@@ -1,5 +1,8 @@
 #include "Core/Application/Application.h"
 
+#include "CSS/StyleResolver.h"
+#include "Layout/BlockLayout.h"
+#include "Layout/Layout.h"
 #include "Rendering/Renderer.h"
 #include "SUI/DOM/Document.h"
 #include "SUI/DOM/Element.h"
@@ -115,13 +118,48 @@ void Application::run() {
         int height = 0;
         platform_->windowSize(width, height);
 
-        // Placeholder fill so the first window is visibly alive; real painting
-        // arrives with goal 2 (box model) and goal 4 (CSS).
-        SDL_FRect panel{40.0f, 40.0f,
-                        static_cast<float>(width) - 80.0f,
-                        static_cast<float>(height) - 80.0f};
-        renderer.fillRect(panel, Color{39, 39, 42, 255});
-        renderer.strokeRect(panel, Color{63, 63, 70, 255}, 1.0f);
+        // Layout + paint
+        if (document_) {
+            sui::LayoutContext ctx;
+            ctx.containerWidth = static_cast<float>(width);
+            ctx.containerHeight = static_cast<float>(height);
+            sui::StyleResolver resolver;
+            sui::BlockLayout layout;
+            if (document_->root()) {
+                layout.layout(document_->root(), ctx, resolver);
+            }
+            // Paint visual elements
+            if (document_->root()) {
+                document_->root()->visit([&](Element& el) {
+                    if (!el.isVisual()) {
+                        return;
+                    }
+                    const float x = el.layoutX();
+                    const float y = el.layoutY();
+                    const float w = el.layoutWidth();
+                    const float h = el.layoutHeight();
+                    if (w <= 0.0f || h <= 0.0f) {
+                        return;
+                    }
+                    const auto s = resolver.resolve(el);
+                    SDL_FRect r{x, y, w, h};
+                    renderer.fillRect(r, Color{s.backgroundColor.r, s.backgroundColor.g,
+                                               s.backgroundColor.b, s.backgroundColor.a});
+                    if (s.borderWidth.left > 0.0f || s.borderWidth.top > 0.0f ||
+                        s.borderWidth.right > 0.0f || s.borderWidth.bottom > 0.0f) {
+                        renderer.strokeRect(r,
+                                           Color{s.borderColor.r, s.borderColor.g,
+                                                 s.borderColor.b, s.borderColor.a},
+                                           1.0f);
+                    }
+                });
+            }
+        } else {
+            SDL_FRect panel{40.0f, 40.0f, static_cast<float>(width) - 80.0f,
+                            static_cast<float>(height) - 80.0f};
+            renderer.fillRect(panel, Color{39, 39, 42, 255});
+            renderer.strokeRect(panel, Color{63, 63, 70, 255}, 1.0f);
+        }
 
         platform_->present();
         SDL_Delay(16);

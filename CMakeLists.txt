@@ -24,7 +24,12 @@ add_library(sui STATIC
     SUI/Markup/Parser.cpp
     SUI/DOM/Element.cpp
     SUI/DOM/Document.cpp
+    CSS/DefaultStyle.cpp
+    CSS/StyleResolver.cpp
+    Layout/Layout.cpp
+    Layout/BlockLayout.cpp
     Rendering/Renderer.cpp
+    Rendering/Text.cpp
     Platform/Platform.cpp
     Platform/Linux/LinuxPlatform.cpp)
 

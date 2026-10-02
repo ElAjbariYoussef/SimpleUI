@@ -54,6 +54,16 @@ public:
     // Depth-first walk over this node and its descendants.
     void visit(const std::function<void(Element&)>& fn);
 
+    // Layout data (owned by element for now)
+    void setLayoutX(float x) noexcept { layoutX_ = x; }
+    void setLayoutY(float y) noexcept { layoutY_ = y; }
+    void setLayoutWidth(float w) noexcept { layoutW_ = w; }
+    void setLayoutHeight(float h) noexcept { layoutH_ = h; }
+    float layoutX() const noexcept { return layoutX_; }
+    float layoutY() const noexcept { return layoutY_; }
+    float layoutWidth() const noexcept { return layoutW_; }
+    float layoutHeight() const noexcept { return layoutH_; }
+
 private:
     void collectText(std::string& out) const;
 
@@ -64,6 +74,11 @@ private:
     std::map<std::string, std::string, std::less<>> attributes_;
     std::string text_;
     bool visual_ = true;
+
+    float layoutX_ = 0.0f;
+    float layoutY_ = 0.0f;
+    float layoutW_ = 0.0f;
+    float layoutH_ = 0.0f;
 };
 
 }  // namespace sui
