@@ -28,6 +28,7 @@ add_library(sui STATIC
     CSS/StyleResolver.cpp
     Layout/Layout.cpp
     Layout/BlockLayout.cpp
+    Layout/InlineFormatter.cpp
     Rendering/Renderer.cpp
     Rendering/Text.cpp
     Platform/Platform.cpp
