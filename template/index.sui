@@ -1,0 +1,20 @@
+<sui>
+    <head>
+        <window state="maximized"
+                title="Main Window"
+                width="1280"
+                height="720" />
+        <link href="/assets/style.css" rel="stylesheet" />
+    </head>
+    <script href="/src/loading.cpp" /> // code loaded before the screen is drawn
+    <body>
+        <div class="sidebar">
+            <button onclick="addone();"> Click to Add </button>
+        </div>
+
+        <div class="content">
+            <p id="counter">0</p>
+        </div>
+    </body>
+    <script href="/src/calculate.cpp" />
+</sui>
