@@ -1,20 +1,13 @@
 <sui>
     <head>
-        <window state="maximized"
-                title="Main Window"
-                width="1280"
-                height="720" />
+        <window state="normal"
+                title="SimpleUI Test"
+                width="800"
+                height="600" />
         <link href="/assets/style.css" rel="stylesheet" />
     </head>
-    <script href="/src/loading.cpp" /> // code loaded before the screen is drawn
     <body>
-        <div class="sidebar">
-            <button onclick="addone();"> Click to Add </button>
-        </div>
-
-        <div class="content">
-            <p id="counter">0</p>
-        </div>
+        <div style="background-color:#1f2937; padding:16px; width:200px; height:100px;">Box 1</div>
+        <div style="background-color:#374151; padding:8px; width:300px; height:80px;">Box 2</div>
     </body>
-    <script href="/src/calculate.cpp" />
 </sui>
