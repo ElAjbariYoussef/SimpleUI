@@ -2,11 +2,15 @@
 
 #include "CSS/StyleResolver.h"
 #include "Layout/BlockLayout.h"
+#include "Layout/InlineFormatter.h"
 #include "Layout/Layout.h"
 #include "Rendering/Renderer.h"
+#include "Rendering/Text.h"
 #include "SUI/DOM/Document.h"
 #include "SUI/DOM/Element.h"
 #include "SUI/Markup/Parser.h"
+
+#include <filesystem>
 
 #include <SDL3/SDL.h>
 
@@ -129,7 +133,26 @@ void Application::run() {
                 layout.layout(document_->root(), ctx, resolver);
             }
             // Paint visual elements
+            static TextFont font;
+            static bool fontLoaded = false;
+            if (!fontLoaded) {
+                // Try to load a system font if present
+                for (const auto& p : {"/usr/share/fonts/fonts-go/Go-Regular.ttf",
+                                      "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                                      "/usr/share/fonts/truetype/freefont/FreeSans.ttf"}) {
+                    if (std::filesystem::exists(p)) {
+                        font.loadFromFile(p);
+                        fontLoaded = true;
+                        break;
+                    }
+                }
+                if (!fontLoaded) {
+                    fontLoaded = true;  // try without font
+                }
+            }
+
             if (document_->root()) {
+                InlineFormatter formatter;
                 document_->root()->visit([&](Element& el) {
                     if (!el.isVisual()) {
                         return;
@@ -138,19 +161,40 @@ void Application::run() {
                     const float y = el.layoutY();
                     const float w = el.layoutWidth();
                     const float h = el.layoutHeight();
-                    if (w <= 0.0f || h <= 0.0f) {
-                        return;
-                    }
                     const auto s = resolver.resolve(el);
-                    SDL_FRect r{x, y, w, h};
-                    renderer.fillRect(r, Color{s.backgroundColor.r, s.backgroundColor.g,
-                                               s.backgroundColor.b, s.backgroundColor.a});
-                    if (s.borderWidth.left > 0.0f || s.borderWidth.top > 0.0f ||
-                        s.borderWidth.right > 0.0f || s.borderWidth.bottom > 0.0f) {
-                        renderer.strokeRect(r,
-                                           Color{s.borderColor.r, s.borderColor.g,
-                                                 s.borderColor.b, s.borderColor.a},
-                                           1.0f);
+                    if (w > 0.0f && h > 0.0f) {
+                        SDL_FRect r{x, y, w, h};
+                        renderer.fillRect(r, Color{s.backgroundColor.r, s.backgroundColor.g,
+                                                   s.backgroundColor.b, s.backgroundColor.a});
+                        if (s.borderWidth.left > 0.0f || s.borderWidth.top > 0.0f ||
+                            s.borderWidth.right > 0.0f || s.borderWidth.bottom > 0.0f) {
+                            renderer.strokeRect(r,
+                                               Color{s.borderColor.r, s.borderColor.g,
+                                                     s.borderColor.b, s.borderColor.a},
+                                               1.0f);
+                        }
+                    }
+                    // Text: only if element has text and no visual children that draw text? simple: draw if textContent non-empty
+                    if (!el.textContent().empty() && font.hasFont() && s.fontSize > 0.0f) {
+                        auto lines = formatter.format(el, s, w > 0.0f ? w : 800.0f);
+                        float ly = y + s.padding.top;
+                        for (const auto& line : lines) {
+                            for (const auto& run : line.runs) {
+                                if (!run.text.empty()) {
+                                    SDL_Texture* tex = font.renderText(platform_->renderer(),
+                                                                      run.text,
+                                                                      s.fontSize,
+                                                                      SDL_Color{s.color.r, s.color.g, s.color.b, s.color.a});
+                                    if (tex) {
+                                        SDL_FRect dst{x + s.padding.left, ly, run.width, run.height};
+                                        SDL_RenderTexture(platform_->renderer(), tex, nullptr, &dst);
+                                        SDL_DestroyTexture(tex);
+                                    }
+                                    ly += 0;  // runs on same line
+                                }
+                            }
+                            ly += line.height;
+                        }
                     }
                 });
             }
