@@ -8,12 +8,15 @@ namespace sui {
 namespace {
 
 bool isVisualTag(std::string_view tag) {
+    // Visual/front-end tags (HTML-like subset for SimpleUI)
     return tag == "body" || tag == "div" || tag == "p" || tag == "h1" ||
            tag == "h2" || tag == "h3" || tag == "h4" || tag == "h5" ||
            tag == "h6" || tag == "br" || tag == "button" || tag == "a" ||
            tag == "table" || tag == "tr" || tag == "th" || tag == "td" ||
-           tag == "span" || tag == "label" || tag == "input";
-}
+           tag == "span" || tag == "label" || tag == "input" || tag == "img" ||
+           tag == "svg" || tag == "video" || tag == "audio" || tag == "canvas" ||
+           tag == "iframe" || tag == "picture" || tag == "source" || tag == "track";
+} // img, svg and others to add later
 
 }  // namespace
 
