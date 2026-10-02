@@ -32,6 +32,9 @@ target_include_directories(sui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(sui PUBLIC PkgConfig::SDL3)
 target_compile_options(sui PRIVATE -Wall -Wextra)
 
+# stb_truetype is a header-only dependency; make it available via include path.
+target_include_directories(sui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+
 add_executable(template template/main.cpp)
 target_link_libraries(template PRIVATE sui)
 
