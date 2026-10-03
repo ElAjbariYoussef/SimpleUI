@@ -69,7 +69,7 @@ struct ComputedStyle {
     SDL_Color borderColor = {63, 63, 70, 255};
 
     // Typography
-    float fontSize = 14.0f;  // px
+    float fontSize = 16.0f;  // px
     std::string fontFamily;   // empty = default
     bool fontBold = false;
     float lineHeight = 1.2f;  // multiplier
@@ -88,6 +88,41 @@ struct ComputedStyle {
 
     // Visibility
     bool visible = true;
+
+    // Which inheritable properties the user-agent style set on its own. Anything
+    // not flagged here flows down from the parent. Author rules and inline
+    // styles apply after inheritance, so they always win.
+    enum Specified : std::uint16_t {
+        SpecifiedColor = 1u << 0,
+        SpecifiedFontSize = 1u << 1,
+        SpecifiedFontFamily = 1u << 2,
+        SpecifiedFontBold = 1u << 3,
+        SpecifiedLineHeight = 1u << 4,
+        SpecifiedTextAlign = 1u << 5,
+    };
+    std::uint16_t specified = 0;
 };
+
+// Fills in the inheritable properties the user-agent style left unspecified.
+inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexcept {
+    if (!(style.specified & ComputedStyle::SpecifiedColor)) {
+        style.color = parent.color;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedFontSize)) {
+        style.fontSize = parent.fontSize;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedFontFamily)) {
+        style.fontFamily = parent.fontFamily;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedFontBold)) {
+        style.fontBold = parent.fontBold;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedLineHeight)) {
+        style.lineHeight = parent.lineHeight;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedTextAlign)) {
+        style.textAlign = parent.textAlign;
+    }
+}
 
 }  // namespace sui

@@ -125,9 +125,28 @@ void testIgnoresComments() {
     check(document != nullptr, "html and line comments skipped");
     if (document) {
         Element* body = document->querySelector("body");
-        check(body && body->text().find("// line") != std::string::npos,
+        check(body && body->textContent().find("// line") != std::string::npos,
               "comment text retained as content");
     }
+}
+
+void testMixedContentOrder() {
+    sui::ParseError error;
+    auto document = sui::MarkupParser::parse(
+        "<sui><body><p>before<br />after</p></body></sui>", error);
+    check(document != nullptr, "mixed content parses");
+    if (!document) {
+        return;
+    }
+    Element* paragraph = document->querySelector("p");
+    check(paragraph != nullptr, "p found");
+    if (!paragraph) {
+        return;
+    }
+    check(paragraph->textContent().find("before") != std::string::npos &&
+              paragraph->textContent().find("after") != std::string::npos,
+          "text on both sides of <br> survives");
+    check(document->querySelector("br") != nullptr, "br kept as a child node");
 }
 
 }  // namespace
@@ -137,6 +156,7 @@ int main() {
     testRejectsMalformed();
     testAcceptsQuoting();
     testIgnoresComments();
+    testMixedContentOrder();
 
     if (failures) {
         std::printf("\n%d check(s) failed\n", failures);

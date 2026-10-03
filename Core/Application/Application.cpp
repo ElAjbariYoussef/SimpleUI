@@ -3,14 +3,14 @@
 #include "CSS/Parser.h"
 #include "CSS/StyleResolver.h"
 #include "Layout/BlockLayout.h"
-#include "Layout/InlineFormatter.h"
-#include "Layout/Layout.h"
 #include "Rendering/Renderer.h"
 #include "Rendering/Text.h"
 #include "SUI/DOM/Document.h"
 #include "SUI/DOM/Element.h"
 #include "SUI/Markup/Parser.h"
 
+#include <algorithm>
+#include <array>
 #include <filesystem>
 
 #include <SDL3/SDL.h>
@@ -42,6 +42,106 @@ bool attributeFlag(Element& element, std::string_view key, bool fallback) {
         return fallback;
     }
     return raw != "false" && raw != "0";
+}
+
+Color toColor(SDL_Color c) {
+    return Color{static_cast<std::uint8_t>(c.r), static_cast<std::uint8_t>(c.g),
+                 static_cast<std::uint8_t>(c.b), static_cast<std::uint8_t>(c.a)};
+}
+
+void dumpLayout(Element& el, int depth) {
+    std::string indent(static_cast<std::size_t>(depth) * 2, ' ');
+    std::string text(el.text());
+    if (text.size() > 24) {
+        text.resize(24);
+    }
+    SDL_Log("%s<%.*s> x=%.1f y=%.1f w=%.1f h=%.1f runs=%zu \"%s\"",
+            indent.c_str(), static_cast<int>(el.tag().size()), el.tag().data(),
+            el.layoutX(), el.layoutY(), el.layoutWidth(), el.layoutHeight(),
+            el.textRuns().size(), text.c_str());
+    for (const auto& child : el.children()) {
+        if (child) {
+            dumpLayout(*child, depth + 1);
+        }
+    }
+}
+
+// Fonts bundled with the engine take priority; the system list is only a
+// development fallback so a checkout without assets still renders text.
+constexpr std::array<std::string_view, 4> kBundledFonts = {
+    "/assets/fonts/DejaVuSans.ttf", "/assets/fonts/Roboto-Regular.ttf",
+    "/assets/fonts/Go-Regular.ttf", "/assets/fonts/FreeSans.ttf"};
+
+constexpr std::array<std::string_view, 4> kSystemFonts = {
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/fonts-go/Go-Regular.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSans.ttf"};
+
+bool loadFirstAvailable(TextFont& font, const Resources* resources) {
+    if (resources) {
+        for (const auto& href : kBundledFonts) {
+            if (!resources->exists(href)) {
+                continue;
+            }
+            if (auto data = resources->readText(href)) {
+                if (font.loadFromMemory(reinterpret_cast<const unsigned char*>(data->data()),
+                                        static_cast<int>(data->size()))) {
+                    return true;
+                }
+            }
+        }
+    }
+    for (const auto& path : kSystemFonts) {
+        if (std::filesystem::exists(path) && font.loadFromFile(std::string(path))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void paintElement(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
+                  const StyleResolver& resolver, const TextFont& font) {
+    const bool drawable = el.isVisual();
+    if (drawable) {
+        const ComputedStyle s = resolver.resolve(el);
+        if (s.display != ComputedStyle::None && s.visible) {
+            const SDL_FRect box{el.layoutX(), el.layoutY(), el.layoutWidth(),
+                                el.layoutHeight()};
+            if (box.w > 0.0f && box.h > 0.0f) {
+                if (s.backgroundColor.a > 0) {
+                    renderer.fillRect(box, toColor(s.backgroundColor));
+                }
+                if (s.borderWidth.top > 0.0f || s.borderWidth.left > 0.0f) {
+                    renderer.strokeRect(box, toColor(s.borderColor), s.borderWidth.top);
+                }
+            }
+
+            if (font.hasFont()) {
+                for (const auto& run : el.textRuns()) {
+                    if (run.text.empty() || run.fontSize <= 0.0f) {
+                        continue;
+                    }
+                    SDL_Texture* texture = font.renderText(
+                        sdlRenderer, run.text, run.fontSize,
+                        SDL_Color{run.r, run.g, run.b, run.a});
+                    if (!texture) {
+                        continue;
+                    }
+                    SDL_FRect dst{run.x, run.y, run.width, run.height};
+                    SDL_RenderTexture(sdlRenderer, texture, nullptr, &dst);
+                    SDL_DestroyTexture(texture);
+                }
+            }
+        }
+    }
+
+    // Non-visual wrappers (<root>, <head>) still contain drawable descendants.
+    for (const auto& child : el.children()) {
+        if (child && !child->isTextNode()) {
+            paintElement(*child, renderer, sdlRenderer, resolver, font);
+        }
+    }
 }
 
 }  // namespace
@@ -90,6 +190,12 @@ bool Application::start(std::string_view entrySuiPath, std::string& error) {
         return false;
     }
 
+    // SUI_SCREENSHOT renders one frame to a BMP and exits, so layout can be
+    // verified without a visible window.
+    if (const char* shot = SDL_getenv("SUI_SCREENSHOT")) {
+        screenshotPath_ = shot;
+    }
+
     ParseError parseError;
     document_ = MarkupParser::parse(*source, parseError);
     if (!document_) {
@@ -116,6 +222,23 @@ bool Application::start(std::string_view entrySuiPath, std::string& error) {
 void Application::run() {
     Renderer renderer(platform_->renderer());
 
+    TextFont font;
+    if (!loadFirstAvailable(font, resources_.get())) {
+        SDL_Log("no font available; text will not render");
+    }
+
+    StyleResolver resolver;
+    if (document_) {
+        for (const auto& link : document_->stylesheets()) {
+            if (auto css = resources_->readText(link.href)) {
+                for (const auto& rule : CSSParser::parse(*css)) {
+                    resolver.addRule(rule);
+                }
+            }
+        }
+    }
+
+    BlockLayout layout;
     while (platform_->pumpEvents()) {
         platform_->clear();
 
@@ -123,94 +246,18 @@ void Application::run() {
         int height = 0;
         platform_->windowSize(width, height);
 
-        // Layout + paint
-        if (document_) {
-            sui::LayoutContext ctx;
-            ctx.containerWidth = static_cast<float>(width);
-            ctx.containerHeight = static_cast<float>(height);
-            sui::StyleResolver resolver;
-            // Load stylesheets
-            if (document_ && resources_) {
-                for (const auto& link : document_->stylesheets()) {
-                    auto css = resources_->readText(link.href);
-                    if (css) {
-                        auto rules = sui::CSSParser::parse(*css);
-                        for (const auto& r : rules) {
-                            resolver.addRule(r);
-                        }
-                    }
-                }
-            }
-            sui::BlockLayout layout;
-            if (document_->root()) {
-                layout.layout(document_->root(), ctx, resolver);
-            }
-            // Paint visual elements
-            static TextFont font;
-            static bool fontLoaded = false;
-            if (!fontLoaded) {
-                // Try to load a system font if present
-                for (const auto& p : {"/usr/share/fonts/fonts-go/Go-Regular.ttf",
-                                      "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                                      "/usr/share/fonts/truetype/freefont/FreeSans.ttf"}) {
-                    if (std::filesystem::exists(p)) {
-                        font.loadFromFile(p);
-                        fontLoaded = true;
-                        break;
-                    }
-                }
-                if (!fontLoaded) {
-                    fontLoaded = true;  // try without font
-                }
-            }
+        if (document_ && document_->root()) {
+            LayoutInput input;
+            input.resolver = &resolver;
+            input.font = &font;
+            input.viewportWidth = static_cast<float>(width);
+            input.viewportHeight = static_cast<float>(height);
 
-            if (document_->root()) {
-                InlineFormatter formatter;
-                document_->root()->visit([&](Element& el) {
-                    if (!el.isVisual()) {
-                        return;
-                    }
-                    const float x = el.layoutX();
-                    const float y = el.layoutY();
-                    const float w = el.layoutWidth();
-                    const float h = el.layoutHeight();
-                    const auto s = resolver.resolve(el);
-                    if (w > 0.0f && h > 0.0f) {
-                        SDL_FRect r{x, y, w, h};
-                        renderer.fillRect(r, Color{s.backgroundColor.r, s.backgroundColor.g,
-                                                   s.backgroundColor.b, s.backgroundColor.a});
-                        if (s.borderWidth.left > 0.0f || s.borderWidth.top > 0.0f ||
-                            s.borderWidth.right > 0.0f || s.borderWidth.bottom > 0.0f) {
-                            renderer.strokeRect(r,
-                                               Color{s.borderColor.r, s.borderColor.g,
-                                                     s.borderColor.b, s.borderColor.a},
-                                               1.0f);
-                        }
-                    }
-                    // Text: only if element has text and no visual children that draw text? simple: draw if textContent non-empty
-                    if (!el.textContent().empty() && font.hasFont() && s.fontSize > 0.0f) {
-                        auto lines = formatter.format(el, s, w > 0.0f ? w : 800.0f);
-                        float ly = y + s.padding.top;
-                        for (const auto& line : lines) {
-                            for (const auto& run : line.runs) {
-                                if (!run.text.empty()) {
-                                    SDL_Texture* tex = font.renderText(platform_->renderer(),
-                                                                      run.text,
-                                                                      s.fontSize,
-                                                                      SDL_Color{s.color.r, s.color.g, s.color.b, s.color.a});
-                                    if (tex) {
-                                        SDL_FRect dst{x + s.padding.left, ly, run.width, run.height};
-                                        SDL_RenderTexture(platform_->renderer(), tex, nullptr, &dst);
-                                        SDL_DestroyTexture(tex);
-                                    }
-                                    ly += 0;  // runs on same line
-                                }
-                            }
-                            ly += line.height;
-                        }
-                    }
-                });
+            layout.layout(document_->root(), input);
+            if (SDL_getenv("SUI_DUMP_LAYOUT")) {
+                dumpLayout(*document_->root(), 0);
             }
+            paintElement(*document_->root(), renderer, platform_->renderer(), resolver, font);
         } else {
             SDL_FRect panel{40.0f, 40.0f, static_cast<float>(width) - 80.0f,
                             static_cast<float>(height) - 80.0f};
@@ -219,6 +266,14 @@ void Application::run() {
         }
 
         platform_->present();
+        if (!screenshotPath_.empty()) {
+            if (platform_->saveScreenshot(screenshotPath_)) {
+                SDL_Log("wrote %s", screenshotPath_.c_str());
+            } else {
+                SDL_Log("screenshot failed: %s", SDL_GetError());
+            }
+            break;
+        }
         SDL_Delay(16);
     }
 }

@@ -1,9 +1,23 @@
-.sidebar {
-    background-color: #27272a;
+body {
+    background-color: #101014;
+    color: #d4d4d8;
+    font-size: 16px;
 }
 
 .content {
     background-color: #18181b;
+    padding: 24px;
+}
+
+h1 {
+    font-size: 28px;
+    color: #fafafa;
+}
+
+.sidebar {
+    background-color: #27272a;
+    padding: 12px;
+    margin-top: 12px;
 }
 
 .counter {

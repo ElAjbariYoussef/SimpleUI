@@ -4,95 +4,173 @@
 #include "SUI/DOM/Element.h"
 
 #include <algorithm>
-#include <cstddef>
-#include <sstream>
-#include <vector>
+#include <cctype>
 
 namespace sui {
 namespace {
 
-float ascentFor(TextFont& /*font*/, float size) {
-    return size * 0.8f;
+// Block-level children force a line break on both sides, mirroring how a
+// browser separates `<div>` siblings inside an inline formatting context.
+bool isBlockTag(std::string_view tag) {
+    return tag == "div" || tag == "p" || tag == "section" || tag == "article" ||
+           tag == "header" || tag == "footer" || tag == "main" || tag == "nav" ||
+           tag == "aside" || tag == "ul" || tag == "ol" || tag == "li" ||
+           tag == "pre" || tag == "blockquote" || tag == "table" || tag == "h1" ||
+           tag == "h2" || tag == "h3" || tag == "h4" || tag == "h5" || tag == "h6";
 }
+
+void collect(Element& el, std::string& out, bool& pendingBreak) {
+    if (!el.isVisual()) {
+        return;
+    }
+    if (el.tag() == "br") {
+        out.push_back('\n');
+        pendingBreak = true;
+        return;
+    }
+    if (pendingBreak && !out.empty() && out.back() != '\n') {
+        out.push_back('\n');
+    }
+    pendingBreak = false;
+
+    const std::string_view own = el.text();
+    for (char c : own) {
+        if (c == '\n' || c == '\r') {
+            out.push_back(' ');
+        } else {
+            out.push_back(c);
+        }
+    }
+
+    for (const auto& child : el.children()) {
+        if (!child) {
+            continue;
+        }
+        if (isBlockTag(child->tag()) && !out.empty() && out.back() != '\n') {
+            out.push_back('\n');
+        }
+        collect(*child, out, pendingBreak);
+    }
+}
+
+struct Word {
+    std::string_view text;
+    float width = 0.0f;
+    bool forcedBreak = false;
+};
 
 }  // namespace
 
-std::vector<InlineLine> InlineFormatter::format(Element& element,
-                                               const ComputedStyle& style,
-                                               float maxWidth) {
-    std::vector<InlineLine> lines;
-    if (maxWidth <= 0.0f) {
-        return lines;
+float InlineFormatter::measure(const TextFont& font, const ComputedStyle& style,
+                               std::string_view text) {
+    if (text.empty() || style.fontSize <= 0.0f) {
+        return 0.0f;
     }
-    std::string text = element.textContent();
-    if (text.empty()) {
+    return font.measureText(text, style.fontSize);
+}
+
+std::vector<InlineLine> InlineFormatter::formatText(const TextFont& font,
+                                                    const ComputedStyle& style,
+                                                    float maxWidth,
+                                                    std::string_view text) {
+    std::vector<InlineLine> lines;
+    if (text.empty() || style.fontSize <= 0.0f) {
         return lines;
     }
 
-    // Whitespace split
-    std::vector<std::string> words;
-    std::string cur;
-    for (char c : text) {
-        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-            if (!cur.empty()) {
-                words.push_back(cur);
-                cur.clear();
+    const TextFont::VerticalMetrics vm = font.verticalMetrics(style.fontSize);
+    const float lineHeight =
+        std::max(style.fontSize * style.lineHeight, vm.height);
+    const float spaceWidth = font.measureText(" ", style.fontSize);
+
+    // Split into words; newlines become forced-break markers.
+    std::vector<Word> words;
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        const std::size_t nl = text.find('\n', start);
+        const std::size_t end = nl == std::string_view::npos ? text.size() : nl;
+        std::size_t cursor = start;
+        while (cursor < end) {
+            while (cursor < end && std::isspace(static_cast<unsigned char>(text[cursor]))) {
+                ++cursor;
             }
-        } else {
-            cur.push_back(c);
+            const std::size_t wordStart = cursor;
+            while (cursor < end && !std::isspace(static_cast<unsigned char>(text[cursor]))) {
+                ++cursor;
+            }
+            if (cursor > wordStart) {
+                const std::string_view word = text.substr(wordStart, cursor - wordStart);
+                words.push_back({word, font.measureText(word, style.fontSize), false});
+            }
         }
+        if (nl == std::string_view::npos) {
+            break;
+        }
+        words.push_back({"", 0.0f, true});
+        start = nl + 1;
     }
-    if (!cur.empty()) {
-        words.push_back(cur);
+
+    if (words.empty()) {
+        return lines;
     }
+
+    auto finishLine = [&](InlineLine& line, float width) {
+        line.width = width;
+        line.height = lineHeight;
+        line.baseline = vm.ascent;
+        lines.push_back(std::move(line));
+        line = InlineLine();
+    };
 
     InlineLine line;
-    float lineW = 0.0f;
-    const float lineH = style.fontSize * style.lineHeight;
-    const float base = style.fontSize;  // rough baseline
+    float lineWidth = 0.0f;
+    bool needsSpace = false;
 
-    for (const auto& w : words) {
-        const float wordW = style.fontSize * static_cast<float>(w.size()) * 0.6f;  // rough
-        if (lineW + wordW <= maxWidth) {
-            TextRun r;
-            r.text = w;
-            r.width = wordW;
-            r.height = lineH;
-            r.baseline = base;
-            line.runs.push_back(std::move(r));
-            lineW += wordW + style.fontSize * 0.2f;  // space
-        } else {
-            if (!line.runs.empty()) {
-                line.width = lineW;
-                line.height = lineH;
-                line.baseline = base;
-                lines.push_back(std::move(line));
-                line = InlineLine();
-                lineW = 0.0f;
-            }
-            // word longer than line
-            TextRun r;
-            r.text = w;
-            r.width = wordW;
-            r.height = lineH;
-            r.baseline = base;
-            line.runs.push_back(std::move(r));
-            lineW = wordW;
+    for (const auto& word : words) {
+        if (word.forcedBreak) {
+            finishLine(line, lineWidth);
+            lineWidth = 0.0f;
+            needsSpace = false;
+            continue;
         }
+        const float advance = (needsSpace ? spaceWidth : 0.0f) + word.width;
+        if (!line.runs.empty() && lineWidth + advance > maxWidth) {
+            finishLine(line, lineWidth);
+            lineWidth = 0.0f;
+            needsSpace = false;
+        }
+        if (needsSpace) {
+            TextRun space;
+            space.text = " ";
+            space.width = spaceWidth;
+            space.height = lineHeight;
+            space.baseline = vm.ascent;
+            line.runs.push_back(std::move(space));
+            lineWidth += spaceWidth;
+        }
+        TextRun run;
+        run.text = std::string(word.text);
+        run.width = word.width;
+        run.height = lineHeight;
+        run.baseline = vm.ascent;
+        line.runs.push_back(std::move(run));
+        lineWidth += word.width;
+        needsSpace = true;
     }
     if (!line.runs.empty()) {
-        line.width = lineW;
-        line.height = lineH;
-        line.baseline = base;
-        lines.push_back(std::move(line));
+        finishLine(line, lineWidth);
     }
-    if (lines.empty()) {
-        InlineLine l;
-        l.height = lineH;
-        l.baseline = base;
-        lines.push_back(l);
-    }
+
     return lines;
+}
+
+std::vector<InlineLine> InlineFormatter::format(const TextFont& font, Element& element,
+                                                const ComputedStyle& style,
+                                                float maxWidth) {
+    std::string text;
+    bool pendingBreak = false;
+    collect(element, text, pendingBreak);
+    return formatText(font, style, maxWidth, text);
 }
 
 }  // namespace sui

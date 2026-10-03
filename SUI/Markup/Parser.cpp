@@ -211,6 +211,14 @@ bool parseElement(Scanner& sc, Element& parent, ParseError& error) {
 
 bool parseChildren(Scanner& sc, Element& parent, ParseError& error) {
     std::string text;
+    // Text becomes a child node so mixed content keeps its document order.
+    const auto flushText = [&]() {
+        if (text.empty()) {
+            return;
+        }
+        parent.appendChild(Element::createText(std::move(text), parent.document()));
+        text.clear();
+    };
     while (true) {
         if (sc.done()) {
             error = {sc.line(),
@@ -230,7 +238,7 @@ bool parseChildren(Scanner& sc, Element& parent, ParseError& error) {
                                         std::string(parent.tag()) + ">"};
                 return false;
             }
-            parent.setText(text);
+            flushText();
             return true;
         }
         if (sc.peek() == '<') {
@@ -244,10 +252,7 @@ bool parseChildren(Scanner& sc, Element& parent, ParseError& error) {
                 }
                 continue;
             }
-            if (!parent.children().empty() || !text.empty()) {
-                parent.setText(text);
-                text.clear();
-            }
+            flushText();
             if (!parseElement(sc, parent, error)) {
                 return false;
             }
@@ -280,10 +285,21 @@ std::unique_ptr<Document> MarkupParser::parse(std::string_view source,
         return nullptr;
     }
 
-    // <sui> is a document wrapper, not a layout node, so its children become the
-    // tree root. Ordering is preserved.
+    // <sui> is a document wrapper, not a layout node, so its children are lifted
+    // into the tree root. Ordering is preserved.
+    std::vector<std::unique_ptr<Element>> lifted;
+    for (auto& wrapper : scratch.releaseChildren()) {
+        if (wrapper->tag() == "sui") {
+            for (auto& child : wrapper->releaseChildren()) {
+                lifted.push_back(std::move(child));
+            }
+        } else {
+            lifted.push_back(std::move(wrapper));
+        }
+    }
+
     auto root = std::make_unique<Element>("root", document.get());
-    for (auto& child : scratch.releaseChildren()) {
+    for (auto& child : lifted) {
         root->appendChild(std::move(child));
     }
 

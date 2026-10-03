@@ -36,10 +36,23 @@ public:
     // Returns glyph metrics for codepoint at size (px). Values are in pixels.
     GlyphMetrics metrics(unsigned int codepoint, float size) const;
 
+    // Vertical metrics of the font at the given size.
+    struct VerticalMetrics {
+        float ascent = 0.0f;
+        float descent = 0.0f;
+        float lineGap = 0.0f;
+        float height = 0.0f;  // ascent + descent + lineGap
+    };
+    VerticalMetrics verticalMetrics(float size) const;
+
+    // Advance width of a UTF-8 string at the given size.
+    float measureText(std::string_view text, float size) const;
+
     // Renders a string to a texture for a given color and size. Caller owns the
-    // returned texture (SDL_DestroyTexture).
-    SDL_Texture* renderText(SDL_Renderer* renderer, std::string_view text,
-                            float size, SDL_Color color);
+    // returned texture (SDL_DestroyTexture). The texture is exactly
+    // (measureText(text, size), verticalMetrics(size).height) pixels.
+    SDL_Texture* renderText(SDL_Renderer* renderer, std::string_view text, float size,
+                            SDL_Color color) const;
 
     bool hasFont() const noexcept { return font_ != nullptr; }
 

@@ -41,6 +41,10 @@ public:
 
     virtual void windowSize(int& width, int& height) const = 0;
 
+    // Writes the current backbuffer to a BMP file; used by the headless
+    // screenshot mode for verifying layout without a visible window.
+    virtual bool saveScreenshot(const std::string& path) const;
+
     // Drains the event queue; returns false once the app should quit.
     virtual bool pumpEvents() = 0;
 };

@@ -2,6 +2,7 @@
 
 #include "SUI/DOM/Document.h"
 
+#include <algorithm>
 #include <utility>
 
 namespace sui {
@@ -16,7 +17,7 @@ bool isVisualTag(std::string_view tag) {
            tag == "span" || tag == "label" || tag == "input" || tag == "img" ||
            tag == "svg" || tag == "video" || tag == "audio" || tag == "canvas" ||
            tag == "iframe" || tag == "picture" || tag == "source" || tag == "track";
-} // img, svg and others to add later
+}
 
 }  // namespace
 
@@ -26,9 +27,36 @@ Element::Element(std::string tag, Document* document)
       document_(document),
       visual_(isVisualTag(tag_)) {}
 
+Element::~Element() = default;
+
+std::unique_ptr<Element> Element::createText(std::string data, Document* document) {
+    auto node = std::make_unique<Element>(std::string(kTextTag), document);
+    node->text_ = std::move(data);
+    return node;
+}
+
 void Element::appendChild(std::unique_ptr<Element> child) {
+    insertChild(std::move(child), children_.size());
+}
+
+void Element::insertChild(std::unique_ptr<Element> child, std::size_t index) {
+    if (!child) {
+        return;
+    }
     child->parent_ = this;
-    children_.push_back(std::move(child));
+    children_.insert(children_.begin() +
+                         static_cast<std::ptrdiff_t>(std::min(index, children_.size())),
+                     std::move(child));
+}
+
+std::unique_ptr<Element> Element::removeChild(std::size_t index) {
+    if (index >= children_.size()) {
+        return nullptr;
+    }
+    std::unique_ptr<Element> child = std::move(children_[index]);
+    children_.erase(children_.begin() + static_cast<std::ptrdiff_t>(index));
+    child->parent_ = nullptr;
+    return child;
 }
 
 std::vector<std::unique_ptr<Element>> Element::releaseChildren() {
@@ -49,6 +77,13 @@ std::string_view Element::attribute(std::string_view key) const {
 
 void Element::setAttribute(std::string key, std::string value) {
     attributes_.insert_or_assign(std::move(key), std::move(value));
+}
+
+void Element::removeAttribute(std::string_view key) {
+    auto it = attributes_.find(key);
+    if (it != attributes_.end()) {
+        attributes_.erase(it);
+    }
 }
 
 std::string_view Element::id() const {
@@ -74,6 +109,18 @@ std::string Element::textContent() const {
     std::string out;
     collectText(out);
     return out;
+}
+
+void Element::setTextContent(std::string text) {
+    children_.clear();
+    if (isTextNode()) {
+        text_ = std::move(text);
+        return;
+    }
+    if (text.empty()) {
+        return;
+    }
+    appendChild(createText(std::move(text), document_));
 }
 
 void Element::visit(const std::function<void(Element&)>& fn) {

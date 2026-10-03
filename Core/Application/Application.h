@@ -34,6 +34,7 @@ private:
     std::unique_ptr<Resources> resources_;
     std::unique_ptr<Platform> platform_;
     std::unique_ptr<Document> document_;
+    std::string screenshotPath_;
 };
 
 }  // namespace sui
