@@ -56,6 +56,12 @@ public:
     std::string_view id() const;
     std::string_view classList() const;
 
+    // classList manipulation, spelled the way a web developer expects.
+    bool hasClass(std::string_view name) const;
+    void addClass(std::string_view name);
+    void removeClass(std::string_view name);
+    void toggleClass(std::string_view name, bool enabled);
+
     // Text belonging to this node. For a text node this is its data; for an
     // element it is empty, because text lives in child nodes.
     std::string_view text() const noexcept { return text_; }
@@ -66,6 +72,14 @@ public:
 
     // Replaces all children with a single text node (innerText = "...").
     void setTextContent(std::string text);
+
+    // Web-named aliases used by the script API.
+    std::string innerText() const { return textContent(); }
+    void setInnerText(std::string text) { setTextContent(std::move(text)); }
+
+    // <input> value, stored as an attribute.
+    std::string value() const;
+    void setValue(std::string text);
 
     // Tags outside the visual set (meta, title, script, link, #text) are
     // retained so they stay reachable by the linker, but layout and paint skip
@@ -105,6 +119,7 @@ public:
 
 private:
     void collectText(std::string& out) const;
+    void touch();
 
     std::string tag_;
     Document* document_ = nullptr;

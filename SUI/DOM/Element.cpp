@@ -3,6 +3,7 @@
 #include "SUI/DOM/Document.h"
 
 #include <algorithm>
+#include <cctype>
 #include <utility>
 
 namespace sui {
@@ -77,12 +78,14 @@ std::string_view Element::attribute(std::string_view key) const {
 
 void Element::setAttribute(std::string key, std::string value) {
     attributes_.insert_or_assign(std::move(key), std::move(value));
+    touch();
 }
 
 void Element::removeAttribute(std::string_view key) {
     auto it = attributes_.find(key);
     if (it != attributes_.end()) {
         attributes_.erase(it);
+        touch();
     }
 }
 
@@ -94,8 +97,86 @@ std::string_view Element::classList() const {
     return attribute("class");
 }
 
+bool Element::hasClass(std::string_view name) const {
+    if (name.empty()) {
+        return false;
+    }
+    const std::string_view classes = classList();
+    std::size_t i = 0;
+    while (i < classes.size()) {
+        while (i < classes.size() && std::isspace(static_cast<unsigned char>(classes[i]))) {
+            ++i;
+        }
+        const std::size_t start = i;
+        while (i < classes.size() && !std::isspace(static_cast<unsigned char>(classes[i]))) {
+            ++i;
+        }
+        if (classes.substr(start, i - start) == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void Element::addClass(std::string_view name) {
+    if (name.empty() || hasClass(name)) {
+        return;
+    }
+    std::string updated(classList());
+    if (!updated.empty()) {
+        updated += ' ';
+    }
+    updated.append(name);
+    setAttribute("class", std::move(updated));
+}
+
+void Element::removeClass(std::string_view name) {
+    if (name.empty()) {
+        return;
+    }
+    const std::string_view classes = classList();
+    std::string updated;
+    updated.reserve(classes.size());
+    std::size_t i = 0;
+    while (i < classes.size()) {
+        while (i < classes.size() && std::isspace(static_cast<unsigned char>(classes[i]))) {
+            ++i;
+        }
+        const std::size_t start = i;
+        while (i < classes.size() && !std::isspace(static_cast<unsigned char>(classes[i]))) {
+            ++i;
+        }
+        const std::string_view token = classes.substr(start, i - start);
+        if (token.empty() || token == name) {
+            continue;
+        }
+        if (!updated.empty()) {
+            updated += ' ';
+        }
+        updated.append(token);
+    }
+    if (updated != classes) {
+        setAttribute("class", std::move(updated));
+    }
+}
+
+void Element::toggleClass(std::string_view name, bool enabled) {
+    if (enabled) {
+        addClass(name);
+    } else {
+        removeClass(name);
+    }
+}
+
+void Element::touch() {
+    if (document_) {
+        document_->noteMutation();
+    }
+}
+
 void Element::setText(std::string text) {
     text_ = std::move(text);
+    touch();
 }
 
 void Element::collectText(std::string& out) const {
@@ -113,6 +194,7 @@ std::string Element::textContent() const {
 
 void Element::setTextContent(std::string text) {
     children_.clear();
+    touch();
     if (isTextNode()) {
         text_ = std::move(text);
         return;
@@ -121,6 +203,14 @@ void Element::setTextContent(std::string text) {
         return;
     }
     appendChild(createText(std::move(text), document_));
+}
+
+std::string Element::value() const {
+    return std::string(attribute("value"));
+}
+
+void Element::setValue(std::string text) {
+    setAttribute("value", std::move(text));
 }
 
 void Element::visit(const std::function<void(Element&)>& fn) {

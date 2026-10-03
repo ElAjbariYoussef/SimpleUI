@@ -8,6 +8,7 @@
 #include "SUI/DOM/Document.h"
 #include "SUI/DOM/Element.h"
 #include "SUI/Markup/Parser.h"
+#include "SUI/Script/Script.h"
 
 #include <algorithm>
 #include <array>
@@ -16,6 +17,7 @@
 #include <SDL3/SDL.h>
 
 #include <charconv>
+#include <cstdio>
 
 namespace sui {
 namespace {
@@ -64,6 +66,43 @@ void dumpLayout(Element& el, int depth) {
             dumpLayout(*child, depth + 1);
         }
     }
+}
+
+// Deepest drawn element whose border box contains the point. Walking front to
+// back over the paint order means the last match wins, which is the element the
+// user is actually pointing at.
+Element* hitTest(Element& el, float x, float y, const StyleResolver& resolver) {
+    Element* found = nullptr;
+    if (el.isVisual()) {
+        const ComputedStyle s = resolver.resolve(el);
+        const bool drawn = s.display != ComputedStyle::None && s.visible;
+        if (drawn && el.layoutWidth() > 0.0f && el.layoutHeight() > 0.0f && x >= el.layoutX() &&
+            x < el.layoutX() + el.layoutWidth() && y >= el.layoutY() &&
+            y < el.layoutY() + el.layoutHeight()) {
+            found = &el;
+        }
+    }
+    for (const auto& child : el.children()) {
+        if (child && !child->isTextNode()) {
+            if (Element* deeper = hitTest(*child, x, y, resolver)) {
+                found = deeper;
+            }
+        }
+    }
+    return found;
+}
+
+// Inline attribute holding the handler for a DOM event.
+const char* attributeForEvent(InputKind kind) {
+    switch (kind) {
+        case InputKind::PointerDown:
+            return "onclick";
+        case InputKind::PointerUp:
+            return "onmouseup";
+        case InputKind::PointerMove:
+            return "onmousemove";
+    }
+    return nullptr;
 }
 
 // Fonts bundled with the engine take priority; the system list is only a
@@ -214,27 +253,102 @@ bool Application::start(std::string_view entrySuiPath, std::string& error) {
     }
 
     SDL_Log("loaded %s (%zu stylesheets, %zu scripts)", std::string(entrySuiPath).c_str(),
-            document_->stylesheets().size(), document_->scriptHrefs().size());
+            document_->stylesheets().size(), document_->scripts().size());
+
+    for (const auto& link : document_->stylesheets()) {
+        auto css = resources_->readText(link.href);
+        if (!css) {
+            script::warn("cannot read stylesheet " + link.href);
+            continue;
+        }
+        for (const auto& rule : CSSParser::parse(*css)) {
+            resolver_.addRule(rule);
+        }
+    }
+
+    scriptContext_.document = document_.get();
+    scriptContext_.styles = &resolver_;
+    script::setContext(&scriptContext_);
 
     return true;
+}
+
+void Application::runScripts(bool afterBody) {
+    if (!document_) {
+        return;
+    }
+    for (const auto& reference : document_->scripts()) {
+        if (reference.afterBody != afterBody) {
+            continue;
+        }
+        const script::EntryPoint entry = script::findModule(reference.href);
+        if (!entry) {
+            // A .sui can name a script the build never compiled. Say so once,
+            // naming the href, rather than failing silently at click time.
+            script::error("no compiled script for href " + reference.href +
+                          " (declare it with SUI_SCRIPT in a translation unit the "
+                          "build links into this executable)");
+            continue;
+        }
+        entry();
+    }
+}
+
+void Application::dispatch(const InputEvent& event) {
+    if (!document_ || !document_->root()) {
+        return;
+    }
+    if (event.kind == InputKind::PointerMove) {
+        return;
+    }
+
+    Element* target = hitTest(*document_->root(), event.x, event.y, resolver_);
+    if (!target) {
+        return;
+    }
+
+    const char* attribute = attributeForEvent(event.kind);
+    if (!attribute) {
+        return;
+    }
+
+    // Fire on the target, then bubble to its ancestors, stopping at the first
+    // handler that explicitly stops propagation.
+    for (Element* current = target; current; current = current->parent()) {
+        const std::string_view handler = current->attribute(attribute);
+        if (handler.empty()) {
+            continue;
+        }
+        script::invokeInlineHandler(handler, current);
+        if (current->attribute("data-stoppropagation") == "true") {
+            break;
+        }
+    }
 }
 
 void Application::run() {
     Renderer renderer(platform_->renderer());
 
-    TextFont font;
-    if (!loadFirstAvailable(font, resources_.get())) {
+    font_ = std::make_unique<TextFont>();
+    if (!loadFirstAvailable(*font_, resources_.get())) {
         SDL_Log("no font available; text will not render");
     }
 
-    StyleResolver resolver;
-    if (document_) {
-        for (const auto& link : document_->stylesheets()) {
-            if (auto css = resources_->readText(link.href)) {
-                for (const auto& rule : CSSParser::parse(*css)) {
-                    resolver.addRule(rule);
-                }
-            }
+    // Scripts placed before <body> run before anything is drawn.
+    runScripts(false);
+
+    // SUI_CLICK=x,y dispatches one synthetic press before the first paint, so
+    // click handling can be exercised without a visible window.
+    InputEvent scripted;
+    bool haveScriptedClick = false;
+    if (const char* click = SDL_getenv("SUI_CLICK")) {
+        float x = 0.0f;
+        float y = 0.0f;
+        if (std::sscanf(click, "%f,%f", &x, &y) == 2) {
+            scripted = InputEvent{InputKind::PointerDown, x, y, 1};
+            haveScriptedClick = true;
+        } else {
+            SDL_Log("SUI_CLICK expects x,y; got '%s'", click);
         }
     }
 
@@ -248,16 +362,35 @@ void Application::run() {
 
         if (document_ && document_->root()) {
             LayoutInput input;
-            input.resolver = &resolver;
-            input.font = &font;
+            input.resolver = &resolver_;
+            input.font = font_.get();
             input.viewportWidth = static_cast<float>(width);
             input.viewportHeight = static_cast<float>(height);
 
             layout.layout(document_->root(), input);
+
+            // Events are routed after layout so hit tests use this frame's
+            // geometry rather than the previous frame's.
+            bool mutated = false;
+            for (const auto& event : platform_->inputEvents()) {
+                dispatch(event);
+                mutated = true;
+            }
+            if (haveScriptedClick) {
+                haveScriptedClick = false;
+                dispatch(scripted);
+                mutated = true;
+            }
+            if (mutated) {
+                // A handler may have rewritten the tree; lay out again so the
+                // frame about to be painted reflects the change.
+                layout.layout(document_->root(), input);
+            }
+
             if (SDL_getenv("SUI_DUMP_LAYOUT")) {
                 dumpLayout(*document_->root(), 0);
             }
-            paintElement(*document_->root(), renderer, platform_->renderer(), resolver, font);
+            paintElement(*document_->root(), renderer, platform_->renderer(), resolver_, *font_);
         } else {
             SDL_FRect panel{40.0f, 40.0f, static_cast<float>(width) - 80.0f,
                             static_cast<float>(height) - 80.0f};
@@ -266,6 +399,13 @@ void Application::run() {
         }
 
         platform_->present();
+
+        // Scripts placed after </body> run once the frame is on screen.
+        if (!scriptsAfterBodyRun_) {
+            scriptsAfterBodyRun_ = true;
+            runScripts(true);
+        }
+
         if (!screenshotPath_.empty()) {
             if (platform_->saveScreenshot(screenshotPath_)) {
                 SDL_Log("wrote %s", screenshotPath_.c_str());
@@ -279,10 +419,12 @@ void Application::run() {
 }
 
 void Application::shutdown() {
+    script::setContext(nullptr);
     if (platform_) {
         platform_->shutdown();
         platform_.reset();
     }
+    font_.reset();
     document_.reset();
     resources_.reset();
 }

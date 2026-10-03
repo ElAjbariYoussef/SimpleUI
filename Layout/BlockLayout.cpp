@@ -69,6 +69,10 @@ public:
     Layout(const StyleResolver& resolver, const TextFont* font)
         : resolver_(resolver), font_(font) {}
 
+    // Exposed for Flow, which needs the same answers run() uses.
+    bool isLaidOut(Element& el) const { return laidOut(el); }
+    ComputedStyle resolveStyle(Element& el) const { return resolver_.resolve(el); }
+
     // Lays out `el` with the given available width. Returns the outer height
     // consumed, margins included.
     float run(Element& el, float availableWidth, float originX, float originY) {
@@ -87,15 +91,19 @@ public:
         const float contentY =
             originY + s.margin.top + s.borderWidth.top + s.padding.top;
 
+        // An inline-level box with auto width shrinks to fit its contents, the
+        // way a browser sizes a button or an image. The probe below measures
+        // the unwrapped width; run() then repeats the layout at the real width.
+        if (s.width <= 0.0f && s.display != ComputedStyle::Block) {
+            availableWidth =
+                std::min(availableWidth, probeWidth(el, s) + horizontalChrome(s));
+            el.clearTextRuns();  // the probe's runs are throwaway measurements
+        }
+
         float contentWidth = 0.0f;
         float contentHeight = 0.0f;
-        if (hasBlockChild(el)) {
-            contentWidth = layoutBlockContainer(el, s, availableWidth, contentX, contentY,
-                                                contentHeight);
-        } else {
-            layoutInlineContainer(el, s, availableWidth, contentX, contentY, contentWidth,
-                                  contentHeight);
-        }
+        contentHeight =
+            layoutContents(el, s, availableWidth, contentX, contentY, contentWidth);
 
         if (s.height > 0.0f) {
             contentHeight = s.height;
@@ -134,7 +142,8 @@ private:
     }
 
     float layoutBlockContainer(Element& el, const ComputedStyle& s, float availableWidth,
-                               float contentX, float contentY, float& outHeight) {
+                               float contentX, float contentY, float& outHeight,
+                               float& outWidth) {
         float contentWidth = applyMinMax(
             s.width > 0.0f ? s.width
                            : std::max(0.0f, availableWidth - horizontalChrome(s)),
@@ -161,51 +170,58 @@ private:
             cursorY += run(*child, contentWidth, contentX, contentY + cursorY);
         }
         outHeight = cursorY;
-        return contentWidth;
+        outWidth = contentWidth;
+        return cursorY;
     }
 
-    // All children are inline-level (or text): wrap into lines, flowing
-    // inline-block boxes and <br> along with the text.
-    void layoutInlineContainer(Element& el, const ComputedStyle& s, float availableWidth,
-                               float contentX, float contentY, float& outWidth,
-                               float& outHeight) {
-        const Metrics m = metricsFor(font_, s);
-        const float inner =
-            s.width > 0.0f ? s.width : std::max(0.0f, availableWidth - horizontalChrome(s));
+    // Widest the element's own contents want when nothing wraps. The layout
+    // this writes is discarded: run() repeats it at the real width.
+    float probeWidth(Element& el, const ComputedStyle& s) {
+        float width = 0.0f;
+        layoutContents(el, s, kUnbounded, 0.0f, 0.0f, width);
+        return width;
+    }
 
-        Flow flow(*this, el, s, m, inner, contentX, contentY);
-        for (const auto& child : el.children()) {
-            if (!child) {
-                continue;
-            }
-            if (child->isTextNode()) {
-                if (!child->text().empty()) {
-                    flow.text(child->text(), s);
-                }
-                continue;
-            }
-            if (!laidOut(*child)) {
-                continue;
-            }
-            if (child->tag() == "br") {
-                // Forced break regardless of its computed display.
-                flow.lineBreak();
-                continue;
-            }
-            const ComputedStyle cs = resolver_.resolve(*child);
-            if (cs.display == ComputedStyle::Inline) {
-                // Plain inline boxes contribute their own contents in place.
-                layoutInlineContainer(*child, cs, inner - flow.penX(), contentX + flow.penX(),
-                                      contentY + flow.cursorY(), outWidth, outHeight);
-                continue;
-            }
-            flow.atomic(*child, cs);
+    float layoutContents(Element& el, const ComputedStyle& s, float availableWidth,
+                         float contentX, float contentY, float& outWidth) {
+        if (hasBlockChild(el)) {
+            float height = 0.0f;
+            layoutBlockContainer(el, s, availableWidth, contentX, contentY, height,
+                                 outWidth);
+            return height;
         }
+        return layoutInlineContainer(el, s, availableWidth, contentX, contentY, outWidth);
+    }
+
+    // Every inline descendant of `el` flows into one line-breaking context, so
+    // wrapping stays correct across element boundaries: "a <span>b c d</span>"
+    // can break inside the span.
+    float layoutInlineContainer(Element& el, const ComputedStyle& s, float availableWidth,
+                               float contentX, float contentY, float& outWidth) {
+        const bool probe = availableWidth >= kUnbounded;
+        // A probe measures max-content, so it must not wrap at all; otherwise
+        // every word lands on its own line and the result is min-content.
+        const float inner =
+            s.width > 0.0f ? s.width
+                           : probe ? kUnbounded
+                                   : std::max(0.0f, availableWidth - horizontalChrome(s));
+
+        Flow flow(*this, el, s, metricsFor(font_, s), inner, contentX, contentY);
+        flow.inlineBox(el, s);
         flow.finish();
 
-        outHeight = flow.cursorY();
-        outWidth = s.width > 0.0f ? s.width : std::max(inner, flow.widest());
+        if (s.width > 0.0f) {
+            outWidth = s.width;
+        } else if (probe) {
+            outWidth = flow.widest();
+        } else {
+            outWidth = std::max(inner, flow.widest());
+        }
+        return flow.cursorY();
     }
+
+    static constexpr float kUnbounded = 1.0e6f;
+    static constexpr float kUnboundedProbe = kUnbounded;
 
     // Greedy line breaking for one inline formatting context.
     class Flow {
@@ -248,8 +264,48 @@ private:
             }
         }
 
+        // Flows `el`'s children into the current line context. Inline boxes are
+        // transparent here: their contents continue the same line. Anything
+        // atomic (inline-block, replaced media) is placed as a unit.
+        void inlineBox(Element& el, const ComputedStyle& container) {
+            for (const auto& child : el.children()) {
+                if (!child) {
+                    continue;
+                }
+                if (child->isTextNode()) {
+                    if (!child->text().empty()) {
+                        text(child->text(), container);
+                    }
+                    continue;
+                }
+                if (child->tag() == "br") {
+                    // Forced break regardless of its computed display.
+                    lineBreak();
+                    continue;
+                }
+                if (!owner_.isLaidOut(*child)) {
+                    continue;
+                }
+                const ComputedStyle cs = owner_.resolveStyle(*child);
+                if (cs.display == ComputedStyle::Inline) {
+                    inlineBox(*child, cs);
+                    continue;
+                }
+                atomic(*child, cs);
+            }
+        }
+
         void atomic(Element& child, const ComputedStyle& cs) {
-            const float outerW = cs.margin.left + cs.margin.right;
+            // Measure before deciding to wrap: an auto-width atomic box is as
+            // wide as its contents want, so the break test needs that number.
+            float boxWidth = cs.width;
+            if (boxWidth <= 0.0f) {
+                owner_.run(child, kUnboundedProbe, 0.0f, 0.0f);
+                boxWidth = child.layoutWidth();
+            }
+            const float outerW =
+                boxWidth + cs.margin.left + cs.margin.right + cs.borderWidth.left +
+                cs.borderWidth.right + cs.padding.left + cs.padding.right;
             if (lineHasContent_ && penX_ + outerW > maxWidth_) {
                 newLine();
             }

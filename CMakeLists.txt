@@ -22,6 +22,7 @@ add_library(sui STATIC
     Core/Resources/Resources.cpp
     Core/Application/Application.cpp
     SUI/Markup/Parser.cpp
+    SUI/Script/Script.cpp
     SUI/DOM/Element.cpp
     SUI/DOM/Document.cpp
     CSS/DefaultStyle.cpp
@@ -42,8 +43,15 @@ target_compile_options(sui PRIVATE -Wall -Wextra)
 # stb_truetype is a header-only dependency; make it available via include path.
 target_include_directories(sui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
-add_executable(template template/main.cpp)
+# The template is also the worked example of the script model: each <script> in
+# template/index.sui names a translation unit that claims its href via
+# SUI_SCRIPT, so the build has to compile them into the executable.
+add_executable(template
+    template/main.cpp
+    template/src/loading.cpp
+    template/src/calculate.cpp)
 target_link_libraries(template PRIVATE sui)
+target_include_directories(template PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/template/src)
 
 enable_testing()
 add_subdirectory(tests)

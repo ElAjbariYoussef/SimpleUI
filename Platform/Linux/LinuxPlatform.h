@@ -18,11 +18,13 @@ public:
     void windowSize(int& width, int& height) const override;
 
     bool pumpEvents() override;
+    const std::vector<InputEvent>& inputEvents() const override { return input_; }
 
 private:
     SDL_Window* window_ = nullptr;
     SDL_Renderer* renderer_ = nullptr;
     bool running_ = true;
+    std::vector<InputEvent> input_;
 };
 
 }  // namespace sui

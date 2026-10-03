@@ -82,6 +82,8 @@ void LinuxPlatform::windowSize(int& width, int& height) const {
 }
 
 bool LinuxPlatform::pumpEvents() {
+    input_.clear();
+
     SDL_Event event{};
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
@@ -91,10 +93,27 @@ bool LinuxPlatform::pumpEvents() {
             case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
                 running_ = false;
                 break;
+            case SDL_EVENT_MOUSE_MOTION:
+                // A drag while a button is held keeps targeting the element
+                // under the cursor, so it reports the same event as a click.
+                if (event.motion.state & SDL_BUTTON_LMASK) {
+                    input_.push_back(InputEvent{InputKind::PointerDown, event.motion.x,
+                                                event.motion.y, SDL_BUTTON_LEFT});
+                }
+                break;
+            case SDL_EVENT_MOUSE_BUTTON_DOWN:
+                input_.push_back(InputEvent{InputKind::PointerDown, event.button.x,
+                                            event.button.y, event.button.button});
+                break;
+            case SDL_EVENT_MOUSE_BUTTON_UP:
+                input_.push_back(InputEvent{InputKind::PointerUp, event.button.x,
+                                            event.button.y, event.button.button});
+                break;
             default:
                 break;
         }
     }
+
     return running_;
 }
 

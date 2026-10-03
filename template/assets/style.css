@@ -9,18 +9,22 @@ body {
     padding: 24px;
 }
 
+.sidebar {
+    background-color: #27272a;
+    padding: 12px;
+    margin-bottom: 12px;
+}
+
+.sidebar.highlight {
+    background-color: #3f3f46;
+}
+
 h1 {
     font-size: 28px;
     color: #fafafa;
 }
 
-.sidebar {
-    background-color: #27272a;
-    padding: 12px;
-    margin-top: 12px;
-}
-
-.counter {
+#counter {
     color: #e4e4e7;
     font-size: 24px;
 }

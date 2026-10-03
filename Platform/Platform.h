@@ -6,11 +6,23 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 struct SDL_Window;
 struct SDL_Renderer;
 
 namespace sui {
+
+// Pointer input, in window coordinates, forwarded to the engine as SDL-free
+// structs so the DOM/event code stays platform independent.
+enum class InputKind : std::uint8_t { PointerDown, PointerUp, PointerMove };
+
+struct InputEvent {
+    InputKind kind = InputKind::PointerDown;
+    float x = 0.0f;
+    float y = 0.0f;
+    int button = 0;  // 1 = left, 2 = middle, 3 = right
+};
 
 struct WindowConfig {
     std::string title = "SimpleUI";
@@ -47,6 +59,9 @@ public:
 
     // Drains the event queue; returns false once the app should quit.
     virtual bool pumpEvents() = 0;
+
+    // Pointer events collected by the last pumpEvents(), in arrival order.
+    virtual const std::vector<InputEvent>& inputEvents() const = 0;
 };
 
 // Factory for the host platform; compiled from Platform/<os>/.

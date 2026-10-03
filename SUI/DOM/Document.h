@@ -2,6 +2,7 @@
 // and inline handlers will use.
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -13,6 +14,13 @@ class Element;
 
 struct StylesheetLink {
     std::string href;
+};
+
+// A <script> reference. Where it sits relative to <body> decides when it runs,
+// exactly as it does in a web page.
+struct ScriptReference {
+    std::string href;
+    bool afterBody = false;
 };
 
 class Document {
@@ -36,18 +44,30 @@ public:
         return stylesheets_;
     }
 
-    // <script href="..."> entries in document order.
-    const std::vector<std::string>& scriptHrefs() const noexcept {
-        return scriptHrefs_;
+    // <script href="..."> entries in document order, each tagged with the phase
+    // its position in the markup implies.
+    const std::vector<ScriptReference>& scripts() const noexcept {
+        return scripts_;
     }
 
     // Walks the tree once, collecting the link and script references.
     void index();
 
+    // Bumped by every mutation, so the layout/paint passes can skip work when a
+    // frame draws exactly what the previous one drew.
+    std::uint64_t mutationCount() const noexcept { return mutations_; }
+    void noteMutation() noexcept { ++mutations_; }
+
+    // The element that last had focus, so focus-driven restyles can be diffed.
+    Element* focused() const noexcept { return focused_; }
+    void setFocused(Element* element) noexcept { focused_ = element; }
+
 private:
     std::unique_ptr<Element> root_;
     std::vector<StylesheetLink> stylesheets_;
-    std::vector<std::string> scriptHrefs_;
+    std::vector<ScriptReference> scripts_;
+    std::uint64_t mutations_ = 0;
+    Element* focused_ = nullptr;
 };
 
 }  // namespace sui

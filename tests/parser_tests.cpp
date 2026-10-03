@@ -69,12 +69,16 @@ void testParsesSample() {
               "stylesheet href parsed");
     }
 
-    check(document->scriptHrefs().size() == 2, "two scripts referenced");
-    if (document->scriptHrefs().size() == 2) {
-        check(document->scriptHrefs()[0] == "/src/loading.cpp",
+    check(document->scripts().size() == 2, "two scripts referenced");
+    if (document->scripts().size() == 2) {
+        check(document->scripts()[0].href == "/src/loading.cpp",
               "pre-body script ordered first");
-        check(document->scriptHrefs()[1] == "/src/calculate.cpp",
+        check(!document->scripts()[0].afterBody,
+              "script before <body> is tagged pre-body");
+        check(document->scripts()[1].href == "/src/calculate.cpp",
               "post-body script ordered second");
+        check(document->scripts()[1].afterBody,
+              "script after <body> is tagged post-body");
     }
 
     Element* counter = document->getElementById("counter");

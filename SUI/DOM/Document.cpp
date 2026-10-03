@@ -55,15 +55,22 @@ Element* Document::windowElement() {
 
 void Document::index() {
     stylesheets_.clear();
-    scriptHrefs_.clear();
+    scripts_.clear();
     if (!root_) {
         return;
     }
+
+    // <body> is the dividing line: a <script> before it runs before the first
+    // paint, one after it runs once the frame is up.
+    bool seenBody = false;
     root_->visit([&](Element& el) {
+        if (el.tag() == "body") {
+            seenBody = true;
+        }
         if (el.tag() == "link" && el.attribute("rel") == "stylesheet") {
             stylesheets_.push_back(StylesheetLink{std::string(el.attribute("href"))});
         } else if (el.tag() == "script" && !el.attribute("href").empty()) {
-            scriptHrefs_.emplace_back(el.attribute("href"));
+            scripts_.push_back(ScriptReference{std::string(el.attribute("href")), seenBody});
         }
     });
 }
