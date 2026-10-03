@@ -1,5 +1,6 @@
 #include "Core/Application/Application.h"
 
+#include "CSS/Parser.h"
 #include "CSS/StyleResolver.h"
 #include "Layout/BlockLayout.h"
 #include "Layout/InlineFormatter.h"
@@ -128,6 +129,18 @@ void Application::run() {
             ctx.containerWidth = static_cast<float>(width);
             ctx.containerHeight = static_cast<float>(height);
             sui::StyleResolver resolver;
+            // Load stylesheets
+            if (document_ && resources_) {
+                for (const auto& link : document_->stylesheets()) {
+                    auto css = resources_->readText(link.href);
+                    if (css) {
+                        auto rules = sui::CSSParser::parse(*css);
+                        for (const auto& r : rules) {
+                            resolver.addRule(r);
+                        }
+                    }
+                }
+            }
             sui::BlockLayout layout;
             if (document_->root()) {
                 layout.layout(document_->root(), ctx, resolver);
