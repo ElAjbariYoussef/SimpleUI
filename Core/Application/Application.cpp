@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <deque>
 #include <filesystem>
 
 #include <SDL3/SDL.h>
@@ -183,6 +184,24 @@ void paintElement(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
     }
 }
 
+std::vector<std::string> splitOnSemicolons(std::string_view text) {
+    std::vector<std::string> parts;
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        const std::size_t stop = text.find(';', start);
+        const std::string_view piece = text.substr(
+            start, stop == std::string_view::npos ? std::string_view::npos : stop - start);
+        if (!piece.empty()) {
+            parts.emplace_back(piece);
+        }
+        if (stop == std::string_view::npos) {
+            break;
+        }
+        start = stop + 1;
+    }
+    return parts;
+}
+
 }  // namespace
 
 Application::Application() = default;
@@ -337,76 +356,115 @@ void Application::run() {
     // Scripts placed before <body> run before anything is drawn.
     runScripts(false);
 
-    // SUI_CLICK=x,y dispatches one synthetic press before the first paint, so
-    // click handling can be exercised without a visible window.
-    InputEvent scripted;
-    bool haveScriptedClick = false;
-    if (const char* click = SDL_getenv("SUI_CLICK")) {
-        float x = 0.0f;
-        float y = 0.0f;
-        if (std::sscanf(click, "%f,%f", &x, &y) == 2) {
-            scripted = InputEvent{InputKind::PointerDown, x, y, 1};
-            haveScriptedClick = true;
-        } else {
-            SDL_Log("SUI_CLICK expects x,y; got '%s'", click);
+    // SUI_CLICK=x,y[;x,y...] dispatches one synthetic press per frame, so click
+    // handling can be exercised without a visible window. Allowing several is
+    // what makes it possible to click an already-idle page, which is where a
+    // frame-skipping bug would swallow the event.
+    std::deque<InputEvent> scriptedClicks;
+    if (const char* clicks = SDL_getenv("SUI_CLICK")) {
+        for (const std::string& pair : splitOnSemicolons(clicks)) {
+            float x = 0.0f;
+            float y = 0.0f;
+            if (std::sscanf(pair.c_str(), "%f,%f", &x, &y) == 2) {
+                scriptedClicks.push_back(InputEvent{InputKind::PointerDown, x, y, 1});
+            } else {
+                SDL_Log("SUI_CLICK expects x,y; got '%s'", pair.c_str());
+            }
+        }
+    }
+
+    // SUI_FRAMES=n keeps the loop alive for n pumped frames instead of stopping
+    // at the first clean one, so the skip path can be measured rather than
+    // assumed: compare frames pumped against frames painted.
+    unsigned minFrames = 0;
+    if (const char* frames = SDL_getenv("SUI_FRAMES")) {
+        if (std::sscanf(frames, "%u", &minFrames) != 1) {
+            SDL_Log("SUI_FRAMES expects a count; got '%s'", frames);
+            minFrames = 0;
         }
     }
 
     BlockLayout layout;
     while (platform_->pumpEvents()) {
-        platform_->clear();
-
+        ++framesPumped_;
         int width = 0;
         int height = 0;
         platform_->windowSize(width, height);
 
-        if (document_ && document_->root()) {
-            LayoutInput input;
-            input.resolver = &resolver_;
-            input.font = font_.get();
-            input.viewportWidth = static_cast<float>(width);
-            input.viewportHeight = static_cast<float>(height);
+        // An idle page repaints nothing. DOM mutations, stylesheet changes,
+        // explicit script invalidation, resizes, and unhandled input are the
+        // only reasons the picture can differ from the last frame; when none of
+        // them moved, the previous frame is still correct and can stay on screen
+        // untouched. Input has to be listed because pumping the queue discards
+        // it, so a skipped frame would swallow the click it carried.
+        const bool stale =
+            !frameDrawn_ || width != stamp_.width || height != stamp_.height ||
+            !platform_->inputEvents().empty() || !scriptedClicks.empty() ||
+            (document_ && document_->mutationCount() != stamp_.mutations) ||
+            resolver_.generation() != stamp_.rules || scriptContext_.generation != stamp_.script;
+        if (stale) {
+            platform_->clear();
 
-            layout.layout(document_->root(), input);
+            if (document_ && document_->root()) {
+                LayoutInput input;
+                input.resolver = &resolver_;
+                input.font = font_.get();
+                input.viewportWidth = static_cast<float>(width);
+                input.viewportHeight = static_cast<float>(height);
 
-            // Events are routed after layout so hit tests use this frame's
-            // geometry rather than the previous frame's.
-            bool mutated = false;
-            for (const auto& event : platform_->inputEvents()) {
-                dispatch(event);
-                mutated = true;
-            }
-            if (haveScriptedClick) {
-                haveScriptedClick = false;
-                dispatch(scripted);
-                mutated = true;
-            }
-            if (mutated) {
-                // A handler may have rewritten the tree; lay out again so the
-                // frame about to be painted reflects the change.
                 layout.layout(document_->root(), input);
+
+                // Events are routed after layout so hit tests use this frame's
+                // geometry rather than the previous frame's.
+                bool mutated = false;
+                for (const auto& event : platform_->inputEvents()) {
+                    dispatch(event);
+                    mutated = true;
+                }
+                if (!scriptedClicks.empty()) {
+                    dispatch(scriptedClicks.front());
+                    scriptedClicks.pop_front();
+                    mutated = true;
+                }
+                if (mutated) {
+                    // A handler may have rewritten the tree; lay out again so
+                    // the frame about to be painted reflects the change.
+                    layout.layout(document_->root(), input);
+                }
+
+                if (SDL_getenv("SUI_DUMP_LAYOUT")) {
+                    dumpLayout(*document_->root(), 0);
+                }
+                paintElement(*document_->root(), renderer, platform_->renderer(), resolver_,
+                             *font_);
+            } else {
+                SDL_FRect panel{40.0f, 40.0f, static_cast<float>(width) - 80.0f,
+                                static_cast<float>(height) - 80.0f};
+                renderer.fillRect(panel, Color{39, 39, 42, 255});
+                renderer.strokeRect(panel, Color{63, 63, 70, 255}, 1.0f);
             }
 
-            if (SDL_getenv("SUI_DUMP_LAYOUT")) {
-                dumpLayout(*document_->root(), 0);
+            platform_->present();
+
+            stamp_.mutations = document_ ? document_->mutationCount() : 0;
+            stamp_.rules = resolver_.generation();
+            stamp_.script = scriptContext_.generation;
+            stamp_.width = width;
+            stamp_.height = height;
+            frameDrawn_ = true;
+            ++framesDrawn_;
+
+            // Scripts placed after </body> run once the frame is on screen.
+            if (!scriptsAfterBodyRun_) {
+                scriptsAfterBodyRun_ = true;
+                runScripts(true);
             }
-            paintElement(*document_->root(), renderer, platform_->renderer(), resolver_, *font_);
-        } else {
-            SDL_FRect panel{40.0f, 40.0f, static_cast<float>(width) - 80.0f,
-                            static_cast<float>(height) - 80.0f};
-            renderer.fillRect(panel, Color{39, 39, 42, 255});
-            renderer.strokeRect(panel, Color{63, 63, 70, 255}, 1.0f);
         }
 
-        platform_->present();
-
-        // Scripts placed after </body> run once the frame is on screen.
-        if (!scriptsAfterBodyRun_) {
-            scriptsAfterBodyRun_ = true;
-            runScripts(true);
-        }
-
-        if (!screenshotPath_.empty()) {
+        // Termination is checked every iteration, skipped frames included: an
+        // idle page skips almost all of them, so putting this inside the branch
+        // that does the drawing would leave it waiting for work that never comes.
+        if (!screenshotPath_.empty() && scriptedClicks.empty() && framesPumped_ >= minFrames) {
             if (platform_->saveScreenshot(screenshotPath_)) {
                 SDL_Log("wrote %s", screenshotPath_.c_str());
             } else {
@@ -415,6 +473,10 @@ void Application::run() {
             break;
         }
         SDL_Delay(16);
+    }
+
+    if (SDL_getenv("SUI_LOG_FRAMES")) {
+        SDL_Log("%u frame(s) pumped, %u painted", framesPumped_, framesDrawn_);
     }
 }
 

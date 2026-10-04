@@ -18,9 +18,29 @@
 namespace sui {
 
 class Document;
+class Element;
 
 // Reserved tag for text nodes.
 inline constexpr std::string_view kTextTag = "#text";
+
+// The live inline declaration for an element, mirroring `element.style` in the
+// DOM. The `style` attribute stays the single source of truth, so a write here
+// round-trips through the same cascade path the parser produces and the value is
+// still visible in the markup.
+class InlineStyle {
+public:
+    explicit InlineStyle(Element& owner) noexcept;
+
+    void setProperty(std::string property, std::string value, bool important = false);
+    std::string getPropertyValue(std::string_view property) const;
+    bool hasProperty(std::string_view property) const;
+
+    // Drops the property and returns whatever it was set to.
+    std::string removeProperty(std::string_view property);
+
+private:
+    Element& owner_;
+};
 
 class Element final : public Object {
 public:
@@ -76,6 +96,8 @@ public:
     // Web-named aliases used by the script API.
     std::string innerText() const { return textContent(); }
     void setInnerText(std::string text) { setTextContent(std::move(text)); }
+
+    InlineStyle style() noexcept { return InlineStyle(*this); }
 
     // <input> value, stored as an attribute.
     std::string value() const;

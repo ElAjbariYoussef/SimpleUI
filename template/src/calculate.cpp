@@ -24,13 +24,43 @@ void toggleHighlight() {
     document.invalidate();
 }
 
+// The same effect without touching the class list: write the inline declaration
+// directly. element.style is the live view of the style attribute, so the change
+// round-trips through the normal cascade and stays visible in the markup.
+void recolorSidebar() {
+    Element* sidebar = document.querySelector(".sidebar");
+    if (!sidebar) {
+        console.warn("no .sidebar element to recolor");
+        return;
+    }
+
+    sidebar->style().setProperty("background-color",
+                                 sidebar->style().getPropertyValue("background-color") ==
+                                         "#7f1d1d"
+                                     ? "#27272a"
+                                     : "#7f1d1d");
+    console.log("sidebar background is now " +
+                document.getComputedStyle(sidebar).getPropertyValue("background-color"));
+}
+
 void calculate_onLoad() {
     console.log("calculate.cpp ran after the first paint");
+
+    // A stylesheet built at runtime joins the author origin after the linked
+    // sheets, so it behaves like a <style> block appended last.
+    document.styleSheets().insertRule(
+        ".sidebar .badge { color: #facc15 }");
+    Element* counter = document.getElementById("counter");
+    if (counter) {
+        console.log("counter font-size resolves to " +
+                    document.getComputedStyle(counter).getPropertyValue("font-size"));
+    }
 }
 
 SUI_SCRIPT("/src/calculate.cpp", calculate_onLoad)
 
-// Both functions are reachable from inline attributes such as
+// All three functions are reachable from inline attributes such as
 // `onclick="addone();"` by their bare names.
 SUI_HANDLER(addone)
 SUI_HANDLER(toggleHighlight)
+SUI_HANDLER(recolorSidebar)

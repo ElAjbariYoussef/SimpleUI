@@ -11,6 +11,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <cstdint>
 
 namespace sui {
 
@@ -49,7 +50,25 @@ private:
     StyleResolver resolver_;
     script::Context scriptContext_;
     std::string screenshotPath_;
+
+    // The inputs that decide whether a frame can be skipped. Anything that can
+    // change what the page looks like has to move one of these counters,
+    // otherwise an idle window would keep repainting a stale tree.
+    struct FrameStamp {
+        std::uint64_t mutations = 0;
+        std::uint64_t rules = 0;
+        std::uint64_t script = 0;
+        int width = -1;
+        int height = -1;
+    };
+    FrameStamp stamp_;
+    bool frameDrawn_ = false;
     bool scriptsAfterBodyRun_ = false;
+
+    // Only observable through SUI_LOG_FRAMES, which exists so the skip path can
+    // be checked rather than assumed.
+    std::uint32_t framesPumped_ = 0;
+    std::uint32_t framesDrawn_ = 0;
 };
 
 }  // namespace sui

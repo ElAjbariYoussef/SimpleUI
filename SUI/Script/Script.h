@@ -71,9 +71,38 @@ void log(std::string_view message);
 void warn(std::string_view message);
 void error(std::string_view message);
 
+// getComputedStyle(element).getPropertyValue("color") — reads what the element
+// actually resolved to, as a browser devtools readout would report it. The
+// object is a view: it re-resolves on each read, so it stays correct after a
+// restyle instead of caching a snapshot.
+class ComputedStyleApi {
+public:
+    explicit ComputedStyleApi(Element* element) noexcept : element_(element) {}
+
+    std::string getPropertyValue(std::string_view property) const;
+
+private:
+    Element* element_;
+};
+
+// document.styleSheets.insertRule(".hot { color: red; }") — a stylesheet a
+// script builds at runtime. Rules land in the author origin after the linked
+// sheets, so they win ties of specificity the same way a later <style> block
+// would, while a more specific rule from a file still wins outright.
+class StyleSheetApi {
+public:
+    // Inserts one rule and returns its index, or -1 when the text is not a
+    // single well-formed rule.
+    int insertRule(std::string_view cssText);
+    bool deleteRule(int index);
+    int ruleCount() const;
+};
+
 // document.getElementById / querySelector, plus the invalidate() a script calls
-// after changing something. Layout re-runs every frame regardless, so invalidate
-// is a hint today and the skip-if-unchanged path in goal 5 will rely on it.
+// after changing something. Layout and paint only re-run when a mutation, a
+// stylesheet change, an explicit invalidate, or a resize marks the frame stale,
+// so invalidate is what a script needs after touching anything the engine
+// cannot observe on its own.
 class DocumentApi {
 public:
     Document* get() const noexcept;
@@ -81,6 +110,11 @@ public:
     Element* getElementById(std::string_view id) const;
     Element* querySelector(std::string_view selector) const;
     void invalidate() const;
+
+    ComputedStyleApi getComputedStyle(Element* element) const {
+        return ComputedStyleApi(element);
+    }
+    StyleSheetApi styleSheets() const { return StyleSheetApi{}; }
 };
 
 struct ConsoleApi {

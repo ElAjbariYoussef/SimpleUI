@@ -21,6 +21,21 @@ std::string_view trim(std::string_view s) {
     return s.substr(b, e - b);
 }
 
+// Renders a float without a trailing ".000000" and without the trailing zeros a
+// to_string would leave, so a script reading fontSize gets "16" not "16.000000".
+std::string unitless(float value) {
+    std::string text = std::to_string(value);
+    if (const std::size_t dot = text.find('.'); dot != std::string::npos) {
+        while (!text.empty() && text.back() == '0') {
+            text.pop_back();
+        }
+        if (!text.empty() && text.back() == '.') {
+            text.pop_back();
+        }
+    }
+    return text;
+}
+
 // Splits a value on whitespace into up to `maxParts` numbers.
 std::vector<float> parseNumberList(std::string_view value) {
     std::vector<float> out;
@@ -319,6 +334,7 @@ void StyleResolver::setRules(std::vector<Rule> rules) {
     std::stable_sort(rules_.begin(), rules_.end(), [](const Rule& a, const Rule& b) {
         return specificity(a.selector) < specificity(b.selector);
     });
+    ++generation_;
 }
 
 void StyleResolver::addRule(Rule rule) {
@@ -327,6 +343,73 @@ void StyleResolver::addRule(Rule rule) {
         rules_.begin(), rules_.end(), rank,
         [](int value, const Rule& existing) { return value < specificity(existing.selector); });
     rules_.insert(pos, std::move(rule));
+    ++generation_;
+}
+
+void StyleResolver::eraseRule(std::size_t index) {
+    if (index >= rules_.size()) {
+        return;
+    }
+    rules_.erase(rules_.begin() + static_cast<std::ptrdiff_t>(index));
+    ++generation_;
+}
+
+std::string StyleResolver::propertyValue(const ComputedStyle& style,
+                                         std::string_view property) {
+    auto number = [](float value) {
+        return unitless(value) + "px";
+    };
+    auto color = [](const SDL_Color& c) {
+        if (c.a == 0) {
+            return std::string("transparent");
+        }
+        char buffer[16];
+        std::snprintf(buffer, sizeof(buffer), "#%02x%02x%02x", c.r, c.g, c.b);
+        return std::string(buffer);
+    };
+
+    if (property == "display") {
+        switch (style.display) {
+            case ComputedStyle::Block: return "block";
+            case ComputedStyle::Inline: return "inline";
+            case ComputedStyle::InlineBlock: return "inline-block";
+            case ComputedStyle::None: return "none";
+        }
+        return {};
+    }
+    if (property == "color") return color(style.color);
+    if (property == "background-color") return color(style.backgroundColor);
+    if (property == "border-color") return color(style.borderColor);
+    if (property == "font-size") return number(style.fontSize);
+    // line-height is kept as a multiplier, so it serialises without a unit.
+    if (property == "line-height") return unitless(style.lineHeight);
+    if (property == "font-weight") return style.fontBold ? "bold" : "normal";
+    if (property == "font-family") return style.fontFamily;
+    if (property == "text-align") {
+        switch (style.textAlign) {
+            case ComputedStyle::Left: return "left";
+            case ComputedStyle::Center: return "center";
+            case ComputedStyle::Right: return "right";
+            case ComputedStyle::Justify: return "justify";
+        }
+        return {};
+    }
+    if (property == "width") return style.width > 0.0f ? number(style.width) : "auto";
+    if (property == "height") return style.height > 0.0f ? number(style.height) : "auto";
+    if (property == "visibility") return style.visible ? "visible" : "hidden";
+    if (property == "margin-top") return number(style.margin.top);
+    if (property == "margin-right") return number(style.margin.right);
+    if (property == "margin-bottom") return number(style.margin.bottom);
+    if (property == "margin-left") return number(style.margin.left);
+    if (property == "padding-top") return number(style.padding.top);
+    if (property == "padding-right") return number(style.padding.right);
+    if (property == "padding-bottom") return number(style.padding.bottom);
+    if (property == "padding-left") return number(style.padding.left);
+    if (property == "border-width-top") return number(style.borderWidth.top);
+    if (property == "border-width-right") return number(style.borderWidth.right);
+    if (property == "border-width-bottom") return number(style.borderWidth.bottom);
+    if (property == "border-width-left") return number(style.borderWidth.left);
+    return {};
 }
 
 bool selectorMatches(const SimpleSelector& selector, const Element& element) {

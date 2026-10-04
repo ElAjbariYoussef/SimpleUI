@@ -209,4 +209,43 @@ void DocumentApi::invalidate() const {
     }
 }
 
+std::string ComputedStyleApi::getPropertyValue(std::string_view property) const {
+    if (!element_ || !g_context || !g_context->styles) {
+        return {};
+    }
+    return StyleResolver::propertyValue(g_context->styles->resolve(*element_), property);
+}
+
+int StyleSheetApi::insertRule(std::string_view cssText) {
+    if (!g_context || !g_context->styles) {
+        warn("insertRule called before the stylesheet is ready");
+        return -1;
+    }
+    const std::vector<Rule> parsed = CSSParser::parse(cssText);
+    if (parsed.size() != 1) {
+        warn("insertRule expects exactly one rule; got " + std::to_string(parsed.size()));
+        return -1;
+    }
+    const int index = static_cast<int>(g_context->styles->rules().size());
+    g_context->styles->addRule(parsed.front());
+    return index;
+}
+
+bool StyleSheetApi::deleteRule(int index) {
+    if (!g_context || !g_context->styles || index < 0) {
+        return false;
+    }
+    const auto count = static_cast<int>(g_context->styles->rules().size());
+    if (index >= count) {
+        return false;
+    }
+    g_context->styles->eraseRule(static_cast<std::size_t>(index));
+    return true;
+}
+
+int StyleSheetApi::ruleCount() const {
+    return g_context && g_context->styles ? static_cast<int>(g_context->styles->rules().size())
+                                          : 0;
+}
+
 }  // namespace sui::script

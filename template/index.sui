@@ -11,6 +11,7 @@
         <div class="sidebar">
             <button onclick="addone();"> Click to Add </button>
             <button onclick="toggleHighlight();"> Toggle highlight </button>
+            <button onclick="recolorSidebar();"> Recolor </button>
         </div>
 
         <div class="content">

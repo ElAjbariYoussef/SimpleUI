@@ -275,6 +275,126 @@ void testScriptDrivenRestyle() {
           "removing the class falls back to the base rule");
 }
 
+void testInlineStyleWrites() {
+    auto doc = parseOrNull(
+        "<sui><body><p id=\"p\" style=\"color: #111111; font-size: 12px\">x</p></body></sui>");
+    if (!doc) {
+        return;
+    }
+    Element* p = doc->getElementById("p");
+    if (!p) {
+        check(false, "p found");
+        return;
+    }
+
+    check(p->style().getPropertyValue("color") == "#111111", "reads a declared property");
+    check(p->style().hasProperty("color"), "reports a declared property");
+    check(!p->style().hasProperty("margin-top"), "reports an absent property");
+    check(p->style().getPropertyValue("margin-top").empty(), "absent property reads empty");
+
+    p->style().setProperty("color", "#ef4444");
+    check(p->style().getPropertyValue("color") == "#ef4444", "setProperty replaces in place");
+    check(p->attribute("style").find("font-size") != std::string_view::npos,
+          "a write leaves the other declarations alone");
+
+    p->style().setProperty("background-color", "#000000");
+    check(p->style().getPropertyValue("background-color") == "#000000",
+          "setProperty appends a new declaration");
+
+    // The attribute is the single source of truth, so it stays inspectable in
+    // the markup exactly as a browser's does.
+    check(p->attribute("style").find("color: #ef4444") != std::string_view::npos,
+          "the write is visible in the style attribute");
+
+    const std::string removed = p->style().removeProperty("color");
+    check(removed == "#ef4444", "removeProperty reports the old value");
+    check(!p->style().hasProperty("color"), "removeProperty drops the property");
+    check(p->style().hasProperty("font-size"), "removeProperty spares the others");
+    check(p->style().removeProperty("color").empty(), "removing twice reports nothing");
+
+    p->style().setProperty("color", "#00ff00", true);
+    check(p->style().getPropertyValue("color") == "#00ff00", "an important write reads back");
+    check(p->attribute("style").find("!important") != std::string_view::npos,
+          "an important write records the flag");
+}
+
+void testComputedStyleReads() {
+    auto doc = parseOrNull("<sui><body><p id=\"p\">x</p></body></sui>");
+    if (!doc) {
+        return;
+    }
+    Element* p = doc->getElementById("p");
+    if (!p) {
+        check(false, "p found");
+        return;
+    }
+
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("#p { font-size: 24px; text-align: center }"));
+    const ScopedContext scope(*doc, resolver);
+
+    check(document.getComputedStyle(p).getPropertyValue("font-size") == "24px",
+          "reads a resolved length as px");
+    check(document.getComputedStyle(p).getPropertyValue("text-align") == "center",
+          "reads a keyword");
+    check(document.getComputedStyle(p).getPropertyValue("display") == "block",
+          "reads the user-agent default when no rule set it");
+    check(document.getComputedStyle(p).getPropertyValue("line-height") ==
+              document.getComputedStyle(p->parent()).getPropertyValue("line-height"),
+          "an unset line-height reads the inherited value, unitless");
+    check(document.getComputedStyle(nullptr).getPropertyValue("color").empty(),
+          "a null element reads empty instead of crashing");
+
+    // The view re-resolves per read, so a restyle is visible immediately.
+    p->style().setProperty("font-size", "30px");
+    check(document.getComputedStyle(p).getPropertyValue("font-size") == "30px",
+          "an inline write wins over the stylesheet and reads back");
+}
+
+void testRuntimeStyleSheet() {
+    auto doc = parseOrNull("<sui><body><div id=\"d\" class=\"box\"></div></body></sui>");
+    if (!doc) {
+        return;
+    }
+    Element* d = doc->getElementById("d");
+    if (!d) {
+        check(false, "d found");
+        return;
+    }
+
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(".box { background-color: #111111 }"));
+    const ScopedContext scope(*doc, resolver);
+
+    const int before = document.styleSheets().ruleCount();
+    check(before == 1, "ruleCount sees the linked stylesheet");
+
+    const std::uint64_t generationBefore = resolver.generation();
+    const int index = document.styleSheets().insertRule(".box { background-color: #222222 }");
+    check(index == before, "insertRule reports the index it used");
+    check(resolver.generation() > generationBefore, "insertRule marks styles stale");
+    check(resolver.resolve(*d).backgroundColor.r == 0x22,
+          "an injected rule beats an equal-specificity rule from a file");
+
+    // A file rule that is genuinely more specific still wins, as CSS requires.
+    resolver.addRule(sui::CSSParser::parse("#d { background-color: #333333 }").front());
+    check(resolver.resolve(*d).backgroundColor.r == 0x33,
+          "a more specific file rule still outranks the injected one");
+
+    check(document.styleSheets().insertRule(".box { color: red } .box { color: blue }") == -1,
+          "insertRule rejects a text holding more than one rule");
+    check(document.styleSheets().insertRule("nonsense") == -1,
+          "insertRule rejects text that is not a rule");
+    check(document.styleSheets().ruleCount() == 3, "rejected inserts leave the count alone");
+
+    check(document.styleSheets().deleteRule(index), "deleteRule removes the injected rule");
+    check(document.styleSheets().ruleCount() == 2, "deleteRule drops the count by one");
+    check(resolver.resolve(*d).backgroundColor.r == 0x33,
+          "after the delete only the file rules remain");
+    check(!document.styleSheets().deleteRule(99), "deleteRule rejects an out-of-range index");
+    check(!document.styleSheets().deleteRule(-1), "deleteRule rejects a negative index");
+}
+
 }  // namespace
 
 int main() {
@@ -286,6 +406,9 @@ int main() {
     testInnerTextAndValue();
     testMutationCounter();
     testScriptDrivenRestyle();
+    testInlineStyleWrites();
+    testComputedStyleReads();
+    testRuntimeStyleSheet();
 
     if (failures) {
         std::printf("\n%d check(s) failed\n", failures);

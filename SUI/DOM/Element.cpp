@@ -1,5 +1,6 @@
 #include "SUI/DOM/Element.h"
 
+#include "CSS/Parser.h"
 #include "SUI/DOM/Document.h"
 
 #include <algorithm>
@@ -211,6 +212,97 @@ std::string Element::value() const {
 
 void Element::setValue(std::string text) {
     setAttribute("value", std::move(text));
+}
+
+InlineStyle::InlineStyle(Element& owner) noexcept : owner_(owner) {}
+
+void InlineStyle::setProperty(std::string property, std::string value, bool important) {
+    if (property.empty()) {
+        return;
+    }
+    std::vector<Declaration> declarations = parseDeclarations(owner_.attribute("style"));
+    bool replaced = false;
+    for (auto& declaration : declarations) {
+        if (declaration.property == property) {
+            declaration.value = std::move(value);
+            declaration.important = important;
+            replaced = true;
+            break;
+        }
+    }
+    if (!replaced) {
+        declarations.push_back(Declaration{std::move(property), std::move(value), important});
+    }
+
+    // Keep the property order stable so repeated writes produce a stable
+    // attribute string.
+    std::string serialized;
+    for (const auto& declaration : declarations) {
+        if (!serialized.empty()) {
+            serialized += ' ';
+        }
+        serialized += declaration.property;
+        serialized += ": ";
+        serialized += declaration.value;
+        if (declaration.important) {
+            serialized += " !important";
+        }
+        serialized += ';';
+    }
+    owner_.setAttribute("style", std::move(serialized));
+}
+
+std::string InlineStyle::getPropertyValue(std::string_view property) const {
+    // Later declarations win, matching the order the cascade applies them in.
+    std::string found;
+    for (const auto& declaration : parseDeclarations(owner_.attribute("style"))) {
+        if (declaration.property == property) {
+            found = declaration.value;
+        }
+    }
+    return found;
+}
+
+bool InlineStyle::hasProperty(std::string_view property) const {
+    for (const auto& declaration : parseDeclarations(owner_.attribute("style"))) {
+        if (declaration.property == property) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string InlineStyle::removeProperty(std::string_view property) {
+    const std::vector<Declaration> declarations = parseDeclarations(owner_.attribute("style"));
+    std::string removed;
+    std::vector<Declaration> kept;
+    kept.reserve(declarations.size());
+    for (const auto& declaration : declarations) {
+        if (declaration.property == property) {
+            removed = declaration.value;
+            continue;
+        }
+        kept.push_back(declaration);
+    }
+    if (removed.empty()) {
+        return removed;
+    }
+
+    std::string serialized;
+    for (const auto& declaration : kept) {
+        if (!serialized.empty()) {
+            serialized += ' ';
+        }
+        serialized += declaration.property;
+        serialized += ": ";
+        serialized += declaration.value;
+        if (declaration.important) {
+            serialized += " !important";
+        }
+        serialized += ';';
+    }
+    owner_.setAttribute("style", std::move(serialized));
+    return removed;
 }
 
 void Element::visit(const std::function<void(Element&)>& fn) {
