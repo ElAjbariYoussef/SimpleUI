@@ -153,6 +153,62 @@ void testMixedContentOrder() {
     check(document->querySelector("br") != nullptr, "br kept as a child node");
 }
 
+// Every HTML tag is classified so a tag can never be silently both styled and
+// invisible. This is the list Difference.md publishes.
+// Parses markup and returns its document, or nullptr.
+std::unique_ptr<Document> document_for(const std::string& markup) {
+    sui::ParseError error;
+    return sui::MarkupParser::parse(markup, error);
+}
+
+void testEveryTagIsClassified() {
+    struct Row {
+        const char* tag;
+        bool visual;
+    };
+    // The engine's own tag plus the tags the UA stylesheet describes.
+    const Row rows[] = {
+        {"sui", false}, {"head", false}, {"window", false}, {"script", false},
+        {"style", false}, {"link", false}, {"meta", false}, {"title", false},
+        {"base", false}, {"defs", false}, {"symbol", false}, {"use", false},
+        {"clipPath", false}, {"mask", false}, {"pattern", false}, {"marker", false},
+        {"filter", false}, {"linearGradient", false}, {"radialGradient", false},
+        {"stop", false}, {"animate", false}, {"animateTransform", false},
+        {"animateMotion", false}, {"set", false}, {"foreignObject", false},
+        {"desc", false}, {"metadata", false}, {"textPath", false}, {"tspan", false},
+        {"tref", false}, {"colgroup", false}, {"col", false}, {"thead", false},
+        {"tbody", false}, {"tfoot", false}, {"template", false}, {"noscript", false},
+        {"slot", false},
+        {"body", true}, {"div", true}, {"p", true}, {"h1", true}, {"h2", true},
+        {"h3", true}, {"h4", true}, {"h5", true}, {"h6", true}, {"br", true},
+        {"a", true}, {"span", true}, {"label", true}, {"button", true},
+        {"table", true}, {"tr", true}, {"th", true}, {"td", true}, {"input", true},
+        {"img", true}, {"svg", true}, {"video", true}, {"audio", true},
+        {"canvas", true}, {"iframe", true}, {"picture", true}, {"source", true},
+        {"track", true}, {"section", true}, {"article", true}, {"header", true},
+        {"footer", true}, {"main", true}, {"nav", true}, {"aside", true},
+        {"code", true}, {"em", true}, {"i", true}, {"small", true}, {"sub", true},
+        {"sup", true}, {"strong", true}, {"b", true}, {"ul", true}, {"ol", true},
+        {"li", true},
+    };
+    for (const Row& row : rows) {
+        auto document =
+            document_for(std::string("<sui><body><") + row.tag + "></" + row.tag +
+                         "></body></sui>");
+        Element* el = document ? document->querySelector(row.tag) : nullptr;
+        if (!el) {
+            // A non-visual wrapper keeps its children, so querySelector finds it.
+            check(false, row.tag);
+            continue;
+        }
+        if (row.visual) {
+            check(el->isVisual(), row.tag);
+        } else {
+            check(!el->isVisual(), row.tag);
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -161,6 +217,7 @@ int main() {
     testAcceptsQuoting();
     testIgnoresComments();
     testMixedContentOrder();
+    testEveryTagIsClassified();
 
     if (failures) {
         std::printf("\n%d check(s) failed\n", failures);

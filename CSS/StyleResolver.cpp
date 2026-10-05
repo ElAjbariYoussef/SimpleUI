@@ -554,6 +554,10 @@ int specificity(const SimpleSelector& selector) {
             case Selector::Kind::Type:
                 ++types;
                 break;
+            case Selector::Kind::Attribute:
+                // CSS counts an attribute selector with the class group.
+                ++classes;
+                break;
             case Selector::Kind::Universal:
                 break;
         }
@@ -589,6 +593,14 @@ bool compoundMatches(const Selector& part, const Element& element) {
             return element.id() == part.value;
         case Selector::Kind::Universal:
             return true;
+        case Selector::Kind::Attribute: {
+            if (!element.hasAttribute(part.value)) {
+                return false;
+            }
+            // An empty `attributeValue` is the presence test `[data-role]`.
+            return part.attributeValue.empty() ||
+                   element.attribute(part.value) == part.attributeValue;
+        }
     }
     return false;
 }
@@ -724,6 +736,9 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
 }
 
 bool selectorMatches(const SimpleSelector& selector, const Element& element) {
+    if (selector.unsupported) {
+        return false;
+    }
     const auto& parts = selector.parts;
     if (parts.empty()) {
         return false;

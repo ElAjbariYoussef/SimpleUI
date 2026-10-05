@@ -8,9 +8,11 @@ namespace sui {
 
 // A single simple selector: `div`, `.sidebar`, `#counter`, or `*`.
 struct Selector {
-    enum class Kind { Type, Class, Id, Universal };
+    enum class Kind { Type, Class, Id, Universal, Attribute };
     Kind kind = Kind::Universal;
     std::string value;
+    // Only for Kind::Attribute: empty means "the attribute is present".
+    std::string attributeValue;
 };
 
 // One comma-separated selector in a rule's prelude. Descendant and child
@@ -21,6 +23,10 @@ struct SimpleSelector {
     std::vector<Selector> parts;
     // Combinator linking parts[i] to parts[i + 1].
     std::vector<Combinator> combinators;
+    // Set when the selector used something the engine cannot evaluate, such as a
+    // pseudo-class. It then matches nothing at all: dropping the unknown part and
+    // matching the rest would make `#t:hover` apply to every `#t`.
+    bool unsupported = false;
 };
 
 struct Declaration {

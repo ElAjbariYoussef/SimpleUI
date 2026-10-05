@@ -74,12 +74,15 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
             while (i < src.size() && isIdentChar(src[i])) {
                 ++i;
             }
-            out.parts.push_back({kind, std::string(src.substr(nameStart, i - nameStart))});
+            out.parts.push_back(
+                {kind, std::string(src.substr(nameStart, i - nameStart)), {}});
             continue;
         }
         if (c == ':' && i + 1 < src.size() && src[i + 1] != ':') {
-            // Pseudo-classes/elements are not supported; skip them so the rest
-            // of the selector still parses.
+            // The engine evaluates no pseudo-classes or pseudo-elements yet. The
+            // selector still parses, but it is marked so it matches nothing rather
+            // than silently matching every element the rest of it describes.
+            out.unsupported = true;
             ++i;
             while (i < src.size() && isIdentChar(src[i])) {
                 ++i;
@@ -101,12 +104,58 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
                 ++i;
             }
             out.parts.push_back(
-                {Selector::Kind::Type, std::string(src.substr(nameStart, i - nameStart))});
+                {Selector::Kind::Type, std::string(src.substr(nameStart, i - nameStart)), {}});
             continue;
         }
         if (c == '*') {
             ++i;
-            out.parts.push_back({Selector::Kind::Universal, std::string()});
+            out.parts.push_back({Selector::Kind::Universal, std::string(), {}});
+            continue;
+        }
+        if (c == '[') {
+            ++i;
+            const std::size_t nameStart = i;
+            while (i < src.size() && isIdentChar(src[i])) {
+                ++i;
+            }
+            const std::string name(src.substr(nameStart, i - nameStart));
+            std::string value;
+            // `[attr]` tests presence; `[attr="v"]` compares the value. The
+            // operator (~= |= ^= $= *=) and any quotes are skipped, then whatever
+            // is left up to the bracket is the value to match against.
+            while (i < src.size() && (isSpace(src[i]) || src[i] == '=' || src[i] == '~' ||
+                                      src[i] == '|' || src[i] == '^' || src[i] == '$' ||
+                                      src[i] == '*')) {
+                ++i;
+            }
+            if (i < src.size() && (src[i] == '"' || src[i] == '\'')) {
+                const char quote = src[i++];
+                const std::size_t vStart = i;
+                while (i < src.size() && src[i] != quote) {
+                    ++i;
+                }
+                value.assign(src.substr(vStart, i - vStart));
+                if (i < src.size()) {
+                    ++i;  // the closing quote
+                }
+                while (i < src.size() && src[i] != ']') {
+                    ++i;
+                }
+            } else {
+                const std::size_t vStart = i;
+                while (i < src.size() && src[i] != ']' && !isSpace(src[i])) {
+                    ++i;
+                }
+                value.assign(src.substr(vStart, i - vStart));
+            }
+            if (i < src.size()) {
+                ++i;  // the closing bracket
+            }
+            Selector part;
+            part.kind = Selector::Kind::Attribute;
+            part.value = name;
+            part.attributeValue = value;
+            out.parts.push_back(std::move(part));
             continue;
         }
         break;

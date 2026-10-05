@@ -117,8 +117,52 @@ void testSelectorMatching() {
           "universal selector matches anything");
     check(selectorMatches(sui::CSSParser::parseSelector("body div p"), *paragraph),
           "descendant chain of any depth matches");
+    // An unsupported pseudo-class must disable the whole selector, not be dropped:
+    // `#t:hover` matching every `#t` would be worse than not matching at all.
     check(!selectorMatches(sui::CSSParser::parseSelector("h1:hover"), *paragraph),
-          "pseudo-classes are skipped without breaking the match");
+          "a selector with a pseudo-class matches nothing");
+    check(!selectorMatches(sui::CSSParser::parseSelector("div:hover"), *div),
+          "a compound selector with a pseudo-class matches nothing");
+}
+
+void testAttributeSelectors() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"main\" data-role=\"panel\" data-open></div>"
+        "<div id=\"other\" data-mode=\"aside\"></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* main = document->getElementById("main");
+    Element* other = document->getElementById("other");
+    check(main && other, "attribute-selector elements found");
+    if (!main || !other) {
+        return;
+    }
+
+    check(selectorMatches(sui::CSSParser::parseSelector("[data-role]"), *main),
+          "attribute presence matches");
+    check(!selectorMatches(sui::CSSParser::parseSelector("[data-role]"), *other),
+          "attribute presence does not match an element without it");
+    check(selectorMatches(sui::CSSParser::parseSelector("[data-open]"), *main),
+          "a valueless attribute is a presence test");
+    check(selectorMatches(sui::CSSParser::parseSelector("[data-role=\"panel\"]"), *main),
+          "attribute value matches when quoted");
+    check(selectorMatches(sui::CSSParser::parseSelector("[data-role=panel]"), *main),
+          "attribute value matches when unquoted");
+    check(!selectorMatches(sui::CSSParser::parseSelector("[data-role=\"panel\"]"), *other),
+          "attribute value does not match a different value");
+    check(!selectorMatches(sui::CSSParser::parseSelector("[data-missing=\"x\"]"), *main),
+          "a missing attribute never matches a value test");
+    // `~=` and friends are parsed the same way but only tested for equality here.
+    check(selectorMatches(sui::CSSParser::parseSelector("[data-role~=\"panel\"]"), *main),
+          "the word-list operator parses and compares the value");
+
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body{margin:0} div{width:10px;height:5px} [data-role=\"panel\"]{width:99px}"));
+    const auto s = resolver.resolve(*main);
+    checkNear(s.width.resolve(0.0f, s.fontSize, 16.0f), 99.0f, 0.01f,
+              "an attribute rule beats a type rule");
 }
 
 void testCascade() {
@@ -1211,6 +1255,7 @@ void testFlexNestedContainer() {
 int main() {
     testRuleParsing();
     testSelectorMatching();
+    testAttributeSelectors();
     testCascade();
     testPropertyParsing();
     testBlockStacking();
