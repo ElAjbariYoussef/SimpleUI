@@ -9,7 +9,7 @@ namespace sui {
 
 // A single simple selector: `div`, `.sidebar`, `#counter`, or `*`.
 struct Selector {
-    enum class Kind { Type, Class, Id, Universal, Attribute };
+    enum class Kind { Type, Class, Id, Universal, Attribute, PseudoElement };
     Kind kind = Kind::Universal;
     std::string value;
     // Only for Kind::Attribute: empty means "the attribute is present".

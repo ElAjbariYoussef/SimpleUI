@@ -170,6 +170,27 @@ struct ComputedStyle {
     Length right;
     Length bottom;
 
+    // Clipping. `Visible` means children may spill past the padding box; the other
+    // two crop them to it.
+    enum Overflow : std::uint8_t { Visible, Hidden, Scroll };
+    Overflow overflowX = Visible;
+    Overflow overflowY = Visible;
+
+    // Paint order within a stacking context. Higher wins; equal values keep
+    // document order. Only positioned elements and flex/grid items take part.
+    int zIndex = 0;
+    bool positioned = false;
+
+    // `white-space: nowrap` and `pre` stop the formatter breaking at spaces. `pre`
+    // additionally keeps newlines and runs of spaces. Prefixed because `NoWrap`
+    // already belongs to FlexWrap.
+    enum WhiteSpace : std::uint8_t { WrapText, WrapNone, WrapPre, WrapPreWrap };
+    WhiteSpace whiteSpace = WrapText;
+
+    // The text a generated `::before` or `::after` puts in the box. Empty means the
+    // pseudo-element is not generated at all.
+    std::string content;
+
     // Visibility
     bool visible = true;
 

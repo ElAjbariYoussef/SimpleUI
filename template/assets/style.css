@@ -64,3 +64,17 @@ h1 {
        window instead of sitting at a fixed size. */
     width: 25%;
 }
+
+/* Generated content. `::before` becomes the first inline box of the element and
+   `::after` the last, so both take part in line breaking and can be styled on
+   their own. A rule with no `content` generates nothing. */
+#badge::before {
+    content: "▸ ";
+    color: #60a5fa;
+}
+
+#badge::after {
+    content: "  (generated)";
+    color: #a1a1aa;
+    font-size: 13px;
+}

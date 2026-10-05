@@ -3,6 +3,7 @@
 // fixed average advances in that case.
 
 #include "CSS/Parser.h"
+#include "CSS/PseudoElements.h"
 #include "CSS/StyleResolver.h"
 #include "Layout/BlockLayout.h"
 #include "SUI/DOM/Document.h"
@@ -1416,6 +1417,93 @@ void testImportantAndCssWideKeywords() {
           "border-width-left is untouched by an unknown keyword");
 }
 
+void testPseudoElements() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"card\"><span id=\"kid\">k</span></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* card = document->getElementById("card");
+    if (!card) {
+        return;
+    }
+
+    // Parsing.
+    const auto before = sui::CSSParser::parseSelector("#card::before");
+    check(!before.unsupported, "::before is a supported selector");
+    check(before.parts.back().kind == sui::Selector::Kind::PseudoElement,
+          "::before parses as a pseudo-element part");
+    check(before.parts.back().value == "::before", "the pseudo-element part keeps its name");
+    check(sui::CSSParser::parseSelector("#card::after").parts.back().value == "::after",
+          "::after parses too");
+    check(sui::CSSParser::parseSelector("#card::marker").unsupported,
+          "an ungenerated pseudo-element matches nothing");
+    check(sui::CSSParser::parseSelector("#card::first-line").unsupported,
+          "::first-line matches nothing");
+
+    // A pseudo-element counts in the type group, so `#card::before` outranks
+    // `#card` exactly as `#card span` would.
+    check(sui::StyleResolver::specificityOf(sui::CSSParser::parseSelector("#card::before")) ==
+              sui::StyleResolver::specificityOf(sui::CSSParser::parseSelector("#card")) + 1,
+          "a pseudo-element counts in the type group");
+
+    // Generation.
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#card::before { content: \"A\" } #card::after { content: \"B\" }"));
+    sui::generatePseudoElements(*document, resolver);
+
+    check(card->children().size() == 3, "::before and ::after become children");
+    check(card->children()[0]->tag() == "::before", "::before comes first");
+    check(card->children()[1]->id() == "kid", "the real content keeps its place");
+    check(card->children()[2]->tag() == "::after", "::after comes last");
+    check(card->children()[0]->textContent() == "A", "::before carries its content");
+    check(card->children()[2]->textContent() == "B", "::after carries its content");
+    check(card->children()[0]->isPseudoElement(), "a generated box is marked as one");
+    check(!card->children()[1]->isPseudoElement(), "real content is not marked as one");
+    check(resolver.resolve(*card->children()[0]).display == sui::ComputedStyle::Inline,
+          "a generated box joins the inline flow");
+
+    // A generated box is styled by the rule that made it and inherits the rest from
+    // the element it hangs off, exactly as the element itself is.
+    sui::StyleResolver styled;
+    styled.setRules(sui::CSSParser::parse(
+        "body { color: #00ff00 } #card::before { content: \"A\"; font-size: 30px }"));
+    sui::generatePseudoElements(*document, styled);
+    check(styled.resolve(*card->children()[0]).fontSize > 29.0f,
+          "::before takes its own font-size");
+    check(styled.resolve(*card->children()[0]).color.g == 0xff,
+          "::before inherits the document colour");
+    check(selectorMatches(sui::CSSParser::parseSelector("#card"), *card->children()[0]),
+          "a rule on the originating element applies to its ::before");
+    check(!selectorMatches(sui::CSSParser::parseSelector("body"), *card->children()[0]),
+          "a rule for an unrelated ancestor does not apply to the box");
+    check(!selectorMatches(sui::CSSParser::parseSelector("#card::after"),
+                           *card->children()[0]),
+          "#card::after does not match the ::before box");
+    check(selectorMatches(sui::CSSParser::parseSelector("#card::before"),
+                          *card->children()[0]),
+          "#card::before matches the ::before box");
+    check(!selectorMatches(sui::CSSParser::parseSelector("span"), *card->children()[0]),
+          "a type selector for the original content misses a generated box");
+
+    // No `content` means no box at all, which is also what `content: none` means.
+    sui::StyleResolver bare;
+    bare.setRules(sui::CSSParser::parse("#card::before { color: #ff0000 }"));
+    sui::generatePseudoElements(*document, bare);
+    check(card->children().size() == 1, "a rule with no content generates nothing");
+    sui::StyleResolver none;
+    none.setRules(sui::CSSParser::parse("#card::before { content: none }"));
+    sui::generatePseudoElements(*document, none);
+    check(card->children().size() == 1, "content: none generates nothing");
+
+    // Rebuilding replaces rather than accumulating, or every frame would double up.
+    sui::generatePseudoElements(*document, resolver);
+    check(card->children().size() == 3, "regenerating does not duplicate the boxes");
+    check(card->children()[0]->textContent() == "A", "regenerating still puts ::before first");
+    check(card->children()[1]->id() == "kid", "regenerating keeps the real content in order");
+}
+
 }  // namespace
 
 int main() {
@@ -1423,6 +1511,7 @@ int main() {
     testSelectorMatching();
     testInteractivePseudoClasses();
     testAttributeSelectors();
+    testPseudoElements();
     testImportantAndCssWideKeywords();
     testCascade();
     testPropertyParsing();

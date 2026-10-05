@@ -18,6 +18,14 @@ ComputedStyle block(std::uint16_t specified = 0) {
 }  // namespace
 
 ComputedStyle defaultStyleFor(std::string_view tag) {
+    // A generated box joins the inline flow of the element it hangs off, which is
+    // what `content` on `::before`/`::after` is for.
+    if (tag == "::before" || tag == "::after") {
+        Style s;
+        s.display = Style::Inline;
+        return s;
+    }
+
     if (tag == "body") {
         Style s = block(Style::SpecifiedColor);
         s.backgroundColor = {24, 24, 27, 255};

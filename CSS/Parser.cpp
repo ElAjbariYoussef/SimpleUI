@@ -109,12 +109,22 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
             continue;
         }
         if (c == ':' && i + 1 < src.size() && src[i + 1] == ':') {
-            // Pseudo-elements are not generated yet, so `::before` and friends
-            // cannot select anything.
-            out.unsupported = true;
             i += 2;
+            const std::size_t nameStart = i;
             while (i < src.size() && isIdentChar(src[i])) {
                 ++i;
+            }
+            const std::string_view name = src.substr(nameStart, i - nameStart);
+            // `::before` and `::after` become real boxes in the tree, so they can
+            // select those boxes and carry their own declarations. No other
+            // pseudo-element is generated.
+            if (name == "before" || name == "after") {
+                Selector part;
+                part.kind = Selector::Kind::PseudoElement;
+                part.value = std::string("::") + std::string(name);
+                out.parts.push_back(std::move(part));
+            } else {
+                out.unsupported = true;
             }
             continue;
         }

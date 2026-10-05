@@ -107,6 +107,11 @@ public:
     // retained so they stay reachable by the linker, but layout and paint skip
     // them.
     bool isVisual() const noexcept { return visual_; }
+
+    // A box the engine generated from a `::before`/`::after` rule rather than from
+    // markup. Its tag is the pseudo-element name, so it takes part in layout and
+    // paint but is never reachable from script or from a plain type selector.
+    bool isPseudoElement() const noexcept { return tag_.rfind("::", 0) == 0; }
     void setVisual(bool visual) noexcept { visual_ = visual; }
 
     // Depth-first walk over this node and its descendants.

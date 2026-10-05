@@ -43,6 +43,10 @@ public:
     // can read what it sees. Returns an empty string for an unsupported name.
     static std::string propertyValue(const ComputedStyle& style, std::string_view property);
 
+    // The rule-ordering weight of a selector: ids * 10000 + classes * 100 + types,
+    // with attribute selectors counted as classes and pseudo-elements as types.
+    static int specificityOf(const SimpleSelector& selector);
+
     // Bumped by every change to the rule set, so the frame loop can notice that
     // resolution may differ even when the DOM did not move.
     std::uint64_t generation() const noexcept { return generation_; }

@@ -1,6 +1,7 @@
 #include "Core/Application/Application.h"
 
 #include "CSS/Parser.h"
+#include "CSS/PseudoElements.h"
 #include "CSS/StyleResolver.h"
 #include "Layout/BlockLayout.h"
 #include "Rendering/Renderer.h"
@@ -462,6 +463,12 @@ void Application::run() {
                 input.viewportWidth = static_cast<float>(width);
                 input.viewportHeight = static_cast<float>(height);
 
+                // Generated content becomes real boxes, so it has to exist before
+                // layout measures anything. Rebuilding it notes no mutation, which
+                // is what stops the frame loop from treating its own output as a
+                // reason to draw another frame.
+                generatePseudoElements(*document_, resolver_);
+
                 layout.layout(document_->root(), input);
 
                 // Events are routed after layout so hit tests use this frame's
@@ -482,8 +489,10 @@ void Application::run() {
                     mutated = true;
                 }
                 if (mutated) {
-                    // A handler may have rewritten the tree; lay out again so
-                    // the frame about to be painted reflects the change.
+                    // A handler may have rewritten the tree or the stylesheet; lay
+                    // out again so the frame about to be painted reflects the
+                    // change.
+                    generatePseudoElements(*document_, resolver_);
                     layout.layout(document_->root(), input);
                 }
 

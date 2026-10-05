@@ -251,6 +251,40 @@ const char* alignName(ComputedStyle::FlexAlign v) {
     }
 }
 
+// `content: "x"` and `content: "a" "b"` concatenate their string arguments.
+// `none` and `normal` mean "no generated box", which an empty result expresses.
+std::string parseContent(std::string_view v) {
+    std::string out;
+    std::size_t i = 0;
+    while (i < v.size()) {
+        const char quote = v[i];
+        if (quote != '"' && quote != '\'') {
+            ++i;
+            continue;
+        }
+        ++i;
+        const std::size_t start = i;
+        while (i < v.size() && v[i] != quote) {
+            ++i;
+        }
+        out.append(v.substr(start, i - start));
+        if (i < v.size()) {
+            ++i;  // the closing quote
+        }
+    }
+    return out;
+}
+
+ComputedStyle::Overflow parseOverflow(std::string_view v) {
+    if (v == "hidden" || v == "clip") {
+        return ComputedStyle::Hidden;
+    }
+    if (v == "scroll" || v == "auto") {
+        return ComputedStyle::Scroll;
+    }
+    return ComputedStyle::Visible;
+}
+
 ComputedStyle::FlexAlign parseJustify(std::string_view v) {
     if (v == "flex-end" || v == "end" || v == "right") {
         return ComputedStyle::AlignEnd;
@@ -455,6 +489,46 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
     } else if (property == "order") {
         // Only `order` above zero changes anything this engine does, and it is
         // applied at layout time, so nothing is stored here yet.
+    } else if (property == "content") {
+        s.content = parseContent(value);
+    } else if (property == "position") {
+        if (value == "relative") {
+            s.position = ComputedStyle::Relative;
+        } else if (value == "absolute") {
+            s.position = ComputedStyle::Absolute;
+        } else if (value == "fixed") {
+            s.position = ComputedStyle::Fixed;
+        } else {
+            s.position = ComputedStyle::Static;
+        }
+        // Only a box that is out of flow joins the paint order.
+        s.positioned = s.position != ComputedStyle::Static;
+    } else if (property == "top") {
+        s.top = parseLength(value);
+    } else if (property == "right") {
+        s.right = parseLength(value);
+    } else if (property == "bottom") {
+        s.bottom = parseLength(value);
+    } else if (property == "left") {
+        s.left = parseLength(value);
+    } else if (property == "z-index") {
+        s.zIndex = static_cast<int>(parseNumber(value));
+    } else if (property == "overflow") {
+        s.overflowX = s.overflowY = parseOverflow(value);
+    } else if (property == "overflow-x") {
+        s.overflowX = parseOverflow(value);
+    } else if (property == "overflow-y") {
+        s.overflowY = parseOverflow(value);
+    } else if (property == "white-space") {
+        if (value == "nowrap") {
+            s.whiteSpace = ComputedStyle::WrapNone;
+        } else if (value == "pre") {
+            s.whiteSpace = ComputedStyle::WrapPre;
+        } else if (value == "pre-wrap") {
+            s.whiteSpace = ComputedStyle::WrapPreWrap;
+        } else {
+            s.whiteSpace = ComputedStyle::WrapText;
+        }
     } else if (property == "box-sizing") {
         s.boxSizing =
             value == "border-box" ? BoxSizing::BorderBox : BoxSizing::ContentBox;
@@ -539,7 +613,7 @@ void applyDimensionAttributes(ComputedStyle& s, Element& element) {
     }
 }
 
-int specificity(const SimpleSelector& selector) {
+int selectorRank(const SimpleSelector& selector) {
     int ids = 0;
     int classes = 0;
     int types = 0;
@@ -559,6 +633,11 @@ int specificity(const SimpleSelector& selector) {
                 ++classes;
                 break;
             case Selector::Kind::Universal:
+                break;
+            case Selector::Kind::PseudoElement:
+                // CSS counts a pseudo-element with the type group, so `li::before`
+                // and `li` have the same specificity.
+                ++types;
                 break;
         }
     }
@@ -593,6 +672,8 @@ bool compoundMatches(const Selector& part, const Element& element) {
             return element.id() == part.value;
         case Selector::Kind::Universal:
             return true;
+        case Selector::Kind::PseudoElement:
+            return element.isPseudoElement() && element.tag() == part.value;
         case Selector::Kind::Attribute: {
             if (!element.hasAttribute(part.value)) {
                 return false;
@@ -607,19 +688,23 @@ bool compoundMatches(const Selector& part, const Element& element) {
 
 }  // namespace
 
+int StyleResolver::specificityOf(const SimpleSelector& selector) {
+    return selectorRank(selector);
+}
+
 void StyleResolver::setRules(std::vector<Rule> rules) {
     rules_ = std::move(rules);
     std::stable_sort(rules_.begin(), rules_.end(), [](const Rule& a, const Rule& b) {
-        return specificity(a.selector) < specificity(b.selector);
+        return selectorRank(a.selector) < selectorRank(b.selector);
     });
     ++generation_;
 }
 
 void StyleResolver::addRule(Rule rule) {
-    const int rank = specificity(rule.selector);
+    const int rank = selectorRank(rule.selector);
     const auto pos = std::upper_bound(
         rules_.begin(), rules_.end(), rank,
-        [](int value, const Rule& existing) { return value < specificity(existing.selector); });
+        [](int value, const Rule& existing) { return value < selectorRank(existing.selector); });
     rules_.insert(pos, std::move(rule));
     ++generation_;
 }
@@ -773,9 +858,29 @@ bool selectorMatches(const SimpleSelector& selector, const Element& element,
     if (parts.empty()) {
         return false;
     }
-    // Match right to left so descendant combinators can walk ancestors.
-    std::size_t partIndex = parts.size() - 1;
+
+    // A generated `::before`/`::after` is a real child box, but the compound that
+    // creates it describes the element it hangs off. So `#btn::before` must be
+    // matched with the pseudo box's parent, and a selector with no pseudo-element
+    // part (`#btn`, `body`) has to reach the box the same way — a pseudo element
+    // takes its inherited values and any declarations on its originating element.
     const Element* current = &element;
+    std::size_t partIndex = parts.size() - 1;
+    if (parts[partIndex].kind == Selector::Kind::PseudoElement) {
+        if (!compoundMatches(parts[partIndex], element)) {
+            return false;
+        }
+        current = element.parent();
+        if (!current) {
+            return false;
+        }
+        partIndex -= 1;
+    } else if (element.isPseudoElement()) {
+        current = element.parent();
+        if (!current) {
+            return false;
+        }
+    }
     while (true) {
         if (!compoundMatches(parts[partIndex], *current)) {
             return false;

@@ -20,6 +20,7 @@
                has to measure real glyph advances instead of guessing at
                character widths. The quick brown fox jumps over the lazy dog.</p>
             <p id="counter">0</p>
+            <p id="badge">Buttons</p>
             <p>Click the buttons to run a handler and re-layout.<br />The counter
                above is a real DOM mutation.</p>
         </div>
