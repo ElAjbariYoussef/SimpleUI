@@ -231,19 +231,69 @@ int main() {
 
     report("properties with no engine effect");
     {
-        const char* noops[] = {"float",         "clear",        "position",
-                               "top",            "left",         "right",
-                               "bottom",         "z-index",      "overflow",
-                               "text-overflow",  "white-space",  "transform",
-                               "box-shadow",     "border-radius", "opacity",
-                               "cursor",         "list-style",   "content",
-                               "background-image", "border-style", "outline",
-                               "letter-spacing", "word-spacing", "text-transform",
-                               "table-layout",   "caption-side", "flex-flow",
-                               "grid-template-columns", "aspect-ratio", "transition",
-                               "animation", "user-select", "vertical-align"};
-        for (const char* p : noops) {
-            std::printf("  %-26s parses=%s  reads-back=%s\n", p, "yes", "no");
+        // Measured, not asserted: each name goes through the real parser and the
+        // real computed-value reader, so the table in Difference.md cannot drift.
+        struct Case {
+            const char* property;
+            const char* value;
+            const char* shown;  // what a browser would resolve to
+        };
+        const Case cases[] = {
+            {"float", "left", "left"},
+            {"clear", "both", "both"},
+            {"position", "absolute", "absolute"},
+            {"position", "relative", "relative"},
+            {"top", "10px", "10px"},
+            {"left", "10px", "10px"},
+            {"right", "10px", "10px"},
+            {"bottom", "10px", "10px"},
+            {"z-index", "99", "99"},
+            {"overflow", "hidden", "hidden"},
+            {"text-overflow", "ellipsis", "ellipsis"},
+            {"white-space", "nowrap", "nowrap"},
+            {"transform", "rotate(10deg)", "rotate(10deg)"},
+            {"box-shadow", "0 0 4px #000", "0 0 4px #000"},
+            {"border-radius", "8px", "8px"},
+            {"opacity", "0.5", "0.5"},
+            {"cursor", "pointer", "pointer"},
+            {"list-style", "none", "none"},
+            {"content", "\"x\"", "\"x\""},
+            {"background-image", "url(a.png)", "url(a.png)"},
+            {"border-style", "dashed", "dashed"},
+            {"outline", "none", "none"},
+            {"letter-spacing", "2px", "2px"},
+            {"word-spacing", "2px", "2px"},
+            {"text-transform", "uppercase", "uppercase"},
+            {"table-layout", "fixed", "fixed"},
+            {"caption-side", "top", "top"},
+            {"flex-flow", "row wrap", "row wrap"},
+            {"grid-template-columns", "1fr 1fr", "1fr 1fr"},
+            {"aspect-ratio", "16/9", "16/9"},
+            {"transition", "all 1s", "all 1s"},
+            {"animation", "x 1s", "x 1s"},
+            {"user-select", "none", "none"},
+            {"vertical-align", "middle", "middle"},
+            {"var-test", "12px", "12px"},
+        };
+        sui::ParseError e;
+        auto doc = sui::MarkupParser::parse("<sui><body><div id=\"t\"></div></body></sui>", e);
+        for (const Case& c : cases) {
+            sui::StyleResolver resolver;
+            resolver.setRules(sui::CSSParser::parse(std::string("#t{") + c.property +
+                                                    ":" + c.value + "}"));
+            const auto style = resolver.resolve(*doc->getElementById("t"));
+            const std::string read =
+                sui::StyleResolver::propertyValue(style, c.property);
+            // A rule that fails to parse produces no rules at all, which shows up
+            // as the id selector being gone from the selector list.
+            const bool ruleSurvived =
+                !sui::CSSParser::parse(std::string("#t{") + c.property + ":" + c.value +
+                                       "}")
+                     .empty();
+            std::printf("  %-22s %-14s parses=%-3s reads-back=%-8s effect=%s\n",
+                        c.property, c.value, ruleSurvived ? "yes" : "NO",
+                        read.empty() ? "(none)" : read.c_str(),
+                        read.empty() ? "none" : "CHECK");
         }
     }
     return 0;
