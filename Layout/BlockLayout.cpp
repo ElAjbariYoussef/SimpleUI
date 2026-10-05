@@ -16,17 +16,14 @@ bool isBlockLevel(const ComputedStyle& s) {
     return s.display == ComputedStyle::Block;
 }
 
-float horizontalChrome(const ComputedStyle& s) {
-    return s.margin.left + s.margin.right + s.borderWidth.left + s.borderWidth.right +
-           s.padding.left + s.padding.right;
-}
-
-float applyMinMax(float value, const ComputedStyle& s) {
-    if (s.minWidth > 0.0f) {
-        value = std::max(value, s.minWidth);
+// CSS clamps by max-* first and then by min-*, so min-width and min-height win
+// when the two conflict.
+float applyMinMax(float value, const UsedBox& box) {
+    if (box.maxWidth > 0.0f) {
+        value = std::min(value, box.maxWidth);
     }
-    if (s.maxWidth > 0.0f) {
-        value = std::min(value, s.maxWidth);
+    if (box.minWidth > 0.0f) {
+        value = std::max(value, box.minWidth);
     }
     return std::max(0.0f, value);
 }
@@ -66,17 +63,26 @@ float textWidth(const TextFont* font, const ComputedStyle& s, std::string_view t
 
 class Layout {
 public:
-    Layout(const StyleResolver& resolver, const TextFont* font)
-        : resolver_(resolver), font_(font) {}
+    Layout(const StyleResolver& resolver, const TextFont* font, float viewportHeight)
+        : resolver_(resolver), font_(font), viewportHeight_(viewportHeight) {}
 
     // Exposed for Flow, which needs the same answers run() uses.
     bool isLaidOut(Element& el) const { return laidOut(el); }
     ComputedStyle resolveStyle(Element& el) const { return resolver_.resolve(el); }
 
+    // A percentage height has to resolve against a containing block that is
+    // usually itself content-sized, which is not knowable while laying out. The
+    // viewport is used instead: that is the only definite height in a typical
+    // desktop page, and it is what an author writing `height: 50%` expects.
+    UsedBox usedBox(const ComputedStyle& s, float availableWidth) const {
+        return resolveBox(s, availableWidth, viewportHeight_, resolver_.rootFontSize());
+    }
+
     // Lays out `el` with the given available width. Returns the outer height
     // consumed, margins included.
     float run(Element& el, float availableWidth, float originX, float originY) {
         const ComputedStyle s = resolver_.resolve(el);
+        const UsedBox box = usedBox(s, availableWidth);
         el.clearTextRuns();
         if (s.display == ComputedStyle::None || !s.visible) {
             el.setLayoutX(originX);
@@ -86,40 +92,40 @@ public:
             return 0.0f;
         }
 
-        const float contentX =
-            originX + s.margin.left + s.borderWidth.left + s.padding.left;
-        const float contentY =
-            originY + s.margin.top + s.borderWidth.top + s.padding.top;
+        const float contentX = originX + box.margin.left + box.borderWidth.left +
+                               box.padding.left;
+        const float contentY = originY + box.margin.top + box.borderWidth.top +
+                               box.padding.top;
 
         // An inline-level box with auto width shrinks to fit its contents, the
         // way a browser sizes a button or an image. The probe below measures
         // the unwrapped width; run() then repeats the layout at the real width.
-        if (s.width <= 0.0f && s.display != ComputedStyle::Block) {
+        if (box.width <= 0.0f && s.display != ComputedStyle::Block) {
             availableWidth =
-                std::min(availableWidth, probeWidth(el, s) + horizontalChrome(s));
+                std::min(availableWidth, probeWidth(el, box) + box.horizontalChrome());
             el.clearTextRuns();  // the probe's runs are throwaway measurements
         }
 
         float contentWidth = 0.0f;
         float contentHeight = 0.0f;
-        contentHeight =
-            layoutContents(el, s, availableWidth, contentX, contentY, contentWidth);
+        contentHeight = layoutContents(el, s, box, availableWidth, contentX, contentY,
+                                       contentWidth);
 
-        if (s.height > 0.0f) {
-            contentHeight = s.height;
+        if (box.height > 0.0f) {
+            contentHeight = box.height;
         }
-        contentWidth = applyMinMax(contentWidth, s);
+        contentWidth = applyMinMax(contentWidth, box);
 
-        const float borderW = contentWidth + s.borderWidth.left + s.borderWidth.right +
-                              s.padding.left + s.padding.right;
-        const float borderH = contentHeight + s.borderWidth.top + s.borderWidth.bottom +
-                              s.padding.top + s.padding.bottom;
+        const float borderW = contentWidth + box.borderWidth.left + box.borderWidth.right +
+                              box.padding.left + box.padding.right;
+        const float borderH = contentHeight + box.borderWidth.top + box.borderWidth.bottom +
+                              box.padding.top + box.padding.bottom;
 
-        el.setLayoutX(originX + s.margin.left);
-        el.setLayoutY(originY + s.margin.top);
+        el.setLayoutX(originX + box.margin.left);
+        el.setLayoutY(originY + box.margin.top);
         el.setLayoutWidth(borderW);
         el.setLayoutHeight(borderH);
-        return borderH + s.margin.top + s.margin.bottom;
+        return borderH + box.margin.top + box.margin.bottom;
     }
 
 private:
@@ -141,23 +147,24 @@ private:
         return false;
     }
 
-    float layoutBlockContainer(Element& el, const ComputedStyle& s, float availableWidth,
+    float layoutBlockContainer(Element& el, const UsedBox& box, float availableWidth,
                                float contentX, float contentY, float& outHeight,
                                float& outWidth) {
         float contentWidth = applyMinMax(
-            s.width > 0.0f ? s.width
-                           : std::max(0.0f, availableWidth - horizontalChrome(s)),
-            s);
-        if (s.width <= 0.0f) {
+            box.width > 0.0f ? box.width
+                             : std::max(0.0f, availableWidth - box.horizontalChrome()),
+            box);
+        if (box.width <= 0.0f) {
             // Auto width still has to fit fixed-width children.
             for (const auto& child : el.children()) {
                 if (!child || child->isTextNode() || !laidOut(*child)) {
                     continue;
                 }
-                const ComputedStyle cs = resolver_.resolve(*child);
-                if (cs.width > 0.0f) {
+                const UsedBox childBox = usedBox(resolver_.resolve(*child), contentWidth);
+                if (childBox.width > 0.0f) {
                     contentWidth = applyMinMax(
-                        std::max(contentWidth, cs.width + horizontalChrome(cs)), s);
+                        std::max(contentWidth, childBox.width + childBox.horizontalChrome()),
+                        box);
                 }
             }
         }
@@ -176,42 +183,43 @@ private:
 
     // Widest the element's own contents want when nothing wraps. The layout
     // this writes is discarded: run() repeats it at the real width.
-    float probeWidth(Element& el, const ComputedStyle& s) {
+    float probeWidth(Element& el, const UsedBox& box) {
         float width = 0.0f;
-        layoutContents(el, s, kUnbounded, 0.0f, 0.0f, width);
+        layoutContents(el, resolver_.resolve(el), box, kUnbounded, 0.0f, 0.0f, width);
         return width;
     }
 
-    float layoutContents(Element& el, const ComputedStyle& s, float availableWidth,
-                         float contentX, float contentY, float& outWidth) {
+    float layoutContents(Element& el, const ComputedStyle& s, const UsedBox& box,
+                         float availableWidth, float contentX, float contentY,
+                         float& outWidth) {
         if (hasBlockChild(el)) {
             float height = 0.0f;
-            layoutBlockContainer(el, s, availableWidth, contentX, contentY, height,
-                                 outWidth);
+            layoutBlockContainer(el, box, availableWidth, contentX, contentY, height, outWidth);
             return height;
         }
-        return layoutInlineContainer(el, s, availableWidth, contentX, contentY, outWidth);
+        return layoutInlineContainer(el, s, box, availableWidth, contentX, contentY, outWidth);
     }
 
     // Every inline descendant of `el` flows into one line-breaking context, so
     // wrapping stays correct across element boundaries: "a <span>b c d</span>"
     // can break inside the span.
-    float layoutInlineContainer(Element& el, const ComputedStyle& s, float availableWidth,
-                               float contentX, float contentY, float& outWidth) {
+    float layoutInlineContainer(Element& el, const ComputedStyle& s, const UsedBox& box,
+                                float availableWidth, float contentX, float contentY,
+                                float& outWidth) {
         const bool probe = availableWidth >= kUnbounded;
         // A probe measures max-content, so it must not wrap at all; otherwise
         // every word lands on its own line and the result is min-content.
         const float inner =
-            s.width > 0.0f ? s.width
-                           : probe ? kUnbounded
-                                   : std::max(0.0f, availableWidth - horizontalChrome(s));
+            box.width > 0.0f ? box.width
+                             : probe ? kUnbounded
+                                     : std::max(0.0f, availableWidth - box.horizontalChrome());
 
         Flow flow(*this, el, s, metricsFor(font_, s), inner, contentX, contentY);
         flow.inlineBox(el, s);
         flow.finish();
 
-        if (s.width > 0.0f) {
-            outWidth = s.width;
+        if (box.width > 0.0f) {
+            outWidth = box.width;
         } else if (probe) {
             outWidth = flow.widest();
         } else {
@@ -296,26 +304,27 @@ private:
         }
 
         void atomic(Element& child, const ComputedStyle& cs) {
+            const UsedBox box = owner_.usedBox(cs, maxWidth_);
             // Measure before deciding to wrap: an auto-width atomic box is as
             // wide as its contents want, so the break test needs that number.
-            float boxWidth = cs.width;
+            float boxWidth = box.width;
             if (boxWidth <= 0.0f) {
                 owner_.run(child, kUnboundedProbe, 0.0f, 0.0f);
                 boxWidth = child.layoutWidth();
             }
-            const float outerW =
-                boxWidth + cs.margin.left + cs.margin.right + cs.borderWidth.left +
-                cs.borderWidth.right + cs.padding.left + cs.padding.right;
+            const float outerW = boxWidth + box.margin.left + box.margin.right +
+                                 box.borderWidth.left + box.borderWidth.right +
+                                 box.padding.left + box.padding.right;
             if (lineHasContent_ && penX_ + outerW > maxWidth_) {
                 newLine();
             }
-            const float top = originY_ + cursorY_ + cs.margin.top;
-            owner_.run(child, maxWidth_, originX_ + penX_ + cs.margin.left, top);
-            penX_ += cs.margin.left + child.layoutWidth() + cs.margin.right;
+            const float top = originY_ + cursorY_ + box.margin.top;
+            owner_.run(child, maxWidth_, originX_ + penX_ + box.margin.left, top);
+            penX_ += box.margin.left + child.layoutWidth() + box.margin.right;
             lineHasContent_ = true;
             widest_ = std::max(widest_, penX_);
-            bottom_ = std::max(bottom_, cursorY_ + cs.margin.top +
-                                                child.layoutHeight() + cs.margin.bottom);
+            bottom_ = std::max(bottom_, cursorY_ + box.margin.top + child.layoutHeight() +
+                                                box.margin.bottom);
         }
 
         void newLine() {
@@ -367,6 +376,7 @@ private:
 
     const StyleResolver& resolver_;
     const TextFont* font_ = nullptr;
+    float viewportHeight_ = 0.0f;
 };
 
 }  // namespace
@@ -375,7 +385,7 @@ void BlockLayout::layout(Element* root, const LayoutInput& input) {
     if (!root || !input.resolver) {
         return;
     }
-    Layout layout(*input.resolver, input.font);
+    Layout layout(*input.resolver, input.font, input.viewportHeight);
     layout.run(*root, input.viewportWidth, 0.0f, 0.0f);
 }
 

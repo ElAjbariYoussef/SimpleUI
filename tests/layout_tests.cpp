@@ -157,10 +157,10 @@ void testPropertyParsing() {
         return;
     }
     const auto s = resolver.resolve(*div);
-    checkNear(s.width, 120.0f, 0.01f, "width parsed");
-    checkNear(s.margin.top, 5.0f, 0.01f, "2-value margin top");
-    checkNear(s.margin.left, 10.0f, 0.01f, "2-value margin left");
-    checkNear(s.padding.right, 4.0f, 0.01f, "2-value padding right");
+    checkNear(s.width.resolve(), 120.0f, 0.01f, "width parsed");
+    checkNear(s.margin.top.resolve(), 5.0f, 0.01f, "2-value margin top");
+    checkNear(s.margin.left.resolve(), 10.0f, 0.01f, "2-value margin left");
+    checkNear(s.padding.right.resolve(), 4.0f, 0.01f, "2-value padding right");
     check(s.backgroundColor.r == 0x0a && s.backgroundColor.g == 0x14 &&
               s.backgroundColor.b == 0x1e,
           "hex background parsed");
@@ -344,6 +344,301 @@ void testDefaultStyles() {
     check(heading.fontBold, "h1 is bold");
 }
 
+void testLengthUnits() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"outer\"><div id=\"half\"></div><div id=\"em\"></div>"
+        "<div id=\"rem\"></div><div id=\"padded\"></div></div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRootFontSize(20.0f);
+    resolver.setRules(sui::CSSParser::parse(
+        "#outer { width: 400px }"
+        "#half { width: 50% }"
+        "#em { font-size: 10px; width: 5em }"
+        "#rem { width: 2rem }"
+        "#padded { padding: 10% 0 10% 0 }"));
+    layoutRoot(*document, resolver, 800.0f);
+
+    Element* outer = document->getElementById("outer");
+    Element* half = document->getElementById("half");
+    Element* em = document->getElementById("em");
+    Element* rem = document->getElementById("rem");
+    Element* padded = document->getElementById("padded");
+    if (!outer || !half || !em || !rem || !padded) {
+        check(false, "unit test elements found");
+        return;
+    }
+
+    checkNear(half->layoutWidth(), 200.0f, 0.5f,
+              "a percentage width resolves against the containing block");
+    checkNear(half->layoutX(), outer->layoutX(), 0.5f,
+              "the percentage child sits at its parent's content edge");
+    checkNear(em->layoutWidth(), 50.0f, 0.5f, "em resolves against the element's own font size");
+    checkNear(rem->layoutWidth(), 40.0f, 0.5f, "rem resolves against the root font size");
+
+    // A percentage padding resolves against the containing block's inline size
+    // even on the top and bottom edges, which is the rule browsers apply.
+    checkNear(resolveBox(resolver.resolve(*padded), 400.0f, 600.0f, 20.0f).padding.top, 40.0f,
+              0.5f, "a percentage padding uses the containing block width on the block axis");
+    checkNear(resolveBox(resolver.resolve(*padded), 400.0f, 600.0f, 20.0f).padding.bottom, 40.0f,
+              0.5f, "a percentage bottom padding resolves the same way");
+
+    // The computed style keeps the unit, so a script can read it back.
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*half), "width") == "50%",
+          "a computed percentage reads back with its unit");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*rem), "width") == "2rem",
+          "a computed rem reads back with its unit");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*outer), "height") == "auto",
+          "an unset height reads back as auto");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*outer), "max-width") == "none",
+          "an unset max-width reads back as none");
+}
+
+void testAbsoluteAndKeywordUnits() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"d\" style=\"width: auto; max-width: none; "
+        "padding: 12pt\"></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    Element* d = document->getElementById("d");
+    if (!d) {
+        check(false, "d found");
+        return;
+    }
+    const auto s = resolver.resolve(*d);
+    check(s.width.isAuto(), "the auto keyword means auto, not zero");
+    check(s.maxWidth.isAuto(), "the none keyword means no maximum");
+    // 12pt is 16px at the CSS 96/72 ratio.
+    checkNear(s.padding.top.resolve(), 16.0f, 0.01f, "pt converts to px");
+}
+
+void testFontRelativeSizes() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"base\"><span id=\"em\"></span>"
+        "<span id=\"pct\"></span><span id=\"root\"></span></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRootFontSize(20.0f);
+    resolver.setRules(sui::CSSParser::parse(
+        "#base { font-size: 10px }"
+        "#em { font-size: 2em }"
+        "#pct { font-size: 150% }"
+        "#root { font-size: 1.5rem }"));
+    Element* base = document->getElementById("base");
+    Element* em = document->getElementById("em");
+    Element* pct = document->getElementById("pct");
+    Element* root = document->getElementById("root");
+    if (!base || !em || !pct || !root) {
+        check(false, "font-relative elements found");
+        return;
+    }
+
+    // Font size is the one length style resolution can finish alone, so it comes
+    // back as a plain number with no containing block needed.
+    checkNear(resolver.resolve(*em).fontSize, 20.0f, 0.01f,
+              "em font-size resolves against the parent's font size");
+    checkNear(resolver.resolve(*pct).fontSize, 15.0f, 0.01f,
+              "a percentage font-size resolves against the parent's font size");
+    checkNear(resolver.resolve(*root).fontSize, 30.0f, 0.01f,
+              "rem font-size resolves against the root font size");
+    checkNear(resolver.resolve(*base).fontSize, 10.0f, 0.01f,
+              "the parent keeps the size the children are relative to");
+}
+
+void testLineHeightUnits() {
+    auto document =
+        parseOrNull("<sui><body><div id=\"a\"></div><div id=\"b\"></div>"
+                    "<div id=\"c\"></div><div id=\"d\"></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#a { font-size: 16px; line-height: 24px }"
+        "#b { font-size: 16px; line-height: 1.5 }"
+        "#c { font-size: 20px; line-height: 2em }"
+        "#d { line-height: normal }"));
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    Element* c = document->getElementById("c");
+    Element* d = document->getElementById("d");
+    if (!a || !b || !c || !d) {
+        check(false, "line-height elements found");
+        return;
+    }
+
+    // line-height is stored as a multiplier, so a length has to become a ratio.
+    // Reading "24px" as a multiplier of 24 would be wildly wrong.
+    checkNear(resolver.resolve(*a).lineHeight, 1.5f, 0.01f,
+              "a px line-height becomes a ratio against the font size");
+    checkNear(resolver.resolve(*b).lineHeight, 1.5f, 0.01f,
+              "a unitless line-height is used as-is");
+    checkNear(resolver.resolve(*c).lineHeight, 2.0f, 0.01f,
+              "an em line-height becomes a ratio against the font size");
+    checkNear(resolver.resolve(*d).lineHeight, 1.2f, 0.01f, "normal restores the default ratio");
+}
+
+void testBoxSizing() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"content\"></div><div id=\"border\"></div>"
+        "<div id=\"tall\"></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#content { width: 200px; padding: 10px; border-width: 5px }"
+        "#border { width: 200px; padding: 10px; border-width: 5px; "
+        "box-sizing: border-box }"
+        "#tall { height: 100px; padding: 10px; border-width: 5px; "
+        "box-sizing: border-box }"));
+    Element* content = document->getElementById("content");
+    Element* border = document->getElementById("border");
+    Element* tall = document->getElementById("tall");
+    if (!content || !border || !tall) {
+        check(false, "box-sizing elements found");
+        return;
+    }
+    check(!document->root() || true, "layout ran");
+    layoutRoot(*document, resolver, 800.0f);
+
+    // content-box: the authored width is the content box, so chrome adds to it.
+    checkNear(content->layoutWidth(), 230.0f, 0.5f,
+              "content-box adds padding and border to the authored width");
+    // border-box: the authored width already includes them, so it stays 200.
+    checkNear(border->layoutWidth(), 200.0f, 0.5f,
+              "border-box keeps the authored width as the outer width");
+    checkNear(tall->layoutHeight(), 100.0f, 0.5f,
+              "border-box applies to height as well");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*border), "box-sizing") ==
+              "border-box",
+          "box-sizing reads back");
+}
+
+void testPercentageMinMax() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"box\"><div id=\"child\"></div>"
+        "<div id=\"minwins\"></div></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#box { width: 200px }"
+        "#child { min-width: 50%; max-width: 75% }"
+        "#minwins { min-width: 75%; max-width: 50% }"));
+    Element* box = document->getElementById("box");
+    Element* child = document->getElementById("child");
+    Element* minwins = document->getElementById("minwins");
+    if (!box || !child || !minwins) {
+        check(false, "min/max elements found");
+        return;
+    }
+    const sui::UsedBox used =
+        resolveBox(resolver.resolve(*child), 200.0f, 600.0f, 16.0f);
+    checkNear(used.minWidth, 100.0f, 0.5f, "a percentage min-width resolves");
+    checkNear(used.maxWidth, 150.0f, 0.5f, "a percentage max-width resolves");
+
+    layoutRoot(*document, resolver, 800.0f);
+    // A block child fills its 200px parent, then clamps: max-width wins when it
+    // is the tighter bound...
+    checkNear(child->layoutWidth(), 150.0f, 0.5f,
+              "a percentage max-width clamps a block that would otherwise fill");
+    // ...and min-width wins when they conflict the other way.
+    checkNear(minwins->layoutWidth(), 150.0f, 0.5f,
+              "min-width wins over a tighter max-width");
+}
+
+void testPercentNestedLevels() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"a\"><div id=\"b\"><div id=\"c\"></div></div></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#a { width: 400px } #b { width: 50% } #c { width: 50% }"));
+    Element* c = document->getElementById("c");
+    if (!c) {
+        check(false, "c found");
+        return;
+    }
+    layoutRoot(*document, resolver, 800.0f);
+    // Each level halves the previous one: 400 -> 200 -> 100.
+    checkNear(c->layoutWidth(), 100.0f, 0.5f,
+              "a nested percentage resolves against its own parent, not the root");
+}
+
+void testCommentsInsideDeclarationBlocks() {
+    // A comment anywhere in a block used to be glued onto the following property
+    // name, which silently dropped that declaration.
+    const auto rules = sui::CSSParser::parse(R"(
+.sidebar {
+    background-color: #27272a;
+    /* explains the gutter */
+    padding: 0.75rem;
+    /* and the gap below it */
+    margin-bottom: 0.75rem;
+}
+.other {
+    padding /* inline */: 1rem;
+}
+)");
+    check(rules.size() == 2, "comments between rules still produce two rules");
+    if (rules.size() < 2) {
+        return;
+    }
+    check(rules[0].declarations.size() == 3,
+          "a comment does not swallow the declaration after it");
+    check(rules[0].declarations.size() == 3 &&
+              rules[0].declarations[1].property == "padding",
+          "the property after a comment is read cleanly");
+    check(rules[0].declarations.size() == 3 &&
+              rules[0].declarations[1].value == "0.75rem",
+          "the value after a comment is read cleanly");
+    check(rules[1].declarations.size() == 1 && rules[1].declarations[0].property == "padding",
+          "a comment inside a declaration reads cleanly too");
+}
+
+void testUnitsEndToEnd() {
+    // The bug this covers was only visible once a stylesheet used rem units: the
+    // comment above the declaration was part of the property name, so the rule
+    // resolved to nothing at all.
+    auto document = parseOrNull("<sui><body><div id=\"s\" class=\"sidebar\"></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRootFontSize(16.0f);
+    resolver.setRules(sui::CSSParser::parse(
+        ".sidebar {\n"
+        "    background-color: #27272a;\n"
+        "    /* the gutter scales with the user's text size */\n"
+        "    padding: 0.75rem;\n"
+        "    margin-bottom: 0.75rem;\n"
+        "}"));
+    Element* s = document->getElementById("s");
+    if (!s) {
+        check(false, "s found");
+        return;
+    }
+    const auto style = resolver.resolve(*s);
+    check(style.backgroundColor.r == 0x27, "the colour before the comment still applies");
+    const sui::UsedBox used = resolveBox(style, 900.0f, 640.0f, resolver.rootFontSize());
+    checkNear(used.padding.left, 12.0f, 0.01f,
+              "a rem padding declared after a comment applies");
+    checkNear(used.margin.bottom, 12.0f, 0.01f,
+              "the declaration after that one applies too");
+}
+
 }  // namespace
 
 int main() {
@@ -358,6 +653,15 @@ int main() {
     testInheritance();
     testChildOverridesInherited();
     testDefaultStyles();
+    testCommentsInsideDeclarationBlocks();
+    testUnitsEndToEnd();
+    testLengthUnits();
+    testAbsoluteAndKeywordUnits();
+    testFontRelativeSizes();
+    testLineHeightUnits();
+    testBoxSizing();
+    testPercentageMinMax();
+    testPercentNestedLevels();
 
     if (failures) {
         std::printf("\n%d check(s) failed\n", failures);

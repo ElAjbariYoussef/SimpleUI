@@ -38,12 +38,18 @@ public:
     // resolution may differ even when the DOM did not move.
     std::uint64_t generation() const noexcept { return generation_; }
 
+    // What `rem` and initial `font-size: <percentage>` resolve against. The
+    // application sets this from the document root once it is known.
+    float rootFontSize() const noexcept { return rootFontSize_; }
+    void setRootFontSize(float size);
+
 private:
     ComputedStyle resolveWithParent(Element& element, const ComputedStyle& parent) const;
 
     // Kept sorted weakest-first so resolve() can apply rules in order.
     std::vector<Rule> rules_;
     std::uint64_t generation_ = 0;
+    float rootFontSize_ = 16.0f;
 };
 
 // True when `selector` matches `element`, treating a compound selector as

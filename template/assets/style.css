@@ -1,30 +1,46 @@
+/* SimpleUI reads this as ordinary CSS: selectors, inheritance, units, and
+   box-sizing all behave the way a browser would. */
+
 body {
     background-color: #101014;
     color: #d4d4d8;
     font-size: 16px;
-}
-
-.content {
-    background-color: #18181b;
-    padding: 24px;
+    margin: 0;
 }
 
 .sidebar {
     background-color: #27272a;
-    padding: 12px;
-    margin-bottom: 12px;
+    /* rem resolves against the document font size, so the whole gutter scales
+       with the user's text size. */
+    padding: 0.75rem;
+    margin-bottom: 0.75rem;
 }
 
 .sidebar.highlight {
     background-color: #3f3f46;
 }
 
+/* border-box means the width below is the outer width, padding included, which
+   is what most people mean when they write a width. */
+.content {
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 60rem;
+    padding: 1.5rem;
+}
+
 h1 {
-    font-size: 28px;
+    font-size: 1.75rem;
     color: #fafafa;
+    /* A length line-height, so the heading keeps a fixed rhythm as its own
+       font size changes. */
+    line-height: 2.25rem;
 }
 
 #counter {
     color: #e4e4e7;
-    font-size: 24px;
+    font-size: 1.5rem;
+    /* A percentage of the containing block, so the counter panel tracks the
+       window instead of sitting at a fixed size. */
+    width: 25%;
 }

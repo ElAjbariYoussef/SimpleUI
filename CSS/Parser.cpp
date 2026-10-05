@@ -27,6 +27,39 @@ bool isSpace(char c) {
     return std::isspace(static_cast<unsigned char>(c)) != 0;
 }
 
+// Advances past a `/* ... */` comment starting at `i`, or returns `i` unchanged
+// when there is no comment there.
+std::size_t skipComment(std::string_view source, std::size_t i) {
+    if (i + 1 >= source.size() || source[i] != '/' || source[i + 1] != '*') {
+        return i;
+    }
+    i += 2;
+    while (i + 1 < source.size() && !(source[i] == '*' && source[i + 1] == '/')) {
+        ++i;
+    }
+    return std::min(i + 2, source.size());
+}
+
+// Removes comments so a declaration block can be scanned as plain text. Comments
+// are legal anywhere in a block, and without this the text before one becomes
+// part of the property name.
+std::string stripComments(std::string_view source) {
+    std::string out;
+    out.reserve(source.size());
+    for (std::size_t i = 0; i < source.size();) {
+        if (source[i] == '/' && i + 1 < source.size() && source[i + 1] == '*') {
+            i = skipComment(source, i);
+            // A comment separates tokens, so it becomes a space rather than
+            // nothing: `red/*x*/blue` must not collapse into `redblue`.
+            out += ' ';
+            continue;
+        }
+        out += source[i];
+        ++i;
+    }
+    return out;
+}
+
 // Reads a single compound selector (no combinators) starting at `i`. Returns
 // the number of characters consumed, or 0 if there is no selector there.
 std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& out) {
@@ -132,7 +165,11 @@ SimpleSelector CSSParser::parseSelector(std::string_view source) {
     return readSelector(source);
 }
 
-std::vector<Declaration> parseDeclarations(std::string_view source) {
+std::vector<Declaration> parseDeclarations(std::string_view rawSource) {
+    // `stripped` owns the text and `source` only views it: substr on a std::string
+    // returns a temporary, so a string_view taken from one would dangle.
+    const std::string stripped = stripComments(rawSource);
+    const std::string_view source(stripped);
     std::vector<Declaration> out;
     std::size_t i = 0;
     while (i < source.size()) {
@@ -193,12 +230,7 @@ std::vector<Rule> CSSParser::parse(std::string_view source) {
             continue;
         }
         if (source[i] == '/' && i + 1 < source.size() && source[i + 1] == '*') {
-            i += 2;
-            while (i + 1 < source.size() &&
-                   !(source[i] == '*' && source[i + 1] == '/')) {
-                ++i;
-            }
-            i = std::min(i + 2, source.size());
+            i = skipComment(source, i);
             continue;
         }
         if (source[i] == '@') {

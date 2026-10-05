@@ -148,12 +148,15 @@ void paintElement(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         if (s.display != ComputedStyle::None && s.visible) {
             const SDL_FRect box{el.layoutX(), el.layoutY(), el.layoutWidth(),
                                 el.layoutHeight()};
+            // Border widths take no percentages or font-relative units, so they
+            // need no containing block to resolve.
+            const float borderTop = s.borderWidth.top.resolve();
             if (box.w > 0.0f && box.h > 0.0f) {
                 if (s.backgroundColor.a > 0) {
                     renderer.fillRect(box, toColor(s.backgroundColor));
                 }
-                if (s.borderWidth.top > 0.0f || s.borderWidth.left > 0.0f) {
-                    renderer.strokeRect(box, toColor(s.borderColor), s.borderWidth.top);
+                if (borderTop > 0.0f || s.borderWidth.left.resolve() > 0.0f) {
+                    renderer.strokeRect(box, toColor(s.borderColor), borderTop);
                 }
             }
 
@@ -355,6 +358,12 @@ void Application::run() {
 
     // Scripts placed before <body> run before anything is drawn.
     runScripts(false);
+
+    // `rem` and `font-size: <percentage>` on the root resolve against the
+    // document's own font size, so it has to be known before the first layout.
+    if (Element* body = document_->querySelector("body")) {
+        resolver_.setRootFontSize(resolver_.resolve(*body).fontSize);
+    }
 
     // SUI_CLICK=x,y[;x,y...] dispatches one synthetic press per frame, so click
     // handling can be exercised without a visible window. Allowing several is

@@ -28,7 +28,6 @@ add_library(sui STATIC
     CSS/DefaultStyle.cpp
     CSS/Parser.cpp
     CSS/StyleResolver.cpp
-    Layout/Layout.cpp
     Layout/BlockLayout.cpp
     Layout/InlineFormatter.cpp
     Rendering/Renderer.cpp

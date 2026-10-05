@@ -57,9 +57,47 @@ std::vector<float> parseNumberList(std::string_view value) {
     return out;
 }
 
-float parseLength(std::string_view value) {
-    const std::vector<float> parts = parseNumberList(value);
-    return parts.empty() ? 0.0f : parts.front();
+// Parses one CSS length, keeping the unit so layout can resolve it against the
+// containing block. `auto` and `none` both come back as Auto, which is what the
+// width/height/max-* properties mean by them.
+Length parseLength(std::string_view value) {
+    const std::string_view text = trim(value);
+    if (text.empty() || text == "auto" || text == "none") {
+        return Length{};
+    }
+
+    std::size_t i = 0;
+    if (i < text.size() && (text[i] == '+' || text[i] == '-')) {
+        ++i;
+    }
+    while (i < text.size() && (std::isdigit(static_cast<unsigned char>(text[i])) ||
+                               text[i] == '.')) {
+        ++i;
+    }
+    if (i == 0) {
+        return Length{};
+    }
+    const float number =
+        std::strtof(std::string(text.substr(0, i)).c_str(), nullptr);
+
+    const std::string_view unit = trim(text.substr(i));
+    if (unit.empty() || unit == "px") {
+        return Length{number};
+    }
+    if (unit == "%") {
+        return Length{Length::Percent, number};
+    }
+    if (unit == "em") {
+        return Length{Length::Em, number};
+    }
+    if (unit == "rem") {
+        return Length{Length::Rem, number};
+    }
+    // pt is the one other unit worth accepting, since desktop designs use it.
+    if (unit == "pt") {
+        return Length{number * (96.0f / 72.0f)};
+    }
+    return Length{};
 }
 
 bool parseBool(std::string_view value) {
@@ -125,8 +163,29 @@ bool parseHexColor(std::string_view value, SDL_Color& out) {
     return false;
 }
 
+// Splits on whitespace and parses each piece as a length, so `margin: 5px 10%`
+// keeps both units rather than flattening them to pixels.
+std::vector<Length> parseLengthList(std::string_view value) {
+    std::vector<Length> out;
+    std::size_t i = 0;
+    while (i < value.size() && out.size() < 4) {
+        while (i < value.size() && std::isspace(static_cast<unsigned char>(value[i]))) {
+            ++i;
+        }
+        const std::size_t start = i;
+        while (i < value.size() && !std::isspace(static_cast<unsigned char>(value[i]))) {
+            ++i;
+        }
+        if (i == start) {
+            break;
+        }
+        out.push_back(parseLength(value.substr(start, i - start)));
+    }
+    return out;
+}
+
 void applyBoxEdges(std::string_view value, BoxEdge& edges) {
-    const std::vector<float> parts = parseNumberList(value);
+    const std::vector<Length> parts = parseLengthList(value);
     switch (parts.size()) {
         case 1:
             edges = {parts[0], parts[0], parts[0], parts[0]};
@@ -145,7 +204,7 @@ void applyBoxEdges(std::string_view value, BoxEdge& edges) {
     }
 }
 
-void applyDeclaration(ComputedStyle& s, const Declaration& decl) {
+void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontSize) {
     const std::string& property = decl.property;
     const std::string_view value = trim(decl.value);
 
@@ -211,10 +270,18 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl) {
         if (parseHexColor(value, color)) {
             s.borderColor = color;
         }
+    } else if (property == "box-sizing") {
+        s.boxSizing =
+            value == "border-box" ? BoxSizing::BorderBox : BoxSizing::ContentBox;
     } else if (property == "font-size") {
-        const float size = parseLength(value);
-        if (size > 0.0f) {
-            s.fontSize = size;
+        // Font size is one of the few lengths style resolution can finish on its
+        // own: em, rem and % are all relative to font sizes, not to a box.
+        const Length length = parseLength(value);
+        if (!length.isAuto()) {
+            const float size = length.resolve(s.fontSize, s.fontSize, rootFontSize);
+            if (size > 0.0f) {
+                s.fontSize = size;
+            }
         }
     } else if (property == "font-weight") {
         s.fontBold = value == "bold" || value == "bolder" ||
@@ -232,9 +299,23 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl) {
         }
         s.fontFamily = std::string(trim(family));
     } else if (property == "line-height") {
-        const float numeric = std::strtof(std::string(value).c_str(), nullptr);
-        if (numeric > 0.0f) {
-            s.lineHeight = numeric;
+        // Stored as a multiplier, so a length has to become a ratio against this
+        // element's font size — which is what CSS computes it to as well. A bare
+        // number is already a ratio and must not be divided.
+        const std::string_view text = trim(value);
+        if (text == "normal") {
+            s.lineHeight = 1.2f;
+        } else {
+            const Length length = parseLength(text);
+            const bool unitless =
+                !text.empty() && (std::isdigit(static_cast<unsigned char>(text.back())) ||
+                                  text.back() == '.');
+            const float numeric =
+                length.isAuto() ? 0.0f : length.resolve(s.fontSize, s.fontSize, rootFontSize);
+            const float ratio = unitless ? numeric : numeric / s.fontSize;
+            if (ratio > 0.0f) {
+                s.lineHeight = ratio;
+            }
         }
     } else if (property == "text-align") {
         if (value == "center") {
@@ -261,8 +342,8 @@ void applyDimensionAttributes(ComputedStyle& s, Element& element) {
         if (raw.empty()) {
             continue;
         }
-        const float v = parseLength(raw);
-        if (v <= 0.0f) {
+        const Length v = parseLength(raw);
+        if (v.isAuto()) {
             continue;
         }
         if (std::string_view(key) == "width") {
@@ -367,6 +448,18 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         std::snprintf(buffer, sizeof(buffer), "#%02x%02x%02x", c.r, c.g, c.b);
         return std::string(buffer);
     };
+    // A computed length keeps whatever unit the author wrote, because that is the
+    // only reading that can be turned back into CSS without losing meaning.
+    auto length = [&](const Length& l, const char* autoKeyword = "0px") {
+        if (l.isAuto()) {
+            return std::string(autoKeyword);
+        }
+        const char* suffix = l.unit == Length::Px        ? "px"
+                             : l.unit == Length::Percent ? "%"
+                             : l.unit == Length::Em      ? "em"
+                                                          : "rem";
+        return unitless(l.value) + suffix;
+    };
 
     if (property == "display") {
         switch (style.display) {
@@ -394,21 +487,28 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         }
         return {};
     }
-    if (property == "width") return style.width > 0.0f ? number(style.width) : "auto";
-    if (property == "height") return style.height > 0.0f ? number(style.height) : "auto";
+    if (property == "width") return length(style.width, "auto");
+    if (property == "height") return length(style.height, "auto");
+    if (property == "min-width") return length(style.minWidth);
+    if (property == "max-width") return length(style.maxWidth, "none");
+    if (property == "min-height") return length(style.minHeight);
+    if (property == "max-height") return length(style.maxHeight, "none");
+    if (property == "box-sizing") {
+        return style.boxSizing == BoxSizing::BorderBox ? "border-box" : "content-box";
+    }
     if (property == "visibility") return style.visible ? "visible" : "hidden";
-    if (property == "margin-top") return number(style.margin.top);
-    if (property == "margin-right") return number(style.margin.right);
-    if (property == "margin-bottom") return number(style.margin.bottom);
-    if (property == "margin-left") return number(style.margin.left);
-    if (property == "padding-top") return number(style.padding.top);
-    if (property == "padding-right") return number(style.padding.right);
-    if (property == "padding-bottom") return number(style.padding.bottom);
-    if (property == "padding-left") return number(style.padding.left);
-    if (property == "border-width-top") return number(style.borderWidth.top);
-    if (property == "border-width-right") return number(style.borderWidth.right);
-    if (property == "border-width-bottom") return number(style.borderWidth.bottom);
-    if (property == "border-width-left") return number(style.borderWidth.left);
+    if (property == "margin-top") return length(style.margin.top);
+    if (property == "margin-right") return length(style.margin.right);
+    if (property == "margin-bottom") return length(style.margin.bottom);
+    if (property == "margin-left") return length(style.margin.left);
+    if (property == "padding-top") return length(style.padding.top);
+    if (property == "padding-right") return length(style.padding.right);
+    if (property == "padding-bottom") return length(style.padding.bottom);
+    if (property == "padding-left") return length(style.padding.left);
+    if (property == "border-width-top") return length(style.borderWidth.top);
+    if (property == "border-width-right") return length(style.borderWidth.right);
+    if (property == "border-width-bottom") return length(style.borderWidth.bottom);
+    if (property == "border-width-left") return length(style.borderWidth.left);
     return {};
 }
 
@@ -475,18 +575,25 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
             continue;
         }
         for (const auto& decl : rule.declarations) {
-            applyDeclaration(style, decl);
+            applyDeclaration(style, decl, rootFontSize_);
         }
     }
 
     if (element.hasAttribute("style")) {
         for (const auto& decl : parseDeclarations(element.attribute("style"))) {
-            applyDeclaration(style, decl);
+            applyDeclaration(style, decl, rootFontSize_);
         }
     }
 
     applyDimensionAttributes(style, element);
     return style;
+}
+
+void StyleResolver::setRootFontSize(float size) {
+    if (size > 0.0f && size != rootFontSize_) {
+        rootFontSize_ = size;
+        ++generation_;
+    }
 }
 
 }  // namespace sui
