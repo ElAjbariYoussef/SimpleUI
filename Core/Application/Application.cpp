@@ -668,6 +668,12 @@ void Application::dispatch(const InputEvent& event) {
     switch (event.kind) {
         case InputKind::PointerMove:
             resolver_.setHovered(target);
+            // A drag keeps the active element under the cursor, so `:active` follows
+            // the pointer instead of sticking to wherever the press landed. The button
+            // field is zero for a plain hover, which is what separates the two.
+            if (event.button != 0) {
+                resolver_.setActive(target);
+            }
             return;
         case InputKind::PointerDown:
             resolver_.setActive(target);
@@ -738,16 +744,20 @@ void Application::run() {
     }
 
     // SUI_MOVE=x,y[;x,y...] does the same for pointer motion, which is how the
-    // `:hover` restyle path is exercised without a visible cursor.
+    // `:hover` restyle path is exercised without a visible cursor. A third field names
+    // the button held during the move, which is what makes it a drag, so `:active`
+    // following the pointer can be reached the same way.
     std::deque<InputEvent> scriptedMoves;
     if (const char* moves = SDL_getenv("SUI_MOVE")) {
         for (const std::string& pair : splitOnSemicolons(moves)) {
             float x = 0.0f;
             float y = 0.0f;
-            if (std::sscanf(pair.c_str(), "%f,%f", &x, &y) == 2) {
-                scriptedMoves.push_back(InputEvent{InputKind::PointerMove, x, y, 0});
+            int button = 0;
+            const int fields = std::sscanf(pair.c_str(), "%f,%f,%d", &x, &y, &button);
+            if (fields >= 2) {
+                scriptedMoves.push_back(InputEvent{InputKind::PointerMove, x, y, button});
             } else {
-                SDL_Log("SUI_MOVE expects x,y; got '%s'", pair.c_str());
+                SDL_Log("SUI_MOVE expects x,y[,button]; got '%s'", pair.c_str());
             }
         }
     }

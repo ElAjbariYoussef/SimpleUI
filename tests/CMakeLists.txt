@@ -15,6 +15,13 @@ add_executable(script_tests script_tests.cpp)
 target_link_libraries(script_tests PRIVATE sui)
 add_test(NAME script_tests COMMAND script_tests)
 
+# What the platform turns raw SDL mouse events into. Needs a video driver but no
+# display, so the dummy one runs it without touching the window system.
+add_executable(input_tests input_tests.cpp)
+target_link_libraries(input_tests PRIVATE sui)
+add_test(NAME input_tests COMMAND input_tests)
+set_tests_properties(input_tests PROPERTIES ENVIRONMENT "SDL_VIDEODRIVER=dummy")
+
 # Renderer geometry: radii clamping, outline sampling, and the gradient maths. None
 # of it needs a device, so it runs in the ordinary test pass.
 add_executable(render_tests render_tests.cpp)
