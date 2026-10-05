@@ -19,6 +19,8 @@ add_test(NAME script_tests COMMAND script_tests)
 # of it needs a device, so it runs in the ordinary test pass.
 add_executable(render_tests render_tests.cpp)
 target_link_libraries(render_tests PRIVATE sui)
+# The font metrics test needs the bundled TTF, which lives outside the build tree.
+target_compile_definitions(render_tests PRIVATE SUI_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME render_tests COMMAND render_tests)
 
 # Prints what the engine measures for each documented capability. Not a pass/fail

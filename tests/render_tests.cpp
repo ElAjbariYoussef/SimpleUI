@@ -1,9 +1,11 @@
 // Geometry checks for the renderer that need no device, so the parts a screenshot
 // cannot pin down precisely still have a regression test.
 #include "Rendering/Renderer.h"
+#include "Rendering/Text.h"
 
 #include <cmath>
 #include <cstdio>
+#include <string>
 
 namespace {
 
@@ -219,6 +221,41 @@ void testSideOutlinesTileTheOutline() {
           "the sides tile the outline with one shared point per corner");
 }
 
+// CSS `font-size` names the em square. stb_truetype's ScaleForPixelHeight instead
+// maps the font's whole ascent-to-descent extent onto the size, which for DejaVu Sans
+// -- 2384 units on a 2048 em -- draws every glyph 16% small. The expected values below
+// are the font's own table divided by its em, so they only pass if the scale comes
+// from the em.
+void testFontSizeIsTheEmSquare() {
+    sui::TextFont font;
+    const std::string path = std::string(SUI_SOURCE_DIR) + "/assets/fonts/DejaVuSans.ttf";
+    if (!font.loadFromFile(path)) {
+        check(false, "the bundled font loads");
+        return;
+    }
+    constexpr float kEm = 2048.0f;
+    constexpr float kSize = 100.0f;
+
+    const sui::TextFont::VerticalMetrics vm = font.verticalMetrics(kSize);
+    checkNear(vm.ascent, 1901.0f / kEm * kSize, 0.05f, "ascent is a fraction of the em");
+    checkNear(vm.descent, 483.0f / kEm * kSize, 0.05f, "descent is a fraction of the em");
+    checkNear(vm.height, 2384.0f / kEm * kSize, 0.05f,
+              "the line box is the font's own height, which is over one em");
+
+    const sui::GlyphMetrics cap = font.metrics('H', kSize);
+    checkNear(cap.advance, 1540.0f / kEm * kSize, 0.05f, "an advance is a fraction of the em");
+    checkNear(cap.height, 1493.0f / kEm * kSize, 1.0f, "cap height matches the font table");
+    checkNear(font.metrics('x', kSize).height, 1120.0f / kEm * kSize, 1.0f,
+              "x-height matches the font table");
+
+    // Every metric has to scale with the size, which is only true if the rasteriser
+    // scale is derived from the requested em rather than from a fixed pixel height.
+    checkNear(font.metrics('H', 50.0f).advance, cap.advance * 0.5f, 0.05f,
+              "halving font-size halves the advance");
+    checkNear(font.verticalMetrics(200.0f).height, vm.height * 2.0f, 0.1f,
+              "doubling font-size doubles the line box");
+}
+
 }  // namespace
 
 int main() {
@@ -233,6 +270,7 @@ int main() {
     testOpacity();
     testMeshNeed();
     testRadialPosition();
+    testFontSizeIsTheEmSquare();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

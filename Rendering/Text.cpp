@@ -63,6 +63,14 @@ unsigned int decodeUtf8(std::string_view text, std::size_t& i) {
     return cp;
 }
 
+// CSS `font-size` names the em square, not the font's ascent-to-descent extent, so the
+// scale has to come from the em. `stbtt_ScaleForPixelHeight` would map the full font
+// height onto the size instead, which for DejaVu Sans (2384 units of ascent+descent on
+// a 2048 em) draws every glyph 16% smaller than the stylesheet asked for.
+float emScale(const stbtt_fontinfo* info, float size) {
+    return stbtt_ScaleForMappingEmToPixels(info, size);
+}
+
 }  // namespace
 
 TextFont::TextFont() = default;
@@ -134,11 +142,9 @@ GlyphMetrics TextFont::metrics(unsigned int codepoint, float size) const {
     int lsb = 0;
     stbtt_GetCodepointHMetrics(info, static_cast<int>(codepoint), &advance, &lsb);
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-    stbtt_GetCodepointBitmapBox(info, static_cast<int>(codepoint),
-                                stbtt_ScaleForPixelHeight(info, size),
-                                stbtt_ScaleForPixelHeight(info, size), &x0, &y0,
+    const float scale = emScale(info, size);
+    stbtt_GetCodepointBitmapBox(info, static_cast<int>(codepoint), scale, scale, &x0, &y0,
                                 &x1, &y1);
-    const float scale = stbtt_ScaleForPixelHeight(info, size);
     gm.advance = static_cast<float>(advance) * scale;
     gm.width = static_cast<float>(x1 - x0);
     gm.height = static_cast<float>(y1 - y0);
@@ -157,7 +163,7 @@ TextFont::VerticalMetrics TextFont::verticalMetrics(float size) const {
     if (!font_ || size <= 0.0f) {
         return vm;
     }
-    const float scale = stbtt_ScaleForPixelHeight(static_cast<stbtt_fontinfo*>(font_), size);
+    const float scale = emScale(static_cast<stbtt_fontinfo*>(font_), size);
     int ascent = 0, descent = 0, lineGap = 0;
     stbtt_GetFontVMetrics(static_cast<stbtt_fontinfo*>(font_), &ascent, &descent, &lineGap);
     vm.ascent = static_cast<float>(ascent) * scale;
@@ -186,7 +192,7 @@ SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
         return nullptr;
     }
     auto* info = static_cast<stbtt_fontinfo*>(font_);
-    const float scale = stbtt_ScaleForPixelHeight(info, size);
+    const float scale = emScale(info, size);
     const VerticalMetrics vm = verticalMetrics(size);
     const int ascentPx = static_cast<int>(std::ceil(vm.ascent));
 

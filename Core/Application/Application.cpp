@@ -763,12 +763,37 @@ void Application::run() {
         }
     }
 
+    // SUI_RESIZE=w,h resizes the window once the first frame is on screen, so the
+    // relayout path can be exercised without a visible window. It is the only way to
+    // reach the code that runs when the drawable size no longer matches the frame.
+    int resizeWidth = 0;
+    int resizeHeight = 0;
+    bool resizeRequested = false;
+    if (const char* resize = SDL_getenv("SUI_RESIZE")) {
+        if (std::sscanf(resize, "%dx%d", &resizeWidth, &resizeHeight) != 2 || resizeWidth <= 0 ||
+            resizeHeight <= 0) {
+            SDL_Log("SUI_RESIZE expects WxH; got '%s'", resize);
+        } else {
+            resizeRequested = true;
+        }
+    }
+
     BlockLayout layout;
     while (platform_->pumpEvents()) {
         ++framesPumped_;
         int width = 0;
         int height = 0;
         platform_->windowSize(width, height);
+
+        // The renderer's logical canvas has to follow the drawable, or a resize would
+        // only letterbox the frame that is already on screen. The frame loop below
+        // already treats a size change as stale, so layout re-runs against the new
+        // viewport in the same pass that repaints.
+        if (width != viewportWidth_ || height != viewportHeight_) {
+            viewportWidth_ = width;
+            viewportHeight_ = height;
+            platform_->setViewportSize(width, height);
+        }
 
         // An idle page repaints nothing. DOM mutations, stylesheet changes,
         // explicit script invalidation, resizes, and unhandled input are the
@@ -882,6 +907,11 @@ void Application::run() {
             if (!scriptsAfterBodyRun_) {
                 scriptsAfterBodyRun_ = true;
                 runScripts(true);
+            }
+
+            if (resizeRequested) {
+                resizeRequested = false;
+                SDL_SetWindowSize(platform_->window(), resizeWidth, resizeHeight);
             }
         }
 

@@ -62,8 +62,7 @@ bool LinuxPlatform::initialize(const WindowConfig& config, std::string& error) {
     // destinations is what keeps glyph edges crisp; SDL defaults to linear, which
     // turns every glyph soft.
     SDL_SetDefaultTextureScaleMode(renderer_, SDL_SCALEMODE_NEAREST);
-    SDL_SetRenderLogicalPresentation(renderer_, config.width, config.height,
-                                     SDL_LOGICAL_PRESENTATION_LETTERBOX);
+    setViewportSize(config.width, config.height);
 
     return true;
 }
@@ -92,12 +91,36 @@ void LinuxPlatform::present() {
 void LinuxPlatform::windowSize(int& width, int& height) const {
     width = 0;
     height = 0;
-    SDL_GetWindowSize(window_, &width, &height);
+    SDL_GetWindowSizeInPixels(window_, &width, &height);
+}
+
+void LinuxPlatform::setViewportSize(int width, int height) {
+    // The logical size is the drawable size, so the mapping is 1:1 and the engine's
+    // coordinates *are* framebuffer pixels. Letterbox at an exactly matching size is
+    // a no-op, and it keeps the bars out of the way if the two ever drift apart.
+    SDL_SetRenderLogicalPresentation(renderer_, width, height,
+                                     SDL_LOGICAL_PRESENTATION_LETTERBOX);
+}
+
+// SDL reports the pointer in window points; layout, hit tests and paint all work in
+// framebuffer pixels, so the two are reconciled once here rather than at every use.
+float LinuxPlatform::pointerScale() const {
+    int pointWidth = 0;
+    int pointHeight = 0;
+    int pixelWidth = 0;
+    int pixelHeight = 0;
+    SDL_GetWindowSize(window_, &pointWidth, &pointHeight);
+    SDL_GetWindowSizeInPixels(window_, &pixelWidth, &pixelHeight);
+    if (pointWidth <= 0) {
+        return 1.0f;
+    }
+    return static_cast<float>(pixelWidth) / static_cast<float>(pointWidth);
 }
 
 bool LinuxPlatform::pumpEvents() {
     input_.clear();
 
+    const float scale = pointerScale();
     SDL_Event event{};
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
@@ -111,17 +134,18 @@ bool LinuxPlatform::pumpEvents() {
                 // A drag while a button is held keeps targeting the element
                 // under the cursor, so it reports the same event as a click.
                 if (event.motion.state & SDL_BUTTON_LMASK) {
-                    input_.push_back(InputEvent{InputKind::PointerDown, event.motion.x,
-                                                event.motion.y, SDL_BUTTON_LEFT});
+                    input_.push_back(InputEvent{InputKind::PointerDown,
+                                                event.motion.x * scale,
+                                                event.motion.y * scale, SDL_BUTTON_LEFT});
                 }
                 break;
             case SDL_EVENT_MOUSE_BUTTON_DOWN:
-                input_.push_back(InputEvent{InputKind::PointerDown, event.button.x,
-                                            event.button.y, event.button.button});
+                input_.push_back(InputEvent{InputKind::PointerDown, event.button.x * scale,
+                                            event.button.y * scale, event.button.button});
                 break;
             case SDL_EVENT_MOUSE_BUTTON_UP:
-                input_.push_back(InputEvent{InputKind::PointerUp, event.button.x,
-                                            event.button.y, event.button.button});
+                input_.push_back(InputEvent{InputKind::PointerUp, event.button.x * scale,
+                                            event.button.y * scale, event.button.button});
                 break;
             default:
                 break;

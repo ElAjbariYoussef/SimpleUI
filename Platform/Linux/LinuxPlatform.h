@@ -16,11 +16,16 @@ public:
     void present() override;
 
     void windowSize(int& width, int& height) const override;
+    void setViewportSize(int width, int height) override;
 
     bool pumpEvents() override;
     const std::vector<InputEvent>& inputEvents() const override { return input_; }
 
 private:
+    // Framebuffer pixels per window point, which is 1 everywhere except a display
+    // with a scale factor.
+    float pointerScale() const;
+
     SDL_Window* window_ = nullptr;
     SDL_Renderer* renderer_ = nullptr;
     bool running_ = true;

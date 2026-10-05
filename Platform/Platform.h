@@ -51,7 +51,15 @@ public:
     virtual void clear() = 0;
     virtual void present() = 0;
 
+    // The drawable size in *pixels*, not in window points, because every coordinate
+    // the engine works in -- layout, hit tests, glyph bitmaps -- is a pixel. On a
+    // display where the two differ the pointer events below are converted to match.
     virtual void windowSize(int& width, int& height) const = 0;
+
+    // Tells the renderer to map its coordinates onto a drawable this size. Without it
+    // the logical canvas stays whatever it was created at, so a resize only ever
+    // letterboxes the old frame instead of relaying the page out to the new size.
+    virtual void setViewportSize(int width, int height) = 0;
 
     // Writes the current backbuffer to a BMP file; used by the headless
     // screenshot mode for verifying layout without a visible window.

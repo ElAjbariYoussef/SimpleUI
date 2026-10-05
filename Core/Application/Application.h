@@ -66,6 +66,10 @@ private:
         int height = -1;
     };
     FrameStamp stamp_;
+    // The drawable size the renderer's logical canvas is currently set to, which is
+    // also what made the frame loop mark a size change as stale.
+    int viewportWidth_ = -1;
+    int viewportHeight_ = -1;
     bool frameDrawn_ = false;
     bool scriptsAfterBodyRun_ = false;
 
