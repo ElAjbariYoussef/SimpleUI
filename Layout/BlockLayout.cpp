@@ -66,8 +66,34 @@ float textWidth(const TextFont* font, const ComputedStyle& s, std::string_view t
 
 class Layout {
 public:
-    Layout(const StyleResolver& resolver, const TextFont* font, float viewportHeight)
-        : resolver_(resolver), font_(font), viewportHeight_(viewportHeight) {}
+    Layout(const StyleResolver& resolver, const TextFont* font, float viewportWidth,
+           float viewportHeight)
+        : resolver_(resolver),
+          viewportWidth_(viewportWidth),
+          viewportHeight_(viewportHeight),
+          font_(font) {}
+
+    // A padding box: the containing block an out-of-flow box resolves against.
+    struct Box {
+        float x = 0.0f;
+        float y = 0.0f;
+        float width = 0.0f;
+        float height = 0.0f;
+    };
+
+    // An out-of-flow box waiting for its containing block to be final.
+    struct Pending {
+        Element* el;
+        Element* owner;  // nearest positioned ancestor, null for the viewport
+        bool fixed;
+    };
+
+    // A relatively positioned box, already in its final place apart from the
+    // offsets.
+    struct Relative {
+        Element* el;
+        ComputedStyle style;
+    };
 
     // Exposed for Flow, which needs the same answers run() uses.
     bool isLaidOut(Element& el) const { return laidOut(el); }
@@ -109,10 +135,19 @@ public:
             el.clearTextRuns();  // the probe's runs are throwaway measurements
         }
 
+        // A positioned element is the containing block for its own out-of-flow
+        // descendants, so the flag moves with whatever is being laid out and is put
+        // back afterwards.
+        Element* const savedOwner = cbOwner_;
+        if (s.position != ComputedStyle::Static) {
+            cbOwner_ = &el;
+        }
+
         float contentWidth = 0.0f;
         float contentHeight = 0.0f;
         contentHeight = layoutContents(el, s, box, availableWidth, contentX, contentY,
                                        contentWidth);
+        cbOwner_ = savedOwner;
 
         if (box.height > 0.0f) {
             contentHeight = box.height;
@@ -128,10 +163,230 @@ public:
         el.setLayoutY(originY + box.margin.top);
         el.setLayoutWidth(borderW);
         el.setLayoutHeight(borderH);
+        recordClip(el, contentX, contentY, contentWidth, contentHeight);
+
+        if (s.position != ComputedStyle::Static) {
+            if (s.position == ComputedStyle::Absolute ||
+                s.position == ComputedStyle::Fixed) {
+                // An out-of-flow box takes no space in its parent and is placed
+                // once the flow has fixed its containing block.
+                pending_.push_back({&el, cbOwner_, s.position == ComputedStyle::Fixed});
+                return 0.0f;
+            }
+            relative_.push_back({&el, s});
+        }
         return borderH + box.margin.top + box.margin.bottom;
     }
 
+    // Out-of-flow boxes are placed after the in-flow layout, because their
+    // containing block is the nearest positioned ancestor's padding box and that
+    // is not known until the flow has placed it. Relative boxes are offset in the
+    // same pass: they are already in their final place, so moving them first means
+    // an absolute box anchored to one reads the moved position.
+    void placeOutOfFlow() {
+        for (const Relative& item : relative_) {
+            Element& el = *item.el;
+            const float em = item.style.fontSize;
+            const float rem = resolver_.rootFontSize();
+            el.setLayoutX(el.layoutX() +
+                          offset(item.style.left, item.style.right, 0.0f, em, rem));
+            el.setLayoutY(el.layoutY() +
+                          offset(item.style.top, item.style.bottom, 0.0f, em, rem));
+        }
+        relative_.clear();
+        // Insertion order puts a box before its own out-of-flow descendants, since
+        // a parent's placeholder is only pushed once its contents are laid out.
+        // Walking backwards therefore places containing blocks first.
+        for (std::size_t i = pending_.size(); i-- > 0;) {
+            placeAbsolute(*pending_[i].el, containingBlockOf(pending_[i]));
+        }
+        pending_.clear();
+    }
+
+    Box containingBlockOf(const Pending& item) const {
+        if (item.fixed || !item.owner) {
+            return {0.0f, 0.0f, viewportWidth_, viewportHeight_};
+        }
+        Element& owner = *item.owner;
+        const UsedBox chrome = usedBox(resolver_.resolve(owner), owner.layoutWidth());
+        const float insetX = chrome.borderWidth.left + chrome.padding.left;
+        const float insetY = chrome.borderWidth.top + chrome.padding.top;
+        return {owner.layoutX() + insetX,
+                owner.layoutY() + insetY,
+                std::max(0.0f, owner.layoutWidth() - insetX - chrome.borderWidth.right -
+                                         chrome.padding.right),
+                std::max(0.0f, owner.layoutHeight() - insetY - chrome.borderWidth.bottom -
+                                         chrome.padding.bottom)};
+    }
+
+    // `left` wins over `right`, and `top` over `bottom`, which is the one case CSS
+    // resolves by leaving the direction over-specified.
+    static float offset(const Length& leading, const Length& trailing, float base,
+                        float emBase, float remBase) {
+        if (!leading.isAuto()) {
+            return leading.resolve(base, emBase, remBase);
+        }
+        if (!trailing.isAuto()) {
+            return -trailing.resolve(base, emBase, remBase);
+        }
+        return 0.0f;
+    }
+
+    // An auto margin in the over-constrained axis centres the box, which is why a
+    // single centred overlay only needs `margin: auto` and two offsets.
+    static float centred(float free, float extent, float margin) {
+        return std::max(0.0f, (free - extent - margin) * 0.5f);
+    }
+
+    void placeAbsolute(Element& el, const Box& cb) {
+        const ComputedStyle s = resolver_.resolve(el);
+        const float em = s.fontSize;
+        const float rem = resolver_.rootFontSize();
+        const UsedBox box = usedBox(s, cb.width);
+
+        const float leftUsed =
+            s.left.isAuto() ? 0.0f : s.left.resolve(cb.width, em, rem);
+        const float rightUsed =
+            s.right.isAuto() ? 0.0f : s.right.resolve(cb.width, em, rem);
+
+        // Both horizontal edges given means the size comes from them; otherwise the
+        // box shrink-wraps its content the way a browser-sized replaced element
+        // does, never past the containing block.
+        float borderW = 0.0f;
+        if (!s.left.isAuto() && !s.right.isAuto()) {
+            borderW = cb.width - leftUsed - rightUsed - box.margin.left - box.margin.right;
+        } else if (box.width > 0.0f) {
+            borderW = box.width + box.horizontalChrome();
+        } else {
+            borderW = std::min(probeWidth(el, box) + box.horizontalChrome(), cb.width);
+        }
+        borderW = std::max(applyMinMax(borderW, box), 0.0f);
+
+        // An `auto` margin is only distributed when the axis is over-constrained,
+        // which is to say when both of its edges are given. Everywhere else it
+        // resolves to zero, the same as any other unset margin.
+        const bool bothHorizontal = !s.left.isAuto() && !s.right.isAuto();
+        const float marginLeft =
+            !s.margin.left.isAuto()
+                ? box.margin.left
+                : (bothHorizontal
+                       ? centred(cb.width - leftUsed - rightUsed, borderW,
+                                 box.margin.right)
+                       : 0.0f);
+        float x = cb.x + marginLeft;
+        if (!s.left.isAuto()) {
+            x = cb.x + leftUsed + marginLeft;
+        } else if (!s.right.isAuto()) {
+            x = cb.x + cb.width - rightUsed - box.margin.right - borderW;
+        }
+
+        // With both vertical edges given the height is whatever is left over, so it
+        // is known without measuring. Otherwise the content decides.
+        const float topUsed =
+            s.top.isAuto() ? 0.0f : s.top.resolve(cb.height, em, rem);
+        const float bottomUsed =
+            s.bottom.isAuto() ? 0.0f : s.bottom.resolve(cb.height, em, rem);
+        float borderH = 0.0f;
+        const bool bothVertical = !s.top.isAuto() && !s.bottom.isAuto();
+        if (bothVertical) {
+            borderH = cb.height - topUsed - bottomUsed - box.margin.top -
+                      box.margin.bottom;
+            borderH = std::max(0.0f, borderH);
+        } else if (box.height > 0.0f) {
+            borderH = box.height + box.verticalChrome();
+        } else {
+            // Measured once to learn the height, then again at the final place so
+            // the descendants land where the box actually is.
+            borderH = measureAtWidth(el, s, borderW) - box.verticalChrome();
+        }
+
+        const float marginTop =
+            !s.margin.top.isAuto()
+                ? box.margin.top
+                : (bothVertical
+                       ? centred(cb.height - topUsed - bottomUsed, borderH, box.margin.bottom)
+                       : 0.0f);
+        float y = cb.y + marginTop;
+        if (!s.top.isAuto()) {
+            y = cb.y + topUsed + marginTop;
+        } else if (!s.bottom.isAuto()) {
+            y = cb.y + cb.height - bottomUsed - box.margin.bottom - borderH;
+        }
+        if (borderH <= 0.0f) {
+            borderH = std::max(0.0f, borderH);
+        }
+
+        // The offsets and margins are already baked into the placement, so the
+        // box lays out as though it were at the origin of its final position.
+        runFixed(el, s, borderW, x, y, bothVertical ? borderH : 0.0f);
+    }
+
+    float measureAtWidth(Element& el, const ComputedStyle& s, float borderW) {
+        UsedBox box = usedBox(s, borderW);
+        box.margin = {0.0f, 0.0f, 0.0f, 0.0f};
+        el.clearTextRuns();
+        const float contentWidth = std::max(
+            0.0f, borderW - box.borderWidth.left - box.borderWidth.right -
+                     box.padding.left - box.padding.right);
+        float width = 0.0f;
+        const float height = layoutContents(el, s, box, contentWidth, 0.0f, 0.0f, width);
+        el.setLayoutX(0.0f);
+        el.setLayoutY(0.0f);
+        el.setLayoutWidth(borderW);
+        el.setLayoutHeight(height + verticalEdges(box.padding, box.borderWidth));
+        return el.layoutHeight();
+    }
+
+    // Lays out an already-placed out-of-flow box. The offsets and auto margins were
+    // resolved by the caller, so this one pass puts the box and its descendants in
+    // their final positions.
+    // `definiteHeight` is non-zero when both vertical offsets pinned the height, in
+    // which case the content does not get a say.
+    void runFixed(Element& el, const ComputedStyle& s, float borderW, float x, float y,
+                  float definiteHeight = 0.0f) {
+        UsedBox box = usedBox(s, borderW);
+        box.margin = {0.0f, 0.0f, 0.0f, 0.0f};
+        el.clearTextRuns();
+        const float contentX = x + box.borderWidth.left + box.padding.left;
+        const float contentY = y + box.borderWidth.top + box.padding.top;
+        const float contentWidth = std::max(
+            0.0f, borderW - box.borderWidth.left - box.borderWidth.right -
+                     box.padding.left - box.padding.right);
+        Element* const savedOwner = cbOwner_;
+        cbOwner_ = &el;
+        float width = 0.0f;
+        float height = layoutContents(el, s, box, contentWidth, contentX, contentY, width);
+        cbOwner_ = savedOwner;
+        if (definiteHeight > 0.0f) {
+            height = definiteHeight - verticalEdges(box.padding, box.borderWidth);
+        } else if (box.height > 0.0f) {
+            height = box.height;
+        }
+        width = applyMinMax(width, box);
+        el.setLayoutX(x);
+        el.setLayoutY(y);
+        el.setLayoutWidth(
+            std::max(borderW, width + horizontalEdges(box.padding, box.borderWidth)));
+        el.setLayoutHeight(height + verticalEdges(box.padding, box.borderWidth));
+        recordClip(el, contentX, contentY, width, height);
+    }
+
+    // The padding box, in window coordinates, which is what `overflow` crops to.
+    void recordClip(Element& el, float x, float y, float width, float height) {
+        el.setClipX(x);
+        el.setClipY(y);
+        el.setClipWidth(std::max(0.0f, width));
+        el.setClipHeight(std::max(0.0f, height));
+    }
+
 private:
+    std::vector<Pending> pending_;
+    std::vector<Relative> relative_;
+
+    // The padding box an out-of-flow box resolves against. Set while laying out a
+    // positioned element, so its own out-of-flow descendants anchor to it.
+    Element* cbOwner_ = nullptr;
+
     bool laidOut(Element& el) const {
         if (!el.isVisual()) {
             return false;
@@ -218,8 +473,13 @@ private:
             originX + box.margin.left + box.borderWidth.left + box.padding.left;
         const float contentY = originY + box.margin.top + box.borderWidth.top + box.padding.top;
 
+        Element* const savedOwner = cbOwner_;
+        if (sized.position != ComputedStyle::Static) {
+            cbOwner_ = &el;
+        }
         float width = 0.0f;
         float height = layoutContents(el, sized, box, availableWidth, contentX, contentY, width);
+        cbOwner_ = savedOwner;
         if (box.height > 0.0f) {
             height = box.height;
         }
@@ -228,6 +488,7 @@ private:
         el.setLayoutY(originY + box.margin.top);
         el.setLayoutWidth(width + horizontalEdges(box.padding, box.borderWidth));
         el.setLayoutHeight(height + verticalEdges(box.padding, box.borderWidth));
+        recordClip(el, contentX, contentY, width, height);
     }
 
     float layoutContents(Element& el, const ComputedStyle& s, const UsedBox& box,
@@ -709,27 +970,35 @@ private:
               metrics_(m),
               maxWidth_(maxWidth),
               originX_(originX),
-              originY_(originY) {}
+              originY_(originY),
+              spacing_(spacingFor(s.whiteSpace)) {}
 
         void text(std::string_view text, const ComputedStyle& s) {
             const Metrics m = metricsFor(owner_.font_, s);
             // A smaller font inside a line raises nothing; the line box keeps
             // the container's height.
             const float ascentDelta = std::min(0.0f, m.ascent - metrics_.ascent);
-            std::size_t i = 0;
-            while (i < text.size()) {
-                // A newline in markup is whitespace, not a forced break.
-                while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) {
-                    ++i;
+            if (!spacing_.keepsNewlines) {
+                words(text, s, ascentDelta);
+                return;
+            }
+            // A newline in the text ends the line instead of collapsing to a space.
+            std::size_t start = 0;
+            while (start <= text.size()) {
+                const std::size_t nl = text.find('\n', start);
+                const std::size_t end = nl == std::string_view::npos ? text.size() : nl;
+                if (end > start) {
+                    if (spacing_.keepsWhitespace) {
+                        word(text.substr(start, end - start), s, ascentDelta);
+                    } else {
+                        words(text.substr(start, end - start), s, ascentDelta);
+                    }
                 }
-                const std::size_t start = i;
-                while (i < text.size() && !std::isspace(static_cast<unsigned char>(text[i]))) {
-                    ++i;
-                }
-                if (i == start) {
+                if (nl == std::string_view::npos) {
                     break;
                 }
-                word(text.substr(start, i - start), s, ascentDelta);
+                newLine();
+                start = nl + 1;
             }
         }
 
@@ -811,9 +1080,52 @@ private:
         float widest() const { return widest_; }
 
     private:
+        // What `white-space` changes. `nowrap` collapses runs of spaces but never
+        // breaks a line. `pre` and `pre-wrap` treat a newline in the text as a line
+        // break rather than whitespace; `pre` also keeps runs of spaces, so a line
+        // is taken whole and never wraps.
+        struct Spacing {
+            bool wraps = true;
+            bool keepsWhitespace = false;
+            bool keepsNewlines = false;
+        };
+
+        static Spacing spacingFor(ComputedStyle::WhiteSpace value) {
+            switch (value) {
+                case ComputedStyle::WrapNone:
+                    return {false, false, false};
+                case ComputedStyle::WrapPre:
+                    return {false, true, true};
+                case ComputedStyle::WrapPreWrap:
+                    return {true, false, true};
+                case ComputedStyle::WrapText:
+                    break;
+            }
+            return {};
+        }
+
+        // Splits at whitespace, collapsing runs of spaces into the single space
+        // word() inserts between runs.
+        void words(std::string_view text, const ComputedStyle& s, float ascentDelta) {
+            std::size_t i = 0;
+            while (i < text.size()) {
+                while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) {
+                    ++i;
+                }
+                const std::size_t start = i;
+                while (i < text.size() && !std::isspace(static_cast<unsigned char>(text[i]))) {
+                    ++i;
+                }
+                if (i == start) {
+                    break;
+                }
+                word(text.substr(start, i - start), s, ascentDelta);
+            }
+        }
+
         void word(std::string_view w, const ComputedStyle& s, float ascentDelta) {
             const float wWidth = textWidth(owner_.font_, s, w);
-            if (lineHasContent_ &&
+            if (spacing_.wraps && lineHasContent_ &&
                 penX_ + metrics_.spaceWidth + wWidth > maxWidth_) {
                 newLine();
             }
@@ -839,11 +1151,13 @@ private:
         float bottom_ = 0.0f;
         float widest_ = 0.0f;
         bool lineHasContent_ = false;
+        Spacing spacing_ = spacingFor(ComputedStyle::WrapText);
     };
 
     const StyleResolver& resolver_;
-    const TextFont* font_ = nullptr;
+    float viewportWidth_ = 0.0f;
     float viewportHeight_ = 0.0f;
+    const TextFont* font_ = nullptr;
 };
 
 }  // namespace
@@ -852,8 +1166,9 @@ void BlockLayout::layout(Element* root, const LayoutInput& input) {
     if (!root || !input.resolver) {
         return;
     }
-    Layout layout(*input.resolver, input.font, input.viewportHeight);
+    Layout layout(*input.resolver, input.font, input.viewportWidth, input.viewportHeight);
     layout.run(*root, input.viewportWidth, 0.0f, 0.0f);
+    layout.placeOutOfFlow();
 }
 
 }  // namespace sui

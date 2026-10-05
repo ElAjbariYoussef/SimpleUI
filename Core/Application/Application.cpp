@@ -142,56 +142,116 @@ bool loadFirstAvailable(TextFont& font, const Resources* resources) {
     return false;
 }
 
-void paintElement(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
-                  const StyleResolver& resolver, const TextFont& font) {
-    const bool drawable = el.isVisual();
-    if (drawable) {
-        const ComputedStyle s = resolver.resolve(el);
-        if (s.display != ComputedStyle::None && s.visible) {
-            const SDL_FRect box{el.layoutX(), el.layoutY(), el.layoutWidth(),
-                                el.layoutHeight()};
-            // Border widths take no percentages or font-relative units, so they
-            // need no containing block to resolve.
-            const float borderTop = s.borderWidth.top.resolve();
-            if (box.w > 0.0f && box.h > 0.0f) {
-                if (s.backgroundColor.a > 0) {
-                    renderer.fillRect(box, toColor(s.backgroundColor));
-                }
-                if (borderTop > 0.0f || s.borderWidth.left.resolve() > 0.0f) {
-                    renderer.strokeRect(box, toColor(s.borderColor), borderTop);
-                }
-            }
+// CSS paint order, as far as a flat list can express it. In CSS the root stacking
+// context paints in this order: its own background, then negative `z-index`,
+// then every in-flow box, then positioned boxes with `z-index: auto` or `0`, then
+// positive `z-index`. Document order breaks ties inside a layer.
+//
+// The engine has one stacking context per document. That is exact for everything
+// except nested contexts, which CSS also creates from `transform`, `opacity` under
+// 1, `filter`, `will-change`, and a few others -- none of which the engine
+// supports, so no nesting can arise.
+struct PaintItem {
+    Element* el;
+    int layer = 0;
+    int zIndex = 0;
+    std::size_t order = 0;
+    // The tightest rect every ancestor's `overflow` imposes, in window
+    // coordinates. A width or height of zero or less means no clip at all.
+    SDL_FRect clip{0.0f, 0.0f, 0.0f, 0.0f};
+};
 
-            if (font.hasFont()) {
-                for (const auto& run : el.textRuns()) {
-                    if (run.text.empty() || run.fontSize <= 0.0f) {
-                        continue;
-                    }
-                    SDL_Texture* texture = font.renderText(
-                        sdlRenderer, run.text, run.fontSize,
-                        SDL_Color{run.r, run.g, run.b, run.a});
-                    if (!texture) {
-                        continue;
-                    }
-                    // The texture is drawn 1:1 on the pixel grid. Scaling it to the
-                    // line box would resample the bitmap and soften every stem, and
-                    // the glyph box already starts at the top of the line box, since
-                    // the run's baseline is the font's own ascent.
-                    float texW = 0.0f, texH = 0.0f;
-                    SDL_GetTextureSize(texture, &texW, &texH);
-                    const SDL_FRect dst{std::floor(run.x), std::floor(run.y), texW, texH};
-                    SDL_RenderTexture(sdlRenderer, texture, nullptr, &dst);
-                    SDL_DestroyTexture(texture);
-                }
-            }
+SDL_FRect intersectClip(const SDL_FRect& a, const SDL_FRect& b) {
+    if (a.w <= 0.0f || a.h <= 0.0f) {
+        return b;
+    }
+    if (b.w <= 0.0f || b.h <= 0.0f) {
+        return a;
+    }
+    const float x = std::max(a.x, b.x);
+    const float y = std::max(a.y, b.y);
+    return {x, y, std::max(0.0f, std::min(a.x + a.w, b.x + b.w) - x),
+            std::max(0.0f, std::min(a.y + a.h, b.y + b.h) - y)};
+}
+
+bool clipsAnything(const ComputedStyle& s) {
+    return s.overflowX != ComputedStyle::Visible || s.overflowY != ComputedStyle::Visible;
+}
+
+// Depth-first collection, so `order` is document order. The inherited clip is
+// threaded down: an element's own box is clipped by its ancestors, and it in turn
+// clips its descendants.
+void collectPaint(Element& el, const StyleResolver& resolver, const SDL_FRect& inherited,
+                  std::vector<PaintItem>& out) {
+    SDL_FRect clip = inherited;
+    bool drawable = false;
+    ComputedStyle s;
+    if (el.isVisual()) {
+        s = resolver.resolve(el);
+        drawable = s.display != ComputedStyle::None && s.visible;
+        if (drawable && clipsAnything(s)) {
+            clip = intersectClip(clip, SDL_FRect{el.clipX(), el.clipY(), el.clipWidth(),
+                                                 el.clipHeight()});
         }
+    }
+
+    if (drawable) {
+        PaintItem item;
+        item.el = &el;
+        item.zIndex = s.positioned ? s.zIndex : 0;
+        item.layer = !s.positioned ? 0 : (s.zIndex < 0 ? -1 : (s.zIndex > 0 ? 2 : 1));
+        item.order = out.size();
+        // `overflow` crops the element's own content as well as its descendants,
+        // so the clip has already included this element by the time it is stored.
+        item.clip = clip;
+        out.push_back(item);
     }
 
     // Non-visual wrappers (<root>, <head>) still contain drawable descendants.
     for (const auto& child : el.children()) {
         if (child && !child->isTextNode()) {
-            paintElement(*child, renderer, sdlRenderer, resolver, font);
+            collectPaint(*child, resolver, clip, out);
         }
+    }
+}
+
+void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
+              const StyleResolver& resolver, const TextFont& font) {
+    const ComputedStyle s = resolver.resolve(el);
+    const SDL_FRect box{el.layoutX(), el.layoutY(), el.layoutWidth(), el.layoutHeight()};
+    // Border widths take no percentages or font-relative units, so they need no
+    // containing block to resolve.
+    const float borderTop = s.borderWidth.top.resolve();
+    if (box.w > 0.0f && box.h > 0.0f) {
+        if (s.backgroundColor.a > 0) {
+            renderer.fillRect(box, toColor(s.backgroundColor));
+        }
+        if (borderTop > 0.0f || s.borderWidth.left.resolve() > 0.0f) {
+            renderer.strokeRect(box, toColor(s.borderColor), borderTop);
+        }
+    }
+
+    if (!font.hasFont()) {
+        return;
+    }
+    for (const auto& run : el.textRuns()) {
+        if (run.text.empty() || run.fontSize <= 0.0f) {
+            continue;
+        }
+        SDL_Texture* texture = font.renderText(
+            sdlRenderer, run.text, run.fontSize, SDL_Color{run.r, run.g, run.b, run.a});
+        if (!texture) {
+            continue;
+        }
+        // The texture is drawn 1:1 on the pixel grid. Scaling it to the line box
+        // would resample the bitmap and soften every stem, and the glyph box
+        // already starts at the top of the line box, since the run's baseline is
+        // the font's own ascent.
+        float texW = 0.0f, texH = 0.0f;
+        SDL_GetTextureSize(texture, &texW, &texH);
+        const SDL_FRect dst{std::floor(run.x), std::floor(run.y), texW, texH};
+        SDL_RenderTexture(sdlRenderer, texture, nullptr, &dst);
+        SDL_DestroyTexture(texture);
     }
 }
 
@@ -499,8 +559,38 @@ void Application::run() {
                 if (SDL_getenv("SUI_DUMP_LAYOUT")) {
                     dumpLayout(*document_->root(), 0);
                 }
-                paintElement(*document_->root(), renderer, platform_->renderer(), resolver_,
-                             *font_);
+
+                // Paint in CSS order: a flat list sorted by stacking layer and
+                // `z-index`, each box clipped to whatever its ancestors' `overflow`
+                // allows.
+                std::vector<PaintItem> paintList;
+                collectPaint(*document_->root(), resolver_, SDL_FRect{}, paintList);
+                std::stable_sort(paintList.begin(), paintList.end(),
+                                 [](const PaintItem& a, const PaintItem& b) {
+                                     if (a.layer != b.layer) {
+                                         return a.layer < b.layer;
+                                     }
+                                     if (a.zIndex != b.zIndex) {
+                                         return a.zIndex < b.zIndex;
+                                     }
+                                     return a.order < b.order;
+                                 });
+                SDL_Renderer* sdlRenderer = platform_->renderer();
+                for (const PaintItem& item : paintList) {
+                    SDL_Rect previous;
+                    SDL_GetRenderClipRect(sdlRenderer, &previous);
+                    if (item.clip.w > 0.0f && item.clip.h > 0.0f) {
+                        const SDL_Rect rect{static_cast<int>(std::floor(item.clip.x)),
+                                            static_cast<int>(std::floor(item.clip.y)),
+                                            static_cast<int>(std::ceil(item.clip.w)),
+                                            static_cast<int>(std::ceil(item.clip.h))};
+                        SDL_SetRenderClipRect(sdlRenderer, &rect);
+                    } else {
+                        SDL_SetRenderClipRect(sdlRenderer, nullptr);
+                    }
+                    paintBox(*item.el, renderer, sdlRenderer, resolver_, *font_);
+                    SDL_SetRenderClipRect(sdlRenderer, &previous);
+                }
             } else {
                 SDL_FRect panel{40.0f, 40.0f, static_cast<float>(width) - 80.0f,
                                 static_cast<float>(height) - 80.0f};

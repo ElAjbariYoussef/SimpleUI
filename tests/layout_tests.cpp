@@ -1417,6 +1417,200 @@ void testImportantAndCssWideKeywords() {
           "border-width-left is untouched by an unknown keyword");
 }
 
+void testPositioning() {
+    // An absolute box resolves against the padding box of the nearest positioned
+    // ancestor, which is only known once the flow has placed that ancestor.
+    auto document = parseOrNull(
+        "<sui><body style=\"margin:0\">"
+        "<div id=\"stage\" style=\"position:relative;width:200px;height:100px;"
+        "padding:10px;border-width:5px\">"
+        "<div id=\"box\" style=\"position:absolute;left:30px;top:40px;"
+        "width:50px;height:20px\"></div>"
+        "</div>"
+        "<div id=\"after\" style=\"height:10px\"></div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    layoutRoot(*document, resolver, 400.0f);
+    Element* stage = document->getElementById("stage");
+    Element* box = document->getElementById("box");
+    Element* after = document->getElementById("after");
+    check(stage && box && after, "positioning elements found");
+    if (!stage || !box || !after) {
+        return;
+    }
+
+    // The stage's padding box starts at 5 + 10 and is 200 + 20 wide.
+    checkNear(stage->layoutX(), 0.0f, 0.01f, "the positioned ancestor is at the flow position");
+    checkNear(box->layoutX(), 45.0f, 0.01f, "position:absolute left is relative to the padding box");
+    checkNear(box->layoutY(), 55.0f, 0.01f, "position:absolute top is relative to the padding box");
+    checkNear(box->layoutWidth(), 50.0f, 0.01f, "an absolute box keeps its own width");
+
+    // An out-of-flow box contributes nothing to its parent's height, so the sibling
+    // below the stage sits right under it rather than under the absolute child.
+    checkNear(after->layoutY(), stage->layoutY() + stage->layoutHeight(), 0.01f,
+              "an absolute box takes no space in its parent");
+    check(box->layoutHeight() < stage->layoutHeight(),
+          "the absolute box does not stretch the stage");
+
+    // `right` and `bottom` anchor the far edges instead.
+    auto corner = parseOrNull(
+        "<sui><body style=\"margin:0\">"
+        "<div id=\"s2\" style=\"position:relative;width:200px;height:100px\">"
+        "<div id=\"b2\" style=\"position:absolute;right:10px;bottom:20px;"
+        "width:50px;height:30px\"></div>"
+        "</div></body></sui>");
+    if (corner) {
+        sui::StyleResolver r2;
+        layoutRoot(*corner, r2, 400.0f);
+        Element* b2 = corner->getElementById("b2");
+        checkNear(b2->layoutX(), 140.0f, 0.01f, "position:absolute right anchors the far edge");
+        checkNear(b2->layoutY(), 50.0f, 0.01f, "position:absolute bottom anchors the far edge");
+    }
+
+    // With no positioned ancestor the containing block is the viewport.
+    auto viewport = parseOrNull(
+        "<sui><body style=\"margin:0\">"
+        "<div id=\"b3\" style=\"position:absolute;left:15px;top:25px;width:40px;height:10px\">"
+        "</div></body></sui>");
+    if (viewport) {
+        sui::StyleResolver r3;
+        layoutRoot(*viewport, r3, 400.0f);
+        Element* b3 = viewport->getElementById("b3");
+        checkNear(b3->layoutX(), 15.0f, 0.01f, "the viewport is the containing block by default");
+        checkNear(b3->layoutY(), 25.0f, 0.01f, "the viewport anchors top too");
+    }
+
+    // Both edges given means the size comes from them.
+    auto stretched = parseOrNull(
+        "<sui><body style=\"margin:0\">"
+        "<div id=\"b4\" style=\"position:absolute;left:10px;right:10px;top:0;bottom:0\">"
+        "</div></body></sui>");
+    if (stretched) {
+        sui::StyleResolver r4;
+        layoutRoot(*stretched, r4, 400.0f);
+        Element* b4 = stretched->getElementById("b4");
+        checkNear(b4->layoutWidth(), 380.0f, 0.01f,
+                  "left and right together set the width");
+        checkNear(b4->layoutHeight(), 600.0f, 0.01f,
+                  "top and bottom together set the height to the viewport");
+    }
+
+    // `relative` moves the box after the flow has placed it and leaves its space
+    // alone, so the sibling below does not move.
+    auto shifted = parseOrNull(
+        "<sui><body style=\"margin:0\">"
+        "<div id=\"r1\" style=\"position:relative;left:20px;top:5px;height:10px\"></div>"
+        "<div id=\"r2\" style=\"height:10px\"></div></body></sui>");
+    if (shifted) {
+        sui::StyleResolver r5;
+        layoutRoot(*shifted, r5, 400.0f);
+        Element* r1 = shifted->getElementById("r1");
+        Element* r2 = shifted->getElementById("r2");
+        checkNear(r1->layoutX(), 20.0f, 0.01f, "position:relative left offsets the box");
+        checkNear(r1->layoutY(), 5.0f, 0.01f, "position:relative top offsets the box");
+        checkNear(r2->layoutY(), 10.0f, 0.01f,
+                  "a relative box leaves the space it occupied in the flow");
+    }
+
+    // `right` and `bottom` subtract rather than add.
+    auto negative = parseOrNull(
+        "<sui><body style=\"margin:0\">"
+        "<div id=\"r3\" style=\"position:relative;right:20px;bottom:5px;height:10px\"></div>"
+        "</body></sui>");
+    if (negative) {
+        sui::StyleResolver r6;
+        layoutRoot(*negative, r6, 400.0f);
+        Element* r3 = negative->getElementById("r3");
+        checkNear(r3->layoutX(), -20.0f, 0.01f, "position:relative right subtracts");
+        checkNear(r3->layoutY(), -5.0f, 0.01f, "position:relative bottom subtracts");
+    }
+
+    // `left` wins over `right`, which is the one direction CSS resolves by leaving
+    // the pair over-specified.
+    auto both = parseOrNull(
+        "<sui><body style=\"margin:0\">"
+        "<div id=\"r4\" style=\"position:relative;left:7px;right:99px;height:10px\"></div>"
+        "</body></sui>");
+    if (both) {
+        sui::StyleResolver r7;
+        layoutRoot(*both, r7, 400.0f);
+        checkNear(both->getElementById("r4")->layoutX(), 7.0f, 0.01f,
+                  "left wins when both offsets are given");
+    }
+}
+
+void testWhiteSpace() {
+    const char* source =
+        "<sui><body style=\"margin:0\">"
+        "<div id=\"t\" style=\"width:80px\">one two three four five</div>"
+        "</body></sui>";
+
+    // 80px fits about two of these words, so the box is one line tall when wrapping
+    // is off and several lines tall when it is on.
+    const char* const cases[] = {"normal", "nowrap", "pre", "pre-wrap"};
+    for (const char* value : cases) {
+        auto document = parseOrNull(source);
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(
+            sui::CSSParser::parse(std::string("#t{white-space:") + value + "}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* box = document->getElementById("t");
+        const std::string what = std::string("white-space:") + value;
+        const std::size_t runs = box->textRuns().size();
+        std::printf("     %-22s -> %zu runs, height %.1f\n", what.c_str(), runs,
+                    box->layoutHeight());
+
+        if (std::string_view(value) == "nowrap") {
+            // One line, one line height, whatever the words do.
+            check(runs == 5, "white-space:nowrap keeps every word but never breaks");
+            check(box->layoutHeight() < 40.0f,
+                  "white-space:nowrap leaves the text on a single line");
+        }
+        if (std::string_view(value) == "normal") {
+            check(runs > 1, "white-space:normal breaks into several runs");
+            check(box->layoutHeight() > 40.0f, "white-space:normal wraps onto more lines");
+        }
+        if (std::string_view(value) == "pre") {
+            check(runs == 1, "white-space:pre takes the line whole");
+            check(box->layoutHeight() < 40.0f, "white-space:pre never wraps");
+        }
+        if (std::string_view(value) == "pre-wrap") {
+            check(runs > 1, "white-space:pre-wrap still wraps");
+            check(box->layoutHeight() > 40.0f, "white-space:pre-wrap fills more than one line");
+        }
+    }
+
+    // A newline in the text is a line break for `pre` and `pre-wrap`, and ordinary
+    // whitespace for everything else.
+    const char* broken =
+        "<sui><body style=\"margin:0\">"
+        "<div id=\"t\" style=\"width:400px;white-space:%s;padding:0;margin:0\">"
+        "one\ntwo</div></body></sui>";
+    for (const char* value : {"pre", "pre-wrap", "normal"}) {
+        char buffer[512];
+        std::snprintf(buffer, sizeof(buffer), broken, value);
+        auto document = parseOrNull(buffer);
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        layoutRoot(*document, resolver, 400.0f);
+        Element* box = document->getElementById("t");
+        const bool keeps = std::string_view(value) != "normal";
+        const std::string label = keeps ? "a newline in white-space:" + std::string(value) +
+                                             " breaks the line"
+                                        : "a newline in normal white-space is just a space";
+        const float oneLine = box->textRuns().front().height;
+        checkNear(box->layoutHeight(), keeps ? 2 * oneLine : oneLine, 0.5f, label.c_str());
+    }
+}
+
 void testPseudoElements() {
     auto document = parseOrNull(
         "<sui><body><div id=\"card\"><span id=\"kid\">k</span></div></body></sui>");
@@ -1511,6 +1705,8 @@ int main() {
     testSelectorMatching();
     testInteractivePseudoClasses();
     testAttributeSelectors();
+    testPositioning();
+    testWhiteSpace();
     testPseudoElements();
     testImportantAndCssWideKeywords();
     testCascade();
