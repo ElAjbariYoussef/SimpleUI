@@ -327,11 +327,29 @@ void Application::dispatch(const InputEvent& event) {
     if (!document_ || !document_->root()) {
         return;
     }
-    if (event.kind == InputKind::PointerMove) {
-        return;
-    }
 
     Element* target = hitTest(*document_->root(), event.x, event.y, resolver_);
+
+    // Interactive state is set first and unconditionally. A move that changes what
+    // is under the pointer has to clear `:hover` even when it lands on nothing, and
+    // a press that misses the document has to clear `:focus`.
+    // Every setter bumps the resolver generation, which is what makes the frame loop
+    // treat the frame as stale.
+    switch (event.kind) {
+        case InputKind::PointerMove:
+            resolver_.setHovered(target);
+            return;
+        case InputKind::PointerDown:
+            resolver_.setActive(target);
+            // Clicking anywhere, including on nothing, moves focus.
+            document_->setFocused(target);
+            resolver_.setFocused(target);
+            break;
+        case InputKind::PointerUp:
+            resolver_.setActive(nullptr);
+            break;
+    }
+
     if (!target) {
         return;
     }
@@ -389,6 +407,21 @@ void Application::run() {
         }
     }
 
+    // SUI_MOVE=x,y[;x,y...] does the same for pointer motion, which is how the
+    // `:hover` restyle path is exercised without a visible cursor.
+    std::deque<InputEvent> scriptedMoves;
+    if (const char* moves = SDL_getenv("SUI_MOVE")) {
+        for (const std::string& pair : splitOnSemicolons(moves)) {
+            float x = 0.0f;
+            float y = 0.0f;
+            if (std::sscanf(pair.c_str(), "%f,%f", &x, &y) == 2) {
+                scriptedMoves.push_back(InputEvent{InputKind::PointerMove, x, y, 0});
+            } else {
+                SDL_Log("SUI_MOVE expects x,y; got '%s'", pair.c_str());
+            }
+        }
+    }
+
     // SUI_FRAMES=n keeps the loop alive for n pumped frames instead of stopping
     // at the first clean one, so the skip path can be measured rather than
     // assumed: compare frames pumped against frames painted.
@@ -416,6 +449,7 @@ void Application::run() {
         const bool stale =
             !frameDrawn_ || width != stamp_.width || height != stamp_.height ||
             !platform_->inputEvents().empty() || !scriptedClicks.empty() ||
+            !scriptedMoves.empty() ||
             (document_ && document_->mutationCount() != stamp_.mutations) ||
             resolver_.generation() != stamp_.rules || scriptContext_.generation != stamp_.script;
         if (stale) {
@@ -440,6 +474,11 @@ void Application::run() {
                 if (!scriptedClicks.empty()) {
                     dispatch(scriptedClicks.front());
                     scriptedClicks.pop_front();
+                    mutated = true;
+                }
+                if (!scriptedMoves.empty()) {
+                    dispatch(scriptedMoves.front());
+                    scriptedMoves.pop_front();
                     mutated = true;
                 }
                 if (mutated) {

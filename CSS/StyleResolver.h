@@ -13,6 +13,15 @@ namespace sui {
 
 class Element;
 
+// Which elements are currently hovered, pressed, and focused. A selector's
+// `:hover`/`:active`/`:focus` parts are matched against this, so passing a null
+// pointer is the same as saying nothing is in any state.
+struct PseudoState {
+    const Element* hovered = nullptr;
+    const Element* active = nullptr;
+    const Element* focused = nullptr;
+};
+
 // Resolves the computed style for an element: user-agent defaults, then
 // matching stylesheet rules by specificity, then the inline style attribute.
 class StyleResolver {
@@ -43,6 +52,14 @@ public:
     float rootFontSize() const noexcept { return rootFontSize_; }
     void setRootFontSize(float size);
 
+    // Interactive state the pseudo-classes are matched against. Each setter
+    // returns whether anything changed, so the caller only re-lays-out on a real
+    // transition rather than on every mouse move.
+    bool setHovered(const Element* element);
+    bool setActive(const Element* element);
+    bool setFocused(const Element* element);
+    const PseudoState& pseudoState() const noexcept { return state_; }
+
 private:
     ComputedStyle resolveWithParent(Element& element, const ComputedStyle& parent) const;
 
@@ -50,10 +67,13 @@ private:
     std::vector<Rule> rules_;
     std::uint64_t generation_ = 0;
     float rootFontSize_ = 16.0f;
+    PseudoState state_;
 };
 
 // True when `selector` matches `element`, treating a compound selector as
-// requiring all of its simple parts on the same element.
-bool selectorMatches(const SimpleSelector& selector, const Element& element);
+// requiring all of its simple parts on the same element. Pass `state` to
+// evaluate `:hover`, `:active`, and `:focus`.
+bool selectorMatches(const SimpleSelector& selector, const Element& element,
+                     const PseudoState* state = nullptr);
 
 }  // namespace sui

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -19,13 +20,19 @@ struct Selector {
 // combinators are kept as separate parts, tagged with their combinator.
 enum class Combinator { None, Descendant, Child };
 
+// The interactive states a selector can match against. Everything else the
+// engine cannot evaluate leaves `unsupported` set on the selector.
+enum class PseudoClass : std::uint8_t { Hover, Active, Focus };
+
 struct SimpleSelector {
     std::vector<Selector> parts;
     // Combinator linking parts[i] to parts[i + 1].
     std::vector<Combinator> combinators;
+    std::vector<PseudoClass> pseudoClasses;
     // Set when the selector used something the engine cannot evaluate, such as a
-    // pseudo-class. It then matches nothing at all: dropping the unknown part and
-    // matching the rest would make `#t:hover` apply to every `#t`.
+    // pseudo-element or an unknown pseudo-class. It then matches nothing at all:
+    // dropping the unknown part and matching the rest would make `#t:hover` apply
+    // to every `#t`.
     bool unsupported = false;
 };
 

@@ -60,7 +60,10 @@ public:
 
     // The element that last had focus, so focus-driven restyles can be diffed.
     Element* focused() const noexcept { return focused_; }
-    void setFocused(Element* element) noexcept { focused_ = element; }
+    void setFocused(Element* element) noexcept {
+        focused_ = element;
+        ++mutations_;
+    }
 
 private:
     std::unique_ptr<Element> root_;

@@ -735,9 +735,39 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     return {};
 }
 
-bool selectorMatches(const SimpleSelector& selector, const Element& element) {
+bool selectorMatches(const SimpleSelector& selector, const Element& element,
+                     const PseudoState* state) {
     if (selector.unsupported) {
         return false;
+    }
+    // `:hover` and `:active` reach ancestors too, the way a browser lights up every
+    // box in the chain under the pointer; `:focus` belongs to one element alone.
+    for (const PseudoClass pseudo : selector.pseudoClasses) {
+        const Element* target = nullptr;
+        switch (pseudo) {
+            case PseudoClass::Hover: target = state ? state->hovered : nullptr; break;
+            case PseudoClass::Active: target = state ? state->active : nullptr; break;
+            case PseudoClass::Focus: target = state ? state->focused : nullptr; break;
+        }
+        if (!target) {
+            return false;
+        }
+        if (pseudo == PseudoClass::Focus) {
+            if (target != &element) {
+                return false;
+            }
+            continue;
+        }
+        bool reached = false;
+        for (const Element* a = target; a; a = a->parent()) {
+            if (a == &element) {
+                reached = true;
+                break;
+            }
+        }
+        if (!reached) {
+            return false;
+        }
     }
     const auto& parts = selector.parts;
     if (parts.empty()) {
@@ -844,7 +874,7 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
             : std::vector<Declaration>{};
     const auto applyLevel = [&](bool important) {
         for (const auto& rule : rules_) {
-            if (!selectorMatches(rule.selector, element)) {
+            if (!selectorMatches(rule.selector, element, &state_)) {
                 continue;
             }
             for (const auto& decl : rule.declarations) {
@@ -882,5 +912,29 @@ void StyleResolver::setRootFontSize(float size) {
         ++generation_;
     }
 }
+
+// Interactive state is part of the resolution input, so a change to it has to bump
+// the same generation counter the frame loop already watches.
+#define SUI_SET_PSEUDO(field, value)                    \
+    if (state_.field == (value)) {                      \
+        return false;                                   \
+    }                                                   \
+    state_.field = (value);                             \
+    ++generation_;                                      \
+    return true
+
+bool StyleResolver::setHovered(const Element* element) {
+    SUI_SET_PSEUDO(hovered, element);
+}
+
+bool StyleResolver::setActive(const Element* element) {
+    SUI_SET_PSEUDO(active, element);
+}
+
+bool StyleResolver::setFocused(const Element* element) {
+    SUI_SET_PSEUDO(focused, element);
+}
+
+#undef SUI_SET_PSEUDO
 
 }  // namespace sui

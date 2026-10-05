@@ -20,6 +20,26 @@ body {
     background-color: #3f3f46;
 }
 
+/* Interactive pseudo-classes. The engine keeps one hovered, one pressed, and one
+   focused element and restyles the frame whenever the pointer moves, so these
+   work without any script at all. */
+button:hover {
+    background-color: #3f3f46;
+    border-color: #52525b;
+}
+
+button:active {
+    background-color: #52525b;
+}
+
+button:focus {
+    border-color: #60a5fa;
+}
+
+#counter:hover {
+    color: #fafafa;
+}
+
 /* border-box means the width below is the outer width, padding included, which
    is what most people mean when they write a width. */
 .content {

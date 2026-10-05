@@ -79,13 +79,23 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
             continue;
         }
         if (c == ':' && i + 1 < src.size() && src[i + 1] != ':') {
-            // The engine evaluates no pseudo-classes or pseudo-elements yet. The
-            // selector still parses, but it is marked so it matches nothing rather
-            // than silently matching every element the rest of it describes.
-            out.unsupported = true;
             ++i;
+            const std::size_t nameStart = i;
             while (i < src.size() && isIdentChar(src[i])) {
                 ++i;
+            }
+            const std::string_view name = src.substr(nameStart, i - nameStart);
+            // The three interactive states are the only pseudo-classes the engine
+            // evaluates. Anything else leaves the selector matching nothing rather
+            // than silently matching every element the rest of it describes.
+            if (name == "hover") {
+                out.pseudoClasses.push_back(PseudoClass::Hover);
+            } else if (name == "active") {
+                out.pseudoClasses.push_back(PseudoClass::Active);
+            } else if (name == "focus") {
+                out.pseudoClasses.push_back(PseudoClass::Focus);
+            } else {
+                out.unsupported = true;
             }
             if (i < src.size() && src[i] == '(') {
                 int depth = 1;
@@ -95,6 +105,16 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
                     if (src[i] == ')') --depth;
                     ++i;
                 }
+            }
+            continue;
+        }
+        if (c == ':' && i + 1 < src.size() && src[i + 1] == ':') {
+            // Pseudo-elements are not generated yet, so `::before` and friends
+            // cannot select anything.
+            out.unsupported = true;
+            i += 2;
+            while (i < src.size() && isIdentChar(src[i])) {
+                ++i;
             }
             continue;
         }

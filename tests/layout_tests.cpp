@@ -120,9 +120,111 @@ void testSelectorMatching() {
     // An unsupported pseudo-class must disable the whole selector, not be dropped:
     // `#t:hover` matching every `#t` would be worse than not matching at all.
     check(!selectorMatches(sui::CSSParser::parseSelector("h1:hover"), *paragraph),
-          "a selector with a pseudo-class matches nothing");
-    check(!selectorMatches(sui::CSSParser::parseSelector("div:hover"), *div),
-          "a compound selector with a pseudo-class matches nothing");
+          "a selector with an unevaluated pseudo-class matches nothing");
+    check(!selectorMatches(sui::CSSParser::parseSelector("div::before"), *div),
+          "a pseudo-element selector matches nothing");
+    check(!selectorMatches(sui::CSSParser::parseSelector("div:first-child"), *div),
+          "an unknown pseudo-class matches nothing");
+    check(!selectorMatches(sui::CSSParser::parseSelector("p:nth-child(2)"), *paragraph),
+          "a functional pseudo-class matches nothing");
+}
+
+void testInteractivePseudoClasses() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"panel\"><button id=\"btn\"><span id=\"label\">Go</span>"
+        "</button></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* panel = document->getElementById("panel");
+    Element* btn = document->getElementById("btn");
+    Element* label = document->getElementById("label");
+    check(panel && btn && label, "pseudo-class elements found");
+    if (!panel || !btn || !label) {
+        return;
+    }
+
+    const auto hoverPanel = sui::CSSParser::parseSelector("#panel:hover");
+    const auto hoverBtn = sui::CSSParser::parseSelector("#btn:hover");
+    // A descendant selector, which is how "the pointer is somewhere inside me"
+    // gets written in CSS: `#panel:hover #btn` lights the button whenever anything
+    // inside the panel is hovered.
+    const auto panelHoverBtn = sui::CSSParser::parseSelector("#panel:hover #btn");
+    const auto activeBtn = sui::CSSParser::parseSelector("#btn:active");
+    const auto focusBtn = sui::CSSParser::parseSelector("#btn:focus");
+
+    sui::PseudoState none;
+    check(!selectorMatches(hoverBtn, *btn, &none),
+          ":hover matches nothing when nothing is hovered");
+    check(!selectorMatches(focusBtn, *btn, &none),
+          ":focus matches nothing when nothing is focused");
+
+    // A compound `#btn:hover` is one element: the button, and only when the button
+    // itself is what the pointer is on or inside.
+    sui::PseudoState overLabel;
+    overLabel.hovered = label;
+    check(selectorMatches(hoverBtn, *btn, &overLabel),
+          "#btn:hover matches the button while a child is hovered");
+    check(selectorMatches(sui::CSSParser::parseSelector("#label:hover"), *label,
+                          &overLabel),
+          ":hover matches the hovered element");
+
+    // The panel is hovered while anything inside it is hovered.
+    check(selectorMatches(hoverPanel, *panel, &overLabel),
+          ":hover matches an ancestor of the hovered element");
+    check(selectorMatches(panelHoverBtn, *btn, &overLabel),
+          "#panel:hover #btn matches a descendant of the hovered panel");
+
+    // The chain does not run the other way: hovering the panel does not light the
+    // button inside it, which is what `:hover` (not `:hover-within`) means.
+    sui::PseudoState overPanel;
+    overPanel.hovered = panel;
+    check(selectorMatches(hoverPanel, *panel, &overPanel),
+          ":hover matches the hovered container itself");
+    check(!selectorMatches(hoverBtn, *btn, &overPanel),
+          ":hover does not leak down to children");
+    check(!selectorMatches(panelHoverBtn, *btn, &overPanel),
+          "a hovered parent does not style its descendants");
+    check(!selectorMatches(hoverPanel, *label, &overPanel),
+          "an ancestor selector does not match a descendant");
+
+    // `:active` behaves like `:hover` while the button is held.
+    sui::PseudoState pressed;
+    pressed.active = btn;
+    check(selectorMatches(activeBtn, *btn, &pressed), ":active matches the pressed element");
+
+    // `:focus` belongs to one element only.
+    sui::PseudoState focused;
+    focused.focused = btn;
+    check(selectorMatches(focusBtn, *btn, &focused), ":focus matches the focused element");
+    check(!selectorMatches(sui::CSSParser::parseSelector("#panel:focus"), *panel,
+                           &focused),
+          ":focus does not match an ancestor of the focused element");
+
+    // The state drives the cascade: a hovered button picks up its hover colour.
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body{margin:0} #btn{width:60px;height:20px} #btn:hover{background-color:#ff0000}"));
+    check(resolver.resolve(*btn).backgroundColor.r != 0xff,
+          "a button is not hover-styled at rest");
+    check(resolver.setHovered(btn), "hovering reports the state change");
+    check(!resolver.setHovered(btn), "hovering the same element again reports no change");
+    check(resolver.resolve(*btn).backgroundColor.r == 0xff,
+          "hovering applies the :hover rule");
+    check(resolver.setHovered(nullptr), "moving away reports the state change");
+    check(resolver.resolve(*btn).backgroundColor.r != 0xff,
+          "moving away drops the :hover rule");
+    check(resolver.generation() > 0, "pseudo state changes bump the resolver generation");
+
+    // A descendant selector sees the same state, which is how a hover highlight is
+    // usually written.
+    sui::StyleResolver nested;
+    nested.setRules(sui::CSSParser::parse(
+        "#panel:hover #btn{background-color:#00ff00}"));
+    check(nested.resolve(*btn).backgroundColor.g != 0xff, "descendant hover is off at rest");
+    nested.setHovered(label);
+    check(nested.resolve(*btn).backgroundColor.g == 0xff,
+          "a descendant selector lights up from a child being hovered");
 }
 
 void testAttributeSelectors() {
@@ -1319,6 +1421,7 @@ void testImportantAndCssWideKeywords() {
 int main() {
     testRuleParsing();
     testSelectorMatching();
+    testInteractivePseudoClasses();
     testAttributeSelectors();
     testImportantAndCssWideKeywords();
     testCascade();
