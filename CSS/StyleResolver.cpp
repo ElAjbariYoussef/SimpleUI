@@ -36,6 +36,30 @@ std::string unitless(float value) {
     return text;
 }
 
+// Splits a value on whitespace, keeping the pieces as views into `value`. Used by
+// the shorthands that need to look at tokens rather than only their numbers.
+std::vector<std::string_view> splitOnSpaces(std::string_view value) {
+    std::vector<std::string_view> out;
+    std::size_t i = 0;
+    while (i < value.size()) {
+        while (i < value.size() && std::isspace(static_cast<unsigned char>(value[i]))) {
+            ++i;
+        }
+        const std::size_t start = i;
+        while (i < value.size() && !std::isspace(static_cast<unsigned char>(value[i]))) {
+            ++i;
+        }
+        if (i > start) {
+            out.push_back(value.substr(start, i - start));
+        }
+    }
+    return out;
+}
+
+float parseNumber(std::string_view value) {
+    return std::strtof(std::string(value).c_str(), nullptr);
+}
+
 // Splits a value on whitespace into up to `maxParts` numbers.
 std::vector<float> parseNumberList(std::string_view value) {
     std::vector<float> out;
@@ -204,6 +228,116 @@ void applyBoxEdges(std::string_view value, BoxEdge& edges) {
     }
 }
 
+const char* justifyName(ComputedStyle::FlexAlign v) {
+    switch (v) {
+        case ComputedStyle::AlignStart: return "flex-start";
+        case ComputedStyle::AlignEnd: return "flex-end";
+        case ComputedStyle::AlignCenter: return "center";
+        case ComputedStyle::AlignSpaceBetween: return "space-between";
+        case ComputedStyle::AlignSpaceAround: return "space-around";
+        case ComputedStyle::AlignSpaceEvenly: return "space-evenly";
+        default: return "stretch";
+    }
+}
+
+const char* alignName(ComputedStyle::FlexAlign v) {
+    switch (v) {
+        case ComputedStyle::AlignStretch: return "stretch";
+        case ComputedStyle::AlignStart: return "flex-start";
+        case ComputedStyle::AlignEnd: return "flex-end";
+        case ComputedStyle::AlignCenter: return "center";
+        case ComputedStyle::AlignBaseline: return "baseline";
+        default: return "normal";
+    }
+}
+
+ComputedStyle::FlexAlign parseJustify(std::string_view v) {
+    if (v == "flex-end" || v == "end" || v == "right") {
+        return ComputedStyle::AlignEnd;
+    }
+    if (v == "center") {
+        return ComputedStyle::AlignCenter;
+    }
+    if (v == "space-between") {
+        return ComputedStyle::AlignSpaceBetween;
+    }
+    if (v == "space-around") {
+        return ComputedStyle::AlignSpaceAround;
+    }
+    if (v == "space-evenly") {
+        return ComputedStyle::AlignSpaceEvenly;
+    }
+    return ComputedStyle::AlignStart;
+}
+
+ComputedStyle::FlexAlign parseAlign(std::string_view v) {
+    if (v == "flex-start" || v == "start" || v == "left") {
+        return ComputedStyle::AlignStart;
+    }
+    if (v == "flex-end" || v == "end" || v == "right") {
+        return ComputedStyle::AlignEnd;
+    }
+    if (v == "center") {
+        return ComputedStyle::AlignCenter;
+    }
+    if (v == "baseline") {
+        return ComputedStyle::AlignBaseline;
+    }
+    return ComputedStyle::AlignStretch;
+}
+
+// `flex` is a shorthand over grow, shrink and basis, where the one-value form
+// `flex: 1` means `1 1 0%` and anything numeric other than 0 sets shrink to 0.
+void applyFlexShorthand(ComputedStyle& s, std::string_view value, float rootFontSize) {
+    const std::string_view text = trim(value);
+    const std::vector<std::string_view> parts = splitOnSpaces(text);
+    s.flex = ComputedStyle::FlexFactors{};
+
+    // The keywords are checked first: they are single tokens, so the one-number
+    // form would otherwise read them as zero.
+    if (text == "auto") {
+        s.flex.grow = 1.0f;
+        s.flex.shrink = 1.0f;
+        s.flex.basis = Length(Length::Auto, 0.0f);
+        return;
+    }
+    if (text == "none") {
+        s.flex.grow = 0.0f;
+        s.flex.shrink = 0.0f;
+        s.flex.basis = Length{};
+        return;
+    }
+    if (text == "initial") {
+        s.flex = ComputedStyle::FlexFactors{};
+        return;
+    }
+    if (parts.empty()) {
+        return;
+    }
+
+    if (parts.size() == 1) {
+        // One number is `flex: <grow> 1 0%`: the item may shrink, and its size comes
+        // only from sharing free space.
+        const float n = parseNumber(parts[0]);
+        s.flex.grow = n;
+        s.flex.shrink = 1.0f;
+        s.flex.basis = Length(Length::Percent, 0.0f);
+        return;
+    }
+    if (parts.size() >= 3) {
+        s.flex.grow = parseNumber(parts[0]);
+        s.flex.shrink = parseNumber(parts[1]);
+        s.flex.basis = parseLength(parts[2]);
+        return;
+    }
+    // Two values: CSS reads the first as both factors and the second as the basis,
+    // so `flex: 1 100px` grows freely but keeps a 100px starting size.
+    s.flex.grow = parseNumber(parts[0]);
+    s.flex.shrink = parseNumber(parts[0]);
+    s.flex.basis = parseLength(parts[1]);
+    (void)rootFontSize;
+}
+
 void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontSize) {
     const std::string& property = decl.property;
     const std::string_view value = trim(decl.value);
@@ -213,8 +347,12 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.display = ComputedStyle::None;
         } else if (value == "inline") {
             s.display = ComputedStyle::Inline;
-        } else if (value == "inline-block" || value == "inline-flex") {
+        } else if (value == "inline-block") {
             s.display = ComputedStyle::InlineBlock;
+        } else if (value == "flex") {
+            s.display = ComputedStyle::Flex;
+        } else if (value == "inline-flex") {
+            s.display = ComputedStyle::InlineFlex;
         } else {
             s.display = ComputedStyle::Block;
         }
@@ -270,6 +408,53 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         if (parseHexColor(value, color)) {
             s.borderColor = color;
         }
+    } else if (property == "flex-direction") {
+        if (value == "row-reverse") {
+            s.flexDirection = ComputedStyle::RowReverse;
+        } else if (value == "column") {
+            s.flexDirection = ComputedStyle::Column;
+        } else if (value == "column-reverse") {
+            s.flexDirection = ComputedStyle::ColumnReverse;
+        } else {
+            s.flexDirection = ComputedStyle::Row;
+        }
+    } else if (property == "flex-wrap") {
+        if (value == "wrap") {
+            s.flexWrap = ComputedStyle::Wrap;
+        } else if (value == "wrap-reverse") {
+            s.flexWrap = ComputedStyle::WrapReverse;
+        } else {
+            s.flexWrap = ComputedStyle::NoWrap;
+        }
+    } else if (property == "justify-content") {
+        s.justifyContent = parseJustify(value);
+    } else if (property == "align-items") {
+        s.alignItems = parseAlign(value);
+    } else if (property == "align-self") {
+        s.alignSelf = parseAlign(value);
+    } else if (property == "align-content") {
+        s.alignContent = parseAlign(value);
+    } else if (property == "gap" || property == "grid-gap") {
+        const Length g = parseLength(value);
+        const float px = g.resolve(0.0f, s.fontSize, rootFontSize);
+        s.gap = px;
+        s.rowGap = px;
+        s.columnGap = px;
+    } else if (property == "row-gap") {
+        s.rowGap = parseLength(value).resolve(0.0f, s.fontSize, rootFontSize);
+    } else if (property == "column-gap") {
+        s.columnGap = parseLength(value).resolve(0.0f, s.fontSize, rootFontSize);
+    } else if (property == "flex") {
+        applyFlexShorthand(s, value, rootFontSize);
+    } else if (property == "flex-grow") {
+        s.flex.grow = parseNumber(value);
+    } else if (property == "flex-shrink") {
+        s.flex.shrink = parseNumber(value);
+    } else if (property == "flex-basis") {
+        s.flex.basis = parseLength(value);
+    } else if (property == "order") {
+        // Only `order` above zero changes anything this engine does, and it is
+        // applied at layout time, so nothing is stored here yet.
     } else if (property == "box-sizing") {
         s.boxSizing =
             value == "border-box" ? BoxSizing::BorderBox : BoxSizing::ContentBox;
@@ -466,6 +651,8 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             case ComputedStyle::Block: return "block";
             case ComputedStyle::Inline: return "inline";
             case ComputedStyle::InlineBlock: return "inline-block";
+            case ComputedStyle::Flex: return "flex";
+            case ComputedStyle::InlineFlex: return "inline-flex";
             case ComputedStyle::None: return "none";
         }
         return {};
@@ -509,6 +696,30 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "border-width-right") return length(style.borderWidth.right);
     if (property == "border-width-bottom") return length(style.borderWidth.bottom);
     if (property == "border-width-left") return length(style.borderWidth.left);
+    if (property == "flex-direction") {
+        switch (style.flexDirection) {
+            case ComputedStyle::Row: return "row";
+            case ComputedStyle::RowReverse: return "row-reverse";
+            case ComputedStyle::Column: return "column";
+            case ComputedStyle::ColumnReverse: return "column-reverse";
+        }
+        return {};
+    }
+    if (property == "flex-wrap") {
+        switch (style.flexWrap) {
+            case ComputedStyle::NoWrap: return "nowrap";
+            case ComputedStyle::Wrap: return "wrap";
+            case ComputedStyle::WrapReverse: return "wrap-reverse";
+        }
+        return {};
+    }
+    if (property == "justify-content") return justifyName(style.justifyContent);
+    if (property == "align-items") return alignName(style.alignItems);
+    if (property == "align-self") return alignName(style.alignSelf);
+    if (property == "align-content") return alignName(style.alignContent);
+    if (property == "flex-grow") return unitless(style.flex.grow);
+    if (property == "flex-shrink") return unitless(style.flex.shrink);
+    if (property == "flex-basis") return length(style.flex.basis, "auto");
     return {};
 }
 

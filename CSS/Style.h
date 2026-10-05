@@ -66,10 +66,31 @@ struct BoxEdge {
     Length left;
 };
 
+// Padding plus border on both edges of one axis, as a single number. Flex sizing
+// needs this because it decides what an item may grow or shrink by.
+inline float horizontalEdges(const Edges& padding, const Edges& border) noexcept {
+    return padding.left + padding.right + border.left + border.right;
+}
+
+inline float verticalEdges(const Edges& padding, const Edges& border) noexcept {
+    return padding.top + padding.bottom + border.top + border.bottom;
+}
+
 struct ComputedStyle {
-    enum Display : std::uint8_t { Block, Inline, InlineBlock, None };
+    enum Display : std::uint8_t {
+        Block,
+        Inline,
+        InlineBlock,
+        Flex,
+        InlineFlex,
+        None
+    };
 
     Display display = Block;
+
+    bool isFlexContainer() const noexcept {
+        return display == Display::Flex || display == Display::InlineFlex;
+    }
 
     // Dimensions. Lengths keep their unit until layout resolves them against the
     // containing block; see UsedBox.
@@ -81,6 +102,46 @@ struct ComputedStyle {
     Length maxHeight; // Auto = none
 
     BoxSizing boxSizing = BoxSizing::ContentBox;
+
+    // Flexbox. A flex container lays its children out along one axis; the free
+    // space left over is distributed by justify-content on the main axis and the
+    // children are aligned on the cross axis by align-items.
+    // Justify and Align share their non-stretch values, so they share one enum and
+    // an align field can be used wherever a justify field is expected. The values
+    // are prefixed because `Center` and `Justify` already exist in TextAlign.
+    enum FlexAlign : std::uint8_t {
+        AlignStretch,
+        AlignStart,
+        AlignEnd,
+        AlignCenter,
+        AlignBaseline,
+        AlignSpaceBetween,
+        AlignSpaceAround,
+        AlignSpaceEvenly
+    };
+    enum FlexDirection : std::uint8_t { Row, RowReverse, Column, ColumnReverse };
+    enum FlexWrap : std::uint8_t { NoWrap, Wrap, WrapReverse };
+
+    FlexDirection flexDirection = Row;
+    FlexAlign justifyContent = AlignStart;
+    FlexAlign alignItems = AlignStretch;
+    FlexAlign alignSelf = AlignStretch;
+    FlexAlign alignContent = AlignStretch;
+    FlexWrap flexWrap = NoWrap;
+    // `gap` sets both; `row-gap` and `column-gap` override one each. Auto means
+    // "not authored", which is what makes the override detectable.
+    float gap = 0.0f;
+    float rowGap = -1.0f;
+    float columnGap = -1.0f;
+
+    // One value per child, as authored. `Flex` means the browser's `flex: 0 1 auto`,
+    // which is not the same as "unset".
+    struct FlexFactors {
+        float grow = 0.0f;
+        float shrink = 1.0f;
+        Length basis;  // Auto = use the item's own width/height
+    };
+    FlexFactors flex;
 
     BoxEdge margin;
     BoxEdge padding;

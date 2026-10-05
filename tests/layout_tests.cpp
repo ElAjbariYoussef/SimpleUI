@@ -639,6 +639,573 @@ void testUnitsEndToEnd() {
               "the declaration after that one applies too");
 }
 
+void testFlexRowBasics() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"row\"><div id=\"a\"></div><div id=\"b\"></div>"
+        "<div id=\"c\"></div></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #row { display: flex; width: 600px }"
+        "#a { width: 100px; height: 100px } #b { width: 200px; height: 120px } #c { width: 150px; height: 150px }"));
+    layoutRoot(*document, resolver, 800.0f);
+
+    Element* row = document->getElementById("row");
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    Element* c = document->getElementById("c");
+    if (!row || !a || !b || !c) {
+        check(false, "flex row elements found");
+        return;
+    }
+    // A row lays its children out side by side starting at the content edge.
+    checkNear(a->layoutX(), 0.0f, 0.5f, "a row places its first item at the content edge");
+    checkNear(b->layoutX(), 100.0f, 0.5f, "the second item follows the first");
+    checkNear(c->layoutX(), 300.0f, 0.5f, "the third item follows the second");
+    checkNear(a->layoutWidth(), 100.0f, 0.5f, "an item keeps the width it asked for");
+    // The container is as tall as its tallest item.
+    checkNear(row->layoutHeight(), 150.0f, 0.5f,
+              "a row is as tall as its tallest item");
+}
+
+void testFlexColumn() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"col\"><div id=\"a\"></div><div id=\"b\"></div>"
+        "</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #col { display: flex; flex-direction: column; width: 400px }"
+        "#a { height: 40px } #b { height: 60px }"));
+    layoutRoot(*document, resolver, 800.0f);
+
+    Element* col = document->getElementById("col");
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    if (!col || !a || !b) {
+        check(false, "flex column elements found");
+        return;
+    }
+    // A column stacks downward instead of sideways.
+    checkNear(a->layoutY(), 0.0f, 0.5f, "a column places its first item at the top");
+    checkNear(b->layoutY(), 40.0f, 0.5f, "the second item is below the first");
+    checkNear(b->layoutHeight(), 60.0f, 0.5f, "an item keeps the height it asked for");
+    // Both items share the cross axis, and align-items stretches by default, so
+    // each fills the container's width.
+    checkNear(a->layoutWidth(), 400.0f, 0.5f,
+              "a stretched item fills the cross axis");
+    checkNear(col->layoutHeight(), 100.0f, 0.5f,
+              "a column is as tall as the sum of its items");
+}
+
+void testFlexGrowAndShrink() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"row\"><div id=\"a\"></div><div id=\"b\"></div>"
+        "</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #row { display: flex; width: 600px }"
+        "#a { flex: 1 } #b { flex: 3 }"));
+    layoutRoot(*document, resolver, 800.0f);
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    if (!a || !b) {
+        check(false, "grow elements found");
+        return;
+    }
+    // All 600px is free, shared 1:3.
+    checkNear(a->layoutWidth(), 150.0f, 0.5f, "flex: 1 takes a quarter of the row");
+    checkNear(b->layoutWidth(), 450.0f, 0.5f, "flex: 3 takes three quarters");
+    checkNear(b->layoutX(), 150.0f, 0.5f, "the grown items sit side by side");
+
+    // Now overflow the row and check that shrinking is weighted by base size.
+    auto document2 = parseOrNull(
+        "<sui><body><div id=\"row\"><div id=\"a\"></div><div id=\"b\"></div>"
+        "</div></body></sui>");
+    if (!document2) {
+        return;
+    }
+    sui::StyleResolver resolver2;
+    resolver2.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #row { display: flex; width: 300px }"
+        "#a { width: 100px; height: 10px } #b { width: 400px; height: 10px }"));
+    layoutRoot(*document2, resolver2, 800.0f);
+    Element* a2 = document2->getElementById("a");
+    Element* b2 = document2->getElementById("b");
+    if (!a2 || !b2) {
+        check(false, "shrink elements found");
+        return;
+    }
+    // 200px of overflow shared in proportion to the 100 and 400 base sizes, so the
+    // small item gives up 40 and keeps 60 while the large one gives up 160.
+    checkNear(a2->layoutWidth(), 60.0f, 0.5f,
+              "an overflowing item shrinks by its share of the base size");
+    checkNear(b2->layoutWidth(), 240.0f, 0.5f, "the larger item gives up more room");
+}
+
+void testFlexBasisAndShrinkZero() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"row\"><div id=\"a\"></div><div id=\"b\"></div>"
+        "</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #row { display: flex; width: 300px }"
+        "#a { flex: 0 0 120px } #b { flex: 1 }"));
+    layoutRoot(*document, resolver, 800.0f);
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    if (!a || !b) {
+        check(false, "basis elements found");
+        return;
+    }
+    // flex-basis sets the size directly and shrink: 0 keeps it there even though
+    // the two items together overflow the row.
+    checkNear(a->layoutWidth(), 120.0f, 0.5f, "flex-basis decides the item's size");
+    checkNear(b->layoutWidth(), 180.0f, 0.5f, "the remaining space goes to flex: 1");
+}
+
+void testFlexGap() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"row\"><div id=\"a\"></div><div id=\"b\"></div>"
+        "<div id=\"c\"></div></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #row { display: flex; width: 600px; gap: 20px }"
+        "#a, #b, #c { width: 100px; height: 10px }"));
+    layoutRoot(*document, resolver, 800.0f);
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    Element* c = document->getElementById("c");
+    if (!a || !b || !c) {
+        check(false, "gap elements found");
+        return;
+    }
+    // Three 100px items plus two 20px gaps leave 60px unused, which
+    // justify-content: flex-start leaves at the end.
+    checkNear(b->layoutX(), 120.0f, 0.5f, "gap separates the first pair");
+    checkNear(c->layoutX(), 240.0f, 0.5f, "gap separates the second pair");
+    checkNear(a->layoutX(), 0.0f, 0.5f, "flex-start leaves no space before the first item");
+
+    // row-gap must not move items sideways, and column-gap must.
+    auto document2 = parseOrNull(
+        "<sui><body><div id=\"row\"><div id=\"a\"></div></div></body></sui>");
+    if (!document2) {
+        return;
+    }
+    sui::StyleResolver resolver2;
+    resolver2.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #row { display: flex; row-gap: 30px; column-gap: 5px; width: 300px }"
+        "#a { width: 50px; height: 10px }"));
+    Element* a2 = document2->getElementById("a");
+    if (!a2) {
+        return;
+    }
+    layoutRoot(*document2, resolver2, 800.0f);
+    checkNear(a2->layoutX(), 0.0f, 0.5f, "row-gap does not affect the inline axis");
+}
+
+void testJustifyContent() {
+    const char* css =
+        "body { margin: 0 } #row { display: flex; width: 400px; %s } #a { width: 100px; height: 10px } "
+        "#b { width: 100px; height: 10px }";
+
+    struct Case {
+        const char* value;
+        float expectA;
+        float expectB;
+        const char* what;
+    };
+    const Case cases[] = {
+        {"justify-content: flex-start;", 0.0f, 100.0f, "flex-start packs at the start"},
+        {"justify-content: flex-end;", 200.0f, 300.0f,
+         "flex-end packs at the end"},
+        {"justify-content: center;", 100.0f, 200.0f,
+         "center puts the free space on both sides"},
+        {"justify-content: space-between;", 0.0f, 300.0f,
+         "space-between pushes the items apart"},
+        {"justify-content: space-around;", 50.0f, 250.0f,
+         "space-around gives each item room on both sides"},
+        {"justify-content: space-evenly;", 66.7f, 233.3f,
+         "space-evenly splits the space evenly"},
+    };
+
+    for (const Case& c : cases) {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"row\"><div id=\"a\"></div><div id=\"b\"></div>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(std::string("body { margin: 0 } #row { display: flex; width: 400px; ") +
+                                                c.value +
+                                                " } #a { width: 100px; height: 10px } "
+                                                "#b { width: 100px; height: 10px }"));
+        layoutRoot(*document, resolver, 800.0f);
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        if (!a || !b) {
+            check(false, "justify elements found");
+            return;
+        }
+        checkNear(a->layoutX(), c.expectA, 1.0f, c.what);
+        checkNear(b->layoutX(), c.expectB, 1.0f, c.what);
+    }
+}
+
+void testFlexAlignItems() {
+    struct Case {
+        const char* value;
+        float expectY;
+        const char* what;
+    };
+    // The row is 200px tall and the single item 20px, so 180px is free to align.
+    const Case cases[] = {
+        {"align-items: stretch;", 0.0f, "stretch starts at the line's cross edge"},
+        {"align-items: flex-start;", 0.0f, "flex-start pins to the cross start"},
+        {"align-items: center;", 90.0f, "center halves the free cross space"},
+        {"align-items: flex-end;", 180.0f, "flex-end pins to the cross end"},
+    };
+    for (const Case& c : cases) {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"row\"><div id=\"a\"></div></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            std::string("body { margin: 0 } #row { display: flex; width: 400px; height: 200px; ") + c.value +
+            " } #a { width: 100px; height: 20px }"));
+        Element* a = document->getElementById("a");
+        if (!a) {
+            check(false, "align element found");
+            return;
+        }
+        layoutRoot(*document, resolver, 800.0f);
+        checkNear(a->layoutY(), c.expectY, 1.0f, c.what);
+    }
+
+    // `align-self` on the item beats the container's `align-items`.
+    auto document = parseOrNull(
+        "<sui><body><div id=\"row\"><div id=\"a\"></div></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #row { display: flex; width: 400px; height: 200px; align-items: flex-start }"
+        "#a { width: 100px; height: 20px; align-self: flex-end }"));
+    Element* a = document->getElementById("a");
+    if (!a) {
+        return;
+    }
+    layoutRoot(*document, resolver, 800.0f);
+    checkNear(a->layoutY(), 180.0f, 1.0f, "align-self overrides align-items");
+}
+
+void testFlexWrap() {
+    // Four 200px items in a 500px row wrap onto two lines of two.
+    auto document = parseOrNull(
+        "<sui><body><div id=\"row\"><div id=\"a\"></div><div id=\"b\"></div>"
+        "<div id=\"c\"></div><div id=\"d\"></div></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #row { display: flex; flex-wrap: wrap; width: 500px }"
+        "#a, #b, #c, #d { width: 200px; height: 30px }"));
+    layoutRoot(*document, resolver, 800.0f);
+    Element* row = document->getElementById("row");
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    Element* c = document->getElementById("c");
+    Element* d = document->getElementById("d");
+    if (!row || !a || !b || !c || !d) {
+        check(false, "wrap elements found");
+        return;
+    }
+    checkNear(b->layoutX(), 200.0f, 0.5f, "the second item stays on the first line");
+    // The third would end at 600px, past the 500px row, so it starts a new line.
+    checkNear(c->layoutX(), 0.0f, 0.5f, "a wrapping item returns to the cross start");
+    checkNear(c->layoutY(), 30.0f, 0.5f, "the new line sits below the first");
+    checkNear(d->layoutX(), 200.0f, 0.5f, "the fourth continues on the second line");
+    checkNear(row->layoutHeight(), 60.0f, 0.5f, "the container is as tall as both lines");
+
+    // Without wrapping the same items overflow instead of stacking.
+    auto document2 = parseOrNull(
+        "<sui><body><div id=\"row\"><div id=\"a\"></div><div id=\"c\"></div>"
+        "</div></body></sui>");
+    if (!document2) {
+        return;
+    }
+    sui::StyleResolver resolver2;
+    resolver2.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #row { display: flex; width: 500px }"
+        "#a, #c { width: 200px; height: 30px }"));
+    layoutRoot(*document2, resolver2, 800.0f);
+    Element* a2 = document2->getElementById("a");
+    Element* c2 = document2->getElementById("c");
+    if (!a2 || !c2) {
+        return;
+    }
+    checkNear(c2->layoutY(), 0.0f, 0.5f, "a no-wrap container keeps every item on one line");
+    checkNear(c2->layoutX(), 200.0f, 0.5f, "a no-wrap container lets its items overflow");
+}
+
+void testFlexReverseDirections() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"row\"><div id=\"a\"></div><div id=\"b\"></div>"
+        "</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #row { display: flex; flex-direction: row-reverse; width: 400px }"
+        "#a { width: 100px; height: 10px } #b { width: 100px; height: 10px }"));
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    if (!a || !b) {
+        check(false, "row-reverse elements found");
+        return;
+    }
+    layoutRoot(*document, resolver, 800.0f);
+    // The first item ends up at the far end, the second before it.
+    checkNear(a->layoutX(), 300.0f, 0.5f, "row-reverse puts the first item at the end");
+    checkNear(b->layoutX(), 200.0f, 0.5f, "the second item precedes it");
+
+    // column-reverse stacks upward from the bottom of a fixed-height container.
+    auto document2 = parseOrNull(
+        "<sui><body><div id=\"col\"><div id=\"a\"></div><div id=\"b\"></div>"
+        "</div></body></sui>");
+    if (!document2) {
+        return;
+    }
+    sui::StyleResolver resolver2;
+    resolver2.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #col { display: flex; flex-direction: column-reverse; height: 300px }"
+        "#a { height: 50px } #b { height: 50px }"));
+    Element* a2 = document2->getElementById("a");
+    Element* b2 = document2->getElementById("b");
+    if (!a2 || !b2) {
+        return;
+    }
+    layoutRoot(*document2, resolver2, 800.0f);
+    checkNear(a2->layoutY(), 250.0f, 0.5f,
+              "column-reverse puts the first item at the bottom");
+    checkNear(b2->layoutY(), 200.0f, 0.5f, "the second item sits above it");
+}
+
+void testFlexItemMarginsAndPadding() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"row\"><div id=\"a\"></div><div id=\"b\"></div>"
+        "</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #row { display: flex; width: 400px }"
+        "#a { width: 100px; height: 10px; margin-left: 20px }"
+        "#b { width: 100px; height: 10px }"));
+    layoutRoot(*document, resolver, 800.0f);
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    if (!a || !b) {
+        check(false, "margin elements found");
+        return;
+    }
+    // A margin pushes the item along the main axis and takes room of its own.
+    checkNear(a->layoutX(), 20.0f, 0.5f, "a margin offsets the item from the line start");
+    checkNear(b->layoutX(), 120.0f, 0.5f, "the margin is included in the item's footprint");
+
+    // Padding is inside the item, so it must not move the next item.
+    auto document2 = parseOrNull(
+        "<sui><body><div id=\"row\"><div id=\"a\"></div><div id=\"b\"></div>"
+        "</div></body></sui>");
+    if (!document2) {
+        return;
+    }
+    sui::StyleResolver resolver2;
+    resolver2.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #row { display: flex; width: 400px }"
+        "#a { width: 100px; height: 10px; padding: 5px }"
+        "#b { width: 100px; height: 10px }"));
+    Element* a2 = document2->getElementById("a");
+    Element* b2 = document2->getElementById("b");
+    if (!a2 || !b2) {
+        return;
+    }
+    layoutRoot(*document2, resolver2, 800.0f);
+    checkNear(b2->layoutX(), 110.0f, 0.5f,
+              "padding adds to the item's outer width, moving the next one");
+    checkNear(a2->layoutWidth(), 110.0f, 0.5f, "the padded item is wider by its padding");
+}
+
+void testFlexMinMaxClamp() {
+    // The items ask for 300px each in a 400px row, so something has to give. A
+    // min-width stops that from going too far.
+    auto document = parseOrNull(
+        "<sui><body><div id=\"row\"><div id=\"a\"></div><div id=\"b\"></div>"
+        "</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #row { display: flex; width: 400px }"
+        "#a { flex: 1; min-width: 250px } #b { flex: 1 }"));
+    layoutRoot(*document, resolver, 800.0f);
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    if (!a || !b) {
+        check(false, "min-width elements found");
+        return;
+    }
+    checkNear(a->layoutWidth(), 250.0f, 0.5f, "min-width stops an item shrinking further");
+    checkNear(b->layoutWidth(), 150.0f, 0.5f, "the other item absorbs the shortfall");
+}
+
+void testFlexInlineFlexShrinks() {
+    // `inline-flex` is a flex container that sits in the inline flow, so it must
+    // size itself to its contents rather than filling the line.
+    auto document = parseOrNull(
+        "<sui><body><p id=\"line\">before <span id=\"f\"><span id=\"a\"></span>"
+        "<span id=\"b\"></span></span> after</p></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #f { display: inline-flex; gap: 10px }"
+        "#a { width: 60px; height: 20px } #b { width: 60px; height: 20px }"));
+    layoutRoot(*document, resolver, 800.0f);
+    Element* f = document->getElementById("f");
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    if (!f || !a || !b) {
+        check(false, "inline-flex elements found");
+        return;
+    }
+    checkNear(f->layoutWidth(), 130.0f, 0.5f,
+              "inline-flex shrinks to its items plus the gap");
+    checkNear(b->layoutX() - a->layoutX(), 70.0f, 0.5f,
+              "inline-flex lays its items out as a row");
+}
+
+void testFlexPropertyParsing() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"a\"></div><div id=\"b\"></div><div id=\"c\"></div>"
+        "<div id=\"d\"></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#a { display: flex; flex-direction: column-reverse; flex-wrap: wrap-reverse; "
+        "justify-content: space-evenly; align-items: baseline; gap: 7px }"
+        "#b { display: inline-flex }"
+        "#c { flex: 2 0 50px }"
+        "#d { flex: none }"));
+    auto value = [&](const char* id, const char* property) {
+        Element* el = document->getElementById(id);
+        return el ? sui::StyleResolver::propertyValue(resolver.resolve(*el), property) : "";
+    };
+    check(value("a", "display") == "flex", "display: flex parses");
+    check(value("b", "display") == "inline-flex", "display: inline-flex parses");
+    check(value("a", "gap") == "", "gap has no computed-value form yet");
+    check(value("a", "flex-direction") == "column-reverse",
+          "flex-direction reads back");
+    check(value("a", "justify-content") == "space-evenly", "justify-content reads back");
+    check(value("a", "align-items") == "baseline", "align-items reads back");
+    check(value("a", "flex-wrap") == "wrap-reverse", "flex-wrap reads back");
+
+    Element* c = document->getElementById("c");
+    if (c) {
+        const auto s = resolver.resolve(*c);
+        checkNear(s.flex.grow, 2.0f, 0.01f, "the flex shorthand sets grow");
+        checkNear(s.flex.shrink, 0.0f, 0.01f, "the flex shorthand sets shrink");
+        checkNear(s.flex.basis.resolve(400.0f, 16.0f, 16.0f), 50.0f, 0.01f,
+                  "the flex shorthand sets basis");
+    }
+    Element* d = document->getElementById("d");
+    if (d) {
+        const auto s = resolver.resolve(*d);
+        checkNear(s.flex.grow, 0.0f, 0.01f, "flex: none does not grow");
+        checkNear(s.flex.shrink, 0.0f, 0.01f, "flex: none does not shrink");
+    }
+}
+
+void testFlexIsBlockLevel() {
+    // `display: flex` puts the box in the block formatting context, so a flex
+    // container sits on its own line and its sibling lands below it. Only
+    // `inline-flex` behaves like an inline-level box.
+    auto document = parseOrNull(
+        "<sui><body><div id=\"row\"><div id=\"a\"></div></div>"
+        "<div id=\"after\"></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #row { display: flex; width: 200px; height: 50px }"
+        "#a { width: 20px; height: 20px } #after { height: 30px }"));
+    layoutRoot(*document, resolver, 800.0f);
+    Element* row = document->getElementById("row");
+    Element* after = document->getElementById("after");
+    if (!row || !after) {
+        check(false, "flex block-level elements found");
+        return;
+    }
+    checkNear(row->layoutY(), 0.0f, 0.5f, "a flex container starts a new block");
+    checkNear(after->layoutY(), 50.0f, 0.5f,
+              "the block after a flex container starts below it");
+    checkNear(after->layoutWidth(), 800.0f, 0.5f,
+              "the block after a flex container still fills the parent");
+}
+
+void testFlexNestedContainer() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"outer\"><div id=\"mid\"><div id=\"a\"></div>"
+        "<div id=\"b\"></div></div><div id=\"side\"></div></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #outer { display: flex; width: 500px }"
+        "#mid { display: flex; flex: 2 } #side { flex: 1 }"
+        "#a { flex: 1; height: 10px } #b { flex: 1; height: 10px }"));
+    layoutRoot(*document, resolver, 800.0f);
+    Element* mid = document->getElementById("mid");
+    Element* side = document->getElementById("side");
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    if (!mid || !side || !a || !b) {
+        check(false, "nested flex elements found");
+        return;
+    }
+    checkNear(mid->layoutWidth(), 333.33f, 1.0f, "the first item takes two parts of the row");
+    checkNear(side->layoutX(), 333.33f, 1.0f, "the second item follows it");
+    // Inside `mid` the space is split again between its two children.
+    checkNear(b->layoutX() - a->layoutX(), 166.67f, 1.0f,
+              "a nested flex container splits its own share");
+}
+
 }  // namespace
 
 int main() {
@@ -655,6 +1222,21 @@ int main() {
     testDefaultStyles();
     testCommentsInsideDeclarationBlocks();
     testUnitsEndToEnd();
+    testFlexRowBasics();
+    testFlexColumn();
+    testFlexGrowAndShrink();
+    testFlexBasisAndShrinkZero();
+    testFlexGap();
+    testJustifyContent();
+    testFlexAlignItems();
+    testFlexWrap();
+    testFlexReverseDirections();
+    testFlexItemMarginsAndPadding();
+    testFlexMinMaxClamp();
+    testFlexInlineFlexShrinks();
+    testFlexPropertyParsing();
+    testFlexIsBlockLevel();
+    testFlexNestedContainer();
     testLengthUnits();
     testAbsoluteAndKeywordUnits();
     testFontRelativeSizes();

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <string>
 #include <string_view>
 
@@ -13,7 +14,9 @@ namespace sui {
 namespace {
 
 bool isBlockLevel(const ComputedStyle& s) {
-    return s.display == ComputedStyle::Block;
+    // CSS puts `display: flex` in the block formatting context; only
+    // `inline-flex` behaves like an inline-level box.
+    return s.display == ComputedStyle::Block || s.display == ComputedStyle::Flex;
 }
 
 // CSS clamps by max-* first and then by min-*, so min-width and min-height win
@@ -189,15 +192,479 @@ private:
         return width;
     }
 
+    // The natural content size on one axis, used as a flex item's automatic basis.
+    float measureNatural(Element& el, const ComputedStyle& s, bool row) {
+        float width = 0.0f;
+        const float height = layoutContents(el, s, usedBox(s, kUnbounded), kUnbounded, 0.0f,
+                                            0.0f, width);
+        return row ? width : height;
+    }
+
+    // Lays out `el` with a style the caller has already decided, rather than the
+    // one the cascade produces. Flex sizing needs this: the algorithm picks the
+    // item's main size, and the item has to lay out at that size.
+    void runWith(Element& el, const ComputedStyle& sized, float availableWidth, float originX,
+                 float originY) {
+        const UsedBox box = usedBox(sized, availableWidth);
+        el.clearTextRuns();
+        if (sized.display == ComputedStyle::None || !sized.visible) {
+            el.setLayoutX(originX);
+            el.setLayoutY(originY);
+            el.setLayoutWidth(0.0f);
+            el.setLayoutHeight(0.0f);
+            return;
+        }
+        const float contentX =
+            originX + box.margin.left + box.borderWidth.left + box.padding.left;
+        const float contentY = originY + box.margin.top + box.borderWidth.top + box.padding.top;
+
+        float width = 0.0f;
+        float height = layoutContents(el, sized, box, availableWidth, contentX, contentY, width);
+        if (box.height > 0.0f) {
+            height = box.height;
+        }
+        width = applyMinMax(width, box);
+        el.setLayoutX(originX + box.margin.left);
+        el.setLayoutY(originY + box.margin.top);
+        el.setLayoutWidth(width + horizontalEdges(box.padding, box.borderWidth));
+        el.setLayoutHeight(height + verticalEdges(box.padding, box.borderWidth));
+    }
+
     float layoutContents(Element& el, const ComputedStyle& s, const UsedBox& box,
                          float availableWidth, float contentX, float contentY,
                          float& outWidth) {
+        if (s.isFlexContainer()) {
+            return layoutFlexContainer(el, s, box, availableWidth, contentX, contentY,
+                                       outWidth);
+        }
         if (hasBlockChild(el)) {
             float height = 0.0f;
             layoutBlockContainer(el, box, availableWidth, contentX, contentY, height, outWidth);
             return height;
         }
         return layoutInlineContainer(el, s, box, availableWidth, contentX, contentY, outWidth);
+    }
+
+    // Flexbox. A container lays its children out along one axis; leftover space goes
+    // to items that can grow, and the items are aligned on the other axis. The main
+    // axis is the inline axis for a row and the block axis for a column.
+    struct FlexItem {
+        Element* el = nullptr;
+        ComputedStyle style;
+        UsedBox box;
+        float mainSize = 0.0f;  // content box along the main axis
+        float crossSize = 0.0f; // cross extent, borders included
+        float mainPos = 0.0f;   // where it lands, offsets included
+        float crossPos = 0.0f;
+        // Set when min/max pinned the item, so it stops absorbing free space.
+        bool frozen = false;
+    };
+
+    // One line's worth of items, sized and placed independently of other lines.
+    struct FlexLine {
+        std::vector<std::size_t> items;
+        float crossSize = 0.0f;
+        float crossPos = 0.0f;
+    };
+
+    // Which edge list belongs to the main and cross axes of this container.
+    static float mainChrome(const UsedBox& b, bool row) {
+        return row ? horizontalEdges(b.padding, b.borderWidth)
+                   : verticalEdges(b.padding, b.borderWidth);
+    }
+    static float crossChrome(const UsedBox& b, bool row) {
+        return row ? verticalEdges(b.padding, b.borderWidth)
+                   : horizontalEdges(b.padding, b.borderWidth);
+    }
+    // Margins measured along one axis, excluding padding and border.
+    static float mainMargins(const UsedBox& b, bool row) {
+        return row ? horizontalEdges(b.margin, {})
+                   : verticalEdges(b.margin, {});
+    }
+    static float crossMargins(const UsedBox& b, bool row) {
+        return row ? verticalEdges(b.margin, {})
+                   : horizontalEdges(b.margin, {});
+    }
+
+    // min/max clamp on whichever axis this container's main axis is. CSS clamps by
+    // max-* first and then by min-*, so min-* wins when they conflict.
+    float clampMain(float value, const UsedBox& box, bool row) const {
+        const float min = row ? box.minWidth : box.minHeight;
+        const float max = row ? box.maxWidth : box.maxHeight;
+        if (max > 0.0f) {
+            value = std::min(value, max);
+        }
+        if (min > 0.0f) {
+            value = std::max(value, min);
+        }
+        return std::max(0.0f, value);
+    }
+
+    // Hands any space still unclaimed — or still oversubscribed after a clamp — to
+    // the items that are not frozen. CSS calls this the second flexing pass.
+    static void redistribute(std::vector<FlexItem>& items, const FlexLine& l, bool row,
+                             float gap, float mainAvailable) {
+        float occupied = gap * static_cast<float>(l.items.size() - 1);
+        for (const std::size_t idx : l.items) {
+            const FlexItem& item = items[idx];
+            occupied += item.mainSize + mainChrome(item.box, row) +
+                        mainMargins(item.box, row);
+        }
+        const float freeSpace = mainAvailable - occupied;
+        if (std::fabs(freeSpace) <= 0.5f) {
+            return;
+        }
+        if (freeSpace > 0.0f) {
+            float grow = 0.0f;
+            for (const std::size_t idx : l.items) {
+                if (!items[idx].frozen) {
+                    grow += items[idx].style.flex.grow;
+                }
+            }
+            if (grow <= 0.0f) {
+                return;
+            }
+            for (const std::size_t idx : l.items) {
+                if (!items[idx].frozen) {
+                    items[idx].mainSize +=
+                        freeSpace * (items[idx].style.flex.grow / grow);
+                }
+            }
+            return;
+        }
+        float shrinkBase = 0.0f;
+        for (const std::size_t idx : l.items) {
+            if (!items[idx].frozen) {
+                shrinkBase += items[idx].mainSize * items[idx].style.flex.shrink;
+            }
+        }
+        if (shrinkBase <= 0.0f) {
+            return;
+        }
+        for (const std::size_t idx : l.items) {
+            if (items[idx].frozen) {
+                continue;
+            }
+            const float share =
+                items[idx].mainSize * items[idx].style.flex.shrink / shrinkBase;
+            items[idx].mainSize = std::max(0.0f, items[idx].mainSize + freeSpace * share);
+        }
+    }
+
+    // The items a flex container positions: its visual children, in order. Text
+    // nodes between them are only whitespace and are dropped.
+    std::vector<Element*> flexChildren(Element& el) const {
+        std::vector<Element*> out;
+        for (const auto& child : el.children()) {
+            if (child && !child->isTextNode() && laidOut(*child)) {
+                out.push_back(child.get());
+            }
+        }
+        return out;
+    }
+
+    float layoutFlexContainer(Element& el, const ComputedStyle& s, const UsedBox& box,
+                              float availableWidth, float contentX, float contentY,
+                              float& outWidth) {
+        const bool row = s.flexDirection == ComputedStyle::Row ||
+                         s.flexDirection == ComputedStyle::RowReverse;
+        // A container with a definite main-axis size hands the items exactly that
+        // much room; an auto one shares whatever the parent offered.
+        const float mainAvailable =
+            row ? (box.width > 0.0f ? box.width
+                                    : std::max(0.0f, availableWidth - box.horizontalChrome()))
+                : (box.height > 0.0f
+                       ? box.height
+                       : std::max(0.0f, viewportHeight_ -
+                                            verticalEdges(box.padding, box.borderWidth)));
+        const float crossDefinite = row ? box.height : box.width;
+        const float crossAvailable =
+            crossDefinite > 0.0f
+                ? crossDefinite
+                : (row ? std::max(0.0f, viewportHeight_ -
+                                             verticalEdges(box.padding, box.borderWidth))
+                       : std::max(0.0f, availableWidth - box.horizontalChrome()));
+        const float gap = std::max(0.0f, s.gap);
+
+        std::vector<FlexItem> items;
+        items.reserve(8);
+        for (Element* child : flexChildren(el)) {
+            FlexItem item;
+            item.el = child;
+            item.style = resolver_.resolve(*child);
+            item.box = usedBox(item.style, row ? availableWidth : viewportHeight_);
+            items.push_back(item);
+        }
+        if (items.empty()) {
+            outWidth = row ? box.width : box.height;
+            return box.height > 0.0f ? box.height : 0.0f;
+        }
+
+        // 1. Resolve the flexible length of every item. `flex-basis` wins; then the
+        //    item's own main-axis size; then the size its content naturally wants.
+        for (FlexItem& item : items) {
+            float basis = 0.0f;
+            if (item.style.flex.basis.isAuto()) {
+                basis = row ? item.box.width : item.box.height;
+                // A zero basis is only a signal to measure when it came from `auto`:
+                // `flex: 1` sets it to a deliberate zero, and content must not
+                // override that.
+                if (basis <= 0.0f) {
+                    item.el->clearTextRuns();
+                    basis = measureNatural(*item.el, item.style, row);
+                    item.el->clearTextRuns();
+                }
+            } else {
+                basis = item.style.flex.basis.resolve(mainAvailable, item.style.fontSize,
+                                                      resolver_.rootFontSize());
+            }
+            item.mainSize = std::max(0.0f, basis);
+        }
+
+        // 2. Collect items into lines. A no-wrap container is always one line, and
+        //    is allowed to overflow; a wrapping one breaks before an item that would
+        //    not fit.
+        const bool wrap = s.flexWrap != ComputedStyle::NoWrap;
+        std::vector<FlexLine> lines;
+        FlexLine line;
+        float used = 0.0f;
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            const float outer =
+                items[i].mainSize + mainChrome(items[i].box, row) +
+                mainMargins(items[i].box, row);
+            if (wrap && !line.items.empty() && used + gap + outer > mainAvailable + 0.5f) {
+                lines.push_back(line);
+                line = FlexLine{};
+                used = 0.0f;
+            }
+            if (!line.items.empty()) {
+                used += gap;
+            }
+            used += outer;
+            line.items.push_back(i);
+        }
+        lines.push_back(line);
+
+        // 3. Resolve each line's flexible lengths: grow or shrink into the free
+        //    space, then clamp by min/max.
+        for (FlexLine& l : lines) {
+            const float gaps = gap * static_cast<float>(l.items.size() - 1);
+            float outer = gaps;
+            float grow = 0.0f;
+            float shrinkBase = 0.0f;
+            for (const std::size_t idx : l.items) {
+                const FlexItem& item = items[idx];
+                outer += item.mainSize + mainChrome(item.box, row) + mainMargins(item.box, row);
+                grow += item.style.flex.grow;
+                shrinkBase += item.mainSize * item.style.flex.shrink;
+            }
+            const float freeSpace = mainAvailable - outer;
+            if (freeSpace > 0.5f && grow > 0.0f) {
+                for (const std::size_t idx : l.items) {
+                    items[idx].mainSize += freeSpace * (items[idx].style.flex.grow / grow);
+                }
+            } else if (freeSpace < -0.5f && shrinkBase > 0.0f) {
+                // Shrinking is weighted by base size, so a wider item gives up more
+                // for the same shrink factor.
+                for (const std::size_t idx : l.items) {
+                    const float share =
+                        items[idx].mainSize * items[idx].style.flex.shrink / shrinkBase;
+                    items[idx].mainSize =
+                        std::max(0.0f, items[idx].mainSize + freeSpace * share);
+                }
+            }
+            // min/max clamp after flexing, as CSS requires. An item the clamp
+            // actually moved is frozen: it can no longer give or take room, so the
+            // remaining items settle the difference.
+            for (const std::size_t idx : l.items) {
+                const float clamped =
+                    clampMain(items[idx].mainSize, items[idx].box, row);
+                items[idx].frozen = std::fabs(clamped - items[idx].mainSize) > 0.5f;
+                items[idx].mainSize = clamped;
+            }
+            redistribute(items, l, row, gap, mainAvailable);
+        }
+
+        // 4. Size each line on the cross axis. An item's cross size is its own
+        //    cross-axis length, or for an auto one the height/width its content
+        //    turned out to need once laid out.
+        for (FlexLine& l : lines) {
+            l.crossSize = 0.0f;
+            for (const std::size_t idx : l.items) {
+                FlexItem& item = items[idx];
+                const float natural = row ? item.box.height : item.box.width;
+                item.crossSize = natural;
+                l.crossSize = std::max(l.crossSize,
+                                       natural + crossChrome(item.box, row) +
+                                           crossMargins(item.box, row));
+            }
+        }
+
+        // A container with a definite cross size stretches its single line to fill
+        // it, which is what makes a row of cards fill its panel. Without a definite
+        // cross size the line is only as tall as its tallest item.
+        if (lines.size() == 1 && crossDefinite > 0.0f &&
+            (row ? s.alignContent : s.alignItems) == ComputedStyle::AlignStretch) {
+            lines[0].crossSize = crossAvailable;
+        }
+
+        // 5. Stack the lines on the cross axis.
+        float crossCursor = 0.0f;
+        for (FlexLine& l : lines) {
+            l.crossPos = crossCursor;
+            crossCursor += l.crossSize + gap;
+        }
+        if (!lines.empty()) {
+            crossCursor -= gap;
+        }
+        applyWrapReverse(s, lines, crossAvailable);
+
+        // 6. Place each item on the main axis, honouring `justify-content`.
+        for (FlexLine& l : lines) {
+            const float gaps = gap * static_cast<float>(l.items.size() - 1);
+            float outer = gaps;
+            for (const std::size_t idx : l.items) {
+                const FlexItem& item = items[idx];
+                outer += item.mainSize + mainChrome(item.box, row) + mainMargins(item.box, row);
+            }
+            // Recomputed from the final sizes, because growing changed the total.
+            const float freeSpace = mainAvailable - outer;
+            const float n = static_cast<float>(l.items.size());
+            float before = 0.0f;
+            float between = gap;
+            switch (s.justifyContent) {
+                case ComputedStyle::AlignEnd:
+                    before = freeSpace;
+                    break;
+                case ComputedStyle::AlignCenter:
+                    before = freeSpace * 0.5f;
+                    break;
+                case ComputedStyle::AlignSpaceBetween:
+                    if (n > 1.0f) {
+                        between = gap + std::max(0.0f, freeSpace) / (n - 1.0f);
+                    }
+                    break;
+                case ComputedStyle::AlignSpaceAround:
+                    // Each item gets an equal slice, half of it on either side.
+                    before = std::max(0.0f, freeSpace) / n * 0.5f;
+                    between = gap + std::max(0.0f, freeSpace) / n;
+                    break;
+                case ComputedStyle::AlignSpaceEvenly:
+                    before = std::max(0.0f, freeSpace) / (n + 1.0f);
+                    between = gap + std::max(0.0f, freeSpace) / (n + 1.0f);
+                    break;
+                default:
+                    break;
+            }
+
+            // A reversed direction lays the same run out from the far end, so the
+            // natural order is computed first and then mirrored.
+            const bool reverse = s.flexDirection == ComputedStyle::RowReverse ||
+                                 s.flexDirection == ComputedStyle::ColumnReverse;
+            float cursor = before;
+            std::vector<float> natural;
+            natural.reserve(l.items.size());
+            for (std::size_t k = 0; k < l.items.size(); ++k) {
+                natural.push_back(cursor);
+                const FlexItem& item = items[l.items[k]];
+                cursor += item.mainSize + mainChrome(item.box, row) +
+                          mainMargins(item.box, row);
+                if (k + 1 < l.items.size()) {
+                    cursor += between;
+                }
+            }
+            for (std::size_t k = 0; k < l.items.size(); ++k) {
+                FlexItem& item = items[l.items[k]];
+                const float start = row ? item.box.margin.left : item.box.margin.top;
+                const float end = row ? item.box.margin.right : item.box.margin.bottom;
+                const float pos = reverse ? mainAvailable -
+                                                (natural[k] + item.mainSize + end) -
+                                                mainChrome(item.box, row)
+                                          : natural[k];
+                item.mainPos = pos + start;
+            }
+        }
+
+        // 7. Place each item on the cross axis, honouring `align-self` over
+        //    `align-items`, and lay it out at the size decided above.
+        float maxMain = 0.0f;
+        float maxCross = 0.0f;
+        for (FlexLine& l : lines) {
+            for (const std::size_t idx : l.items) {
+                FlexItem& item = items[idx];
+                const ComputedStyle::FlexAlign align =
+                    item.style.alignSelf != ComputedStyle::AlignStretch
+                        ? item.style.alignSelf
+                        : s.alignItems;
+                // Stretch fills the line only when the item has no definite size on
+                // the cross axis: its height in a row, its width in a column.
+                float cross = crossMargins(item.box, row) + crossChrome(item.box, row) +
+                              item.crossSize;
+                const float authored = row ? item.box.height : item.box.width;
+                if (align == ComputedStyle::AlignStretch && authored <= 0.0f) {
+                    cross = l.crossSize;
+                }
+                const float freeSpace = std::max(0.0f, l.crossSize - cross);
+                if (align == ComputedStyle::AlignEnd) {
+                    item.crossPos = l.crossPos + freeSpace;
+                } else if (align == ComputedStyle::AlignCenter) {
+                    item.crossPos = l.crossPos + freeSpace * 0.5f;
+                } else {
+                    item.crossPos = l.crossPos;
+                }
+
+                // `mainSize` and `cross` are already content-box lengths, since
+                // resolveBox reduced the authored sizes that way, so they become
+                // the item's width and height directly. The margins are cleared
+                // because the algorithm already spent them in `mainPos`/`crossPos`,
+                // and `run` would otherwise add them a second time.
+                ComputedStyle sized = item.style;
+                sized.width = Length(std::max(0.0f, row ? item.mainSize : cross));
+                sized.height = Length(std::max(0.0f, row ? cross : item.mainSize));
+                sized.margin = {};
+
+                // `mainPos` and `crossPos` already have the start margin added, so
+                // the item is placed straight from them.
+                const float x = contentX + (row ? item.mainPos : item.crossPos);
+                const float y = contentY + (row ? item.crossPos : item.mainPos);
+                runWith(*item.el, sized, std::max(0.0f, sized.width.resolve()), x, y);
+                // How far the items reach along each axis. For a column the main
+                // extent is a height and the cross one a width.
+                maxMain = std::max(maxMain, item.mainPos +
+                                                 (row ? item.el->layoutWidth()
+                                                      : item.el->layoutHeight()) +
+                                                 mainMargins(item.box, row));
+                maxCross = std::max(maxCross, item.crossPos + item.el->layoutHeight() +
+                                                 crossMargins(item.box, row));
+            }
+        }
+
+        // `maxMain` is how far the items reach along the main axis and `maxCross`
+        // along the cross one, so each maps back to a different physical axis. A
+        // container with no authored size on that axis is as large as its content,
+        // which is what makes an `inline-flex` box shrink to fit its items.
+        outWidth = box.width > 0.0f ? box.width : (row ? maxMain : maxCross);
+        return box.height > 0.0f ? box.height : (row ? maxCross : maxMain);
+    }
+
+    // `wrap-reverse` stacks the lines from the far end of the cross axis instead
+    // of the near one. Only the line offsets change; items keep their place inside
+    // their line.
+    void applyWrapReverse(const ComputedStyle& s, std::vector<FlexLine>& lines,
+                          float crossAvailable) {
+        if (s.flexWrap != ComputedStyle::WrapReverse) {
+            return;
+        }
+        float total = 0.0f;
+        for (const FlexLine& line : lines) {
+            total += line.crossSize;
+        }
+        const float gaps = std::max(0.0f, s.gap) * static_cast<float>(lines.size() - 1);
+        float cursor = std::max(0.0f, crossAvailable - total - gaps);
+        for (FlexLine& line : lines) {
+            line.crossPos = cursor;
+            cursor += line.crossSize + std::max(0.0f, s.gap);
+        }
     }
 
     // Every inline descendant of `el` flows into one line-breaking context, so
