@@ -2,26 +2,837 @@
 
 #include <SDL3/SDL.h>
 
+#include <algorithm>
+#include <cmath>
+#include <utility>
+
 namespace sui {
+namespace {
+
+// One sample per 90 degrees of arc: smooth at text sizes without generating more
+// vertices than the eye can pick out.
+constexpr int kArcSamples = 8;
+
+// A dash pattern of three times the stroke width, which is what CSS's own diagrams
+// use and reads correctly at any scale.
+constexpr float kDashMultiplier = 3.0f;
+
+SDL_FColor toFColor(const Color& c) {
+    return SDL_FColor{static_cast<float>(c.r) / 255.0f, static_cast<float>(c.g) / 255.0f,
+                      static_cast<float>(c.b) / 255.0f, static_cast<float>(c.a) / 255.0f};
+}
+
+Color lerp(Color a, Color b, float t) {
+    const auto channel = [t](std::uint8_t from, std::uint8_t to) {
+        return static_cast<std::uint8_t>(std::lround(from + (to - from) * t));
+    };
+    return Color{channel(a.r, b.r), channel(a.g, b.g), channel(a.b, b.b), channel(a.a, b.a)};
+}
+
+// The colour a gradient shows at `t`, holding the end colours past the ends. CSS
+// says stops are sorted, so the list is searched rather than assumed ordered.
+Color sampleStops(const std::vector<GradientStop>& stops, float t) {
+    if (stops.empty()) {
+        return Color{0, 0, 0, 0};
+    }
+    if (stops.size() == 1 || t <= stops.front().offset) {
+        return stops.front().color;
+    }
+    if (t >= stops.back().offset) {
+        return stops.back().color;
+    }
+    for (std::size_t i = 1; i < stops.size(); ++i) {
+        if (t > stops[i].offset) {
+            continue;
+        }
+        const GradientStop& lo = stops[i - 1];
+        const GradientStop& hi = stops[i];
+        const float span = hi.offset - lo.offset;
+        // Two stops at the same offset are a hard edge; the later one wins.
+        return span <= 0.0f ? hi.color : lerp(lo.color, hi.color, (t - lo.offset) / span);
+    }
+    return stops.back().color;
+}
+
+// Where a point sits along a gradient line, normalised so 0 is the start and 1 the
+// end. A degenerate line collapses to its first colour.
+float projectLinear(const LinearGradient& g, float x, float y) {
+    const float dx = g.x2 - g.x1;
+    const float dy = g.y2 - g.y1;
+    const float lenSq = dx * dx + dy * dy;
+    if (lenSq <= 0.0f) {
+        return 0.0f;
+    }
+    return ((x - g.x1) * dx + (y - g.y1) * dy) / lenSq;
+}
+
+float clamp01(float v) {
+    return std::clamp(v, 0.0f, 1.0f);
+}
+
+// Where a point sits on a radial gradient, 0 at the focus and 1 past the ending
+// shape. The gradient line runs from the focus through the centre and on to the
+// far edge, so a point's position is where its own ray crosses that line: the
+// distance from the focus divided by the ray's length. Scaling into a space where
+// the ending shape is a unit circle makes the far edge sit at 1, and makes a
+// concentric gradient exact rather than merely close.
+float radialPosition(const RadialGradient& g, float x, float y) {
+    const float rx = g.radiusX > 0.0f ? g.radiusX : 1.0f;
+    const float ry = g.radiusY > 0.0f ? g.radiusY : 1.0f;
+    // Point and focus, both relative to the centre and in the normalised space.
+    const float px = (x - g.cx) / rx;
+    const float py = (y - g.cy) / ry;
+    const float fx = (g.focalX - g.cx) / rx;
+    const float fy = (g.focalY - g.cy) / ry;
+    const float mx = px - fx;
+    const float my = py - fy;
+
+    const float distance = std::hypot(fx, fy);
+    if (distance <= 1e-6f) {
+        // Concentric: the position is just how far out the point is.
+        return clamp01(std::hypot(mx, my));
+    }
+    // Solve |P - Q| = lambda * |F - Q| for Q on the axis at F + t * u, which is the
+    // definition CSS gives: every point shares one circle through the focus.
+    const float ux = fx / distance;
+    const float uy = fy / distance;
+    const float along = mx * ux + my * uy;
+    const float lambda = distance + 1.0f;
+    const float a = 1.0f - lambda * lambda;
+    const float b = along * along - a * (mx * mx + my * my);
+    if (b <= 0.0f) {
+        return clamp01(along / lambda);
+    }
+    const float root = std::sqrt(b);
+    // `a` is negative for every lambda the spec allows, so the root that puts the
+    // crossing in front of the focus is the one that subtracts it; the other lands
+    // behind and would make the gradient run backwards.
+    const float t = (along - root) / a;
+    return clamp01(t / lambda);
+}
+
+// Which side of a directed edge is inside a convex polygon. The sign is worked out
+// from the polygon's own winding so the clip does not care how the outline was built.
+float insideSign(const std::vector<SDL_FPoint>& polygon) {
+    double area = 0.0;
+    for (std::size_t i = 0; i < polygon.size(); ++i) {
+        const SDL_FPoint& a = polygon[i];
+        const SDL_FPoint& b = polygon[(i + 1) % polygon.size()];
+        area += static_cast<double>(a.x) * b.y - static_cast<double>(b.x) * a.y;
+    }
+    return area >= 0.0 ? 1.0f : -1.0f;
+}
+
+bool isInside(const std::vector<SDL_FPoint>& polygon, const SDL_FPoint& p, float sign) {
+    for (std::size_t i = 0; i < polygon.size(); ++i) {
+        const SDL_FPoint& a = polygon[i];
+        const SDL_FPoint& b = polygon[(i + 1) % polygon.size()];
+        const float cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+        if (cross * sign < 0.0f) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Sutherland-Hodgman against one edge of the convex clip polygon.
+void clipToEdge(std::vector<SDL_FPoint>& subject, std::vector<SDL_FPoint>& scratch,
+                const SDL_FPoint& a, const SDL_FPoint& b, float sign) {
+    if (subject.empty()) {
+        return;
+    }
+    scratch.clear();
+    const auto inside = [&](const SDL_FPoint& p) {
+        return ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)) * sign >= 0.0f;
+    };
+    for (std::size_t i = 0; i < subject.size(); ++i) {
+        const SDL_FPoint& cur = subject[i];
+        const SDL_FPoint& next = subject[(i + 1) % subject.size()];
+        const bool curIn = inside(cur);
+        const bool nextIn = inside(next);
+        if (curIn != nextIn) {
+            // The crossing point, found by the ratio of the two signed areas.
+            const float dCur = (b.x - a.x) * (cur.y - a.y) - (b.y - a.y) * (cur.x - a.x);
+            const float dNext = (b.x - a.x) * (next.y - a.y) - (b.y - a.y) * (next.x - a.x);
+            const float t = dCur / (dCur - dNext);
+            scratch.push_back(SDL_FPoint{cur.x + (next.x - cur.x) * t, cur.y + (next.y - cur.y) * t});
+        }
+        if (nextIn) {
+            scratch.push_back(next);
+        }
+    }
+    subject.swap(scratch);
+}
+
+SDL_FPoint centroid(const std::vector<SDL_FPoint>& points) {
+    double x = 0.0;
+    double y = 0.0;
+    for (const SDL_FPoint& p : points) {
+        x += p.x;
+        y += p.y;
+    }
+    const double n = static_cast<double>(points.size());
+    return SDL_FPoint{static_cast<float>(x / n), static_cast<float>(y / n)};
+}
+
+// Points along an arc, inclusive of both ends.
+void arc(std::vector<SDL_FPoint>& out, float cx, float cy, float rx, float ry, float from,
+         float to, int samples) {
+    for (int i = 0; i <= samples; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(samples);
+        const float a = from + (to - from) * t;
+        out.push_back(SDL_FPoint{cx + std::cos(a) * rx, cy + std::sin(a) * ry});
+    }
+}
+
+}  // namespace
+
+Color withOpacity(Color color, float opacity) {
+    color.a = static_cast<std::uint8_t>(std::lround(clamp01(opacity) * color.a));
+    return color;
+}
+
+Color multiplyAlpha(Color color, float factor) {
+    color.a = static_cast<std::uint8_t>(std::lround(clamp01(factor) * color.a));
+    return color;
+}
+
+bool Radii::any() const {
+    return topLeft.x > 0.0f || topLeft.y > 0.0f || topRight.x > 0.0f || topRight.y > 0.0f ||
+           bottomRight.x > 0.0f || bottomRight.y > 0.0f || bottomLeft.x > 0.0f ||
+           bottomLeft.y > 0.0f;
+}
+
+bool Radii::uniform() const {
+    return topLeft.x == topRight.x && topLeft.x == bottomRight.x &&
+           topLeft.x == bottomLeft.x && topLeft.y == topRight.y &&
+           topLeft.y == bottomRight.y && topLeft.y == bottomLeft.y;
+}
+
+Radii Radii::all(float x, float y) {
+    Radii r;
+    r.topLeft = Corner{x, y};
+    r.topRight = Corner{x, y};
+    r.bottomRight = Corner{x, y};
+    r.bottomLeft = Corner{x, y};
+    return r;
+}
+
+Radii Radii::clamped(float width, float height) const {
+    Radii r = *this;
+    if (width <= 0.0f || height <= 0.0f) {
+        return Radii{};
+    }
+    // Each pair of corners sharing an edge must fit within it; the scale factor that
+    // achieves this is applied to every radius so the shape stays a scaled version
+    // of what was asked for rather than an arbitrary truncation.
+    const float horizontal = std::max(
+        {r.topLeft.x + r.topRight.x, r.topRight.x + r.bottomRight.x,
+         r.bottomRight.x + r.bottomLeft.x, r.bottomLeft.x + r.topLeft.x});
+    if (horizontal > 0.0f) {
+        const float f = std::min(1.0f, width / horizontal);
+        for (Corner* c : {&r.topLeft, &r.topRight, &r.bottomRight, &r.bottomLeft}) {
+            c->x *= f;
+        }
+    }
+    const float vertical = std::max({r.topLeft.y + r.bottomLeft.y, r.topLeft.y + r.topRight.y,
+                                     r.topRight.y + r.bottomRight.y,
+                                     r.bottomRight.y + r.bottomLeft.y});
+    if (vertical > 0.0f) {
+        const float f = std::min(1.0f, height / vertical);
+        for (Corner* c : {&r.topLeft, &r.topRight, &r.bottomRight, &r.bottomLeft}) {
+            c->y *= f;
+        }
+    }
+    return r;
+}
+
+Shader Shader::solid(Color color) {
+    Shader shader;
+    shader.kind_ = Kind::Solid;
+    shader.solid_ = color;
+    return shader;
+}
+
+Shader Shader::linear(const LinearGradient& gradient) {
+    Shader shader;
+    shader.kind_ = Kind::Linear;
+    shader.linear_ = gradient;
+    return shader;
+}
+
+Shader Shader::radial(const RadialGradient& gradient) {
+    Shader shader;
+    shader.kind_ = Kind::Radial;
+    shader.radial_ = gradient;
+    return shader;
+}
+
+Shader Shader::image(SDL_Texture* texture, const SDL_FRect& source,
+                     const SDL_FRect& destination, Repeat repeat, Color tint) {
+    Shader shader;
+    shader.kind_ = Kind::Image;
+    shader.texture_ = texture;
+    shader.source_ = source;
+    shader.destination_ = destination;
+    shader.repeat_ = repeat;
+    shader.tint_ = tint;
+    return shader;
+}
+
+bool Shader::needsMesh() const {
+    if (kind_ == Kind::Radial) {
+        return true;
+    }
+    // A single ramp between the two ends is a linear function of position, so the
+    // outline's corners determine the whole triangle exactly. A stop in between
+    // makes a second ramp with a different slope, and the corner interpolation would
+    // round that break off, so the edges have to be sampled as well.
+    return kind_ == Kind::Linear && linear_.stops.size() > 2;
+}
+
+float Shader::meshStep() const {
+    if (kind_ == Kind::Radial) {
+        // The error across one cell grows as the square of the step over the radius,
+        // and near the focus the field is a cone rather than a plane, so the step is
+        // kept well under the radius.
+        const float radius = std::max(radial_.radiusX, radial_.radiusY);
+        return std::clamp(radius / 14.0f, 1.0f, 12.0f);
+    }
+    // A linear ramp only bends where a stop sits, and the corners already carry the
+    // slope on either side, so a fine outline is enough.
+    return 4.0f;
+}
+
+Color Shader::colorAt(float x, float y) const {
+    switch (kind_) {
+        case Kind::Solid:
+            return solid_;
+        case Kind::Linear:
+            return sampleStops(linear_.stops, projectLinear(linear_, x, y));
+        case Kind::Radial:
+            return sampleStops(radial_.stops, radialPosition(radial_, x, y));
+        case Kind::Image:
+            return tint_;
+    }
+    return solid_;
+}
+
+std::vector<SDL_FPoint> Renderer::roundedOutline(const SDL_FRect& rect, const Radii& raw,
+                                                 int samples) {
+    std::vector<SDL_FPoint> points;
+    if (rect.w <= 0.0f || rect.h <= 0.0f) {
+        return points;
+    }
+    if (!raw.any()) {
+        points = {{rect.x, rect.y},
+                  {rect.x + rect.w, rect.y},
+                  {rect.x + rect.w, rect.y + rect.h},
+                  {rect.x, rect.y + rect.h}};
+        return points;
+    }
+    const Radii r = raw.clamped(rect.w, rect.h);
+    points.reserve(static_cast<std::size_t>(samples) * 4 + 4);
+    const float right = rect.x + rect.w;
+    const float bottom = rect.y + rect.h;
+    const float pi = static_cast<float>(M_PI);
+    // Clockwise from the top-left arc, which is the winding a triangle fan needs.
+    arc(points, rect.x + r.topLeft.x, rect.y + r.topLeft.y, r.topLeft.x, r.topLeft.y, pi,
+        pi * 1.5f, samples);
+    arc(points, right - r.topRight.x, rect.y + r.topRight.y, r.topRight.x, r.topRight.y,
+        pi * 1.5f, pi * 2.0f, samples);
+    arc(points, right - r.bottomRight.x, bottom - r.bottomRight.y, r.bottomRight.x,
+        r.bottomRight.y, 0.0f, pi * 0.5f, samples);
+    arc(points, rect.x + r.bottomLeft.x, bottom - r.bottomLeft.y, r.bottomLeft.x,
+        r.bottomLeft.y, pi * 0.5f, pi, samples);
+    return points;
+}
+
+void Renderer::setColor(const Color& color) {
+    SDL_SetRenderDrawColor(renderer_, color.r, color.g, color.b, color.a);
+}
 
 void Renderer::fillRect(const SDL_FRect& rect, const Color& color) {
-    SDL_SetRenderDrawColor(renderer_, color.r, color.g, color.b, color.a);
+    if (color.a == 0 || rect.w <= 0.0f || rect.h <= 0.0f) {
+        return;
+    }
+    setColor(color);
     SDL_RenderFillRect(renderer_, &rect);
 }
 
-void Renderer::strokeRect(const SDL_FRect& rect, const Color& color,
-                          float thickness) {
-    SDL_SetRenderDrawColor(renderer_, color.r, color.g, color.b, color.a);
+void Renderer::fillRect(const SDL_FRect& rect, const Shader& shader, const Radii& radii) {
+    if (rect.w <= 0.0f || rect.h <= 0.0f) {
+        return;
+    }
+    if (shader.isImage()) {
+        emitImageQuad(rect, shader);
+        return;
+    }
+    if (shader.isSolid() && !radii.any()) {
+        fillRect(rect, shader.colorAt(rect.x, rect.y));
+        return;
+    }
+    if (shader.isSolid() && shader.colorAt(rect.x, rect.y).a == 0) {
+        return;
+    }
+    emit(roundedOutline(rect, radii), shader);
+}
 
-    const SDL_FRect top{rect.x, rect.y, rect.w, thickness};
-    const SDL_FRect bottom{rect.x, rect.y + rect.h - thickness, rect.w, thickness};
-    const SDL_FRect left{rect.x, rect.y, thickness, rect.h};
-    const SDL_FRect right{rect.x + rect.w - thickness, rect.y, thickness, rect.h};
+void Renderer::emit(const std::vector<SDL_FPoint>& points, const Shader& shader) {
+    if (points.size() < 3) {
+        return;
+    }
+    if (const Color probe = shader.colorAt(points[0].x, points[0].y); probe.a == 0) {
+        return;
+    }
+    if (shader.needsMesh()) {
+        emitMesh(points, shader);
+        return;
+    }
+    // Every shape the engine draws is convex, so a fan from the first vertex covers
+    // it, and the corner colours then determine the whole triangle.
+    emitFan(points, shader, points[0]);
+}
 
-    SDL_RenderFillRect(renderer_, &top);
-    SDL_RenderFillRect(renderer_, &bottom);
-    SDL_RenderFillRect(renderer_, &left);
-    SDL_RenderFillRect(renderer_, &right);
+void Renderer::emitFan(const std::vector<SDL_FPoint>& outline, const Shader& shader,
+                       SDL_FPoint apex) {
+    if (outline.size() < 3) {
+        return;
+    }
+    std::vector<SDL_Vertex> vertices;
+    vertices.reserve(outline.size() + 1);
+    vertices.push_back(
+        SDL_Vertex{apex, toFColor(shader.colorAt(apex.x, apex.y)), SDL_FPoint{0.0f, 0.0f}});
+    for (const SDL_FPoint& p : outline) {
+        vertices.push_back(
+            SDL_Vertex{p, toFColor(shader.colorAt(p.x, p.y)), SDL_FPoint{0.0f, 0.0f}});
+    }
+    std::vector<int> indices;
+    indices.reserve(outline.size() * 3);
+    for (std::size_t i = 0; i < outline.size(); ++i) {
+        indices.push_back(0);
+        indices.push_back(static_cast<int>(i) + 1);
+        indices.push_back(static_cast<int>((i + 1) % outline.size()) + 1);
+    }
+    SDL_RenderGeometry(renderer_, nullptr, vertices.data(),
+                       static_cast<int>(vertices.size()), indices.data(),
+                       static_cast<int>(indices.size()));
+}
+
+void Renderer::emitRing(const std::vector<SDL_FPoint>& outer,
+                        const std::vector<SDL_FPoint>& inner, const Color& color) {
+    if (color.a == 0 || outer.size() != inner.size() || outer.size() < 3) {
+        return;
+    }
+    // Both outlines were sampled at the same arc angles, so the ring is a strip
+    // between corresponding points. The walk has to wrap past the last pair or the
+    // side where the outline closes on itself is left bare.
+    std::vector<SDL_Vertex> vertices;
+    const std::size_t pairs = outer.size() + 1;  // the extra pair closes the loop
+    vertices.reserve(pairs * 2);
+    for (std::size_t i = 0; i < pairs; ++i) {
+        const std::size_t j = i % outer.size();
+        vertices.push_back(SDL_Vertex{outer[j], toFColor(color), SDL_FPoint{0.0f, 0.0f}});
+        vertices.push_back(SDL_Vertex{inner[j], toFColor(color), SDL_FPoint{0.0f, 0.0f}});
+    }
+    std::vector<int> indices;
+    indices.reserve(outer.size() * 6);
+    for (std::size_t i = 0; i + 1 < pairs; ++i) {
+        const int a = static_cast<int>(i) * 2;
+        indices.insert(indices.end(), {a, a + 1, a + 2, a + 1, a + 3, a + 2});
+    }
+    SDL_RenderGeometry(renderer_, nullptr, vertices.data(),
+                       static_cast<int>(vertices.size()), indices.data(),
+                       static_cast<int>(indices.size()));
+}
+
+void Renderer::fillPolygon(const std::vector<SDL_FPoint>& points, const Color& color) {
+    if (color.a == 0) {
+        return;
+    }
+    emit(points, Shader::solid(color));
+}
+
+void Renderer::fillPolygon(const std::vector<SDL_FPoint>& points, const Shader& shader) {
+    emit(points, shader);
+}
+
+void Renderer::fillCircle(float cx, float cy, float radius, const Color& color) {
+    if (radius <= 0.0f || color.a == 0) {
+        return;
+    }
+    // A fixed sample count makes a large circle visibly faceted and wastes vertices
+    // on a small one, so the count follows the radius: one segment per few pixels of
+    // circumference, which is where the chord error falls below half a pixel.
+    const int samples = std::clamp(static_cast<int>(std::ceil(radius * 1.6f)), 8, 128);
+    std::vector<SDL_FPoint> points;
+    points.reserve(samples);
+    const float twoPi = 2.0f * static_cast<float>(M_PI);
+    for (int i = 0; i < samples; ++i) {
+        const float a = twoPi * static_cast<float>(i) / static_cast<float>(samples);
+        points.push_back(SDL_FPoint{cx + std::cos(a) * radius, cy + std::sin(a) * radius});
+    }
+    fillPolygon(points, color);
+}
+
+void Renderer::strokeRect(const SDL_FRect& rect, const Color& color, float thickness,
+                          const Radii& radii, Dash dash) {
+    if (color.a == 0 || thickness <= 0.0f || rect.w <= 0.0f || rect.h <= 0.0f) {
+        return;
+    }
+    if (dash != Dash::Solid) {
+        emitDashed(roundedOutline(rect, radii), thickness, color, dash, true);
+        return;
+    }
+    if (!radii.any()) {
+        // The common case: SDL draws the four sides exactly, and a 1px border is by
+        // far the most frequent thing a stylesheet asks for.
+        const float inset = std::min(thickness * 0.5f, std::min(rect.w, rect.h) * 0.5f);
+        setColor(color);
+        const SDL_FRect inner{rect.x + inset, rect.y + inset,
+                              std::max(0.0f, rect.w - inset * 2.0f),
+                              std::max(0.0f, rect.h - inset * 2.0f)};
+        if (inner.w <= 0.0f || inner.h <= 0.0f) {
+            SDL_RenderRect(renderer_, &rect);
+            return;
+        }
+        const SDL_FRect sides[4] = {
+            {rect.x, rect.y, rect.w, inner.y - rect.y},
+            {rect.x, inner.y + inner.h, rect.w, rect.y + rect.h - inner.y - inner.h},
+            {rect.x, inner.y, inner.x - rect.x, inner.h},
+            {inner.x + inner.w, inner.y, rect.x + rect.w - inner.x - inner.w, inner.h},
+        };
+        for (const SDL_FRect& side : sides) {
+            if (side.w > 0.0f && side.h > 0.0f) {
+                SDL_RenderFillRect(renderer_, &side);
+            }
+        }
+        return;
+    }
+
+    const std::vector<SDL_FPoint> outer = roundedOutline(rect, radii);
+    // The inner edge follows the outer one concentrically, so each radius shrinks by
+    // the border width and is then clamped into the smaller box.
+    Radii inner = radii;
+    for (Radii::Corner* c :
+         {&inner.topLeft, &inner.topRight, &inner.bottomRight, &inner.bottomLeft}) {
+        c->x = std::max(0.0f, c->x - thickness);
+        c->y = std::max(0.0f, c->y - thickness);
+    }
+    const SDL_FRect innerRect{rect.x + thickness, rect.y + thickness,
+                              std::max(0.0f, rect.w - thickness * 2.0f),
+                              std::max(0.0f, rect.h - thickness * 2.0f)};
+    const std::vector<SDL_FPoint> innerPoints = roundedOutline(innerRect, inner);
+    if (innerPoints.size() != outer.size()) {
+        // Degenerate geometry (a corner radius larger than the box); the outer ring
+        // alone is a better answer than dropping the border.
+        emit(outer, Shader::solid(color));
+        return;
+    }
+    emitRing(outer, innerPoints, color);
+}
+
+void Renderer::emitMesh(const std::vector<SDL_FPoint>& polygon, const Shader& shader) {
+    if (polygon.size() < 3) {
+        return;
+    }
+    float minX = polygon[0].x;
+    float minY = polygon[0].y;
+    float maxX = polygon[0].x;
+    float maxY = polygon[0].y;
+    for (const SDL_FPoint& p : polygon) {
+        minX = std::min(minX, p.x);
+        minY = std::min(minY, p.y);
+        maxX = std::max(maxX, p.x);
+        maxY = std::max(maxY, p.y);
+    }
+    const float sign = insideSign(polygon);
+    const float step = std::max(0.5f, shader.meshStep());
+    const int columns = std::max(1, static_cast<int>(std::ceil((maxX - minX) / step)));
+    const int rows = std::max(1, static_cast<int>(std::ceil((maxY - minY) / step)));
+    const float cellW = (maxX - minX) / columns;
+    const float cellH = (maxY - minY) / rows;
+
+    meshVertices_.clear();
+    meshIndices_.clear();
+    clipFront_.clear();
+    clipBack_.clear();
+
+    // A fan from one point cannot hold a gradient's peak: the triangles that reach
+    // the middle of the shape are enormous, and the colour across one of them is a
+    // straight line between two far-apart endpoints. A grid clipped to the outline
+    // keeps every triangle the size of a cell, so the interpolation error is the same
+    // everywhere and stays proportional to the cell rather than to the shape.
+    for (int row = 0; row < rows; ++row) {
+        for (int column = 0; column < columns; ++column) {
+            const float x0 = minX + static_cast<float>(column) * cellW;
+            const float y0 = minY + static_cast<float>(row) * cellH;
+            const float x1 = x0 + cellW;
+            const float y1 = y0 + cellH;
+            const SDL_FPoint corners[4] = {{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}};
+
+            bool whole = true;
+            for (const SDL_FPoint& corner : corners) {
+                if (!isInside(polygon, corner, sign)) {
+                    whole = false;
+                    break;
+                }
+            }
+
+            const int base = static_cast<int>(meshVertices_.size());
+            if (whole) {
+                // The common case, and it needs no clipping at all.
+                for (int i = 0; i < 4; ++i) {
+                    meshVertices_.push_back(SDL_Vertex{
+                        corners[i], toFColor(shader.colorAt(corners[i].x, corners[i].y)),
+                        SDL_FPoint{0.0f, 0.0f}});
+                }
+                meshIndices_.insert(meshIndices_.end(), {base, base + 1, base + 2, base, base + 2,
+                                                        base + 3});
+                continue;
+            }
+
+            clipFront_.assign(std::begin(corners), std::end(corners));
+            for (std::size_t i = 0; i < polygon.size() && !clipFront_.empty(); ++i) {
+                clipToEdge(clipFront_, clipBack_, polygon[i], polygon[(i + 1) % polygon.size()],
+                           sign);
+            }
+            if (clipFront_.size() < 3) {
+                continue;
+            }
+            for (const SDL_FPoint& p : clipFront_) {
+                meshVertices_.push_back(
+                    SDL_Vertex{p, toFColor(shader.colorAt(p.x, p.y)), SDL_FPoint{0.0f, 0.0f}});
+            }
+            // The centre, plus one triangle per outline edge.
+            const int centre = static_cast<int>(meshVertices_.size());
+            meshVertices_.push_back(SDL_Vertex{centroid(clipFront_),
+                                               toFColor(shader.colorAt(centroid(clipFront_).x,
+                                                                          centroid(clipFront_).y)),
+                                               SDL_FPoint{0.0f, 0.0f}});
+            for (std::size_t i = 0; i < clipFront_.size(); ++i) {
+                meshIndices_.insert(meshIndices_.end(),
+                                    {centre, base + static_cast<int>(i),
+                                     base + static_cast<int>((i + 1) % clipFront_.size())});
+            }
+        }
+    }
+    if (meshIndices_.empty()) {
+        return;
+    }
+    SDL_RenderGeometry(renderer_, nullptr, meshVertices_.data(),
+                       static_cast<int>(meshVertices_.size()), meshIndices_.data(),
+                       static_cast<int>(meshIndices_.size()));
+}
+
+void Renderer::emitDashed(const std::vector<SDL_FPoint>& outline, float thickness,
+                          const Color& color, Dash dash, bool closed) {
+    if (outline.size() < 2 || thickness <= 0.0f || color.a == 0) {
+        return;
+    }
+    const float half = thickness * 0.5f;
+    const float period = std::max(thickness * kDashMultiplier, 1.0f) * 1.5f;
+    // A dotted border is the same walk with a round cap and a run only as wide as the
+    // stroke, so it differs in the length of each dash as well as in how it is drawn.
+    const bool dotted = dash == Dash::Dotted;
+    const float on = dotted ? std::max(half, 1.0f) : period * (2.0f / 3.0f);
+    const std::size_t count = outline.size();
+    const std::size_t segments = closed ? count : count - 1;
+
+    float consumed = 0.0f;
+    for (std::size_t i = 0; i < segments; ++i) {
+        const SDL_FPoint& a = outline[i];
+        const SDL_FPoint& b = outline[(i + 1) % count];
+        const float span = std::hypot(b.x - a.x, b.y - a.y);
+        if (span <= 0.0f) {
+            continue;
+        }
+        float t = 0.0f;
+        while (t < span) {
+            const float phase = std::fmod(consumed + t, period);
+            if (phase >= on) {
+                t += std::min(period - phase, span - t);
+                continue;
+            }
+            // The whole lit stretch is consumed in one step. Advancing by the dot
+            // width instead would lay every dot of the period down touching.
+            const float run = std::min(on - phase, span - t);
+            const float x0 = a.x + (b.x - a.x) * (t / span);
+            const float y0 = a.y + (b.y - a.y) * (t / span);
+            const float x1 = a.x + (b.x - a.x) * ((t + run) / span);
+            const float y1 = a.y + (b.y - a.y) * ((t + run) / span);
+            if (dotted) {
+                fillCircle((x0 + x1) * 0.5f, (y0 + y1) * 0.5f, half, color);
+            } else {
+                const float dx = (b.x - a.x) / span;
+                const float dy = (b.y - a.y) / span;
+                const std::vector<SDL_FPoint> quad{{x0 - dy * half, y0 + dx * half},
+                                                   {x1 - dy * half, y1 + dx * half},
+                                                   {x1 + dy * half, y1 - dx * half},
+                                                   {x0 + dy * half, y0 - dx * half}};
+                fillPolygon(quad, color);
+            }
+            t += run;
+        }
+        consumed = std::fmod(consumed + span, period);
+    }
+}
+
+void Renderer::strokePath(const std::vector<SDL_FPoint>& points, const Color& color,
+                          float thickness, bool closed, Dash dash) {
+    if (color.a == 0 || thickness <= 0.0f || points.size() < 2) {
+        return;
+    }
+    if (dash != Dash::Solid) {
+        emitDashed(points, thickness, color, dash, closed);
+        return;
+    }
+    const float half = thickness * 0.5f;
+    const std::size_t last = closed ? points.size() : points.size() - 1;
+    for (std::size_t i = 0; i < last; ++i) {
+        const SDL_FPoint& a = points[i];
+        const SDL_FPoint& b = points[(i + 1) % points.size()];
+        const float span = std::hypot(b.x - a.x, b.y - a.y);
+        if (span <= 0.0f) {
+            continue;
+        }
+        const float dx = (b.x - a.x) / span;
+        const float dy = (b.y - a.y) / span;
+        const std::vector<SDL_FPoint> quad{{a.x - dy * half, a.y + dx * half},
+                                           {b.x - dy * half, b.y + dx * half},
+                                           {b.x + dy * half, b.y - dx * half},
+                                           {a.x + dy * half, a.y - dx * half}};
+        fillPolygon(quad, color);
+        if (thickness > 1.5f && i + 2 < points.size()) {
+            // A thick polyline notches at each vertex without a join.
+            fillCircle(b.x, b.y, half, color);
+        }
+    }
+}
+
+void Renderer::line(float x1, float y1, float x2, float y2, const Color& color,
+                    float thickness) {
+    strokePath({SDL_FPoint{x1, y1}, SDL_FPoint{x2, y2}}, color, thickness);
+}
+
+void Renderer::emitImageQuad(const SDL_FRect& rect, const Shader& shader) {
+    SDL_Texture* texture = shader.texture();
+    if (!texture || shader.tint().a == 0) {
+        return;
+    }
+    const SDL_FRect& dst = shader.destination();
+    const SDL_FRect& src = shader.source();
+
+    // A repeat mode needs the texture addressed beyond 0..1, and SDL has to be told
+    // which mode before the draw.
+    const bool tiled = shader.repeat() != Repeat::No;
+    if (tiled) {
+        // SDL takes the two axes separately, so `repeat-x` and `repeat-y` are
+        // expressible directly.
+        SDL_TextureAddressMode u = SDL_TEXTURE_ADDRESS_CLAMP;
+        SDL_TextureAddressMode v = SDL_TEXTURE_ADDRESS_CLAMP;
+        if (shader.repeat() == Repeat::Tile || shader.repeat() == Repeat::TileX) {
+            u = SDL_TEXTURE_ADDRESS_WRAP;
+        }
+        if (shader.repeat() == Repeat::Tile || shader.repeat() == Repeat::TileY) {
+            v = SDL_TEXTURE_ADDRESS_WRAP;
+        }
+        SDL_SetRenderTextureAddressMode(renderer_, u, v);
+    }
+
+    // The image's own placement: `background-position` has already resolved the
+    // destination, so a plain draw uses it directly.
+    if (!tiled) {
+        const SDL_FRect target{shader.repeat() == Repeat::No && dst.w > 0.0f && dst.h > 0.0f
+                                   ? dst
+                                   : rect};
+        SDL_Texture* tex = texture;
+        const bool hasMod = !(shader.tint() == Color{255, 255, 255, 255});
+        if (hasMod) {
+            SDL_SetTextureAlphaMod(tex, shader.tint().a);
+            SDL_SetTextureColorMod(tex, shader.tint().r, shader.tint().g, shader.tint().b);
+        }
+        SDL_RenderTexture(renderer_, tex, src.w > 0.0f ? &src : nullptr, &target);
+        if (hasMod) {
+            SDL_SetTextureAlphaMod(tex, 255);
+            SDL_SetTextureColorMod(tex, 255, 255, 255);
+        }
+        return;
+    }
+
+    // Tiled: UVs are the destination relative to the image's placement, so the
+    // address mode does the repeating.
+    const float originX = dst.w > 0.0f ? dst.x : rect.x;
+    const float originY = dst.h > 0.0f ? dst.y : rect.y;
+    const SDL_FRect source{dst.w > 0.0f ? 0.0f : src.x, dst.h > 0.0f ? 0.0f : src.y,
+                            dst.w > 0.0f ? dst.w : src.w, dst.h > 0.0f ? dst.h : src.h};
+    const float u0 = (rect.x - originX) / (source.w > 0.0f ? source.w : 1.0f);
+    const float v0 = (rect.y - originY) / (source.h > 0.0f ? source.h : 1.0f);
+    const float u1 = (rect.x + rect.w - originX) / (source.w > 0.0f ? source.w : 1.0f);
+    const float v1 = (rect.y + rect.h - originY) / (source.h > 0.0f ? source.h : 1.0f);
+    SDL_Vertex vertices[6] = {
+        SDL_Vertex{{rect.x, rect.y}, toFColor(shader.tint()), SDL_FPoint{u0, v0}},
+        SDL_Vertex{{rect.x + rect.w, rect.y}, toFColor(shader.tint()), SDL_FPoint{u1, v0}},
+        SDL_Vertex{{rect.x, rect.y + rect.h}, toFColor(shader.tint()), SDL_FPoint{u0, v1}},
+        SDL_Vertex{{rect.x + rect.w, rect.y}, toFColor(shader.tint()), SDL_FPoint{u1, v0}},
+        SDL_Vertex{{rect.x + rect.w, rect.y + rect.h}, toFColor(shader.tint()), SDL_FPoint{u1, v1}},
+        SDL_Vertex{{rect.x, rect.y + rect.h}, toFColor(shader.tint()), SDL_FPoint{u0, v1}},
+    };
+    SDL_SetTextureAlphaMod(texture, shader.tint().a);
+    SDL_SetTextureColorMod(texture, shader.tint().r, shader.tint().g, shader.tint().b);
+    SDL_RenderGeometry(renderer_, texture, vertices, 6, nullptr, 0);
+    SDL_SetTextureAlphaMod(texture, 255);
+    SDL_SetTextureColorMod(texture, 255, 255, 255);
+    if (tiled) {
+        SDL_SetRenderTextureAddressMode(renderer_, SDL_TEXTURE_ADDRESS_CLAMP,
+                                       SDL_TEXTURE_ADDRESS_CLAMP);
+    }
+}
+
+void Renderer::drawTexture(SDL_Texture* texture, const SDL_FRect& destination,
+                           const SDL_FRect* source, Color tint) {
+    if (!texture || destination.w <= 0.0f || destination.h <= 0.0f || tint.a == 0) {
+        return;
+    }
+    const bool modulated = !(tint == Color{255, 255, 255, 255});
+    if (modulated) {
+        SDL_SetTextureAlphaMod(texture, tint.a);
+        SDL_SetTextureColorMod(texture, tint.r, tint.g, tint.b);
+    }
+    SDL_RenderTexture(renderer_, texture, source, &destination);
+    if (modulated) {
+        SDL_SetTextureAlphaMod(texture, 255);
+        SDL_SetTextureColorMod(texture, 255, 255, 255);
+    }
+}
+
+void Renderer::pushClip(const SDL_FRect& rect) {
+    clipStack_.push_back(current_);
+    const SDL_Rect incoming{static_cast<int>(std::floor(rect.x)),
+                            static_cast<int>(std::floor(rect.y)),
+                            static_cast<int>(std::ceil(rect.w)),
+                            static_cast<int>(std::ceil(rect.h))};
+    if (clipStack_.size() == 1) {
+        current_ = incoming;
+    } else {
+        const int x = std::max(current_.x, incoming.x);
+        const int y = std::max(current_.y, incoming.y);
+        const int right = std::min(current_.x + current_.w, incoming.x + incoming.w);
+        const int bottom = std::min(current_.y + current_.h, incoming.y + incoming.h);
+        current_ = SDL_Rect{x, y, std::max(0, right - x), std::max(0, bottom - y)};
+    }
+    clipping_ = true;
+    SDL_SetRenderClipRect(renderer_, &current_);
+}
+
+void Renderer::popClip() {
+    if (clipStack_.empty()) {
+        return;
+    }
+    current_ = clipStack_.back();
+    clipStack_.pop_back();
+    clipping_ = !clipStack_.empty();
+    SDL_SetRenderClipRect(renderer_, clipping_ ? &current_ : nullptr);
 }
 
 }  // namespace sui

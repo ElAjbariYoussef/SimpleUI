@@ -15,6 +15,12 @@ add_executable(script_tests script_tests.cpp)
 target_link_libraries(script_tests PRIVATE sui)
 add_test(NAME script_tests COMMAND script_tests)
 
+# Renderer geometry: radii clamping, outline sampling, and the gradient maths. None
+# of it needs a device, so it runs in the ordinary test pass.
+add_executable(render_tests render_tests.cpp)
+target_link_libraries(render_tests PRIVATE sui)
+add_test(NAME render_tests COMMAND render_tests)
+
 # Prints what the engine measures for each documented capability. Not a pass/fail
 # test: it is the evidence behind Difference.md.
 add_executable(capability_probe capability_probe.cpp)
