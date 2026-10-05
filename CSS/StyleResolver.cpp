@@ -124,6 +124,52 @@ Length parseLength(std::string_view value) {
     return Length{};
 }
 
+// CSS names three border widths; the numbers are the ones the spec fixes them at.
+Length parseBorderWidth(std::string_view v) {
+    if (v == "thin") return Length{1.0f};
+    if (v == "medium") return Length{3.0f};
+    if (v == "thick") return Length{5.0f};
+    return parseLength(v);
+}
+
+std::vector<std::string_view> splitTopLevel(std::string_view value, char separator);
+
+// CSS expands a one-to-four value box shorthand as: one value sets all four sides,
+// two set top-and-bottom then left-and-right, three are top | left-and-right |
+// bottom, and four run clockwise from the top.
+template <typename T, typename Parse>
+void applyToSides(std::string_view value, Parse parse, T& top, T& right, T& bottom, T& left) {
+    const std::vector<std::string_view> parts = splitTopLevel(value, ' ');
+    T sides[4];
+    switch (parts.size()) {
+        case 1:
+            sides[0] = parse(parts[0]);
+            sides[1] = sides[2] = sides[3] = sides[0];
+            break;
+        case 2:
+            sides[0] = sides[2] = parse(parts[0]);
+            sides[1] = sides[3] = parse(parts[1]);
+            break;
+        case 3:
+            sides[0] = parse(parts[0]);
+            sides[1] = sides[3] = parse(parts[1]);
+            sides[2] = parse(parts[2]);
+            break;
+        case 4:
+            sides[0] = parse(parts[0]);
+            sides[1] = parse(parts[1]);
+            sides[2] = parse(parts[2]);
+            sides[3] = parse(parts[3]);
+            break;
+        default:
+            return;
+    }
+    top = sides[0];
+    right = sides[1];
+    bottom = sides[2];
+    left = sides[3];
+}
+
 bool parseBool(std::string_view value) {
     return value != "none" && value != "hidden" && value != "0" && value != "false";
 }
@@ -137,7 +183,9 @@ int hexDigit(char c) {
 
 bool parseHexColor(std::string_view value, SDL_Color& out) {
     std::string_view hex = trim(value);
-    if (hex.size() > 4 && hex[0] == '#') {
+    // '#' plus the shortest legal form is four characters, so the test has to allow
+    // `size == 4` or the three-digit branch below is unreachable.
+    if (hex.size() >= 4 && hex[0] == '#') {
         hex.remove_prefix(1);
     } else if (hex.size() > 3 && hex.substr(0, 3) == "rgb") {
         const std::size_t open = hex.find('(');
@@ -158,7 +206,7 @@ bool parseHexColor(std::string_view value, SDL_Color& out) {
     }
 
     if (hex.size() == 3 || hex.size() == 4) {
-        int channels[4] = {0, 0, 0, 15};
+        int channels[4] = {0, 0, 0, 255};
         for (std::size_t k = 0; k < hex.size(); ++k) {
             channels[k] = hexDigit(hex[k]);
             if (channels[k] < 0) {
@@ -372,6 +420,216 @@ void applyFlexShorthand(ComputedStyle& s, std::string_view value, float rootFont
     (void)rootFontSize;
 }
 
+// Strict on purpose: the `border` shorthand has to tell a style keyword apart from a
+// colour, and a lenient parser would claim every unrecognised token as a style.
+bool parseBorderStyle(std::string_view v, ComputedStyle::BorderStyle& out) {
+    if (v == "none" || v == "hidden") { out = ComputedStyle::BorderStyleNone; return true; }
+    if (v == "solid") { out = ComputedStyle::BorderSolid; return true; }
+    if (v == "dashed") { out = ComputedStyle::BorderDashed; return true; }
+    if (v == "dotted") { out = ComputedStyle::BorderDotted; return true; }
+    if (v == "double") { out = ComputedStyle::BorderDouble; return true; }
+    if (v == "groove") { out = ComputedStyle::BorderGroove; return true; }
+    if (v == "ridge") { out = ComputedStyle::BorderRidge; return true; }
+    if (v == "inset") { out = ComputedStyle::BorderInset; return true; }
+    if (v == "outset") { out = ComputedStyle::BorderOutset; return true; }
+    return false;
+}
+
+// Whether a token is a length rather than a keyword or a colour. Used by the
+// shadow parsers, which accept their parts in any order.
+bool isLengthToken(std::string_view token) {
+    if (token.empty() || std::isdigit(static_cast<unsigned char>(token[0])) == 0) {
+        return token.size() > 1 && (token[0] == '.' || token[0] == '+' || token[0] == '-');
+    }
+    return true;
+}
+
+// Splits on commas that are not inside brackets or quotes, so a gradient's own
+// commas do not cut the value in half.
+std::vector<std::string_view> splitTopLevel(std::string_view value, char separator = ',') {
+    std::vector<std::string_view> parts;
+    int depth = 0;
+    std::size_t start = 0;
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        const char c = value[i];
+        if (c == '(' || c == '[') {
+            ++depth;
+        } else if (c == ')' || c == ']') {
+            --depth;
+        } else if (c == separator && depth == 0) {
+            parts.push_back(trim(value.substr(start, i - start)));
+            start = i + 1;
+        }
+    }
+    parts.push_back(trim(value.substr(start)));
+    return parts;
+}
+
+std::vector<std::string_view> splitTokens(std::string_view value) {
+    return splitTopLevel(value, ' ');
+}
+
+// The 1-to-4 corner expansion every box property shares: one value sets all four,
+// two set the diagonals, and so on.
+template <typename T>
+void expandCorners(const std::vector<T>& parts, T& topLeft, T& topRight, T& bottomRight,
+                   T& bottomLeft) {
+    switch (parts.size()) {
+        case 1:
+            topLeft = topRight = bottomRight = bottomLeft = parts[0];
+            break;
+        case 2:
+            topLeft = bottomRight = parts[0];
+            topRight = bottomLeft = parts[1];
+            break;
+        case 3:
+            topLeft = parts[0];
+            topRight = bottomLeft = parts[1];
+            bottomRight = parts[2];
+            break;
+        default:
+            topLeft = parts[0];
+            topRight = parts[1];
+            bottomRight = parts[2];
+            bottomLeft = parts[3];
+            break;
+    }
+}
+
+// `border-radius` is the only corner property that takes a second group of values
+// after a slash, giving each corner a horizontal and a vertical radius.
+void applyBorderRadius(ComputedStyle& s, std::string_view value) {
+    const std::size_t slash = value.find('/');
+    const std::string_view horizontal = slash == std::string_view::npos
+                                            ? value
+                                            : value.substr(0, slash);
+    const std::string_view vertical =
+        slash == std::string_view::npos ? std::string_view{} : value.substr(slash + 1);
+
+    const std::vector<Length> xs = parseLengthList(horizontal);
+    if (xs.empty()) {
+        return;
+    }
+    std::vector<Length> ys = vertical.empty() ? xs : parseLengthList(vertical);
+    if (ys.empty()) {
+        ys = xs;
+    }
+
+    ComputedStyle::RadiusPair horizontalCorners[4];
+    ComputedStyle::RadiusPair verticalCorners[4];
+    expandCorners(xs, horizontalCorners[0].x, horizontalCorners[1].x, horizontalCorners[2].x,
+                  horizontalCorners[3].x);
+    expandCorners(ys, verticalCorners[0].y, verticalCorners[1].y, verticalCorners[2].y,
+                  verticalCorners[3].y);
+    s.borderRadii.topLeft = {horizontalCorners[0].x, verticalCorners[0].y};
+    s.borderRadii.topRight = {horizontalCorners[1].x, verticalCorners[1].y};
+    s.borderRadii.bottomRight = {horizontalCorners[2].x, verticalCorners[2].y};
+    s.borderRadii.bottomLeft = {horizontalCorners[3].x, verticalCorners[3].y};
+}
+
+// One shadow's parts, already sorted out from their order in the declaration.
+struct ShadowParts {
+    bool inset = false;
+    std::vector<Length> lengths;
+    SDL_Color color{};
+    bool hasColor = false;
+};
+
+ShadowParts parseShadowParts(std::string_view value) {
+    ShadowParts parts;
+    for (const std::string_view token : splitTokens(value)) {
+        if (token.empty()) {
+            continue;
+        }
+        if (token == "inset") {
+            parts.inset = true;
+            continue;
+        }
+        if (isLengthToken(token)) {
+            parts.lengths.push_back(parseLength(token));
+            continue;
+        }
+        SDL_Color color{};
+        if (parseHexColor(token, color)) {
+            parts.color = color;
+            parts.hasColor = true;
+        }
+    }
+    return parts;
+}
+
+// `outline` is width, style, and colour in any order, and its parts are optional.
+void applyOutline(ComputedStyle& s, std::string_view value) {
+    for (const std::string_view token : splitTokens(value)) {
+        if (token.empty()) {
+            continue;
+        }
+        // Length first, then colour, so nothing depends on a keyword parser's
+        // fallback for tokens it does not recognise.
+        if (isLengthToken(token) || token == "thin" || token == "medium" || token == "thick") {
+            s.outline.width = parseBorderWidth(token);
+            continue;
+        }
+        SDL_Color color{};
+        if (parseHexColor(token, color)) {
+            s.outline.color = color;
+            continue;
+        }
+        parseBorderStyle(token, s.outline.style);
+    }
+}
+
+void applyBoxShadow(ComputedStyle& s, std::string_view value) {
+    if (value == "none") {
+        s.boxShadows.clear();
+        return;
+    }
+    for (const std::string_view entry : splitTopLevel(value)) {
+        const ShadowParts parts = parseShadowParts(entry);
+        if (parts.lengths.size() < 2) {
+            // CSS drops a shadow that has no offsets, rather than guessing one.
+            continue;
+        }
+        ComputedStyle::BoxShadow shadow;
+        shadow.inset = parts.inset;
+        shadow.offsetX = parts.lengths[0];
+        shadow.offsetY = parts.lengths[1];
+        if (parts.lengths.size() > 2) {
+            shadow.blurRadius = parts.lengths[2];
+        }
+        if (parts.lengths.size() > 3) {
+            shadow.spread = parts.lengths[3];
+        }
+        if (parts.hasColor) {
+            shadow.color = parts.color;
+        }
+        s.boxShadows.push_back(shadow);
+    }
+}
+
+void applyTextShadow(ComputedStyle& s, std::string_view value) {
+    if (value == "none") {
+        s.textShadows.clear();
+        return;
+    }
+    for (const std::string_view entry : splitTopLevel(value)) {
+        const ShadowParts parts = parseShadowParts(entry);
+        if (parts.lengths.size() < 2) {
+            continue;
+        }
+        ComputedStyle::TextShadow shadow;
+        shadow.offsetX = parts.lengths[0];
+        shadow.offsetY = parts.lengths[1];
+        if (parts.lengths.size() > 2) {
+            shadow.blurRadius = parts.lengths[2];
+        }
+        if (parts.hasColor) {
+            shadow.color = parts.color;
+        }
+        s.textShadows.push_back(shadow);
+    }
+}
+
 void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontSize) {
     const std::string& property = decl.property;
     const std::string_view value = trim(decl.value);
@@ -423,10 +681,28 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
     } else if (property == "padding-bottom") {
         s.padding.bottom = parseLength(value);
     } else if (property == "border-width") {
-        applyBoxEdges(value, s.borderWidth);
+        applyToSides(value, parseBorderWidth, s.borderWidth.top, s.borderWidth.right,
+                     s.borderWidth.bottom, s.borderWidth.left);
     } else if (property == "border") {
-        // Only the width component is meaningful here; colour is ignored.
-        applyBoxEdges(value, s.borderWidth);
+        // Width, style and colour in any order, one value each; an unknown token is
+        // dropped rather than guessed at, as an invalid declaration should be.
+        for (const std::string_view part : splitTopLevel(value, ' ')) {
+            if (part == "thin" || part == "medium" || part == "thick" ||
+                isLengthToken(part)) {
+                const Length width = parseBorderWidth(part);
+                s.borderWidth = {width, width, width, width};
+                continue;
+            }
+            ComputedStyle::BorderStyle style{};
+            if (parseBorderStyle(part, style)) {
+                s.borderStyles = {style, style, style, style};
+                continue;
+            }
+            SDL_Color color{};
+            if (parseHexColor(part, color)) {
+                s.borderColor = color;
+            }
+        }
     } else if (property == "background-color" || property == "background") {
         SDL_Color color{};
         if (parseHexColor(value, color)) {
@@ -442,6 +718,61 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         if (parseHexColor(value, color)) {
             s.borderColor = color;
         }
+    } else if (property == "border-style") {
+        applyToSides(value, [](std::string_view v) {
+                     ComputedStyle::BorderStyle style = ComputedStyle::BorderSolid;
+                     parseBorderStyle(v, style);
+                     return style;
+                 },
+                 s.borderStyles.top, s.borderStyles.right, s.borderStyles.bottom,
+                 s.borderStyles.left);
+    } else if (property == "border-top-style") {
+        parseBorderStyle(value, s.borderStyles.top);
+    } else if (property == "border-right-style") {
+        parseBorderStyle(value, s.borderStyles.right);
+    } else if (property == "border-bottom-style") {
+        parseBorderStyle(value, s.borderStyles.bottom);
+    } else if (property == "border-left-style") {
+        parseBorderStyle(value, s.borderStyles.left);
+    } else if (property == "border-radius") {
+        applyBorderRadius(s, value);
+    } else if (property == "border-top-left-radius" ||
+               property == "border-top-right-radius" ||
+               property == "border-bottom-right-radius" ||
+               property == "border-bottom-left-radius") {
+        const std::vector<Length> parts = parseLengthList(value);
+        if (parts.empty()) {
+            return;
+        }
+        // A longhand takes the same `x / y` form as the shorthand.
+        const std::size_t slash = value.find('/');
+        const Length x = parts[0];
+        const Length y = slash == std::string_view::npos ? parts[0] : parts[1];
+        ComputedStyle::RadiusPair& corner =
+            property == "border-top-left-radius"     ? s.borderRadii.topLeft
+            : property == "border-top-right-radius"   ? s.borderRadii.topRight
+            : property == "border-bottom-right-radius" ? s.borderRadii.bottomRight
+                                                       : s.borderRadii.bottomLeft;
+        corner = {x, y};
+    } else if (property == "outline") {
+        applyOutline(s, value);
+    } else if (property == "outline-width") {
+        s.outline.width = parseBorderWidth(value);
+    } else if (property == "outline-style") {
+        parseBorderStyle(value, s.outline.style);
+    } else if (property == "outline-color") {
+        SDL_Color color{};
+        if (parseHexColor(value, color)) {
+            s.outline.color = color;
+        }
+    } else if (property == "outline-offset") {
+        s.outline.offset = parseLength(value);
+    } else if (property == "opacity") {
+        s.opacity = std::clamp(parseNumber(value), 0.0f, 1.0f);
+    } else if (property == "box-shadow") {
+        applyBoxShadow(s, value);
+    } else if (property == "text-shadow") {
+        applyTextShadow(s, value);
     } else if (property == "flex-direction") {
         if (value == "row-reverse") {
             s.flexDirection = ComputedStyle::RowReverse;

@@ -152,6 +152,75 @@ struct ComputedStyle {
     SDL_Color color = {255, 255, 255, 255};    // default text
     SDL_Color borderColor = {63, 63, 70, 255};
 
+    // How a border edge is drawn. Prefixed because `Solid`, `Dashed` and friends
+    // read too loosely on their own next to the other unscoped enumerators here.
+    // The values CSS treats as 3D are drawn as plain strokes; see Difference.md.
+    enum BorderStyle : std::uint8_t {
+        BorderStyleNone,
+        BorderSolid,
+        BorderDashed,
+        BorderDotted,
+        BorderDouble,
+        BorderGroove,
+        BorderRidge,
+        BorderInset,
+        BorderOutset
+    };
+    struct PerSide {
+        BorderStyle top = BorderSolid;
+        BorderStyle right = BorderSolid;
+        BorderStyle bottom = BorderSolid;
+        BorderStyle left = BorderSolid;
+    };
+    PerSide borderStyles;
+
+    // Corner rounding, kept as lengths because a percentage resolves against the
+    // box's own width and height, which layout is the first to know.
+    struct RadiusPair {
+        Length x;
+        Length y;
+    };
+    struct Radii {
+        RadiusPair topLeft;
+        RadiusPair topRight;
+        RadiusPair bottomRight;
+        RadiusPair bottomLeft;
+    };
+    Radii borderRadii;
+
+    // An outline is drawn outside the border box and takes no space in layout.
+    struct Outline {
+        Length width;
+        Length offset;
+        BorderStyle style = BorderStyleNone;
+        SDL_Color color = {59, 130, 246, 255};
+    };
+    Outline outline;
+
+    // Group opacity. Multiplied into the alpha of everything the element paints,
+    // including its descendants, which is what makes it different from a colour's
+    // own alpha.
+    float opacity = 1.0f;
+
+    // Shadows are painted in list order, so a later one sits over an earlier one.
+    struct BoxShadow {
+        bool inset = false;
+        Length offsetX;
+        Length offsetY;
+        Length blurRadius;
+        Length spread;
+        SDL_Color color = {0, 0, 0, 96};
+    };
+    std::vector<BoxShadow> boxShadows;
+
+    struct TextShadow {
+        Length offsetX;
+        Length offsetY;
+        Length blurRadius;
+        SDL_Color color = {0, 0, 0, 128};
+    };
+    std::vector<TextShadow> textShadows;
+
     // Typography
     float fontSize = 16.0f;  // px
     std::string fontFamily;   // empty = default
@@ -255,6 +324,12 @@ inline UsedBox resolveBox(const ComputedStyle& style, float containingWidth,
     // border-width takes no percentages or font-relative units in CSS.
     box.borderWidth = Edges{px(style.borderWidth.top, 0.0f), px(style.borderWidth.right, 0.0f),
                             px(style.borderWidth.bottom, 0.0f), px(style.borderWidth.left, 0.0f)};
+    // `border-style: none` is what removes a border, not a width of zero, so an
+    // authored `border-width: 5px` with the style set to none still takes no space.
+    if (style.borderStyles.top == ComputedStyle::BorderStyleNone) box.borderWidth.top = 0.0f;
+    if (style.borderStyles.right == ComputedStyle::BorderStyleNone) box.borderWidth.right = 0.0f;
+    if (style.borderStyles.bottom == ComputedStyle::BorderStyleNone) box.borderWidth.bottom = 0.0f;
+    if (style.borderStyles.left == ComputedStyle::BorderStyleNone) box.borderWidth.left = 0.0f;
 
     box.minWidth = px(style.minWidth, containingWidth);
     box.maxWidth = px(style.maxWidth, containingWidth);

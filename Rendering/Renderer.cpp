@@ -164,6 +164,11 @@ void clipToEdge(std::vector<SDL_FPoint>& subject, std::vector<SDL_FPoint>& scrat
     subject.swap(scratch);
 }
 
+// A point known to be inside a box, used to tell which way a stroke band extends.
+SDL_FPoint centreOf(const SDL_FRect& rect) {
+    return SDL_FPoint{rect.x + rect.w * 0.5f, rect.y + rect.h * 0.5f};
+}
+
 SDL_FPoint centroid(const std::vector<SDL_FPoint>& points) {
     double x = 0.0;
     double y = 0.0;
@@ -320,15 +325,26 @@ Color Shader::colorAt(float x, float y) const {
 
 std::vector<SDL_FPoint> Renderer::roundedOutline(const SDL_FRect& rect, const Radii& raw,
                                                  int samples) {
+    if (!raw.any()) {
+        return fourCorners(rect);
+    }
+    return sampledOutline(rect, raw, samples);
+}
+
+std::vector<SDL_FPoint> Renderer::fourCorners(const SDL_FRect& rect) {
+    if (rect.w <= 0.0f || rect.h <= 0.0f) {
+        return {};
+    }
+    return {{rect.x, rect.y},
+            {rect.x + rect.w, rect.y},
+            {rect.x + rect.w, rect.y + rect.h},
+            {rect.x, rect.y + rect.h}};
+}
+
+std::vector<SDL_FPoint> Renderer::sampledOutline(const SDL_FRect& rect, const Radii& raw,
+                                                 int samples) {
     std::vector<SDL_FPoint> points;
     if (rect.w <= 0.0f || rect.h <= 0.0f) {
-        return points;
-    }
-    if (!raw.any()) {
-        points = {{rect.x, rect.y},
-                  {rect.x + rect.w, rect.y},
-                  {rect.x + rect.w, rect.y + rect.h},
-                  {rect.x, rect.y + rect.h}};
         return points;
     }
     const Radii r = raw.clamped(rect.w, rect.h);
@@ -345,6 +361,50 @@ std::vector<SDL_FPoint> Renderer::roundedOutline(const SDL_FRect& rect, const Ra
         r.bottomRight.y, 0.0f, pi * 0.5f, samples);
     arc(points, rect.x + r.bottomLeft.x, bottom - r.bottomLeft.y, r.bottomLeft.x,
         r.bottomLeft.y, pi * 0.5f, pi, samples);
+    return points;
+}
+
+std::vector<SDL_FPoint> Renderer::sideOutline(const SDL_FRect& rect, const Radii& raw,
+                                              Side side, int samplesPerQuarter) {
+    std::vector<SDL_FPoint> points;
+    if (rect.w <= 0.0f || rect.h <= 0.0f) {
+        return points;
+    }
+    const Radii r = raw.clamped(rect.w, rect.h);
+    const float right = rect.x + rect.w;
+    const float bottom = rect.y + rect.h;
+    const float pi = static_cast<float>(M_PI);
+    const float eighth = pi * 0.25f;
+    points.reserve(static_cast<std::size_t>(samplesPerQuarter) * 2 + 2);
+
+    // Every corner arc is split in half, and each half belongs to the side it faces,
+    // so the four sides together trace the outline exactly once.
+    switch (side) {
+        case Side::Top:
+            arc(points, rect.x + r.topLeft.x, rect.y + r.topLeft.y, r.topLeft.x, r.topLeft.y,
+                pi + eighth, pi * 1.5f, samplesPerQuarter);
+            arc(points, right - r.topRight.x, rect.y + r.topRight.y, r.topRight.x, r.topRight.y,
+                pi * 1.5f, pi * 1.75f, samplesPerQuarter);
+            break;
+        case Side::Right:
+            arc(points, right - r.topRight.x, rect.y + r.topRight.y, r.topRight.x, r.topRight.y,
+                pi * 1.75f, pi * 2.0f, samplesPerQuarter);
+            arc(points, right - r.bottomRight.x, bottom - r.bottomRight.y, r.bottomRight.x,
+                r.bottomRight.y, 0.0f, eighth, samplesPerQuarter);
+            break;
+        case Side::Bottom:
+            arc(points, right - r.bottomRight.x, bottom - r.bottomRight.y, r.bottomRight.x,
+                r.bottomRight.y, eighth, pi * 0.5f, samplesPerQuarter);
+            arc(points, rect.x + r.bottomLeft.x, bottom - r.bottomLeft.y, r.bottomLeft.x,
+                r.bottomLeft.y, pi * 0.5f, pi * 0.75f, samplesPerQuarter);
+            break;
+        case Side::Left:
+            arc(points, rect.x + r.bottomLeft.x, bottom - r.bottomLeft.y, r.bottomLeft.x,
+                r.bottomLeft.y, pi * 0.75f, pi, samplesPerQuarter);
+            arc(points, rect.x + r.topLeft.x, rect.y + r.topLeft.y, r.topLeft.x, r.topLeft.y,
+                pi, pi + eighth, samplesPerQuarter);
+            break;
+    }
     return points;
 }
 
@@ -476,31 +536,36 @@ void Renderer::fillCircle(float cx, float cy, float radius, const Color& color) 
 }
 
 void Renderer::strokeRect(const SDL_FRect& rect, const Color& color, float thickness,
-                          const Radii& radii, Dash dash) {
+                          const Radii& radii, const SideDashes& dashes) {
     if (color.a == 0 || thickness <= 0.0f || rect.w <= 0.0f || rect.h <= 0.0f) {
         return;
     }
-    if (dash != Dash::Solid) {
-        emitDashed(roundedOutline(rect, radii), thickness, color, dash, true);
+    if (!dashes.uniform()) {
+        // Each side is drawn on its own so it can carry its own pattern. The dash
+        // phase restarts at every side, which only shows where the patterns differ.
+        for (const Side side : {Side::Top, Side::Right, Side::Bottom, Side::Left}) {
+            emitSide(rect, side, thickness, color, radii, dashes.of(side));
+        }
+        return;
+    }
+    if (dashes.top != Dash::Solid) {
+        // Dashing walks the whole closed outline in one go, so the pattern carries on
+        // around the corners the way CSS draws it.
+        emitDashed(roundedOutline(rect, radii), thickness, color, dashes.top, true,
+                   centreOf(rect));
         return;
     }
     if (!radii.any()) {
-        // The common case: SDL draws the four sides exactly, and a 1px border is by
-        // far the most frequent thing a stylesheet asks for.
-        const float inset = std::min(thickness * 0.5f, std::min(rect.w, rect.h) * 0.5f);
+        // The common case: four axis-aligned bands between the box and the box inset
+        // by the border width. The band is inward, not centred, so that this path and
+        // the ring path below put the ink in the same place.
+        const float t = std::min(thickness, std::min(rect.w, rect.h));
         setColor(color);
-        const SDL_FRect inner{rect.x + inset, rect.y + inset,
-                              std::max(0.0f, rect.w - inset * 2.0f),
-                              std::max(0.0f, rect.h - inset * 2.0f)};
-        if (inner.w <= 0.0f || inner.h <= 0.0f) {
-            SDL_RenderRect(renderer_, &rect);
-            return;
-        }
         const SDL_FRect sides[4] = {
-            {rect.x, rect.y, rect.w, inner.y - rect.y},
-            {rect.x, inner.y + inner.h, rect.w, rect.y + rect.h - inner.y - inner.h},
-            {rect.x, inner.y, inner.x - rect.x, inner.h},
-            {inner.x + inner.w, inner.y, rect.x + rect.w - inner.x - inner.w, inner.h},
+            {rect.x, rect.y, rect.w, t},
+            {rect.x, rect.y + rect.h - t, rect.w, t},
+            {rect.x, rect.y + t, t, std::max(0.0f, rect.h - t * 2.0f)},
+            {rect.x + rect.w - t, rect.y + t, t, std::max(0.0f, rect.h - t * 2.0f)},
         };
         for (const SDL_FRect& side : sides) {
             if (side.w > 0.0f && side.h > 0.0f) {
@@ -510,7 +575,7 @@ void Renderer::strokeRect(const SDL_FRect& rect, const Color& color, float thick
         return;
     }
 
-    const std::vector<SDL_FPoint> outer = roundedOutline(rect, radii);
+    const std::vector<SDL_FPoint> outer = sampledOutline(rect, radii);
     // The inner edge follows the outer one concentrically, so each radius shrinks by
     // the border width and is then clamped into the smaller box.
     Radii inner = radii;
@@ -522,13 +587,40 @@ void Renderer::strokeRect(const SDL_FRect& rect, const Color& color, float thick
     const SDL_FRect innerRect{rect.x + thickness, rect.y + thickness,
                               std::max(0.0f, rect.w - thickness * 2.0f),
                               std::max(0.0f, rect.h - thickness * 2.0f)};
-    const std::vector<SDL_FPoint> innerPoints = roundedOutline(innerRect, inner);
-    if (innerPoints.size() != outer.size()) {
-        // Degenerate geometry (a corner radius larger than the box); the outer ring
-        // alone is a better answer than dropping the border.
-        emit(outer, Shader::solid(color));
+    const std::vector<SDL_FPoint> innerPoints = sampledOutline(innerRect, inner);
+    emitRing(outer, innerPoints, color);
+}
+
+void Renderer::strokeSide(const SDL_FRect& rect, Side side, const Color& color, float thickness,
+                          const Radii& radii, Dash dash) {
+    if (color.a == 0 || thickness <= 0.0f || rect.w <= 0.0f || rect.h <= 0.0f) {
         return;
     }
+    emitSide(rect, side, thickness, color, radii, dash);
+}
+
+void Renderer::emitSide(const SDL_FRect& rect, Side side, float thickness, const Color& color,
+                        const Radii& radii, Dash dash) {
+    const std::vector<SDL_FPoint> outer = sideOutline(rect, radii, side);
+    if (outer.size() < 2) {
+        return;
+    }
+    if (dash != Dash::Solid) {
+        emitDashed(outer, thickness, color, dash, false, centreOf(rect));
+        return;
+    }
+    // The inner edge is the same side of the box inset by the border width, with each
+    // radius reduced by the same amount so the two arcs stay concentric.
+    Radii inner = radii;
+    for (Radii::Corner* c :
+         {&inner.topLeft, &inner.topRight, &inner.bottomRight, &inner.bottomLeft}) {
+        c->x = std::max(0.0f, c->x - thickness);
+        c->y = std::max(0.0f, c->y - thickness);
+    }
+    const SDL_FRect innerRect{rect.x + thickness, rect.y + thickness,
+                              std::max(0.0f, rect.w - thickness * 2.0f),
+                              std::max(0.0f, rect.h - thickness * 2.0f)};
+    const std::vector<SDL_FPoint> innerPoints = sideOutline(innerRect, inner, side);
     emitRing(outer, innerPoints, color);
 }
 
@@ -626,16 +718,26 @@ void Renderer::emitMesh(const std::vector<SDL_FPoint>& polygon, const Shader& sh
 }
 
 void Renderer::emitDashed(const std::vector<SDL_FPoint>& outline, float thickness,
-                          const Color& color, Dash dash, bool closed) {
+                          const Color& color, Dash dash, bool closed, const SDL_FPoint& interior) {
     if (outline.size() < 2 || thickness <= 0.0f || color.a == 0) {
         return;
     }
+    // A dotted run is a disc centred half a width in from the path, so that it fills
+    // the band instead of hanging over the outline.
     const float half = thickness * 0.5f;
-    const float period = std::max(thickness * kDashMultiplier, 1.0f) * 1.5f;
-    // A dotted border is the same walk with a round cap and a run only as wide as the
-    // stroke, so it differs in the length of each dash as well as in how it is drawn.
+    // A border band lives between the outline and the outline moved inward by the
+    // border width, so a dashed run fills that same band rather than straddling the
+    // path the way a stroked centreline would. Which way is inward is decided per
+    // segment against `interior`, which keeps the answer right whether the path is a
+    // whole box or a single side of one walked either way round.
+    //
+    // A dotted border is the same walk with a round cap, a dot as wide as the border
+    // and a gap of the same length, so it differs in the rhythm as well as in shape.
+    // Dashing keeps the longer, thinner rhythm.
     const bool dotted = dash == Dash::Dotted;
-    const float on = dotted ? std::max(half, 1.0f) : period * (2.0f / 3.0f);
+    const float period =
+        dotted ? std::max(thickness * 2.0f, 1.0f) : std::max(thickness * kDashMultiplier, 1.0f) * 1.5f;
+    const float on = dotted ? std::max(thickness, 1.0f) : period * (2.0f / 3.0f);
     const std::size_t count = outline.size();
     const std::size_t segments = closed ? count : count - 1;
 
@@ -661,15 +763,22 @@ void Renderer::emitDashed(const std::vector<SDL_FPoint>& outline, float thicknes
             const float y0 = a.y + (b.y - a.y) * (t / span);
             const float x1 = a.x + (b.x - a.x) * ((t + run) / span);
             const float y1 = a.y + (b.y - a.y) * ((t + run) / span);
+            const float dx = (b.x - a.x) / span;
+            const float dy = (b.y - a.y) / span;
+            float nx = -dy;
+            float ny = dx;
+            if (nx * (interior.x - a.x) + ny * (interior.y - a.y) < 0.0f) {
+                nx = -nx;
+                ny = -ny;
+            }
             if (dotted) {
-                fillCircle((x0 + x1) * 0.5f, (y0 + y1) * 0.5f, half, color);
+                fillCircle((x0 + x1) * 0.5f + nx * half, (y0 + y1) * 0.5f + ny * half, half,
+                           color);
             } else {
-                const float dx = (b.x - a.x) / span;
-                const float dy = (b.y - a.y) / span;
-                const std::vector<SDL_FPoint> quad{{x0 - dy * half, y0 + dx * half},
-                                                   {x1 - dy * half, y1 + dx * half},
-                                                   {x1 + dy * half, y1 - dx * half},
-                                                   {x0 + dy * half, y0 - dx * half}};
+                const std::vector<SDL_FPoint> quad{{x0 + nx * thickness, y0 + ny * thickness},
+                                                   {x1 + nx * thickness, y1 + ny * thickness},
+                                                   {x1, y1},
+                                                   {x0, y0}};
                 fillPolygon(quad, color);
             }
             t += run;
@@ -684,7 +793,7 @@ void Renderer::strokePath(const std::vector<SDL_FPoint>& points, const Color& co
         return;
     }
     if (dash != Dash::Solid) {
-        emitDashed(points, thickness, color, dash, closed);
+        emitDashed(points, thickness, color, dash, closed, centroid(points));
         return;
     }
     const float half = thickness * 0.5f;

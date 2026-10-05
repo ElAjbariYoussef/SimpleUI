@@ -158,10 +158,74 @@ void testRadialPosition() {
     check(atCentre < 0.9f && atCentre > 0.1f, "the box centre is part way along the ramp");
 }
 
+// An elliptical radius has to put its arc on the ellipse, not on the circle its x
+// radius describes, and the arc has to end where the straight sides begin.
+void testEllipticalOutline() {
+    const SDL_FRect rect{20.0f, 60.0f, 200.0f, 84.0f};
+    const sui::Radii radii = sui::Radii::all(12.0f, 24.0f);
+    const auto points = sui::Renderer::sampledOutline(rect, radii);
+    constexpr int kPerCorner = 9;
+    check(points.size() == kPerCorner * 4, "sampled outline samples every corner");
+    const float cx = rect.x + 12.0f;
+    const float cy = rect.y + 24.0f;
+    for (int i = 0; i < kPerCorner; ++i) {
+        const float nx = (points[i].x - cx) / 12.0f;
+        const float ny = (points[i].y - cy) / 24.0f;
+        checkNear(nx * nx + ny * ny, 1.0f, 0.01f, "the arc lies on the ellipse");
+    }
+    // The arc runs from the end of one straight side to the start of the next.
+    checkNear(points.front().x, rect.x, 0.001f, "the arc starts on the left edge");
+    checkNear(points.front().y, rect.y + 24.0f, 0.001f, "the arc starts a full ry down");
+    checkNear(points[kPerCorner - 1].x, rect.x + 12.0f, 0.001f, "the arc ends on the top edge");
+    checkNear(points[kPerCorner - 1].y, rect.y, 0.001f, "the arc ends on the top edge");
+}
+
+// A ring zips an outer outline against an inner one, so the two have to agree on how
+// many points that is even where a radius has shrunk away to nothing.
+void testSampledOutlineAlwaysSamples() {
+    const SDL_FRect rect{0.0f, 0.0f, 100.0f, 60.0f};
+    const auto square = sui::Renderer::roundedOutline(rect, {});
+    check(square.size() == 4, "a square outline is four points");
+    const auto sampled = sui::Renderer::sampledOutline(rect, {});
+    check(sampled.size() > 4, "a sampled square outline still samples");
+    // The border as wide as the radius collapses the inner radii to nothing, which is
+    // exactly the case that used to leave the pair unmatched.
+    const auto inner = sui::Renderer::sampledOutline(
+        {rect.x + 12.0f, rect.y + 12.0f, rect.w - 24.0f, rect.h - 24.0f}, {});
+    check(inner.size() == sampled.size(),
+          "the inner outline matches the outer in point count");
+}
+
+// The four sides tile the outline: each point of the whole belongs to exactly one side,
+// and the only overlap is a shared corner endpoint.
+void testSideOutlinesTileTheOutline() {
+    const SDL_FRect rect{10.0f, 20.0f, 120.0f, 80.0f};
+    const sui::Radii radii = sui::Radii::all(10.0f, 16.0f);
+    const auto whole = sui::Renderer::sampledOutline(rect, radii);
+    int total = 0;
+    for (const sui::Side side :
+         {sui::Side::Top, sui::Side::Right, sui::Side::Bottom, sui::Side::Left}) {
+        const auto points = sui::Renderer::sideOutline(rect, radii, side);
+        check(points.size() >= 2, "each side has points to walk");
+        for (const SDL_FPoint& p : points) {
+            check(p.x >= rect.x - 0.01f && p.x <= rect.x + rect.w + 0.01f,
+                  "side point inside the box in x");
+            check(p.y >= rect.y - 0.01f && p.y <= rect.y + rect.h + 0.01f,
+                  "side point inside the box in y");
+        }
+        total += static_cast<int>(points.size());
+    }
+    check(total == static_cast<int>(whole.size()) + 4,
+          "the sides tile the outline with one shared point per corner");
+}
+
 }  // namespace
 
 int main() {
     testOutlineStaysInBox();
+    testEllipticalOutline();
+    testSampledOutlineAlwaysSamples();
+    testSideOutlinesTileTheOutline();
     testSquareOutline();
     testDegenerateBox();
     testRadiiClamped();

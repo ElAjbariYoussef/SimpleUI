@@ -68,6 +68,40 @@ enum class Dash {
     Dotted,
 };
 
+enum class Side : std::uint8_t {
+    Top,
+    Right,
+    Bottom,
+    Left,
+};
+
+// `border-style` is a per-side property, so the four edges can disagree. `all` is
+// the shorthand for the common case where they do not.
+struct SideDashes {
+    Dash top = Dash::Solid;
+    Dash right = Dash::Solid;
+    Dash bottom = Dash::Solid;
+    Dash left = Dash::Solid;
+
+    bool uniform() const {
+        return top == right && right == bottom && bottom == left;
+    }
+    Dash of(Side side) const {
+        switch (side) {
+            case Side::Top:
+                return top;
+            case Side::Right:
+                return right;
+            case Side::Bottom:
+                return bottom;
+            case Side::Left:
+                return left;
+        }
+        return Dash::Solid;
+    }
+    static SideDashes all(Dash dash) { return SideDashes{dash, dash, dash, dash}; }
+};
+
 struct GradientStop {
     float offset = 0.0f;  // 0..1
     Color color;
@@ -158,9 +192,10 @@ public:
     void fillPolygon(const std::vector<SDL_FPoint>& points, const Shader& shader);
     void fillCircle(float cx, float cy, float radius, const Color& color);
 
-    // Strokes. The stroke straddles the path, centred on it, as CSS borders do.
+    // Strokes. The band runs inward from the path, not centred on it, because that is
+    // where a CSS border sits: inside the border box, taking space from the padding.
     void strokeRect(const SDL_FRect& rect, const Color& color, float thickness = 1.0f,
-                    const Radii& radii = {}, Dash dash = Dash::Solid);
+                    const Radii& radii = {}, const SideDashes& dashes = {});
     void strokePath(const std::vector<SDL_FPoint>& points, const Color& color,
                     float thickness = 1.0f, bool closed = false, Dash dash = Dash::Solid);
     void line(float x1, float y1, float x2, float y2, const Color& color,
@@ -177,10 +212,28 @@ public:
 
     SDL_Renderer* sdl() const { return renderer_; }
 
+    void strokeSide(const SDL_FRect& rect, Side side, const Color& color, float thickness,
+                    const Radii& radii, Dash dash);
+
     // Exposed so layout-adjacent code and tests can reason about the geometry
     // without a renderer.
     static std::vector<SDL_FPoint> roundedOutline(const SDL_FRect& rect, const Radii& radii,
                                                   int samplesPerCorner = 8);
+
+    // The same outline, but always with the arcs sampled even where a radius is zero.
+    // A ring zips an outer outline against an inner one point for point, so the two
+    // have to agree on how many points that is; a zero radius collapsing to a single
+    // corner would otherwise leave the pair unmatched.
+    static std::vector<SDL_FPoint> sampledOutline(const SDL_FRect& rect, const Radii& radii,
+                                                  int samplesPerCorner = 8);
+
+    static std::vector<SDL_FPoint> fourCorners(const SDL_FRect& rect);
+
+    // One side's share of that outline: the straight edge plus the half of each
+    // corner arc that touches it. The four sides partition the outline, so drawing
+    // them one at a time covers every pixel exactly once.
+    static std::vector<SDL_FPoint> sideOutline(const SDL_FRect& rect, const Radii& radii,
+                                               Side side, int samplesPerQuarter = 4);
 
 private:
     void emit(const std::vector<SDL_FPoint>& points, const Shader& shader);
@@ -188,8 +241,12 @@ private:
     void emitMesh(const std::vector<SDL_FPoint>& polygon, const Shader& shader);
     void emitRing(const std::vector<SDL_FPoint>& outer, const std::vector<SDL_FPoint>& inner,
                   const Color& color);
+    // `interior` is a point known to lie inside the shape; it decides which way the
+    // band extends from the path.
     void emitDashed(const std::vector<SDL_FPoint>& outline, float thickness, const Color& color,
-                    Dash dash, bool closed);
+                    Dash dash, bool closed, const SDL_FPoint& interior);
+    void emitSide(const SDL_FRect& rect, Side side, float thickness, const Color& color,
+                  const Radii& radii, Dash dash);
     void emitImageQuad(const SDL_FRect& rect, const Shader& shader);
     void setColor(const Color& color);
 

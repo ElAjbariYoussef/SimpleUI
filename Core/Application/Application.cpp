@@ -159,6 +159,10 @@ struct PaintItem {
     // The tightest rect every ancestor's `overflow` imposes, in window
     // coordinates. A width or height of zero or less means no clip at all.
     SDL_FRect clip{0.0f, 0.0f, 0.0f, 0.0f};
+    // Every ancestor's `opacity` multiplied together. Carried per item rather than
+    // composited through an offscreen buffer, which differs only where two elements
+    // inside the same group overlap.
+    float opacity = 1.0f;
 };
 
 SDL_FRect intersectClip(const SDL_FRect& a, const SDL_FRect& b) {
@@ -182,13 +186,14 @@ bool clipsAnything(const ComputedStyle& s) {
 // threaded down: an element's own box is clipped by its ancestors, and it in turn
 // clips its descendants.
 void collectPaint(Element& el, const StyleResolver& resolver, const SDL_FRect& inherited,
-                  std::vector<PaintItem>& out) {
+                  float opacity, std::vector<PaintItem>& out) {
     SDL_FRect clip = inherited;
     bool drawable = false;
     ComputedStyle s;
     if (el.isVisual()) {
         s = resolver.resolve(el);
         drawable = s.display != ComputedStyle::None && s.visible;
+        opacity *= s.opacity;
         if (drawable && clipsAnything(s)) {
             clip = intersectClip(clip, SDL_FRect{el.clipX(), el.clipY(), el.clipWidth(),
                                                  el.clipHeight()});
@@ -204,42 +209,290 @@ void collectPaint(Element& el, const StyleResolver& resolver, const SDL_FRect& i
         // `overflow` crops the element's own content as well as its descendants,
         // so the clip has already included this element by the time it is stored.
         item.clip = clip;
+        item.opacity = opacity;
         out.push_back(item);
     }
 
     // Non-visual wrappers (<root>, <head>) still contain drawable descendants.
     for (const auto& child : el.children()) {
         if (child && !child->isTextNode()) {
-            collectPaint(*child, resolver, clip, out);
+            collectPaint(*child, resolver, clip, opacity, out);
         }
     }
 }
 
+// A percentage radius resolves against the box's own width and height, and an `em`
+// or `rem` against the font sizes, so this cannot be settled until the box is known.
+sui::Radii radiiOf(const ComputedStyle& s, const SDL_FRect& box, float rootFontSize) {
+    const ComputedStyle::Radii& authored = s.borderRadii;
+    const auto px = [&](const Length& l, float base) {
+        return l.resolve(base, s.fontSize, rootFontSize);
+    };
+    return sui::Radii{
+        {px(authored.topLeft.x, box.w), px(authored.topLeft.y, box.h)},
+        {px(authored.topRight.x, box.w), px(authored.topRight.y, box.h)},
+        {px(authored.bottomRight.x, box.w), px(authored.bottomRight.y, box.h)},
+        {px(authored.bottomLeft.x, box.w), px(authored.bottomLeft.y, box.h)}};
+}
+
+sui::SideDashes dashesOf(const ComputedStyle& s) {
+    const auto dash = [](ComputedStyle::BorderStyle style) {
+        switch (style) {
+            case ComputedStyle::BorderDashed:
+                return sui::Dash::Dashed;
+            case ComputedStyle::BorderDotted:
+                return sui::Dash::Dotted;
+            default:
+                return sui::Dash::Solid;
+        }
+    };
+    return sui::SideDashes{dash(s.borderStyles.top), dash(s.borderStyles.right),
+                           dash(s.borderStyles.bottom), dash(s.borderStyles.left)};
+}
+
+bool borderEdgeVisible(ComputedStyle::BorderStyle style) {
+    return style != ComputedStyle::BorderStyleNone;
+}
+
+// A blurred shadow is drawn as concentric rings at falling alpha. Each ring is a real
+// annulus, drawn as a stroke on its own path, which is what lets the alpha fall off
+// in either direction: nested *filled* shapes can only ever accumulate coverage, so
+// an inward falloff would be impossible with them.
+//
+// The blur radius sets how far the rings reach, and the weights are a linear ramp
+// rather than a Gaussian. Nothing in CSS asks for the exact curve, and a staircase
+// of a few bands is what the eye reads as a soft edge anyway.
+constexpr int kShadowSteps = 6;
+
+void paintShadowRings(const ComputedStyle::BoxShadow& shadow, const SDL_FRect& shape,
+                      const sui::Radii& radii, const ComputedStyle& s, Renderer& renderer,
+                      float rootFontSize, float opacity, bool inset) {
+    const float blur =
+        std::max(0.0f, shadow.blurRadius.resolve(0.0f, s.fontSize, rootFontSize));
+    const Color base = multiplyAlpha(toColor(shadow.color), opacity);
+    if (base.a == 0) {
+        return;
+    }
+    if (blur <= 0.0f) {
+        // An unblurred shadow is a single hard-edged copy of the silhouette.
+        if (inset) {
+            renderer.fillRect(shape, Shader::solid(base), radii);
+        } else {
+            renderer.strokeRect(shape, base, 1.0f, radii);
+        }
+        return;
+    }
+    const float step = blur / kShadowSteps;
+    // Weights fall off linearly outward and sum to one, so the ring at the
+    // silhouette carries the whole authored alpha and the far tail carries almost
+    // none of it.
+    const float weightSum = static_cast<float>(kShadowSteps * (kShadowSteps + 1)) * 0.5f;
+    for (int i = 1; i <= kShadowSteps; ++i) {
+        // A ring is filled inward from its own path, so this places band `i` over
+        // exactly the slice from (i-1) steps out to i, and the six of them tile the
+        // blur radius with no gap at the silhouette and no overlap anywhere.
+        const float reach = static_cast<float>(i - 1) * step;
+        // A ring fills inward from its own path. An outset band therefore has to be
+        // the path *outside* its band, while an inset one is the path *inside* its own.
+        const float outside = inset ? reach : reach + step;
+        const SDL_FRect path{inset ? shape.x + reach : shape.x - outside,
+                             inset ? shape.y + reach : shape.y - outside,
+                             inset ? shape.w - reach * 2.0f : shape.w + outside * 2.0f,
+                             inset ? shape.h - reach * 2.0f : shape.h + outside * 2.0f};
+        if (path.w <= 0.0f || path.h <= 0.0f) {
+            continue;
+        }
+        const sui::Radii ringRadii =
+            radii.any() ? sui::Radii::all(inset ? std::max(0.0f, radii.topLeft.x - reach)
+                                                : radii.topLeft.x + reach,
+                                          inset ? std::max(0.0f, radii.topLeft.y - reach)
+                                                : radii.topLeft.y + reach)
+                        : radii;
+        const float weight = static_cast<float>(kShadowSteps + 1 - i) * 2.0f / weightSum;
+        renderer.strokeRect(path, multiplyAlpha(base, weight), step, ringRadii);
+    }
+}
+
+// An outset shadow paints behind the box. A list of them all draws, with the first
+// entry on top, so the list is walked backwards.
+void paintBoxShadow(const ComputedStyle& s, const SDL_FRect& box, const sui::Radii& radii,
+                    Renderer& renderer, float rootFontSize, float opacity) {
+    for (auto it = s.boxShadows.rbegin(); it != s.boxShadows.rend(); ++it) {
+        const ComputedStyle::BoxShadow& shadow = *it;
+        if (shadow.inset) {
+            continue;
+        }
+        const float dx = shadow.offsetX.resolve(0.0f, s.fontSize, rootFontSize);
+        const float dy = shadow.offsetY.resolve(0.0f, s.fontSize, rootFontSize);
+        const float spread = shadow.spread.resolve(0.0f, s.fontSize, rootFontSize);
+        const SDL_FRect shape{box.x + dx - spread, box.y + dy - spread,
+                              box.w + spread * 2.0f, box.h + spread * 2.0f};
+        if (shape.w <= 0.0f || shape.h <= 0.0f) {
+            continue;
+        }
+        // A positive spread pushes the silhouette out and the radius with it, so the
+        // shadow keeps the corner's proportions instead of sharpening as it grows.
+        const sui::Radii grown =
+            radii.any() ? sui::Radii::all(std::max(0.0f, radii.topLeft.x + spread),
+                                          std::max(0.0f, radii.topLeft.y + spread))
+                        : radii;
+        paintShadowRings(shadow, shape, grown, s, renderer, rootFontSize, opacity, false);
+    }
+}
+
+void paintInsetShadow(const ComputedStyle& s, const SDL_FRect& box, const sui::Radii& radii,
+                      Renderer& renderer, float rootFontSize, float opacity) {
+    if (s.boxShadows.empty() || box.w <= 0.0f || box.h <= 0.0f) {
+        return;
+    }
+    renderer.pushClip(box);
+    for (const ComputedStyle::BoxShadow& shadow : s.boxShadows) {
+        if (!shadow.inset) {
+            continue;
+        }
+        const float spread = shadow.spread.resolve(0.0f, s.fontSize, rootFontSize);
+        // A negative spread pulls the shadow's edge in from the box's own, so it only
+        // darkens what is left of the band between the two.
+        const SDL_FRect shape{box.x - spread, box.y - spread, box.w + spread * 2.0f,
+                              box.h + spread * 2.0f};
+        paintShadowRings(shadow, shape, radii, s, renderer, rootFontSize, opacity, true);
+    }
+    renderer.popClip();
+}
+
+// One text shadow: the run drawn again, offset, then blurred by stamping the glyphs
+// out along the blur radius at falling alpha. A stencil per band would need a surface
+// the offscreen path does not have yet, so the stamps stand in for it.
+void paintTextShadow(const ComputedStyle::TextShadow& shadow, const Element::TextRun& run,
+                     const TextFont& font, SDL_Renderer* sdlRenderer, Renderer& renderer,
+                     float fontSize, float rootFontSize, float opacity) {
+    const float dx = shadow.offsetX.resolve(0.0f, fontSize, rootFontSize);
+    const float dy = shadow.offsetY.resolve(0.0f, fontSize, rootFontSize);
+    const float blur = std::max(0.0f, shadow.blurRadius.resolve(0.0f, fontSize, rootFontSize));
+    const Color base = multiplyAlpha(toColor(shadow.color), opacity);
+    if (base.a == 0) {
+        return;
+    }
+    const SDL_Color tint{base.r, base.g, base.b, base.a};
+    const int bands = blur > 0.0f ? kShadowSteps : 1;
+    for (int band = 0; band < bands; ++band) {
+        // The stamp nearest the run carries the most of the alpha, and the ones further
+        // out fill in the blur. Linear, like the box shadow's ramp.
+        const float reach = bands > 1 ? static_cast<float>(band) * blur / (bands - 1) : 0.0f;
+        const float weight =
+            bands > 1 ? 1.0f - 0.6f * static_cast<float>(band) / (bands - 1) : 1.0f;
+        // Offsetting along the shadow's own direction reads as blur; spreading it evenly
+        // reads as a drop shadow, which is what an unblurred one is anyway.
+        const float len = std::hypot(dx, dy);
+        const float ux = len > 0.0f ? dx / len : 0.707f;
+        const float uy = len > 0.0f ? dy / len : 0.707f;
+        SDL_Texture* texture = font.renderText(sdlRenderer, run.text, run.fontSize, tint);
+        if (!texture) {
+            continue;
+        }
+        float texW = 0.0f, texH = 0.0f;
+        SDL_GetTextureSize(texture, &texW, &texH);
+        renderer.drawTexture(
+            texture, SDL_FRect{std::floor(run.x + dx + ux * reach),
+                               std::floor(run.y + dy + uy * reach), texW, texH},
+            nullptr, Color{255, 255, 255, static_cast<Uint8>(weight * 255.0f)});
+        SDL_DestroyTexture(texture);
+    }
+}
+
 void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
-              const StyleResolver& resolver, const TextFont& font) {
+              const StyleResolver& resolver, const TextFont& font, float opacity) {
     const ComputedStyle s = resolver.resolve(el);
     const SDL_FRect box{el.layoutX(), el.layoutY(), el.layoutWidth(), el.layoutHeight()};
+    const float rootFontSize = resolver.rootFontSize();
     // Border widths take no percentages or font-relative units, so they need no
     // containing block to resolve.
-    const float borderTop = s.borderWidth.top.resolve();
+    const sui::Radii radii = radiiOf(s, box, rootFontSize);
+    const sui::Color background = multiplyAlpha(toColor(s.backgroundColor), opacity);
+    const sui::Color border = multiplyAlpha(toColor(s.borderColor), opacity);
+
     if (box.w > 0.0f && box.h > 0.0f) {
-        if (s.backgroundColor.a > 0) {
-            renderer.fillRect(box, toColor(s.backgroundColor));
+        // An outset shadow paints behind the box, an inset one over the background
+        // and below the content, which is the order CSS uses.
+        paintBoxShadow(s, box, radii, renderer, rootFontSize, opacity);
+        if (background.a > 0) {
+            renderer.fillRect(box, Shader::solid(background), radii);
         }
-        if (borderTop > 0.0f || s.borderWidth.left.resolve() > 0.0f) {
-            renderer.strokeRect(box, toColor(s.borderColor), borderTop);
+        paintInsetShadow(s, box, radii, renderer, rootFontSize, opacity);
+
+        if (border.a > 0) {
+            // A side CSS leaves invisible is dropped outright rather than drawn with a
+            // zero width, and four sides that disagree about width or pattern are drawn
+            // one at a time so they are not forced into a single ring.
+            const float widths[4] = {
+                borderEdgeVisible(s.borderStyles.top) ? s.borderWidth.top.resolve() : 0.0f,
+                borderEdgeVisible(s.borderStyles.right) ? s.borderWidth.right.resolve() : 0.0f,
+                borderEdgeVisible(s.borderStyles.bottom) ? s.borderWidth.bottom.resolve() : 0.0f,
+                borderEdgeVisible(s.borderStyles.left) ? s.borderWidth.left.resolve() : 0.0f};
+            const sui::SideDashes dashes = dashesOf(s);
+            const bool uniform = widths[0] > 0.0f && widths[0] == widths[1] &&
+                                 widths[0] == widths[2] && widths[0] == widths[3];
+            if (uniform) {
+                renderer.strokeRect(box, border, widths[0], radii, dashes);
+            } else {
+                const Side sides[4] = {Side::Top, Side::Right, Side::Bottom, Side::Left};
+                for (int i = 0; i < 4; ++i) {
+                    if (widths[i] > 0.0f) {
+                        renderer.strokeSide(box, sides[i], border, widths[i], radii,
+                                            dashes.of(sides[i]));
+                    }
+                }
+            }
+        }
+
+        // The outline sits outside the border box and takes no space, so it is drawn
+        // without touching layout at all.
+        const float outlineWidth = s.outline.width.resolve(0.0f, s.fontSize, rootFontSize);
+        if (borderEdgeVisible(s.outline.style) && outlineWidth > 0.0f) {
+            const float offset = s.outline.offset.resolve(0.0f, s.fontSize, rootFontSize);
+            const SDL_FRect shape{box.x - offset - outlineWidth, box.y - offset - outlineWidth,
+                                  box.w + (offset + outlineWidth) * 2.0f,
+                                  box.h + (offset + outlineWidth) * 2.0f};
+            const sui::Radii outlineRadii =
+                radii.any() ? sui::Radii::all(radii.topLeft.x + offset + outlineWidth,
+                                              radii.topLeft.y + offset + outlineWidth)
+                            : radii;
+            const auto dash = [](ComputedStyle::BorderStyle style) {
+                switch (style) {
+                    case ComputedStyle::BorderDashed:
+                        return sui::Dash::Dashed;
+                    case ComputedStyle::BorderDotted:
+                        return sui::Dash::Dotted;
+                    default:
+                        return sui::Dash::Solid;
+                }
+            };
+            renderer.strokeRect(shape, multiplyAlpha(toColor(s.outline.color), opacity),
+                               outlineWidth, outlineRadii,
+                               sui::SideDashes::all(dash(s.outline.style)));
         }
     }
 
     if (!font.hasFont()) {
         return;
     }
+    // A text shadow is the run drawn again, offset and blurred, before the run
+    // itself. Both carry the group's opacity.
     for (const auto& run : el.textRuns()) {
         if (run.text.empty() || run.fontSize <= 0.0f) {
             continue;
         }
+        // The list draws back to front so that the first entry lands on top, the same
+        // order CSS uses. Each shadow re-renders the run, so a blur costs a render per
+        // band rather than a filter on an offscreen surface.
+        for (auto shadow = s.textShadows.rbegin(); shadow != s.textShadows.rend(); ++shadow) {
+            paintTextShadow(*shadow, run, font, sdlRenderer, renderer, s.fontSize,
+                            rootFontSize, opacity);
+        }
         SDL_Texture* texture = font.renderText(
-            sdlRenderer, run.text, run.fontSize, SDL_Color{run.r, run.g, run.b, run.a});
+            sdlRenderer, run.text, run.fontSize,
+            SDL_Color{run.r, run.g, run.b,
+                      static_cast<Uint8>(static_cast<float>(run.a) * opacity)});
         if (!texture) {
             continue;
         }
@@ -564,7 +817,7 @@ void Application::run() {
                 // `z-index`, each box clipped to whatever its ancestors' `overflow`
                 // allows.
                 std::vector<PaintItem> paintList;
-                collectPaint(*document_->root(), resolver_, SDL_FRect{}, paintList);
+                collectPaint(*document_->root(), resolver_, SDL_FRect{}, 1.0f, paintList);
                 std::stable_sort(paintList.begin(), paintList.end(),
                                  [](const PaintItem& a, const PaintItem& b) {
                                      if (a.layer != b.layer) {
@@ -588,7 +841,7 @@ void Application::run() {
                     } else {
                         SDL_SetRenderClipRect(sdlRenderer, nullptr);
                     }
-                    paintBox(*item.el, renderer, sdlRenderer, resolver_, *font_);
+                    paintBox(*item.el, renderer, sdlRenderer, resolver_, *font_, item.opacity);
                     SDL_SetRenderClipRect(sdlRenderer, &previous);
                 }
             } else {

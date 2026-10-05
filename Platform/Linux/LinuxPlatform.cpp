@@ -51,6 +51,12 @@ bool LinuxPlatform::initialize(const WindowConfig& config, std::string& error) {
         return false;
     }
 
+    // Alpha has to reach the framebuffer as blending, not as a stored alpha byte.
+    // SDL's default is no blending, which silently turns every translucent fill --
+    // any `opacity`, any shadow, any semi-transparent background -- into an opaque
+    // one, so this has to be set before the first frame.
+    SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
+
     // Text is rasterised by the engine at its exact pixel size, so the renderer's
     // own sampler has no business blending it. Nearest sampling plus pixel-aligned
     // destinations is what keeps glyph edges crisp; SDL defaults to linear, which
