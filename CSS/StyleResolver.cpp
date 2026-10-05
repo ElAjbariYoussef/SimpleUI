@@ -790,26 +790,87 @@ ComputedStyle StyleResolver::resolve(Element& element) const {
     return resolveWithParent(element, parent);
 }
 
+namespace {
+
+// `initial` and `revert` need an initial-value table per property, which the
+// engine does not have, so they are left out and handled like any other unknown
+// value. These two the engine can answer exactly.
+bool isCssWideKeyword(std::string_view value) {
+    return value == "inherit" || value == "unset";
+}
+
+// The properties `unset` inherits when no other value applies. Mirrors the set
+// inheritInto() fills in.
+bool isInheritable(std::string_view property) {
+    return property == "color" || property == "font-size" ||
+           property == "font-family" || property == "font-weight" ||
+           property == "line-height" || property == "text-align";
+}
+
+// `inherit` and `unset` are the two CSS-wide keywords the engine can answer
+// exactly: the first always takes the parent's value, the second takes it for an
+// inheritable property and is otherwise left to the property's own initial value,
+// which is what a default-constructed `ComputedStyle` already holds.
+void applyCssWideKeyword(ComputedStyle& style, const Declaration& decl,
+                         const ComputedStyle& parent) {
+    const std::string_view value = trim(decl.value);
+    const bool take =
+        value == "inherit" || (value == "unset" && isInheritable(decl.property));
+    if (!take) {
+        return;
+    }
+    // propertyValue round-trips the parent's value through the same parser, so
+    // this needs no second copy of the property table.
+    applyDeclaration(style,
+                     Declaration{decl.property,
+                                 StyleResolver::propertyValue(parent, decl.property),
+                                 decl.important},
+                     0.0f);
+}
+
+}  // namespace
+
 ComputedStyle StyleResolver::resolveWithParent(Element& element,
                                                const ComputedStyle& parent) const {
     ComputedStyle style = defaultStyleFor(element.tag());
     inheritInto(style, parent);
 
-    // Author rules, weakest first, so later/specific rules overwrite.
-    for (const auto& rule : rules_) {
-        if (!selectorMatches(rule.selector, element)) {
-            continue;
+    // `!important` is a cascade level of its own, not a tiebreak: it outranks a
+    // stronger selector at an ordinary weight. So the declarations are applied in
+    // two passes, each already sorted weakest-first.
+    const std::vector<Declaration> inlineDecls =
+        element.hasAttribute("style")
+            ? parseDeclarations(element.attribute("style"))
+            : std::vector<Declaration>{};
+    const auto applyLevel = [&](bool important) {
+        for (const auto& rule : rules_) {
+            if (!selectorMatches(rule.selector, element)) {
+                continue;
+            }
+            for (const auto& decl : rule.declarations) {
+                if (decl.important != important) {
+                    continue;
+                }
+                if (isCssWideKeyword(decl.value)) {
+                    applyCssWideKeyword(style, decl, parent);
+                } else {
+                    applyDeclaration(style, decl, rootFontSize_);
+                }
+            }
         }
-        for (const auto& decl : rule.declarations) {
-            applyDeclaration(style, decl, rootFontSize_);
+        for (const auto& decl : inlineDecls) {
+            if (decl.important != important) {
+                continue;
+            }
+            if (isCssWideKeyword(decl.value)) {
+                applyCssWideKeyword(style, decl, parent);
+            } else {
+                applyDeclaration(style, decl, rootFontSize_);
+            }
         }
-    }
-
-    if (element.hasAttribute("style")) {
-        for (const auto& decl : parseDeclarations(element.attribute("style"))) {
-            applyDeclaration(style, decl, rootFontSize_);
-        }
-    }
+    };
+    applyLevel(false);
+    applyLevel(true);
 
     applyDimensionAttributes(style, element);
     return style;

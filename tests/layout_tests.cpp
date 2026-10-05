@@ -1250,12 +1250,77 @@ void testFlexNestedContainer() {
               "a nested flex container splits its own share");
 }
 
+void testImportantAndCssWideKeywords() {
+    auto document = parseOrNull(
+        "<sui><body><div style=\"width:300px;padding:20px\">"
+        "<p id=\"t\">x</p></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* t = document->getElementById("t");
+    check(t != nullptr, "important/keyword elements found");
+    if (!t) {
+        return;
+    }
+
+    // `!important` is a cascade level, so a type rule carrying it beats a later id
+    // rule that does not.
+    sui::StyleResolver r1;
+    r1.setRules(sui::CSSParser::parse("p{color:#0000ff !important} #t{color:#ff0000}"));
+    check(r1.resolve(*t).color.b == 0xff && r1.resolve(*t).color.r == 0x00,
+          "!important beats a stronger ordinary selector");
+
+    // Without it, specificity decides as usual.
+    sui::StyleResolver r2;
+    r2.setRules(sui::CSSParser::parse("p{color:#0000ff} #t{color:#ff0000}"));
+    check(r2.resolve(*t).color.r == 0xff, "an ordinary id rule still beats a type rule");
+
+    // `!important` inside the style attribute outranks every rule.
+    sui::ParseError e3;
+    auto d3 = parseOrNull(
+        "<sui><body><p id=\"t\" style=\"color:#00ff00 !important\">x</p></body></sui>");
+    if (d3) {
+        sui::StyleResolver r3;
+        r3.setRules(sui::CSSParser::parse("#t{color:#ff0000}"));
+        const auto s = r3.resolve(*d3->getElementById("t"));
+        check(s.color.g == 0xff, "an inline !important beats every rule");
+    }
+
+    // `inherit` takes the parent's value, including for a property that does not
+    // normally inherit.
+    sui::StyleResolver r4;
+    r4.setRules(sui::CSSParser::parse("#t{width:inherit}"));
+    check(r4.resolve(*t).width.isAuto() == false,
+          "width:inherit produces a length instead of auto");
+    checkNear(r4.resolve(*t).width.resolve(0.0f, 16.0f, 16.0f), 300.0f, 0.01f,
+              "width:inherit takes the parent's width");
+
+    // `unset` inherits for an inheritable property...
+    sui::StyleResolver r5;
+    r5.setRules(sui::CSSParser::parse("body{color:#00ff00} #t{color:unset}"));
+    check(r5.resolve(*t).color.g == 0xff, "color:unset inherits");
+
+    // ...and does nothing for one that does not.
+    sui::StyleResolver r6;
+    r6.setRules(sui::CSSParser::parse("#t{width:80px} #t{width:unset}"));
+    checkNear(r6.resolve(*t).width.resolve(0.0f, 16.0f, 16.0f), 80.0f, 0.01f,
+              "width:unset leaves the earlier declaration alone");
+
+    // `initial` and `revert` are not implemented and must not be mistaken for
+    // lengths: they leave the property exactly as the UA left it.
+    sui::StyleResolver r7;
+    r7.setRules(sui::CSSParser::parse("#t{border-width-left:initial}"));
+    check(r7.resolve(*t).borderWidth.left.isAuto(),
+          "border-width-left is untouched by an unknown keyword");
+}
+
 }  // namespace
 
 int main() {
     testRuleParsing();
     testSelectorMatching();
     testAttributeSelectors();
+    testImportantAndCssWideKeywords();
     testCascade();
     testPropertyParsing();
     testBlockStacking();
