@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <deque>
 #include <filesystem>
 
@@ -171,7 +172,13 @@ void paintElement(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                     if (!texture) {
                         continue;
                     }
-                    SDL_FRect dst{run.x, run.y, run.width, run.height};
+                    // The texture is drawn 1:1 on the pixel grid. Scaling it to the
+                    // line box would resample the bitmap and soften every stem, and
+                    // the glyph box already starts at the top of the line box, since
+                    // the run's baseline is the font's own ascent.
+                    float texW = 0.0f, texH = 0.0f;
+                    SDL_GetTextureSize(texture, &texW, &texH);
+                    const SDL_FRect dst{std::floor(run.x), std::floor(run.y), texW, texH};
                     SDL_RenderTexture(sdlRenderer, texture, nullptr, &dst);
                     SDL_DestroyTexture(texture);
                 }

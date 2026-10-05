@@ -240,6 +240,8 @@ SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
     }
 
     SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, surf);
+    // The bitmap is already at its final pixel size, so it must be sampled 1:1.
+    SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_NEAREST);
     SDL_DestroySurface(surf);
     return tex;
 }

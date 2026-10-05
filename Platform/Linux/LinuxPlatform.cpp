@@ -51,6 +51,14 @@ bool LinuxPlatform::initialize(const WindowConfig& config, std::string& error) {
         return false;
     }
 
+    // Text is rasterised by the engine at its exact pixel size, so the renderer's
+    // own sampler has no business blending it. Nearest sampling plus pixel-aligned
+    // destinations is what keeps glyph edges crisp; SDL defaults to linear, which
+    // turns every glyph soft.
+    SDL_SetDefaultTextureScaleMode(renderer_, SDL_SCALEMODE_NEAREST);
+    SDL_SetRenderLogicalPresentation(renderer_, config.width, config.height,
+                                     SDL_LOGICAL_PRESENTATION_LETTERBOX);
+
     return true;
 }
 

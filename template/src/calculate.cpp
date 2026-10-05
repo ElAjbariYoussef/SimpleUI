@@ -19,6 +19,11 @@ void toggleHighlight() {
         return;
     }
 
+    // An inline declaration outranks every class rule, so a recolour left behind by
+    // recolorSidebar() would win and the highlight would look broken. Clearing it
+    // hands the property back to the cascade, which is the rule browsers follow too.
+    sidebar->style().removeProperty("background-color");
+
     // classList is how a web developer toggles state; the cascade does the rest.
     sidebar->toggleClass("highlight", !sidebar->hasClass("highlight"));
     document.invalidate();
