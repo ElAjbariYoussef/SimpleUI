@@ -134,6 +134,67 @@ Length parseBorderWidth(std::string_view v) {
 
 std::vector<std::string_view> splitTopLevel(std::string_view value, char separator);
 
+bool startsWith(std::string_view value, std::string_view prefix) {
+    return value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0;
+}
+
+bool endsWith(std::string_view value, std::string_view suffix) {
+    return value.size() >= suffix.size() &&
+           value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+// The arguments of `name(...)`, or false when the token is not that function. The
+// closing paren is the token's last character, so a `url()` holding one still works.
+bool functionArgs(std::string_view token, std::string_view name, std::string_view& out) {
+    if (token.empty() || token.back() != ')') {
+        return false;
+    }
+    if (!startsWith(token, name) || token.size() <= name.size() ||
+        token[name.size()] != '(') {
+        return false;
+    }
+    out = trim(token.substr(name.size() + 1, token.size() - name.size() - 2));
+    return true;
+}
+
+// An angle in degrees, accepting the `deg`, `grad`, `rad` and `turn` units. The unit is
+// a suffix, so the number is stripped from the end rather than tested at the front. A
+// bare number is not an angle in CSS; a lone `0` is the one exception worth allowing,
+// since it is what a zero offset serialises to.
+bool parseAngle(std::string_view token, float& out) {
+    struct Unit {
+        std::string_view name;
+        float degrees;
+    };
+    static constexpr Unit kUnits[] = {
+        {"grad", 0.9f}, {"turn", 360.0f}, {"rad", 57.29577951308232f}, {"deg", 1.0f}};
+    for (const Unit& unit : kUnits) {
+        if (!endsWith(token, unit.name)) {
+            continue;
+        }
+        const std::string_view number = trim(token.substr(0, token.size() - unit.name.size()));
+        if (number.empty()) {
+            return false;
+        }
+        try {
+            std::size_t read = 0;
+            const float value = std::stof(std::string(number), &read);
+            if (read != number.size()) {
+                return false;
+            }
+            out = value * unit.degrees;
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+    if (token == "0") {
+        out = 0.0f;
+        return true;
+    }
+    return false;
+}
+
 // CSS expands a one-to-four value box shorthand as: one value sets all four sides,
 // two set top-and-bottom then left-and-right, three are top | left-and-right |
 // bottom, and four run clockwise from the top.
@@ -235,6 +296,122 @@ bool parseHexColor(std::string_view value, SDL_Color& out) {
     return false;
 }
 
+// The CSS named colours. A sorted static table is searched with a binary search rather
+// than a map so nothing has to be constructed before main; the list is fixed at compile
+// time either way, and a table keeps the names and their values side by side.
+struct NamedColor {
+    const char* name;
+    std::uint8_t r, g, b;
+};
+
+constexpr NamedColor kNamedColors[] = {
+    {"aliceblue", 240, 248, 255},        {"antiquewhite", 250, 235, 215},
+    {"aqua", 0, 255, 255},               {"aquamarine", 127, 255, 212},
+    {"azure", 240, 255, 255},            {"beige", 245, 245, 220},
+    {"bisque", 255, 228, 196},           {"black", 0, 0, 0},
+    {"blanchedalmond", 255, 235, 205},   {"blue", 0, 0, 255},
+    {"blueviolet", 138, 43, 226},        {"brown", 165, 42, 42},
+    {"burlywood", 222, 184, 135},        {"cadetblue", 95, 158, 160},
+    {"chartreuse", 127, 255, 0},         {"chocolate", 210, 105, 30},
+    {"coral", 255, 127, 80},             {"cornflowerblue", 100, 149, 237},
+    {"cornsilk", 255, 248, 220},         {"crimson", 220, 20, 60},
+    {"cyan", 0, 255, 255},               {"darkblue", 0, 0, 139},
+    {"darkcyan", 0, 139, 139},           {"darkgoldenrod", 184, 134, 11},
+    {"darkgray", 169, 169, 169},         {"darkgreen", 0, 100, 0},
+    {"darkgrey", 169, 169, 169},         {"darkkhaki", 189, 183, 107},
+    {"darkmagenta", 139, 0, 139},        {"darkolivegreen", 85, 107, 47},
+    {"darkorange", 255, 140, 0},         {"darkorchid", 153, 50, 204},
+    {"darkred", 139, 0, 0},              {"darksalmon", 233, 150, 122},
+    {"darkseagreen", 143, 188, 143},     {"darkslateblue", 72, 61, 139},
+    {"darkslategray", 47, 79, 79},       {"darkslategrey", 47, 79, 79},
+    {"darkturquoise", 0, 206, 209},      {"darkviolet", 148, 0, 211},
+    {"deeppink", 255, 20, 147},          {"deepskyblue", 0, 191, 255},
+    {"dimgray", 105, 105, 105},          {"dimgrey", 105, 105, 105},
+    {"dodgerblue", 30, 144, 255},        {"firebrick", 178, 34, 34},
+    {"floralwhite", 255, 250, 240},      {"forestgreen", 34, 139, 34},
+    {"fuchsia", 255, 0, 255},            {"gainsboro", 220, 220, 220},
+    {"ghostwhite", 248, 248, 255},       {"gold", 255, 215, 0},
+    {"goldenrod", 218, 165, 32},         {"gray", 128, 128, 128},
+    {"green", 0, 128, 0},                {"greenyellow", 173, 255, 47},
+    {"grey", 128, 128, 128},             {"honeydew", 240, 255, 240},
+    {"hotpink", 255, 105, 180},          {"indianred", 205, 92, 92},
+    {"indigo", 75, 0, 130},              {"ivory", 255, 255, 240},
+    {"khaki", 240, 230, 140},            {"lavender", 230, 230, 250},
+    {"lavenderblush", 255, 240, 245},    {"lawngreen", 124, 252, 0},
+    {"lemonchiffon", 255, 250, 205},     {"lightblue", 173, 216, 230},
+    {"lightcoral", 240, 128, 128},       {"lightcyan", 224, 255, 255},
+    {"lightgoldenrodyellow", 250, 250, 210},
+    {"lightgray", 211, 211, 211},         {"lightgreen", 144, 238, 144},
+    {"lightgrey", 211, 211, 211},        {"lightpink", 255, 182, 193},
+    {"lightsalmon", 255, 160, 122},      {"lightseagreen", 32, 178, 170},
+    {"lightskyblue", 135, 206, 250},     {"lightslategray", 119, 136, 153},
+    {"lightslategrey", 119, 136, 153},   {"lightsteelblue", 176, 196, 222},
+    {"lightyellow", 255, 255, 224},      {"lime", 0, 255, 0},
+    {"limegreen", 50, 205, 50},          {"linen", 250, 240, 230},
+    {"magenta", 255, 0, 255},            {"maroon", 128, 0, 0},
+    {"mediumaquamarine", 102, 205, 170}, {"mediumblue", 0, 0, 205},
+    {"mediumorchid", 186, 85, 211},      {"mediumpurple", 147, 112, 219},
+    {"mediumseagreen", 60, 179, 113},    {"mediumslateblue", 123, 104, 238},
+    {"mediumspringgreen", 0, 250, 154},  {"mediumturquoise", 72, 209, 204},
+    {"mediumvioletred", 199, 21, 133},   {"midnightblue", 25, 25, 112},
+    {"mintcream", 245, 255, 250},        {"mistyrose", 255, 228, 225},
+    {"moccasin", 255, 228, 181},         {"navajowhite", 255, 222, 173},
+    {"navy", 0, 0, 128},                 {"oldlace", 253, 245, 230},
+    {"olive", 128, 128, 0},              {"olivedrab", 107, 142, 35},
+    {"orange", 255, 165, 0},             {"orangered", 255, 69, 0},
+    {"orchid", 218, 112, 214},           {"palegoldenrod", 238, 232, 170},
+    {"palegreen", 152, 251, 152},        {"paleturquoise", 175, 238, 238},
+    {"palevioletred", 219, 112, 147},    {"papayawhip", 255, 239, 213},
+    {"peachpuff", 255, 218, 185},        {"peru", 205, 133, 63},
+    {"pink", 255, 192, 203},             {"plum", 221, 160, 221},
+    {"powderblue", 176, 224, 230},       {"purple", 128, 0, 128},
+    {"rebeccapurple", 102, 51, 153},     {"red", 255, 0, 0},
+    {"rosybrown", 188, 143, 143},        {"royalblue", 65, 105, 225},
+    {"saddlebrown", 139, 69, 19},        {"salmon", 250, 128, 114},
+    {"sandybrown", 244, 164, 96},        {"seagreen", 46, 139, 87},
+    {"seashell", 255, 245, 238},         {"sienna", 160, 82, 45},
+    {"silver", 192, 192, 192},           {"skyblue", 135, 206, 235},
+    {"slateblue", 106, 90, 205},         {"slategray", 112, 128, 144},
+    {"slategrey", 112, 128, 144},        {"snow", 255, 250, 250},
+    {"springgreen", 0, 255, 127},        {"steelblue", 70, 130, 180},
+    {"tan", 210, 180, 140},              {"teal", 0, 128, 128},
+    {"thistle", 216, 191, 216},          {"tomato", 255, 99, 71},
+    {"turquoise", 64, 224, 208},         {"violet", 238, 130, 238},
+    {"wheat", 245, 222, 179},            {"white", 255, 255, 255},
+    {"whitesmoke", 245, 245, 245},       {"yellow", 255, 255, 0},
+    {"yellowgreen", 154, 205, 50},
+};
+
+bool parseNamedColor(std::string_view name, SDL_Color& out) {
+    if (name == "transparent") {
+        out = {0, 0, 0, 0};
+        return true;
+    }
+    // CSS keywords are case-insensitive. The table is all lowercase, so the search
+    // key is lowercased here rather than a second copy of every name being carried.
+    std::string lowered(name);
+    for (char& c : lowered) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    const auto found = std::lower_bound(
+        kNamedColors, kNamedColors + std::size(kNamedColors), lowered,
+        [](const NamedColor& entry, const std::string& key) {
+            return std::string_view(entry.name) < std::string_view(key);
+        });
+    if (found == kNamedColors + std::size(kNamedColors) || found->name != lowered) {
+        return false;
+    }
+    out = {found->r, found->g, found->b, 255};
+    return true;
+}
+
+// Every property that takes a colour goes through here rather than through the hex
+// parser directly, because `red` is at least as common as `#ff0000` and a property
+// that silently ignored it would look like a bug in the stylesheet.
+bool parseColor(std::string_view value, SDL_Color& out) {
+    return parseHexColor(value, out) || parseNamedColor(value, out);
+}
+
 // Splits on whitespace and parses each piece as a length, so `margin: 5px 10%`
 // keeps both units rather than flattening them to pixels.
 std::vector<Length> parseLengthList(std::string_view value) {
@@ -333,11 +510,17 @@ ComputedStyle::Overflow parseOverflow(std::string_view v) {
     return ComputedStyle::Visible;
 }
 
+// `centre` is the legacy British spelling of `center`; CSS 2.1 allowed it and browsers
+// still accept it wherever the American spelling appears.
+bool isCentre(std::string_view token) {
+    return token == "center" || token == "centre";
+}
+
 ComputedStyle::FlexAlign parseJustify(std::string_view v) {
     if (v == "flex-end" || v == "end" || v == "right") {
         return ComputedStyle::AlignEnd;
     }
-    if (v == "center") {
+    if (isCentre(v)) {
         return ComputedStyle::AlignCenter;
     }
     if (v == "space-between") {
@@ -359,7 +542,7 @@ ComputedStyle::FlexAlign parseAlign(std::string_view v) {
     if (v == "flex-end" || v == "end" || v == "right") {
         return ComputedStyle::AlignEnd;
     }
-    if (v == "center") {
+    if (isCentre(v)) {
         return ComputedStyle::AlignCenter;
     }
     if (v == "baseline") {
@@ -550,7 +733,7 @@ ShadowParts parseShadowParts(std::string_view value) {
             continue;
         }
         SDL_Color color{};
-        if (parseHexColor(token, color)) {
+        if (parseColor(token, color)) {
             parts.color = color;
             parts.hasColor = true;
         }
@@ -571,7 +754,7 @@ void applyOutline(ComputedStyle& s, std::string_view value) {
             continue;
         }
         SDL_Color color{};
-        if (parseHexColor(token, color)) {
+        if (parseColor(token, color)) {
             s.outline.color = color;
             continue;
         }
@@ -629,6 +812,478 @@ void applyTextShadow(ComputedStyle& s, std::string_view value) {
         s.textShadows.push_back(shadow);
     }
 }
+
+// The inside of a `url(...)`, minus the wrapper and any quotes.
+std::string_view unwrapUrl(std::string_view token) {
+    std::string_view args;
+    if (!functionArgs(token, "url", args)) {
+        return {};
+    }
+    if (args.size() >= 2 && (args.front() == '"' || args.front() == '\'') &&
+        args.back() == args.front()) {
+        args = args.substr(1, args.size() - 2);
+    }
+    return args;
+}
+
+// One colour stop inside a gradient. The position is optional and may come before or
+// after the colour, which is why this takes the whole comma-separated entry.
+bool parseGradientStop(std::string_view entry, ComputedStyle::GradientStop& out) {
+    const std::vector<std::string_view> parts = splitTokens(entry);
+    if (parts.empty()) {
+        return false;
+    }
+    for (const std::string_view part : parts) {
+        SDL_Color color;
+        if (parseColor(part, color)) {
+            out.color = color;
+            continue;
+        }
+        const Length length = parseLength(part);
+        if (length.unit != Length::Auto) {
+            out.offset = length;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+// The first entry that names a colour is where a gradient's stops begin; everything
+// before it is the prelude, which is why the split is on commas rather than on spaces.
+// A `90deg` on its own is an entry, but `90deg,` is not once the tokeniser has run.
+std::size_t firstStopEntry(const std::vector<std::string_view>& entries) {
+    ComputedStyle::GradientStop probe;
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (parseGradientStop(entries[i], probe)) {
+            return i;
+        }
+    }
+    return entries.size();
+}
+
+// The angle `to <side-or-corner>` means, or -1 for a keyword CSS does not have. A
+// diagonal is 45 degrees off an axis, which is all `to top right` amounts to.
+float angleForSide(std::string_view token) {
+    std::string_view side = token;
+    if (startsWith(side, "to ")) {
+        side = trim(side.substr(3));
+    }
+    if (side == "top") return 0.0f;
+    if (side == "right") return 90.0f;
+    if (side == "bottom") return 180.0f;
+    if (side == "left") return 270.0f;
+    if (side == "top right" || side == "right top") return 45.0f;
+    if (side == "bottom right" || side == "right bottom") return 135.0f;
+    if (side == "bottom left" || side == "left bottom") return 225.0f;
+    if (side == "top left" || side == "left top") return 315.0f;
+    return -1.0f;
+}
+
+// `linear-gradient()` takes either an angle or a `to <side-or-corner>` before the
+// stops, and both are optional. An unrecognised prelude is a bad value, so the whole
+// function is dropped — which is what tells `linear-gradient(red, blue)` apart from
+// `linear-gradient(sideways, red, blue)`.
+bool parseLinearGradient(std::string_view args, ComputedStyle::LinearGradient& out) {
+    const std::vector<std::string_view> entries = splitTopLevel(args);
+    const std::size_t first = firstStopEntry(entries);
+    // A zero means the very first entry is already a colour, so there is no prelude. A
+    // non-zero one means whatever sits in front of it had better be a direction, since a
+    // stop that failed to parse above is indistinguishable from one that never was a stop.
+    if (first > 0) {
+        const float side = angleForSide(entries[0]);
+        if (!parseAngle(entries[0], out.angle)) {
+            if (side < 0.0f) {
+                return false;
+            }
+            out.angle = side;
+        }
+    }
+    for (std::size_t i = first; i < entries.size(); ++i) {
+        ComputedStyle::GradientStop stop;
+        // A colour and an optional position, so one bad entry makes the whole function
+        // a bad value rather than silently losing a stop.
+        if (!parseGradientStop(entries[i], stop)) {
+            return false;
+        }
+        out.stops.push_back(stop);
+    }
+    return out.stops.size() >= 1;
+}
+
+// The shape, the extent and the sizes of a `radial-gradient()`. The first two are
+// keywords in either order, and any of them may be absent.
+void parseRadialPrelude(std::string_view args, ComputedStyle::RadialGradient& out,
+                        std::size_t& index) {
+    bool shapeSeen = false;
+    bool extentSeen = false;
+    const std::vector<std::string_view> tokens = splitTokens(args);
+    while (index < tokens.size()) {
+        const std::string_view part = tokens[index];
+        if (!shapeSeen && (part == "circle" || part == "ellipse")) {
+            out.shape = part == "circle" ? ComputedStyle::RadialGradient::Circle
+                                         : ComputedStyle::RadialGradient::Ellipse;
+            shapeSeen = true;
+            ++index;
+            continue;
+        }
+        if (!extentSeen && (part == "closest-side" || part == "farthest-side" ||
+                            part == "closest-corner" || part == "farthest-corner")) {
+            if (part == "closest-side") {
+                out.extent = ComputedStyle::RadialGradient::ClosestSide;
+            } else if (part == "farthest-side") {
+                out.extent = ComputedStyle::RadialGradient::FarthestSide;
+            } else if (part == "closest-corner") {
+                out.extent = ComputedStyle::RadialGradient::ClosestCorner;
+            } else {
+                out.extent = ComputedStyle::RadialGradient::FarthestCorner;
+            }
+            extentSeen = true;
+            ++index;
+            continue;
+        }
+        break;
+    }
+}
+
+// `at` introduces the centre and, optionally, the focus. Two lengths after it are the
+// centre, three or four are the centre then the radius pair. Without `at` the lengths
+// are the radii alone, and there can be at most two of them.
+void parseRadialPositions(std::string_view args, ComputedStyle::RadialGradient& out,
+                          std::size_t index) {
+    const std::vector<std::string_view> tokens = splitTokens(args);
+    const bool hasAt = index < tokens.size() && tokens[index] == "at";
+    if (hasAt) {
+        ++index;
+    }
+    std::vector<Length> numbers;
+    for (std::size_t i = index; i < tokens.size(); ++i) {
+        const Length length = parseLength(tokens[i]);
+        if (length.unit != Length::Auto) {
+            numbers.push_back(length);
+        }
+    }
+    if (hasAt) {
+        if (numbers.empty()) {
+            return;
+        }
+        out.centreX = numbers[0];
+        out.centreY = numbers.size() > 1 ? numbers[1] : Length{50.0f};
+        if (numbers.size() > 2) {
+            // Three or four: the centre, then the radii. A further `at` beyond two
+            // lengths would be the focus, which the spec only allows with `circle`.
+            out.radiusX = numbers[2];
+            out.hasRadii = true;
+            if (numbers.size() > 3) {
+                out.radiusY = numbers[3];
+            }
+        }
+        return;
+    }
+    if (numbers.size() >= 1) {
+        out.radiusX = numbers[0];
+        out.hasRadii = true;
+    }
+    if (numbers.size() >= 2) {
+        out.radiusY = numbers[1];
+    }
+}
+
+bool parseRadialGradient(std::string_view args, ComputedStyle::RadialGradient& out) {
+    const std::vector<std::string_view> entries = splitTopLevel(args);
+    const std::size_t first = firstStopEntry(entries);
+    if (first == entries.size()) {
+        return false;  // a gradient needs at least two stops
+    }
+    std::string prelude;
+    for (std::size_t i = 0; i < first; ++i) {
+        if (i > 0) {
+            prelude += ' ';
+        }
+        prelude += entries[i];
+    }
+    std::size_t index = 0;
+    parseRadialPrelude(prelude, out, index);
+    parseRadialPositions(prelude, out, index);
+    for (std::size_t i = first; i < entries.size(); ++i) {
+        ComputedStyle::GradientStop stop;
+        if (!parseGradientStop(entries[i], stop)) {
+            return false;
+        }
+        out.stops.push_back(stop);
+    }
+    return out.stops.size() >= 1;
+}
+
+void applyBackgroundImage(ComputedStyle& s, std::string_view value) {
+    if (value == "none") {
+        s.backgroundImages.assign(1, ComputedStyle::BackgroundImage{});
+        return;
+    }
+    for (const std::string_view entry : splitTopLevel(value)) {
+        ComputedStyle::BackgroundImage image;
+        if (const std::string_view href = unwrapUrl(entry); !href.empty()) {
+            image.kind = ComputedStyle::BackgroundImage::Url;
+            image.href = std::string(href);
+        } else if (std::string_view args; functionArgs(entry, "linear-gradient", args)) {
+            // The kind is only set once the arguments parse, because a value that does
+            // not is invalid at computed-value time and leaves the layer as `none`. It
+            // has to keep its place in the list rather than be dropped, or every layer
+            // after it would slide out of step with the other longhands, which are
+            // matched to it by position.
+            if (parseLinearGradient(args, image.linear)) {
+                image.kind = ComputedStyle::BackgroundImage::LinearGradientImage;
+            }
+        } else if (std::string_view args; functionArgs(entry, "radial-gradient", args)) {
+            if (parseRadialGradient(args, image.radial)) {
+                image.kind = ComputedStyle::BackgroundImage::RadialGradientImage;
+            }
+        }
+        s.backgroundImages.push_back(image);
+    }
+}
+
+bool parseBackgroundSize(std::string_view value, ComputedStyle::BackgroundSize& size) {
+    const std::vector<std::string_view> parts = splitTokens(value);
+    if (parts.empty() || parts.size() > 2) {
+        return false;
+    }
+    if (parts.size() == 1 && (parts[0] == "cover" || parts[0] == "contain")) {
+        size.mode = parts[0] == "cover" ? ComputedStyle::BackgroundSize::Cover
+                                        : ComputedStyle::BackgroundSize::Contain;
+        return true;
+    }
+    size.mode = ComputedStyle::BackgroundSize::Explicit;
+    // An axis the author left out is `auto`, which is the same thing `auto` says, so
+    // there is nothing extra to record for it.
+    size.width = parseLength(parts[0]);
+    size.height = parts.size() == 2 ? parseLength(parts[1]) : Length{};
+    return true;
+}
+
+bool parseBackgroundBox(std::string_view value, ComputedStyle::BackgroundBox& out) {
+    if (value == "border-box") {
+        out = ComputedStyle::BackgroundBorderBox;
+    } else if (value == "padding-box") {
+        out = ComputedStyle::BackgroundPaddingBox;
+    } else if (value == "content-box") {
+        out = ComputedStyle::BackgroundContentBox;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+bool parseAttachment(std::string_view value, ComputedStyle::BackgroundAttachment& out) {
+    if (value == "scroll") {
+        out = ComputedStyle::BackgroundScroll;
+    } else if (value == "fixed") {
+        out = ComputedStyle::BackgroundFixed;
+    } else if (value == "local") {
+        out = ComputedStyle::BackgroundLocal;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// Every background longhand but the colour and the image is a comma-separated list,
+// matched against the image layers by position, so this runs once per comma-separated
+// entry and always pushes something: an entry that does not parse is invalid at
+// computed-value time and becomes that property's initial value, which is what keeps
+// the layers after it lined up with the images.
+enum class PositionAxis { Horizontal, Vertical, Both };
+PositionAxis axisOf(std::string_view token) {
+    if (token == "top" || token == "bottom") {
+        return PositionAxis::Vertical;
+    }
+    if (isCentre(token)) {
+        return PositionAxis::Both;
+    }
+    return PositionAxis::Horizontal;
+}
+
+bool assignPosition(std::string_view token, ComputedStyle::BackgroundPosition& out,
+                    PositionAxis axis) {
+    if (token == "left") {
+        out.horizontal = ComputedStyle::BackgroundPosition::Start;
+    } else if (token == "right") {
+        out.horizontal = ComputedStyle::BackgroundPosition::End;
+    } else if (token == "top") {
+        out.vertical = ComputedStyle::BackgroundPosition::Start;
+    } else if (token == "bottom") {
+        out.vertical = ComputedStyle::BackgroundPosition::End;
+    } else if (isCentre(token)) {
+        if (axis != PositionAxis::Horizontal) {
+            out.horizontal = ComputedStyle::BackgroundPosition::Center;
+        }
+        if (axis != PositionAxis::Vertical) {
+            out.vertical = ComputedStyle::BackgroundPosition::Center;
+        }
+    } else {
+        const Length length = parseLength(token);
+        if (length.unit == Length::Auto) {
+            return false;
+        }
+        if (axis == PositionAxis::Vertical) {
+            out.offsetY = length;
+        } else {
+            out.offsetX = length;
+        }
+        return true;
+    }
+    return axis == PositionAxis::Both || axisOf(token) == axis;
+}
+
+bool parsePositionPair(std::string_view value, ComputedStyle::BackgroundPosition& out) {
+    const std::vector<std::string_view> parts = splitTokens(value);
+    ComputedStyle::BackgroundPosition position;
+
+    if (parts.size() == 1 || parts.size() == 2) {
+        // One value takes the horizontal slot unless it names a vertical edge, which is
+        // what makes `top` and `center` behave differently in first and second place.
+        if (!assignPosition(parts[0], position, axisOf(parts[0]))) {
+            return false;
+        }
+        if (parts.size() == 1) {
+            // A lone `center` means both axes; a lone `left` leaves the vertical slot
+            // at its initial `Start`, which is `top`.
+            if (isCentre(parts[0])) {
+                position.vertical = ComputedStyle::BackgroundPosition::Center;
+            }
+            out = position;
+            return true;
+        }
+        // Two values take different axes. When both name the same one the second is
+        // taken as vertical, which is what `50% 20%` and `center top` both need.
+        const PositionAxis first = axisOf(parts[0]);
+        const PositionAxis second =
+            axisOf(parts[1]) == first && first != PositionAxis::Both ? PositionAxis::Vertical
+                                                                      : axisOf(parts[1]);
+        if (!assignPosition(parts[1], position, second)) {
+            return false;
+        }
+        out = position;
+        return true;
+    }
+
+    if (parts.size() != 4) {
+        return false;
+    }
+    // Four values: two edges and two offsets, in either clockwise or anticlockwise
+    // order. An offset after `right` or `bottom` measures back from that edge, so it is
+    // negated here rather than in the paint stage.
+    bool horizontalSeen = false;
+    bool verticalSeen = false;
+    for (std::size_t i = 0; i < 4; i += 2) {
+        const std::string_view edge = parts[i];
+        const Length offset = parseLength(parts[i + 1]);
+        if (offset.unit == Length::Auto) {
+            return false;
+        }
+        if (edge == "left" || edge == "right") {
+            if (horizontalSeen) {
+                return false;
+            }
+            horizontalSeen = true;
+            position.horizontal = edge == "left" ? ComputedStyle::BackgroundPosition::Start
+                                                 : ComputedStyle::BackgroundPosition::End;
+            position.offsetX = edge == "left" ? offset : Length{Length::Px, -offset.value};
+        } else if (edge == "top" || edge == "bottom") {
+            if (verticalSeen) {
+                return false;
+            }
+            verticalSeen = true;
+            position.vertical = edge == "top" ? ComputedStyle::BackgroundPosition::Start
+                                              : ComputedStyle::BackgroundPosition::End;
+            position.offsetY = edge == "top" ? offset : Length{Length::Px, -offset.value};
+        } else {
+            return false;
+        }
+    }
+    if (!horizontalSeen || !verticalSeen) {
+        return false;
+    }
+    out = position;
+    return true;
+}
+
+bool parseRepeatWord(std::string_view token, bool& x, bool& y) {
+    if (token == "repeat") {
+        x = y = true;
+    } else if (token == "no-repeat") {
+        x = y = false;
+    } else if (token == "repeat-x") {
+        x = true;
+        y = false;
+    } else if (token == "repeat-y") {
+        x = false;
+        y = true;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+bool parseRepeatValue(std::string_view value, ComputedStyle::RepeatPair& repeat) {
+    const std::vector<std::string_view> parts = splitTokens(value);
+    if (parts.size() == 1 && (parts[0] == "space" || parts[0] == "round")) {
+        repeat.x = repeat.y = false;
+        repeat.kind = parts[0] == "space" ? ComputedStyle::RepeatPair::Space
+                                          : ComputedStyle::RepeatPair::Round;
+        return true;
+    }
+    if (parts.size() == 1) {
+        return parseRepeatWord(parts[0], repeat.x, repeat.y);
+    }
+    if (parts.size() == 2) {
+        return parseRepeatWord(parts[0], repeat.x, repeat.y) &&
+               parseRepeatWord(parts[1], repeat.x, repeat.y);
+    }
+    return false;
+}
+
+void applyBackgroundLonghand(ComputedStyle& s, std::string_view property,
+                             std::string_view value) {
+    if (property == "background-size") {
+        ComputedStyle::BackgroundSize size;
+        if (!parseBackgroundSize(value, size)) {
+            size = ComputedStyle::BackgroundSize{};
+        }
+        s.backgroundSizes.push_back(size);
+    } else if (property == "background-position") {
+        ComputedStyle::BackgroundPosition position;
+        if (!parsePositionPair(value, position)) {
+            position = ComputedStyle::BackgroundPosition{};
+        }
+        s.backgroundPositions.push_back(position);
+    } else if (property == "background-repeat") {
+        ComputedStyle::RepeatPair repeat;
+        if (!parseRepeatValue(value, repeat)) {
+            repeat = ComputedStyle::RepeatPair{};
+        }
+        s.backgroundRepeats.push_back(repeat);
+    } else if (property == "background-clip") {
+        ComputedStyle::BackgroundBox box;
+        if (!parseBackgroundBox(value, box)) {
+            box = ComputedStyle::BackgroundBorderBox;
+        }
+        s.backgroundClips.push_back(box);
+    } else if (property == "background-origin") {
+        ComputedStyle::BackgroundBox box;
+        if (!parseBackgroundBox(value, box)) {
+            box = ComputedStyle::BackgroundPaddingBox;
+        }
+        s.backgroundOrigins.push_back(box);
+    } else if (property == "background-attachment") {
+        ComputedStyle::BackgroundAttachment attachment;
+        if (!parseAttachment(value, attachment)) {
+            attachment = ComputedStyle::BackgroundScroll;
+        }
+        s.backgroundAttachments.push_back(attachment);
+    }
+}
+
 
 void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontSize) {
     const std::string& property = decl.property;
@@ -699,23 +1354,31 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
                 continue;
             }
             SDL_Color color{};
-            if (parseHexColor(part, color)) {
+            if (parseColor(part, color)) {
                 s.borderColor = color;
             }
         }
+    } else if (property == "background-image") {
+        applyBackgroundImage(s, value);
+    } else if (property == "background-size" || property == "background-position" ||
+               property == "background-repeat" || property == "background-clip" ||
+               property == "background-origin" || property == "background-attachment") {
+        for (const std::string_view entry : splitTopLevel(value)) {
+            applyBackgroundLonghand(s, property, entry);
+        }
     } else if (property == "background-color" || property == "background") {
         SDL_Color color{};
-        if (parseHexColor(value, color)) {
+        if (parseColor(value, color)) {
             s.backgroundColor = color;
         }
     } else if (property == "color") {
         SDL_Color color{};
-        if (parseHexColor(value, color)) {
+        if (parseColor(value, color)) {
             s.color = color;
         }
     } else if (property == "border-color") {
         SDL_Color color{};
-        if (parseHexColor(value, color)) {
+        if (parseColor(value, color)) {
             s.borderColor = color;
         }
     } else if (property == "border-style") {
@@ -762,7 +1425,7 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         parseBorderStyle(value, s.outline.style);
     } else if (property == "outline-color") {
         SDL_Color color{};
-        if (parseHexColor(value, color)) {
+        if (parseColor(value, color)) {
             s.outline.color = color;
         }
     } else if (property == "outline-offset") {
@@ -908,7 +1571,7 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             }
         }
     } else if (property == "text-align") {
-        if (value == "center") {
+        if (isCentre(value)) {
             s.textAlign = ComputedStyle::Center;
         } else if (value == "right") {
             s.textAlign = ComputedStyle::Right;

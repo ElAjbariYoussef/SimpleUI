@@ -22,6 +22,20 @@ SDL_FColor toFColor(const Color& c) {
                       static_cast<float>(c.b) / 255.0f, static_cast<float>(c.a) / 255.0f};
 }
 
+// `SDL_RenderGeometry` takes normalized texture coordinates, and the image's own
+// placement is already resolved into the destination, so a point maps to a
+// fraction of the way across that destination. A solid or gradient fill has no
+// texture, and the value is ignored for those.
+SDL_FPoint uvOf(const Shader& shader, float x, float y) {
+    if (!shader.isImage()) {
+        return SDL_FPoint{0.0f, 0.0f};
+    }
+    const SDL_FRect& dst = shader.destination();
+    const float w = dst.w > 0.0f ? dst.w : 1.0f;
+    const float h = dst.h > 0.0f ? dst.h : 1.0f;
+    return SDL_FPoint{(x - dst.x) / w, (y - dst.y) / h};
+}
+
 Color lerp(Color a, Color b, float t) {
     const auto channel = [t](std::uint8_t from, std::uint8_t to) {
         return static_cast<std::uint8_t>(std::lround(from + (to - from) * t));
@@ -191,6 +205,11 @@ void arc(std::vector<SDL_FPoint>& out, float cx, float cy, float rx, float ry, f
 }
 
 }  // namespace
+
+Color toColor(SDL_Color color) {
+    return Color{color.r, color.g, color.b, color.a};
+}
+
 
 Color withOpacity(Color color, float opacity) {
     color.a = static_cast<std::uint8_t>(std::lround(clamp01(opacity) * color.a));
@@ -424,10 +443,6 @@ void Renderer::fillRect(const SDL_FRect& rect, const Shader& shader, const Radii
     if (rect.w <= 0.0f || rect.h <= 0.0f) {
         return;
     }
-    if (shader.isImage()) {
-        emitImageQuad(rect, shader);
-        return;
-    }
     if (shader.isSolid() && !radii.any()) {
         fillRect(rect, shader.colorAt(rect.x, rect.y));
         return;
@@ -445,6 +460,17 @@ void Renderer::emit(const std::vector<SDL_FPoint>& points, const Shader& shader)
     if (const Color probe = shader.colorAt(points[0].x, points[0].y); probe.a == 0) {
         return;
     }
+    if (shader.isImage()) {
+        // The address mode is renderer state rather than texture state, and
+        // SDL_RenderGeometry is the only thing it affects, so it is set here. Wrapping
+        // is the default when a coordinate leaves 0..1, which is what a tiled
+        // background wants, and what an untiled one has to ask not to get.
+        const bool tileX = shader.repeat() == Repeat::Tile || shader.repeat() == Repeat::TileX;
+        const bool tileY = shader.repeat() == Repeat::Tile || shader.repeat() == Repeat::TileY;
+        SDL_SetRenderTextureAddressMode(
+            renderer_, tileX ? SDL_TEXTURE_ADDRESS_WRAP : SDL_TEXTURE_ADDRESS_CLAMP,
+            tileY ? SDL_TEXTURE_ADDRESS_WRAP : SDL_TEXTURE_ADDRESS_CLAMP);
+    }
     if (shader.needsMesh()) {
         emitMesh(points, shader);
         return;
@@ -461,11 +487,13 @@ void Renderer::emitFan(const std::vector<SDL_FPoint>& outline, const Shader& sha
     }
     std::vector<SDL_Vertex> vertices;
     vertices.reserve(outline.size() + 1);
-    vertices.push_back(
-        SDL_Vertex{apex, toFColor(shader.colorAt(apex.x, apex.y)), SDL_FPoint{0.0f, 0.0f}});
+    // An image shader carries its colour in the texture rather than in the vertices, so
+    // the per-vertex colour is only the tint and the coordinates are what sample it.
+    vertices.push_back(SDL_Vertex{apex, toFColor(shader.colorAt(apex.x, apex.y)),
+                                  uvOf(shader, apex.x, apex.y)});
     for (const SDL_FPoint& p : outline) {
         vertices.push_back(
-            SDL_Vertex{p, toFColor(shader.colorAt(p.x, p.y)), SDL_FPoint{0.0f, 0.0f}});
+            SDL_Vertex{p, toFColor(shader.colorAt(p.x, p.y)), uvOf(shader, p.x, p.y)});
     }
     std::vector<int> indices;
     indices.reserve(outline.size() * 3);
@@ -474,7 +502,7 @@ void Renderer::emitFan(const std::vector<SDL_FPoint>& outline, const Shader& sha
         indices.push_back(static_cast<int>(i) + 1);
         indices.push_back(static_cast<int>((i + 1) % outline.size()) + 1);
     }
-    SDL_RenderGeometry(renderer_, nullptr, vertices.data(),
+    SDL_RenderGeometry(renderer_, shader.texture(), vertices.data(),
                        static_cast<int>(vertices.size()), indices.data(),
                        static_cast<int>(indices.size()));
 }
@@ -677,7 +705,7 @@ void Renderer::emitMesh(const std::vector<SDL_FPoint>& polygon, const Shader& sh
                 for (int i = 0; i < 4; ++i) {
                     meshVertices_.push_back(SDL_Vertex{
                         corners[i], toFColor(shader.colorAt(corners[i].x, corners[i].y)),
-                        SDL_FPoint{0.0f, 0.0f}});
+                        uvOf(shader, corners[i].x, corners[i].y)});
                 }
                 meshIndices_.insert(meshIndices_.end(), {base, base + 1, base + 2, base, base + 2,
                                                         base + 3});
@@ -694,14 +722,14 @@ void Renderer::emitMesh(const std::vector<SDL_FPoint>& polygon, const Shader& sh
             }
             for (const SDL_FPoint& p : clipFront_) {
                 meshVertices_.push_back(
-                    SDL_Vertex{p, toFColor(shader.colorAt(p.x, p.y)), SDL_FPoint{0.0f, 0.0f}});
+                    SDL_Vertex{p, toFColor(shader.colorAt(p.x, p.y)), uvOf(shader, p.x, p.y)});
             }
             // The centre, plus one triangle per outline edge.
             const int centre = static_cast<int>(meshVertices_.size());
-            meshVertices_.push_back(SDL_Vertex{centroid(clipFront_),
-                                               toFColor(shader.colorAt(centroid(clipFront_).x,
-                                                                          centroid(clipFront_).y)),
-                                               SDL_FPoint{0.0f, 0.0f}});
+            const SDL_FPoint middle = centroid(clipFront_);
+            meshVertices_.push_back(SDL_Vertex{middle,
+                                               toFColor(shader.colorAt(middle.x, middle.y)),
+                                               uvOf(shader, middle.x, middle.y)});
             for (std::size_t i = 0; i < clipFront_.size(); ++i) {
                 meshIndices_.insert(meshIndices_.end(),
                                     {centre, base + static_cast<int>(i),
@@ -712,7 +740,7 @@ void Renderer::emitMesh(const std::vector<SDL_FPoint>& polygon, const Shader& sh
     if (meshIndices_.empty()) {
         return;
     }
-    SDL_RenderGeometry(renderer_, nullptr, meshVertices_.data(),
+    SDL_RenderGeometry(renderer_, shader.texture(), meshVertices_.data(),
                        static_cast<int>(meshVertices_.size()), meshIndices_.data(),
                        static_cast<int>(meshIndices_.size()));
 }
@@ -787,117 +815,6 @@ void Renderer::emitDashed(const std::vector<SDL_FPoint>& outline, float thicknes
     }
 }
 
-void Renderer::strokePath(const std::vector<SDL_FPoint>& points, const Color& color,
-                          float thickness, bool closed, Dash dash) {
-    if (color.a == 0 || thickness <= 0.0f || points.size() < 2) {
-        return;
-    }
-    if (dash != Dash::Solid) {
-        emitDashed(points, thickness, color, dash, closed, centroid(points));
-        return;
-    }
-    const float half = thickness * 0.5f;
-    const std::size_t last = closed ? points.size() : points.size() - 1;
-    for (std::size_t i = 0; i < last; ++i) {
-        const SDL_FPoint& a = points[i];
-        const SDL_FPoint& b = points[(i + 1) % points.size()];
-        const float span = std::hypot(b.x - a.x, b.y - a.y);
-        if (span <= 0.0f) {
-            continue;
-        }
-        const float dx = (b.x - a.x) / span;
-        const float dy = (b.y - a.y) / span;
-        const std::vector<SDL_FPoint> quad{{a.x - dy * half, a.y + dx * half},
-                                           {b.x - dy * half, b.y + dx * half},
-                                           {b.x + dy * half, b.y - dx * half},
-                                           {a.x + dy * half, a.y - dx * half}};
-        fillPolygon(quad, color);
-        if (thickness > 1.5f && i + 2 < points.size()) {
-            // A thick polyline notches at each vertex without a join.
-            fillCircle(b.x, b.y, half, color);
-        }
-    }
-}
-
-void Renderer::line(float x1, float y1, float x2, float y2, const Color& color,
-                    float thickness) {
-    strokePath({SDL_FPoint{x1, y1}, SDL_FPoint{x2, y2}}, color, thickness);
-}
-
-void Renderer::emitImageQuad(const SDL_FRect& rect, const Shader& shader) {
-    SDL_Texture* texture = shader.texture();
-    if (!texture || shader.tint().a == 0) {
-        return;
-    }
-    const SDL_FRect& dst = shader.destination();
-    const SDL_FRect& src = shader.source();
-
-    // A repeat mode needs the texture addressed beyond 0..1, and SDL has to be told
-    // which mode before the draw.
-    const bool tiled = shader.repeat() != Repeat::No;
-    if (tiled) {
-        // SDL takes the two axes separately, so `repeat-x` and `repeat-y` are
-        // expressible directly.
-        SDL_TextureAddressMode u = SDL_TEXTURE_ADDRESS_CLAMP;
-        SDL_TextureAddressMode v = SDL_TEXTURE_ADDRESS_CLAMP;
-        if (shader.repeat() == Repeat::Tile || shader.repeat() == Repeat::TileX) {
-            u = SDL_TEXTURE_ADDRESS_WRAP;
-        }
-        if (shader.repeat() == Repeat::Tile || shader.repeat() == Repeat::TileY) {
-            v = SDL_TEXTURE_ADDRESS_WRAP;
-        }
-        SDL_SetRenderTextureAddressMode(renderer_, u, v);
-    }
-
-    // The image's own placement: `background-position` has already resolved the
-    // destination, so a plain draw uses it directly.
-    if (!tiled) {
-        const SDL_FRect target{shader.repeat() == Repeat::No && dst.w > 0.0f && dst.h > 0.0f
-                                   ? dst
-                                   : rect};
-        SDL_Texture* tex = texture;
-        const bool hasMod = !(shader.tint() == Color{255, 255, 255, 255});
-        if (hasMod) {
-            SDL_SetTextureAlphaMod(tex, shader.tint().a);
-            SDL_SetTextureColorMod(tex, shader.tint().r, shader.tint().g, shader.tint().b);
-        }
-        SDL_RenderTexture(renderer_, tex, src.w > 0.0f ? &src : nullptr, &target);
-        if (hasMod) {
-            SDL_SetTextureAlphaMod(tex, 255);
-            SDL_SetTextureColorMod(tex, 255, 255, 255);
-        }
-        return;
-    }
-
-    // Tiled: UVs are the destination relative to the image's placement, so the
-    // address mode does the repeating.
-    const float originX = dst.w > 0.0f ? dst.x : rect.x;
-    const float originY = dst.h > 0.0f ? dst.y : rect.y;
-    const SDL_FRect source{dst.w > 0.0f ? 0.0f : src.x, dst.h > 0.0f ? 0.0f : src.y,
-                            dst.w > 0.0f ? dst.w : src.w, dst.h > 0.0f ? dst.h : src.h};
-    const float u0 = (rect.x - originX) / (source.w > 0.0f ? source.w : 1.0f);
-    const float v0 = (rect.y - originY) / (source.h > 0.0f ? source.h : 1.0f);
-    const float u1 = (rect.x + rect.w - originX) / (source.w > 0.0f ? source.w : 1.0f);
-    const float v1 = (rect.y + rect.h - originY) / (source.h > 0.0f ? source.h : 1.0f);
-    SDL_Vertex vertices[6] = {
-        SDL_Vertex{{rect.x, rect.y}, toFColor(shader.tint()), SDL_FPoint{u0, v0}},
-        SDL_Vertex{{rect.x + rect.w, rect.y}, toFColor(shader.tint()), SDL_FPoint{u1, v0}},
-        SDL_Vertex{{rect.x, rect.y + rect.h}, toFColor(shader.tint()), SDL_FPoint{u0, v1}},
-        SDL_Vertex{{rect.x + rect.w, rect.y}, toFColor(shader.tint()), SDL_FPoint{u1, v0}},
-        SDL_Vertex{{rect.x + rect.w, rect.y + rect.h}, toFColor(shader.tint()), SDL_FPoint{u1, v1}},
-        SDL_Vertex{{rect.x, rect.y + rect.h}, toFColor(shader.tint()), SDL_FPoint{u0, v1}},
-    };
-    SDL_SetTextureAlphaMod(texture, shader.tint().a);
-    SDL_SetTextureColorMod(texture, shader.tint().r, shader.tint().g, shader.tint().b);
-    SDL_RenderGeometry(renderer_, texture, vertices, 6, nullptr, 0);
-    SDL_SetTextureAlphaMod(texture, 255);
-    SDL_SetTextureColorMod(texture, 255, 255, 255);
-    if (tiled) {
-        SDL_SetRenderTextureAddressMode(renderer_, SDL_TEXTURE_ADDRESS_CLAMP,
-                                       SDL_TEXTURE_ADDRESS_CLAMP);
-    }
-}
-
 void Renderer::drawTexture(SDL_Texture* texture, const SDL_FRect& destination,
                            const SDL_FRect* source, Color tint) {
     if (!texture || destination.w <= 0.0f || destination.h <= 0.0f || tint.a == 0) {
@@ -943,5 +860,43 @@ void Renderer::popClip() {
     clipping_ = !clipStack_.empty();
     SDL_SetRenderClipRect(renderer_, clipping_ ? &current_ : nullptr);
 }
+
+void Renderer::strokePath(const std::vector<SDL_FPoint>& points, const Color& color,
+                          float thickness, bool closed, Dash dash) {
+    if (color.a == 0 || thickness <= 0.0f || points.size() < 2) {
+        return;
+    }
+    if (dash != Dash::Solid) {
+        emitDashed(points, thickness, color, dash, closed, centroid(points));
+        return;
+    }
+    const float half = thickness * 0.5f;
+    const std::size_t last = closed ? points.size() : points.size() - 1;
+    for (std::size_t i = 0; i < last; ++i) {
+        const SDL_FPoint& a = points[i];
+        const SDL_FPoint& b = points[(i + 1) % points.size()];
+        const float span = std::hypot(b.x - a.x, b.y - a.y);
+        if (span <= 0.0f) {
+            continue;
+        }
+        const float dx = (b.x - a.x) / span;
+        const float dy = (b.y - a.y) / span;
+        const std::vector<SDL_FPoint> quad{{a.x - dy * half, a.y + dx * half},
+                                           {b.x - dy * half, b.y + dx * half},
+                                           {b.x + dy * half, b.y - dx * half},
+                                           {a.x + dy * half, a.y - dx * half}};
+        fillPolygon(quad, color);
+        if (thickness > 1.5f && i + 2 < points.size()) {
+            // A thick polyline notches at each vertex without a join.
+            fillCircle(b.x, b.y, half, color);
+        }
+    }
+}
+
+void Renderer::line(float x1, float y1, float x2, float y2, const Color& color,
+                    float thickness) {
+    strokePath({SDL_FPoint{x1, y1}, SDL_FPoint{x2, y2}}, color, thickness);
+}
+
 
 }  // namespace sui

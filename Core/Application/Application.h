@@ -5,6 +5,7 @@
 
 #include "CSS/StyleResolver.h"
 #include "Core/Resources/Resources.h"
+#include "Rendering/ImageCache.h"
 #include "Platform/Platform.h"
 #include "SUI/Script/Script.h"
 
@@ -47,6 +48,9 @@ private:
     std::unique_ptr<Platform> platform_;
     std::unique_ptr<Document> document_;
     std::unique_ptr<TextFont> font_;
+    // Decoded background and content images, shared across every element and every
+    // frame. Constructed once the resources exist, so it borrows rather than owns them.
+    std::unique_ptr<ImageCache> images_;
     StyleResolver resolver_;
     script::Context scriptContext_;
     std::string screenshotPath_;

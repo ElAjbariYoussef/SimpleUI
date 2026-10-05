@@ -128,17 +128,27 @@ public:
     float layoutWidth() const noexcept { return layoutW_; }
     float layoutHeight() const noexcept { return layoutH_; }
 
-    // The padding box, which is what `overflow` clips to. Layout records it because
-    // padding percentages were already resolved against the right containing
-    // block and re-resolving here would give a different answer.
-    void setClipX(float x) noexcept { clipX_ = x; }
-    void setClipY(float y) noexcept { clipY_ = y; }
-    void setClipWidth(float w) noexcept { clipW_ = w; }
-    void setClipHeight(float h) noexcept { clipH_ = h; }
-    float clipX() const noexcept { return clipX_; }
-    float clipY() const noexcept { return clipY_; }
-    float clipWidth() const noexcept { return clipW_; }
-    float clipHeight() const noexcept { return clipH_; }
+    // The padding box, which is what `overflow` clips to, and the content box, which is
+    // what `background-clip: content-box` is relative to. Layout records both because
+    // padding percentages were already resolved against the right containing block and
+    // re-resolving them here would give a different answer.
+    void setPaddingX(float x) noexcept { paddingX_ = x; }
+    void setPaddingY(float y) noexcept { paddingY_ = y; }
+    void setPaddingWidth(float w) noexcept { paddingW_ = w; }
+    void setPaddingHeight(float h) noexcept { paddingH_ = h; }
+    float paddingX() const noexcept { return paddingX_; }
+    float paddingY() const noexcept { return paddingY_; }
+    float paddingWidth() const noexcept { return paddingW_; }
+    float paddingHeight() const noexcept { return paddingH_; }
+
+    void setContentX(float x) noexcept { contentX_ = x; }
+    void setContentY(float y) noexcept { contentY_ = y; }
+    void setContentWidth(float w) noexcept { contentW_ = w; }
+    void setContentHeight(float h) noexcept { contentH_ = h; }
+    float contentX() const noexcept { return contentX_; }
+    float contentY() const noexcept { return contentY_; }
+    float contentWidth() const noexcept { return contentW_; }
+    float contentHeight() const noexcept { return contentH_; }
 
     // Text the layout pass placed inside this element's content box. The
     // painter reads these instead of re-running the formatter.
@@ -172,10 +182,14 @@ private:
     float layoutY_ = 0.0f;
     float layoutW_ = 0.0f;
     float layoutH_ = 0.0f;
-    float clipX_ = 0.0f;
-    float clipY_ = 0.0f;
-    float clipW_ = 0.0f;
-    float clipH_ = 0.0f;
+    float paddingX_ = 0.0f;
+    float paddingY_ = 0.0f;
+    float paddingW_ = 0.0f;
+    float paddingH_ = 0.0f;
+    float contentX_ = 0.0f;
+    float contentY_ = 0.0f;
+    float contentW_ = 0.0f;
+    float contentH_ = 0.0f;
     std::vector<TextRun> textRuns_;
 };
 

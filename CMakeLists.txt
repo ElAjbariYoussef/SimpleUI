@@ -30,6 +30,8 @@ add_library(sui STATIC
     CSS/StyleResolver.cpp
     CSS/PseudoElements.cpp
     Layout/BlockLayout.cpp
+    Core/Application/Background.cpp
+    Rendering/ImageCache.cpp
     Rendering/Renderer.cpp
     Rendering/Text.cpp
     Platform/Platform.cpp

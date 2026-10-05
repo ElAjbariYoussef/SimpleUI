@@ -36,6 +36,7 @@ void checkNear(float actual, float expected, float tolerance, const char* what) 
     }
 }
 
+using sui::ComputedStyle;
 using sui::Document;
 using sui::Element;
 
@@ -1700,6 +1701,396 @@ void testPseudoElements() {
 
 }  // namespace
 
+// Resolves the style of every child of the body against `resolver`, so a stylesheet can
+// be checked positionally: the nth element matches the nth rule in the test source.
+std::vector<ComputedStyle> bodyStyles(Document& document, sui::StyleResolver& resolver) {
+    Element* body = document.querySelector("body");
+    std::vector<ComputedStyle> styles;
+    if (!body) {
+        return styles;
+    }
+    for (const auto& child : body->children()) {
+        if (child) {
+            styles.push_back(resolver.resolve(*child));
+        }
+    }
+    return styles;
+}
+
+void testBackgroundColourParsing() {
+    const auto rules = sui::CSSParser::parse(R"(
+        .a { background-color: #f0a8 }
+        .b { background-color: #ff00aa80 }
+        .c { background-color: red }
+        .d { background-color: GREEN }
+        .e { background-color: transparent }
+        .f { background-color: green }
+        .g { background-color: lime }
+        .h { background-color: #ABCDEF }
+        .i { background-color: not-a-colour }
+    )");
+    sui::StyleResolver resolver;
+    resolver.setRules(rules);
+
+    auto document = parseOrNull("<sui><body>"
+                                "<div class=\"a\"></div><div class=\"b\"></div>"
+                                "<div class=\"c\"></div><div class=\"d\"></div>"
+                                "<div class=\"e\"></div><div class=\"f\"></div>"
+                                "<div class=\"g\"></div><div class=\"h\"></div>"
+                                "<div class=\"i\"></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* root = document->root();
+    const std::vector<ComputedStyle> styles = bodyStyles(*document, resolver);
+    if (styles.size() < 9) {
+        check(false, "background colour elements found");
+        return;
+    }
+    const SDL_Color& a = styles[0].backgroundColor;
+    check(a.r == 255 && a.g == 0 && a.b == 170 && a.a == 136, "#f0a8 short-form hex");
+    const SDL_Color& b = styles[1].backgroundColor;
+    check(b.r == 255 && b.b == 170 && b.a == 128, "eight-digit hex carries alpha");
+    check(styles[2].backgroundColor.r == 255 && styles[2].backgroundColor.g == 0,
+          "the name red");
+    check(styles[3].backgroundColor.g == 128, "a colour name is case-insensitive");
+    check(styles[4].backgroundColor.a == 0, "transparent is a zero alpha");
+    // CSS `green` is the darker #008000 and `lime` is the brighter #00ff00, which is
+    // the opposite of what most people expect and the one that shows up in a gradient.
+    check(styles[5].backgroundColor.g == 128 && styles[5].backgroundColor.b == 0,
+          "the name green is #008000, not lime");
+    check(styles[6].backgroundColor.g == 255, "the name lime is #00ff00");
+    const SDL_Color& h = styles[7].backgroundColor;
+    check(h.r == 0xab && h.g == 0xcd && h.b == 0xef, "hex digits are case-insensitive");
+    check(styles[8].backgroundColor.r == 0 && styles[8].backgroundColor.g == 0 &&
+              styles[8].backgroundColor.b == 0 && styles[8].backgroundColor.a == 0,
+          "an unparseable colour falls back to transparent");
+}
+
+void testLinearGradientParsing() {
+    const auto rules = sui::CSSParser::parse(R"(
+        .a { background-image: linear-gradient(red, blue) }
+        .b { background-image: linear-gradient(to right, red, blue) }
+        .c { background-image: linear-gradient(90deg, red, blue) }
+        .d { background-image: linear-gradient(0.5turn, red, blue) }
+        .e { background-image: linear-gradient(100grad, red, blue) }
+        .f { background-image: linear-gradient(1.57rad, red, blue) }
+        .g { background-image: linear-gradient(to bottom right, red, blue) }
+        .h { background-image: linear-gradient(red 20%, blue 80%) }
+        .i { background-image: linear-gradient(red, blue, lime) }
+        .j { background-image: linear-gradient(sideways, red, blue) }
+        .k { background-image: linear-gradient(red) }
+        .l { background-image: linear-gradient(to right 90deg, red, blue) }
+        .m { background-image: linear-gradient(#fff) }
+    )");
+    sui::StyleResolver resolver;
+    resolver.setRules(rules);
+    static const char* kClasses =
+        "<div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div>"
+        "<div class=\"d\"></div><div class=\"e\"></div><div class=\"f\"></div>"
+        "<div class=\"g\"></div><div class=\"h\"></div><div class=\"i\"></div>"
+        "<div class=\"j\"></div><div class=\"k\"></div><div class=\"l\"></div>"
+        "<div class=\"m\"></div>";
+    auto body = parseOrNull((std::string("<sui><body>") + kClasses + "</body></sui>").c_str());
+    if (!body) {
+        return;
+    }
+    const std::vector<ComputedStyle> styles = bodyStyles(*body, resolver);
+    if (styles.size() < 13) {
+        check(false, "linear gradient elements found");
+        return;
+    }
+    using Kind = sui::ComputedStyle::BackgroundImage::Kind;
+    // No prelude means `to bottom`, which is 180 degrees clockwise from the top.
+    check(styles[0].backgroundImages.size() == 1 &&
+              styles[0].backgroundImages[0].kind == Kind::LinearGradientImage,
+          "a bare linear-gradient still parses");
+    checkNear(styles[0].backgroundImages[0].linear.angle, 180.0f, 0.01f,
+              "a bare linear-gradient points down");
+    check(styles[0].backgroundImages[0].linear.stops.size() == 2,
+          "two stops for two colours");
+    checkNear(styles[1].backgroundImages[0].linear.angle, 90.0f, 0.01f, "to right is 90deg");
+    checkNear(styles[2].backgroundImages[0].linear.angle, 90.0f, 0.01f, "90deg parses");
+    checkNear(styles[3].backgroundImages[0].linear.angle, 180.0f, 0.01f, "a turn converts");
+    checkNear(styles[4].backgroundImages[0].linear.angle, 90.0f, 0.01f, "a grad converts");
+    checkNear(styles[5].backgroundImages[0].linear.angle, 90.0f, 0.5f, "a rad converts");
+    // Angles are clockwise from "to top", so a diagonal sits halfway between the two
+    // edges it names: bottom is 180 and right is 90, putting the corner at 135.
+    checkNear(styles[6].backgroundImages[0].linear.angle, 135.0f, 0.01f,
+              "to bottom right is 135deg");
+    check(styles[7].backgroundImages[0].linear.stops.size() == 2 &&
+              styles[7].backgroundImages[0].linear.stops[0].offset.unit ==
+                  sui::Length::Percent &&
+              styles[7].backgroundImages[0].linear.stops[0].offset.value == 20.0f,
+          "an explicit stop offset is kept as a percentage");
+    check(styles[8].backgroundImages[0].linear.stops.size() == 3,
+          "three colours give three stops");
+    // An unauthored offset has to stay distinguishable from an authored 0%.
+    check(styles[0].backgroundImages[0].linear.stops[0].offset.unit == sui::Length::Auto,
+          "an unauthored offset is Auto, not 0%");
+    check(styles[9].backgroundImages[0].kind == Kind::None,
+          "a bad direction drops the whole gradient");
+    check(styles[10].backgroundImages[0].kind == Kind::LinearGradientImage,
+          "a single colour is still a gradient");
+    check(styles[11].backgroundImages[0].kind == Kind::None,
+          "two directions in one prelude is not a direction");
+    check(styles[12].backgroundImages[0].kind == Kind::LinearGradientImage,
+          "a one-stop gradient paints as a flat fill");
+}
+
+void testRadialGradientParsing() {
+    const auto rules = sui::CSSParser::parse(R"(
+        .a { background-image: radial-gradient(white, black) }
+        .b { background-image: radial-gradient(circle closest-side, white, black) }
+        .c { background-image: radial-gradient(ellipse farthest-side at 20% 30%, white, black) }
+        .d { background-image: radial-gradient(circle at 10px 20px 30px, white, black) }
+        .e { background-image: radial-gradient(ellipse 40px 20px at 10% 10%, white, black) }
+        .f { background-image: radial-gradient(white) }
+        .g { background-image: radial-gradient(closest-corner, white, black) }
+    )");
+    sui::StyleResolver resolver;
+    resolver.setRules(rules);
+    static const char* kClasses =
+        "<div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div>"
+        "<div class=\"d\"></div><div class=\"e\"></div><div class=\"f\"></div>"
+        "<div class=\"g\"></div>";
+    auto body = parseOrNull((std::string("<sui><body>") + kClasses + "</body></sui>").c_str());
+    if (!body) {
+        return;
+    }
+    const std::vector<ComputedStyle> styles = bodyStyles(*body, resolver);
+    if (styles.size() < 7) {
+        check(false, "radial gradient elements found");
+        return;
+    }
+    using Kind = sui::ComputedStyle::BackgroundImage::Kind;
+    using Radial = sui::ComputedStyle::RadialGradient;
+    check(styles[0].backgroundImages[0].kind == Kind::RadialGradientImage &&
+              styles[0].backgroundImages[0].radial.shape == Radial::Circle &&
+              styles[0].backgroundImages[0].radial.extent == Radial::FarthestCorner,
+          "the default radial is a circle reaching the farthest corner");
+    // The centre defaults to the middle of the box, which has to be a percentage or it
+    // lands 50px from the left edge instead of halfway across.
+    check(styles[0].backgroundImages[0].radial.centreX.unit == sui::Length::Percent &&
+              styles[0].backgroundImages[0].radial.centreX.value == 50.0f,
+          "the default centre is 50%, not 50px");
+    check(styles[1].backgroundImages[0].radial.shape == Radial::Circle &&
+              styles[1].backgroundImages[0].radial.extent == Radial::ClosestSide,
+          "circle and closest-side both parse");
+    check(styles[2].backgroundImages[0].radial.shape == Radial::Ellipse &&
+              styles[2].backgroundImages[0].radial.extent == Radial::FarthestSide &&
+              styles[2].backgroundImages[0].radial.centreX.value == 20.0f,
+          "ellipse, farthest-side, and a centre all parse");
+    check(styles[3].backgroundImages[0].radial.hasRadii &&
+              styles[3].backgroundImages[0].radial.radiusX.unit == sui::Length::Px &&
+              styles[3].backgroundImages[0].radial.radiusX.value == 30.0f,
+          "one radius on a circle");
+    check(styles[4].backgroundImages[0].radial.hasRadii &&
+              styles[4].backgroundImages[0].radial.radiusX.value == 40.0f &&
+              styles[4].backgroundImages[0].radial.radiusY.value == 20.0f,
+          "two radii on an ellipse");
+    check(styles[5].backgroundImages[0].kind == Kind::RadialGradientImage &&
+              styles[5].backgroundImages[0].radial.stops.size() == 1,
+          "a one-stop radial paints as a flat fill");
+    check(styles[6].backgroundImages[0].radial.extent == Radial::ClosestCorner,
+          "an extent with no shape takes the default shape");
+}
+
+// The seven background longhands are parallel lists that CSS matches up by
+// position, repeating whichever is shortest, so one value can serve every layer.
+void testBackgroundListsAreParallel() {
+    const auto rules = sui::CSSParser::parse(R"(
+        .a { background-image: url(one.png), linear-gradient(red, blue);
+             background-size: 10px }
+        .b { background-image: linear-gradient(red, blue);
+             background-repeat: no-repeat, repeat-x }
+        .c { background-image: linear-gradient(red, blue);
+             background-position: right 4px bottom 8px }
+        .d { background-image: linear-gradient(red, blue), url(one.png);
+             background-clip: content-box }
+        .e { background-image: none }
+    )");
+    sui::StyleResolver resolver;
+    resolver.setRules(rules);
+    static const char* kClasses =
+        "<div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div>"
+        "<div class=\"d\"></div><div class=\"e\"></div>";
+    auto body = parseOrNull((std::string("<sui><body>") + kClasses + "</body></sui>").c_str());
+    if (!body) {
+        return;
+    }
+    const std::vector<ComputedStyle> styles = bodyStyles(*body, resolver);
+    if (styles.size() < 5) {
+        check(false, "background list elements found");
+        return;
+    }
+    using Kind = sui::ComputedStyle::BackgroundImage::Kind;
+    using SizeMode = sui::ComputedStyle::BackgroundSize::Mode;
+    check(styles[0].backgroundImages.size() == 2 && styles[0].backgroundSizes.size() == 1,
+          "one size value serves both layers");
+    check(styles[0].backgroundImages[0].kind == Kind::Url &&
+              styles[0].backgroundImages[1].kind == Kind::LinearGradientImage,
+          "the first layer in the list is the topmost");
+    check(styles[0].backgroundSizes[0].mode == SizeMode::Explicit &&
+              styles[0].backgroundSizes[0].width.value == 10.0f,
+          "a lone size value sets the width and leaves the height auto");
+    check(styles[0].backgroundSizes[0].height.unit == sui::Length::Auto,
+          "an unstated size axis stays auto");
+    check(styles[1].backgroundRepeats.size() == 2 &&
+              !styles[1].backgroundRepeats[0].x && !styles[1].backgroundRepeats[0].y &&
+              styles[1].backgroundRepeats[1].x && !styles[1].backgroundRepeats[1].y,
+          "a repeat pair splits into one entry per axis");
+    check(styles[2].backgroundPositions.size() == 1 &&
+              styles[2].backgroundPositions[0].horizontal ==
+                  sui::ComputedStyle::BackgroundPosition::End &&
+              styles[2].backgroundPositions[0].vertical ==
+                  sui::ComputedStyle::BackgroundPosition::End,
+          "the four-value position form names both edges");
+    // A length after `right` or `bottom` measures back from the edge, so it is stored
+    // negative and added to the leftover space rather than to the origin.
+    checkNear(styles[2].backgroundPositions[0].offsetX.value, -4.0f, 0.01f,
+              "an offset after right counts back from the edge");
+    checkNear(styles[2].backgroundPositions[0].offsetY.value, -8.0f, 0.01f,
+              "an offset after bottom counts back from the edge");
+    check(styles[3].backgroundClips.size() == 1 &&
+              styles[3].backgroundClips[0] ==
+                  sui::ComputedStyle::BackgroundContentBox,
+          "a lone clip value serves both layers");
+    check(styles[4].backgroundImages.size() == 1 &&
+              styles[4].backgroundImages[0].kind == Kind::None,
+          "none is a layer of its own rather than an absent list");
+}
+
+void testBackgroundSizeAndPositionKeywords() {
+    const auto rules = sui::CSSParser::parse(R"(
+        .a { background-size: cover }
+        .b { background-size: contain }
+        .c { background-size: auto 40px }
+        .d { background-size: 30% }
+        .e { background-size: 10px 20px }
+        .f { background-size: 10px 20px 30px }
+        .g { background-position: center }
+        .h { background-position: left top }
+        .i { background-position: 50% 50% }
+        .j { background-position: right }
+        .k { background-position: 10px }
+        .l { background-position: left 5px }
+        .m { background-position: centre }
+    )");
+    sui::StyleResolver resolver;
+    resolver.setRules(rules);
+    static const char* kClasses =
+        "<div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div>"
+        "<div class=\"d\"></div><div class=\"e\"></div><div class=\"f\"></div>"
+        "<div class=\"g\"></div><div class=\"h\"></div><div class=\"i\"></div>"
+        "<div class=\"j\"></div><div class=\"k\"></div><div class=\"l\"></div>"
+        "<div class=\"m\"></div>";
+    auto body = parseOrNull((std::string("<sui><body>") + kClasses + "</body></sui>").c_str());
+    if (!body) {
+        return;
+    }
+    const std::vector<ComputedStyle> styles = bodyStyles(*body, resolver);
+    if (styles.size() < 13) {
+        check(false, "background keyword elements found");
+        return;
+    }
+    using SizeMode = sui::ComputedStyle::BackgroundSize::Mode;
+    using Keyword = sui::ComputedStyle::BackgroundPosition::Keyword;
+    check(styles[0].backgroundSizes[0].mode == SizeMode::Cover, "cover parses");
+    check(styles[1].backgroundSizes[0].mode == SizeMode::Contain, "contain parses");
+    check(styles[2].backgroundSizes[0].mode == SizeMode::Explicit &&
+              styles[2].backgroundSizes[0].width.unit == sui::Length::Auto &&
+              styles[2].backgroundSizes[0].height.value == 40.0f,
+          "auto with a length keeps the two axes apart");
+    check(styles[3].backgroundSizes[0].width.unit == sui::Length::Percent,
+          "a percentage size stays a percentage");
+    check(styles[4].backgroundSizes[0].width.value == 10.0f &&
+              styles[4].backgroundSizes[0].height.value == 20.0f,
+          "two lengths give both axes");
+    check(styles[5].backgroundSizes[0].mode == SizeMode::AutoSize,
+          "a third length is an invalid value, not a shift");
+    check(styles[6].backgroundPositions[0].horizontal == Keyword::Center &&
+              styles[6].backgroundPositions[0].vertical == Keyword::Center,
+          "a lone centre applies to both axes");
+    check(styles[7].backgroundPositions[0].horizontal == Keyword::Start &&
+              styles[7].backgroundPositions[0].vertical == Keyword::Start,
+          "left top is the start corner on both axes");
+    check(styles[8].backgroundPositions[0].offsetX.unit == sui::Length::Percent &&
+              styles[8].backgroundPositions[0].offsetY.unit == sui::Length::Percent,
+          "two percentages are lengths, not keywords");
+    check(styles[9].backgroundPositions[0].horizontal == Keyword::End &&
+              styles[9].backgroundPositions[0].vertical == Keyword::Start,
+          "a lone right names the horizontal axis only");
+    check(styles[10].backgroundPositions[0].offsetX.value == 10.0f,
+          "a lone length applies to the horizontal axis");
+    check(styles[11].backgroundPositions[0].horizontal == Keyword::Start &&
+              styles[11].backgroundPositions[0].offsetY.value == 5.0f,
+          "left takes the horizontal slot and the length the vertical one");
+    checkNear(styles[12].backgroundPositions[0].horizontal == Keyword::Center ? 1.0f : 0.0f,
+              1.0f, 0.01f, "the British spelling of centre is accepted");
+}
+
+// A flex item's own cross size is a content-box length, so the border and padding
+// have to come off the line's cross extent when it stretches to fill it, and must not
+// be added a second time when the size is written back onto the item.
+void testFlexCrossSizeExcludesChrome() {
+    auto document = parseOrNull("<sui><body><div id=\"row\">"
+                                "<div id=\"bordered\"></div><div id=\"auto\"></div>"
+                                "</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #row { display: flex; width: 400px }"
+        "#bordered { width: 100px; height: 70px; border: 1px solid #fff; padding: 6px }"
+        "#auto { width: 50px }"));
+    layoutRoot(*document, resolver, 800.0f);
+    Element* bordered = document->getElementById("bordered");
+    Element* autoHeight = document->getElementById("auto");
+    Element* row = document->getElementById("row");
+    if (!bordered || !autoHeight || !row) {
+        check(false, "flex cross-size elements found");
+        return;
+    }
+    checkNear(bordered->layoutWidth(), 114.0f, 0.5f, "the main axis keeps its own chrome");
+    checkNear(bordered->layoutHeight(), 84.0f, 0.5f,
+              "the cross axis adds the border and padding once");
+    // The auto-height item stretches to the line's cross extent, which is the tallest
+    // item's outer height, so it ends up the same height as its neighbour.
+    checkNear(autoHeight->layoutHeight(), 84.0f, 0.5f, "a stretched item matches the line");
+    checkNear(row->layoutHeight(), 84.0f, 0.5f, "the line is as tall as its items");
+}
+
+void testFlexBoxSizingIsNotAppliedTwice() {
+    auto document = parseOrNull("<sui><body><div id=\"row\">"
+                                "<div id=\"a\"></div><div id=\"b\"></div></div>"
+                                "<div id=\"col\"><div id=\"c\"></div></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #row { display: flex; width: 400px }"
+        "#col { display: flex; flex-direction: column; width: 400px }"
+        "#a, #b, #c { box-sizing: border-box; width: 100px; height: 70px;"
+        "             border: 1px solid #fff; padding: 6px }"));
+    layoutRoot(*document, resolver, 800.0f);
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    Element* c = document->getElementById("c");
+    if (!a || !b || !c) {
+        check(false, "flex border-box elements found");
+        return;
+    }
+    checkNear(a->layoutWidth(), 100.0f, 0.5f, "a border-box row item keeps its width");
+    checkNear(a->layoutHeight(), 70.0f, 0.5f, "a border-box row item keeps its height");
+    checkNear(b->layoutWidth(), 100.0f, 0.5f, "the cross axis is not reduced twice");
+    checkNear(b->layoutHeight(), 70.0f, 0.5f, "the cross axis is not reduced twice");
+    checkNear(c->layoutWidth(), 100.0f, 0.5f, "a border-box column item keeps its width");
+    checkNear(c->layoutHeight(), 70.0f, 0.5f, "a border-box column item keeps its height");
+}
+
 int main() {
     testRuleParsing();
     testSelectorMatching();
@@ -1742,6 +2133,13 @@ int main() {
     testBoxSizing();
     testPercentageMinMax();
     testPercentNestedLevels();
+    testBackgroundColourParsing();
+    testLinearGradientParsing();
+    testRadialGradientParsing();
+    testBackgroundListsAreParallel();
+    testBackgroundSizeAndPositionKeywords();
+    testFlexCrossSizeExcludesChrome();
+    testFlexBoxSizingIsNotAppliedTwice();
 
     if (failures) {
         std::printf("\n%d check(s) failed\n", failures);

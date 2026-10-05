@@ -41,6 +41,10 @@ Color withOpacity(Color color, float opacity);
 // every drawing command inside it.
 Color multiplyAlpha(Color color, float factor);
 
+// The style layer stores SDL colours and the renderer draws `Color`, so every value
+// crosses that boundary in one place.
+Color toColor(SDL_Color color);
+
 // Two radii per corner, so `border-radius: 10px 20px / 30px 40px` is expressible.
 struct Radii {
     struct Corner {
@@ -247,7 +251,6 @@ private:
                     Dash dash, bool closed, const SDL_FPoint& interior);
     void emitSide(const SDL_FRect& rect, Side side, float thickness, const Color& color,
                   const Radii& radii, Dash dash);
-    void emitImageQuad(const SDL_FRect& rect, const Shader& shader);
     void setColor(const Color& color);
 
     SDL_Renderer* renderer_ = nullptr;

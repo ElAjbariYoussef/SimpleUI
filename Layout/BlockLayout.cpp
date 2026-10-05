@@ -163,7 +163,7 @@ public:
         el.setLayoutY(originY + box.margin.top);
         el.setLayoutWidth(borderW);
         el.setLayoutHeight(borderH);
-        recordClip(el, contentX, contentY, contentWidth, contentHeight);
+        recordBoxes(el, contentX, contentY, contentWidth, contentHeight, box);
 
         if (s.position != ComputedStyle::Static) {
             if (s.position == ComputedStyle::Absolute ||
@@ -368,15 +368,22 @@ public:
         el.setLayoutWidth(
             std::max(borderW, width + horizontalEdges(box.padding, box.borderWidth)));
         el.setLayoutHeight(height + verticalEdges(box.padding, box.borderWidth));
-        recordClip(el, contentX, contentY, width, height);
+        recordBoxes(el, contentX, contentY, width, height, box);
     }
 
-    // The padding box, in window coordinates, which is what `overflow` crops to.
-    void recordClip(Element& el, float x, float y, float width, float height) {
-        el.setClipX(x);
-        el.setClipY(y);
-        el.setClipWidth(std::max(0.0f, width));
-        el.setClipHeight(std::max(0.0f, height));
+    // The padding and content boxes, in window coordinates. `overflow` crops to the
+    // padding box and `background-clip: content-box` is measured against the content
+    // box, and the two are only one padding-width apart.
+    void recordBoxes(Element& el, float x, float y, float width, float height,
+                     const UsedBox& box) {
+        el.setPaddingX(x - box.padding.left);
+        el.setPaddingY(y - box.padding.top);
+        el.setPaddingWidth(std::max(0.0f, width + box.padding.left + box.padding.right));
+        el.setPaddingHeight(std::max(0.0f, height + box.padding.top + box.padding.bottom));
+        el.setContentX(x);
+        el.setContentY(y);
+        el.setContentWidth(std::max(0.0f, width));
+        el.setContentHeight(std::max(0.0f, height));
     }
 
 private:
@@ -488,7 +495,7 @@ private:
         el.setLayoutY(originY + box.margin.top);
         el.setLayoutWidth(width + horizontalEdges(box.padding, box.borderWidth));
         el.setLayoutHeight(height + verticalEdges(box.padding, box.borderWidth));
-        recordClip(el, contentX, contentY, width, height);
+        recordBoxes(el, contentX, contentY, width, height, box);
     }
 
     float layoutContents(Element& el, const ComputedStyle& s, const UsedBox& box,
@@ -859,12 +866,19 @@ private:
                         : s.alignItems;
                 // Stretch fills the line only when the item has no definite size on
                 // the cross axis: its height in a row, its width in a column.
-                float cross = crossMargins(item.box, row) + crossChrome(item.box, row) +
-                              item.crossSize;
+                // `crossSize` is a content-box length, so stretching to the line's
+                // cross extent has to give the chrome back before it can be used as
+                // one, and the two are kept apart because the extent is what the
+                // alignment arithmetic needs while the content box is what the item
+                // is actually laid out at.
+                float crossContent = item.crossSize;
                 const float authored = row ? item.box.height : item.box.width;
                 if (align == ComputedStyle::AlignStretch && authored <= 0.0f) {
-                    cross = l.crossSize;
+                    crossContent =
+                        std::max(0.0f, l.crossSize - crossChrome(item.box, row));
                 }
+                const float cross = crossMargins(item.box, row) +
+                                    crossChrome(item.box, row) + crossContent;
                 const float freeSpace = std::max(0.0f, l.crossSize - cross);
                 if (align == ComputedStyle::AlignEnd) {
                     item.crossPos = l.crossPos + freeSpace;
@@ -874,14 +888,16 @@ private:
                     item.crossPos = l.crossPos;
                 }
 
-                // `mainSize` and `cross` are already content-box lengths, since
-                // resolveBox reduced the authored sizes that way, so they become
-                // the item's width and height directly. The margins are cleared
-                // because the algorithm already spent them in `mainPos`/`crossPos`,
-                // and `run` would otherwise add them a second time.
+                // Both sizes are content-box lengths, since `resolveBox` already
+                // reduced whatever the author wrote, so they become the item's width
+                // and height directly and `box-sizing` has to stop agreeing to reduce
+                // them again. The margins are cleared because the algorithm already
+                // spent them in `mainPos`/`crossPos`, and `run` would otherwise add
+                // them a second time.
                 ComputedStyle sized = item.style;
-                sized.width = Length(std::max(0.0f, row ? item.mainSize : cross));
-                sized.height = Length(std::max(0.0f, row ? cross : item.mainSize));
+                sized.width = Length(std::max(0.0f, row ? item.mainSize : crossContent));
+                sized.height = Length(std::max(0.0f, row ? crossContent : item.mainSize));
+                sized.boxSizing = BoxSizing::ContentBox;
                 sized.margin = {};
 
                 // `mainPos` and `crossPos` already have the start margin added, so

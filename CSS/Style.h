@@ -221,6 +221,101 @@ struct ComputedStyle {
     };
     std::vector<TextShadow> textShadows;
 
+    // Background layers. CSS paints the *first* image layer on top of the ones after
+    // it, and `background-color` sits below all of them, so index 0 here is the
+    // topmost. The companion properties are parallel lists rather than one struct per
+    // layer because CSS accumulates them independently and then matches them up by
+    // position, repeating the shorter list — see `backgroundListAt`.
+    struct GradientStop {
+        // An `Auto` offset means "not authored". A gradient gives an unauthored stop
+        // the midpoint of its neighbours, and gives a single one a flat fill, so an
+        // explicit `0%` is not the same thing and has to stay distinguishable.
+        Length offset;
+        SDL_Color color = {0, 0, 0, 255};
+    };
+
+    struct LinearGradient {
+        // Degrees clockwise from "to top", which is how CSS defines the angle. 0deg
+        // is up, 90deg right, 180deg down.
+        float angle = 180.0f;
+        std::vector<GradientStop> stops;
+    };
+
+    struct RadialGradient {
+        enum Shape : std::uint8_t { Circle, Ellipse };
+        enum Extent : std::uint8_t { FarthestCorner, ClosestSide, FarthestSide, ClosestCorner };
+        Shape shape = Circle;
+        Extent extent = FarthestCorner;
+        // The centre, defaulting to the middle of the box. The default is a
+        // percentage rather than a pixel count, so it follows the box it is sized
+        // against instead of landing 50px from its left edge.
+        Length centreX{Length::Percent, 50.0f};
+        Length centreY{Length::Percent, 50.0f};
+        // Only read when `hasRadii`; a circle takes the first, an ellipse both.
+        Length radiusX;
+        Length radiusY;
+        bool hasRadii = false;
+        // The focus, which defaults to the centre. `hasFocus` distinguishes "at the
+        // centre" from "not authored", which matters only for the centre in the spec.
+        Length focalX;
+        Length focalY;
+        bool hasFocus = false;
+        std::vector<GradientStop> stops;
+    };
+
+    struct BackgroundImage {
+        enum Kind : std::uint8_t { None, Url, LinearGradientImage, RadialGradientImage };
+        Kind kind = None;
+        std::string href;
+        LinearGradient linear;
+        RadialGradient radial;
+    };
+    std::vector<BackgroundImage> backgroundImages;
+
+    struct BackgroundSize {
+        enum Mode : std::uint8_t { Explicit, AutoSize, Cover, Contain };
+        Mode mode = AutoSize;
+        // `Auto` on an axis means the image's own size there, except where the other
+        // axis is explicit, in which case it means "whatever keeps the aspect ratio".
+        Length width;
+        Length height;
+    };
+    std::vector<BackgroundSize> backgroundSizes;
+
+    // A keyword pair plus a length offset, which is what every CSS `background-position`
+    // form reduces to. `right 10px` is `End` with a negative offset, because a length
+    // after `right` measures *back* from the edge.
+    struct BackgroundPosition {
+        enum Keyword : std::uint8_t { Start, Center, End };
+        Keyword horizontal = Start;
+        Keyword vertical = Start;
+        Length offsetX;
+        Length offsetY;
+    };
+    std::vector<BackgroundPosition> backgroundPositions;
+
+    struct RepeatPair {
+        bool x = true;
+        bool y = true;
+        // `space` and `round` both need the tile count and the leftover, which only
+        // the paint stage knows, so the choice is carried rather than resolved.
+        enum Kind : std::uint8_t { Repeat, NoRepeat, Space, Round };
+        Kind kind = Repeat;
+    };
+    std::vector<RepeatPair> backgroundRepeats;
+
+    // Which of the three boxes a layer paints inside. Prefixed because `BorderBox`
+    // reads ambiguously next to the border members above.
+    enum BackgroundBox : std::uint8_t { BackgroundBorderBox, BackgroundPaddingBox,
+                                        BackgroundContentBox };
+    std::vector<BackgroundBox> backgroundClips;
+    std::vector<BackgroundBox> backgroundOrigins;
+    // Only `Fixed` differs from `Scroll` once there is a scrolling viewport, so this
+    // is parsed and carried but currently paints the same either way.
+    enum BackgroundAttachment : std::uint8_t { BackgroundScroll, BackgroundFixed,
+                                                BackgroundLocal };
+    std::vector<BackgroundAttachment> backgroundAttachments;
+
     // Typography
     float fontSize = 16.0f;  // px
     std::string fontFamily;   // empty = default

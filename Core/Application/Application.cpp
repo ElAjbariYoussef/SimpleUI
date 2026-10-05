@@ -1,9 +1,12 @@
 #include "Core/Application/Application.h"
 
+#include "Core/Application/Background.h"
+
 #include "CSS/Parser.h"
 #include "CSS/PseudoElements.h"
 #include "CSS/StyleResolver.h"
 #include "Layout/BlockLayout.h"
+#include "Rendering/ImageCache.h"
 #include "Rendering/Renderer.h"
 #include "Rendering/Text.h"
 #include "SUI/DOM/Document.h"
@@ -49,11 +52,6 @@ bool attributeFlag(Element& element, std::string_view key, bool fallback) {
     return raw != "false" && raw != "0";
 }
 
-Color toColor(SDL_Color c) {
-    return Color{static_cast<std::uint8_t>(c.r), static_cast<std::uint8_t>(c.g),
-                 static_cast<std::uint8_t>(c.b), static_cast<std::uint8_t>(c.a)};
-}
-
 void dumpLayout(Element& el, int depth) {
     std::string indent(static_cast<std::size_t>(depth) * 2, ' ');
     std::string text(el.text());
@@ -64,6 +62,14 @@ void dumpLayout(Element& el, int depth) {
             indent.c_str(), static_cast<int>(el.tag().size()), el.tag().data(),
             el.layoutX(), el.layoutY(), el.layoutWidth(), el.layoutHeight(),
             el.textRuns().size(), text.c_str());
+    // The padding and content boxes decide what `overflow` crops to and what a
+    // background layer is measured against, and neither is visible in the rects above.
+    if (el.layoutWidth() > 0.0f && el.layoutHeight() > 0.0f) {
+        SDL_Log("%s  padding %.1f,%.1f %.1fx%.1f  content %.1f,%.1f %.1fx%.1f",
+                indent.c_str(), el.paddingX(), el.paddingY(), el.paddingWidth(),
+                el.paddingHeight(), el.contentX(), el.contentY(), el.contentWidth(),
+                el.contentHeight());
+    }
     for (const auto& child : el.children()) {
         if (child) {
             dumpLayout(*child, depth + 1);
@@ -195,8 +201,10 @@ void collectPaint(Element& el, const StyleResolver& resolver, const SDL_FRect& i
         drawable = s.display != ComputedStyle::None && s.visible;
         opacity *= s.opacity;
         if (drawable && clipsAnything(s)) {
-            clip = intersectClip(clip, SDL_FRect{el.clipX(), el.clipY(), el.clipWidth(),
-                                                 el.clipHeight()});
+            // `overflow` crops to the padding box, which in CSS includes the padding.
+            clip = intersectClip(clip,
+                                 SDL_FRect{el.paddingX(), el.paddingY(), el.paddingWidth(),
+                                           el.paddingHeight()});
         }
     }
 
@@ -401,23 +409,30 @@ void paintTextShadow(const ComputedStyle::TextShadow& shadow, const Element::Tex
 }
 
 void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
-              const StyleResolver& resolver, const TextFont& font, float opacity) {
+              const StyleResolver& resolver, const TextFont& font, float opacity,
+              ImageCache& images) {
     const ComputedStyle s = resolver.resolve(el);
     const SDL_FRect box{el.layoutX(), el.layoutY(), el.layoutWidth(), el.layoutHeight()};
     const float rootFontSize = resolver.rootFontSize();
     // Border widths take no percentages or font-relative units, so they need no
     // containing block to resolve.
     const sui::Radii radii = radiiOf(s, box, rootFontSize);
-    const sui::Color background = multiplyAlpha(toColor(s.backgroundColor), opacity);
     const sui::Color border = multiplyAlpha(toColor(s.borderColor), opacity);
 
     if (box.w > 0.0f && box.h > 0.0f) {
         // An outset shadow paints behind the box, an inset one over the background
         // and below the content, which is the order CSS uses.
         paintBoxShadow(s, box, radii, renderer, rootFontSize, opacity);
-        if (background.a > 0) {
-            renderer.fillRect(box, Shader::solid(background), radii);
-        }
+
+        // The three boxes a background layer can be relative to, all in window
+        // coordinates. Layout already recorded the inner two, so the percentages in
+        // the padding are not resolved a second time and have to be re-derived here.
+        const BackgroundBoxes boxes{
+            box,
+            {el.paddingX(), el.paddingY(), el.paddingWidth(), el.paddingHeight()},
+            {el.contentX(), el.contentY(), el.contentWidth(), el.contentHeight()}};
+        paintBackground(s, boxes, s.fontSize, rootFontSize, opacity, renderer, images, radii);
+
         paintInsetShadow(s, box, radii, renderer, rootFontSize, opacity);
 
         if (border.a > 0) {
@@ -564,6 +579,7 @@ WindowConfig Application::windowConfigFrom(Document& document) {
 bool Application::start(std::string_view entrySuiPath, std::string& error) {
     resources_ =
         std::make_unique<FileResources>(projectRootFor(std::string(entrySuiPath)));
+    images_ = std::make_unique<ImageCache>(*resources_);
 
     const std::string absolute = resources_->resolve(entrySuiPath);
     auto source = resources_->readText(entrySuiPath);
@@ -841,7 +857,8 @@ void Application::run() {
                     } else {
                         SDL_SetRenderClipRect(sdlRenderer, nullptr);
                     }
-                    paintBox(*item.el, renderer, sdlRenderer, resolver_, *font_, item.opacity);
+                    paintBox(*item.el, renderer, sdlRenderer, resolver_, *font_, item.opacity,
+                             *images_);
                     SDL_SetRenderClipRect(sdlRenderer, &previous);
                 }
             } else {
@@ -893,6 +910,8 @@ void Application::shutdown() {
         platform_->shutdown();
         platform_.reset();
     }
+    // Before the resources, since the cache borrows them.
+    images_.reset();
     font_.reset();
     document_.reset();
     resources_.reset();
