@@ -1300,6 +1300,115 @@ void warnUnknownProperty(std::string_view property) {
     }
 }
 
+// Custom properties start with `--`; nothing else in the engine's property set
+// does, so the prefix is a reliable discriminator.
+bool isCustomProperty(std::string_view property) {
+    return property.size() > 2 && property[0] == '-' && property[1] == '-';
+}
+
+bool containsVars(std::string_view value) {
+    return value.find("var(") != std::string_view::npos;
+}
+
+// `var(--name)` and `var(--name, fallback)` resolve against the element's custom
+// properties. Values are raw tokens, so a lookup recurses: `--a: var(--b)` only
+// produces a value when `--b` itself resolves. `fallback` is resolved the same
+// way, so `var(--x, var(--y))` works. Returns false when a name is undefined and
+// has no fallback, or a substitution chain never settles — both make the whole
+// declaration invalid at computed-value time, per CSS, and the caller drops it.
+bool resolveVars(std::string_view in,
+                 const std::map<std::string, std::string, std::less<>>& custom,
+                 std::string& out, const int depth) {
+    std::size_t pos = 0;
+    while (true) {
+        const std::size_t var = in.find("var(", pos);
+        if (var == std::string_view::npos) {
+            out.append(in.substr(pos));
+            return true;
+        }
+        out.append(in.substr(pos, var - pos));
+
+        // Match the closing paren with a balance count, so the comma-split below
+        // never sees a fallback like `var(--x, calc(a + b))` cut at its first `)`.
+        std::size_t end = var + 4;
+        int parens = 1;
+        while (end < in.size() && parens > 0) {
+            if (in[end] == '(') {
+                ++parens;
+            } else if (in[end] == ')') {
+                --parens;
+            }
+            if (parens > 0) {
+                ++end;
+            }
+        }
+        if (parens != 0) {
+            // Unbalanced `var(`. A declaration like this is a parse-time error in
+            // CSS and is never applied; keep the remainder so nothing is lost.
+            out.append(in.substr(var + 4));
+            return true;
+        }
+
+        const std::string_view args = in.substr(var + 4, end - (var + 4));
+        const std::size_t comma = args.find(',');
+        const std::string_view name = trim(comma == std::string_view::npos ? args
+                                                                           : args.substr(0, comma));
+        if (!isCustomProperty(name)) {
+            // `var()` requires a custom-property name; anything else is a parse
+            // error, which invalidates the whole declaration.
+            return false;
+        }
+
+        const auto found = custom.find(std::string(name));
+        if (found != custom.end()) {
+            if (depth > 8) {
+                // `--a: var(--b); --b: var(--a)` never settles. Reported once, and
+                // the declaration drops rather than looping forever.
+                static bool warned = false;
+                if (!warned) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "custom property substitution exceeds depth; "
+                                "the declaration is dropped (a --a: var(--b); --b: var(--a) cycle?)");
+                    warned = true;
+                }
+                return false;
+            }
+            if (!resolveVars(found->second, custom, out, depth + 1)) {
+                return false;
+            }
+        } else if (comma != std::string_view::npos) {
+            std::string fallback;
+            if (!resolveVars(trim(args.substr(comma + 1)), custom, fallback, depth + 1)) {
+                return false;
+            }
+            out.append(fallback);
+        } else {
+            // Undefined and no fallback: the declaration is invalid at
+            // computed-value time and is dropped. Told about once per name.
+            static std::set<std::string, std::less<>> reported;
+            if (reported.emplace(name).second) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "var(--%.*s) has no value and no fallback; the declaration is dropped",
+                            static_cast<int>(name.size() - 2), name.data() + 2);
+            }
+            return false;
+        }
+        pos = end + 1;
+    }
+}
+
+// The flag is derived, not authored: whoever hands the resolver a rule gets the
+// right answer, including a rule built by hand rather than parsed.
+void noteCustomUsage(Rule& rule) {
+    for (const auto& decl : rule.declarations) {
+        if (isCustomProperty(decl.property) || containsVars(decl.value)) {
+            rule.usesCustom = true;
+            return;
+        }
+    }
+    rule.usesCustom = false;
+}
+
 
 void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontSize) {
     const std::string& property = decl.property;
@@ -1769,6 +1878,9 @@ int StyleResolver::specificityOf(const SimpleSelector& selector) {
 }
 
 void StyleResolver::setRules(std::vector<Rule> rules) {
+    for (Rule& rule : rules) {
+        noteCustomUsage(rule);
+    }
     rules_ = std::move(rules);
     std::stable_sort(rules_.begin(), rules_.end(), [](const Rule& a, const Rule& b) {
         return selectorRank(a.selector) < selectorRank(b.selector);
@@ -1777,6 +1889,7 @@ void StyleResolver::setRules(std::vector<Rule> rules) {
 }
 
 void StyleResolver::addRule(Rule rule) {
+    noteCustomUsage(rule);
     const int rank = selectorRank(rule.selector);
     const auto pos = std::upper_bound(
         rules_.begin(), rules_.end(), rank,
@@ -1795,6 +1908,10 @@ void StyleResolver::eraseRule(std::size_t index) {
 
 std::string StyleResolver::propertyValue(const ComputedStyle& style,
                                          std::string_view property) {
+    if (isCustomProperty(property)) {
+        const auto found = style.custom.find(std::string(property));
+        return found == style.custom.end() ? std::string() : found->second;
+    }
     auto number = [](float value) {
         return unitless(value) + "px";
     };
@@ -2057,6 +2174,81 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
         element.hasAttribute("style")
             ? parseDeclarations(element.attribute("style"))
             : std::vector<Declaration>{};
+
+    // A custom property is a value, not a style, and `var()` has to be substituted
+    // against the *final* map, not the map as it stood when the consuming rule was
+    // reached. So `div { --x: 1; width: var(--x) } div { --x: 2 }` must give width
+    // 2. When anything in reach refers to a custom property, the matched
+    // declarations are therefore walked twice: once to settle the custom map, then
+    // once to apply. The apply pass keeps its order, so a `var()` that loses its
+    // cascade position loses it exactly as a literal value would.
+    bool customInPlay = false;
+    for (const auto& rule : rules_) {
+        if (rule.usesCustom) {
+            customInPlay = true;
+            break;
+        }
+    }
+    if (!customInPlay) {
+        for (const auto& decl : inlineDecls) {
+            if (isCustomProperty(decl.property) || containsVars(decl.value)) {
+                customInPlay = true;
+                break;
+            }
+        }
+    }
+
+    const auto collectCustom = [&](bool important) {
+        for (const auto& rule : rules_) {
+            if (!rule.usesCustom) {
+                continue;
+            }
+            if (!rule.media.empty() &&
+                !mediaMatches(rule.media, viewportWidth_, viewportHeight_)) {
+                continue;
+            }
+            if (!selectorMatches(rule.selector, element, &state_)) {
+                continue;
+            }
+            for (const auto& decl : rule.declarations) {
+                if (decl.important != important || !isCustomProperty(decl.property)) {
+                    continue;
+                }
+                style.custom[decl.property] = decl.value;
+            }
+        }
+        for (const auto& decl : inlineDecls) {
+            if (decl.important != important || !isCustomProperty(decl.property)) {
+                continue;
+            }
+            style.custom[decl.property] = decl.value;
+        }
+    };
+
+    // Applies one already-important-filtered declaration so the rules and inline
+    // loops share the exact same custom-property and substitution handling.
+    const auto applyOne = [&](const Declaration& decl) {
+        if (isCustomProperty(decl.property)) {
+            return;  // settled by collectCustom, above
+        }
+        if (isCssWideKeyword(decl.value)) {
+            applyCssWideKeyword(style, decl, parent);
+            return;
+        }
+        if (containsVars(decl.value)) {
+            std::string filled;
+            if (resolveVars(decl.value, style.custom, filled, 0)) {
+                Declaration applied = decl;
+                applied.value = std::move(filled);
+                applyDeclaration(style, applied, rootFontSize_);
+            }
+            // Unresolved: invalid at computed-value time, dropped. resolveVars
+            // already logged which name (if any) caused it.
+            return;
+        }
+        applyDeclaration(style, decl, rootFontSize_);
+    };
+
     const auto applyLevel = [&](bool important) {
         for (const auto& rule : rules_) {
             // Only a rule under an `@media` pays for evaluating one, which keeps
@@ -2069,27 +2261,22 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
                 continue;
             }
             for (const auto& decl : rule.declarations) {
-                if (decl.important != important) {
-                    continue;
-                }
-                if (isCssWideKeyword(decl.value)) {
-                    applyCssWideKeyword(style, decl, parent);
-                } else {
-                    applyDeclaration(style, decl, rootFontSize_);
+                if (decl.important == important) {
+                    applyOne(decl);
                 }
             }
         }
         for (const auto& decl : inlineDecls) {
-            if (decl.important != important) {
-                continue;
-            }
-            if (isCssWideKeyword(decl.value)) {
-                applyCssWideKeyword(style, decl, parent);
-            } else {
-                applyDeclaration(style, decl, rootFontSize_);
+            if (decl.important == important) {
+                applyOne(decl);
             }
         }
     };
+
+    if (customInPlay) {
+        collectCustom(false);
+        collectCustom(true);
+    }
     applyLevel(false);
     applyLevel(true);
 

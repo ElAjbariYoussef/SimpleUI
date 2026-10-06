@@ -2364,6 +2364,124 @@ void testMediaQueries() {
     check(!resolver.setViewportSize(0, 400), "a zero dimension is not accepted as a viewport");
 }
 
+// Custom properties (`--name`) and `var()`: values are raw tokens, the cascade
+// decides them before anything is substituted, and an unresolved `var()` drops
+// the whole declaration at computed-value time.
+void testCustomProperties() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"t1\">a</div><div id=\"t2\">b</div><div id=\"t3\">c</div>"
+        "<div id=\"t4\">d</div><div id=\"t5\">e</div><div id=\"t6\">f</div>"
+        "<div id=\"t7\">g</div><div id=\"t8\" style=\"--k: 3px; width: var(--k)\">h</div>"
+        "<div id=\"t9\">i</div><div id=\"t10\">j</div><div id=\"t11\">k</div>"
+        "<div id=\"t12\">l</div><div id=\"t13\">m</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { --accent: #00ff00; color: var(--accent) }"
+        "#t1 { --w: 40px; width: var(--w) }"
+        "#t2 { --x: 4px; width: var(--x) }"
+        "#t2 { --x: 8px }"
+        "#t3 { width: var(--y) }"
+        "#t3 { --y: 40px }"
+        "#t4 { width: var(--never, 30px) }"
+        "#t5 { --a: 5px; width: var(--never2, var(--a)) }"
+        "#t6 { width: var(--nope); height: 9px; color: #ff0000 }"
+        "#t7 { --x: 40px; width: var(--x) }"
+        "#t7 { width: 12px }"
+        "#t9 { --a: var(--b); --b: var(--a); width: var(--a); height: 5px }"
+        "#t11 { --x: 1px; width: var(--x) }"
+        "#t11 { --x: 9px !important }"
+        "#t13 { color: var(--accent); height: 7px }"
+        "#t10 { width: var(--x) }"
+        "@media (min-width: 600px) { #t10 { --x: 50px } }"));
+
+    auto width = [&](const char* id) {
+        Element* el = document->getElementById(id);
+        if (!el) {
+            return -1.0f;
+        }
+        return resolver.resolve(*el).width.resolve(0.0f, 16.0f, 16.0f);
+    };
+    auto throughId = [&](const char* id) {
+        Element* el = document->getElementById(id);
+        return el ? resolver.resolve(*el) : sui::ComputedStyle{};
+    };
+
+    Element* t1 = document->getElementById("t1");
+    Element* t2 = document->getElementById("t2");
+    Element* t4 = document->getElementById("t4");
+    Element* t5 = document->getElementById("t5");
+    Element* t6 = document->getElementById("t6");
+    Element* t10 = document->getElementById("t10");
+    Element* t11 = document->getElementById("t11");
+    check(t1 && t2 && t4 && t5 && t6 && t10 && t11, "elements found");
+    if (!t1 || !t2 || !t4 || !t5 || !t6 || !t10 || !t11) {
+        return;
+    }
+
+    checkNear(width("t1"), 40.0f, 0.01f, "var(--w) resolves to the custom property value");
+    check(resolver.propertyValue(resolver.resolve(*t1), "--w") == "40px",
+          "a custom property reads back from the computed style");
+    check(resolver.propertyValue(resolver.resolve(*t2), "--x") == "8px",
+          "the later --x wins the custom-property cascade");
+    checkNear(width("t2"), 8.0f, 0.01f,
+              "width: var(--x) sees the --x that was declared after it");
+    checkNear(width("t3"), 40.0f, 0.01f,
+              "a consuming rule that precedes the definition still gets the value");
+    checkNear(width("t4"), 30.0f, 0.01f, "an undefined var falls back to its fallback");
+    checkNear(width("t5"), 5.0f, 0.01f, "a fallback may itself be a var()");
+    checkNear(width("t6"), 0.0f, 0.01f,
+              "an undefined var with no fallback drops the declaration");
+    const sui::ComputedStyle s6 = throughId("t6");
+    checkNear(s6.height.resolve(0.0f, 16.0f, 16.0f), 9.0f, 0.01f,
+              "sibling declarations in the same rule still apply");
+    check(s6.color.r == 0xff, "a colour after the dropped declaration still applies");
+
+    const sui::ComputedStyle body = [&]() {
+        Element* b = document->querySelector("body");
+        return b ? resolver.resolve(*b) : sui::ComputedStyle{};
+    }();
+    check(body.color.g == 0xff, "body consumes its own inherited --accent");
+    const sui::ComputedStyle s13 = throughId("t13");
+    check(s13.color.g == 0xff && s13.color.a == 0xff,
+          "a child consumes a custom property inherited from its ancestor");
+
+    checkNear(width("t7"), 12.0f, 0.01f,
+              "a later literal beats an earlier var() at the same specificity");
+    checkNear(width("t8"), 3.0f, 0.01f,
+              "a custom property from an inline style resolves too");
+    const sui::ComputedStyle s9 = throughId("t9");
+    checkNear(s9.width.resolve(0.0f, 16.0f, 16.0f), 0.0f, 0.01f,
+              "a --a: var(--b); --b: var(--a) cycle drops the consuming declaration");
+    checkNear(s9.height.resolve(0.0f, 16.0f, 16.0f), 5.0f, 0.01f,
+              "a declaration next to a cycled one still applies");
+    checkNear(width("t11"), 9.0f, 0.01f, "an important custom property beats a normal one");
+
+    resolver.setViewportSize(500, 400);
+    const float narrow = resolver.resolve(*t10).width.resolve(0.0f, 16.0f, 16.0f);
+    resolver.setViewportSize(700, 400);
+    const float wide = resolver.resolve(*t10).width.resolve(0.0f, 16.0f, 16.0f);
+    checkNear(narrow, 0.0f, 0.01f,
+              "below the breakpoint --x never exists, so the var() drops");
+    checkNear(wide, 50.0f, 0.01f,
+              "above the breakpoint --x is defined and the var() resolves");
+
+    // The none case: a warning exists but the stylesheet still resolves. A custom
+    // property must not trip the unknown-property report.
+    auto clean = sui::CSSParser::parse("#a { --pool: 4px }");
+    sui::StyleResolver probe;
+    probe.setRules(clean);
+    check(!probe.rules().empty() && probe.rules()[0].usesCustom,
+          "a custom property marks its rule for the two-pass path");
+    auto plain = sui::CSSParser::parse("#a { width: 4px }");
+    probe.setRules(plain);
+    check(!probe.rules()[0].usesCustom, "a rule without one does not pay for the path");
+}
+
 int main() {
     testRuleParsing();
     testSelectorMatching();
@@ -2375,6 +2493,7 @@ int main() {
     testImportantAndCssWideKeywords();
     testBorderWidthLonghands();
     testMediaQueries();
+    testCustomProperties();
     testCascade();
     testPropertyParsing();
     testBlockStacking();

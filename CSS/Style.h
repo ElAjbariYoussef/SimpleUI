@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -322,6 +323,12 @@ struct ComputedStyle {
     bool fontBold = false;
     float lineHeight = 1.2f;  // multiplier
 
+    // Custom properties (`--name`). They are values, not styles: nothing types or
+    // validates them, and `var(--name)` resolves against them once this element's
+    // whole cascade has settled. They inherit like every other property — this
+    // engine has no per-property inheritance table, so they copy like the rest.
+    std::map<std::string, std::string, std::less<>> custom;
+
     // Text alignment
     enum TextAlign : std::uint8_t { Left, Center, Right, Justify };
     TextAlign textAlign = Left;
@@ -467,6 +474,9 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     if (!(style.specified & ComputedStyle::SpecifiedTextAlign)) {
         style.textAlign = parent.textAlign;
     }
+    // Custom properties always inherit; the resolved element's own cascade then
+    // overwrites the entries it declares locally.
+    style.custom = parent.custom;
 }
 
 }  // namespace sui

@@ -86,6 +86,10 @@ struct Rule {
     std::vector<Declaration> declarations;
     std::size_t order = 0;  // source position, used as the final tiebreak
     std::vector<MediaQuery> media;
+    // True once any declaration is a custom property (`--name`) or references one
+    // (`var(...)`). Computed by the resolver when the rule is registered, so a
+    // rule built by hand does not silently miss the custom-property path.
+    bool usesCustom = false;
 };
 
 class CSSParser {
