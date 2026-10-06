@@ -23,6 +23,7 @@ add_library(sui STATIC
     Core/Application/Application.cpp
     SUI/Markup/Parser.cpp
     SUI/Script/Script.cpp
+    SUI/Script/Timers.cpp
     SUI/DOM/Element.cpp
     SUI/DOM/Document.cpp
     CSS/DefaultStyle.cpp

@@ -11,6 +11,7 @@
 #pragma once
 
 #include "SUI/DOM/Element.h"
+#include "SUI/Script/Timers.h"
 
 #include <cstdint>
 #include <string>
@@ -136,6 +137,31 @@ using sui::Element;
 
 inline sui::script::DocumentApi document{};
 inline sui::script::ConsoleApi console{};
+inline sui::script::PerformanceApi performance{};
+
+// Date.now() is not expressible in C++ — a class name cannot take the dot
+// syntax — so the closest C++ spelling, Date::now(), is the one on offer.
+struct Date {
+    static double now() { return sui::script::unixTimeMs(); }
+};
+
+using sui::script::TimerCallback;
+inline std::uint64_t setTimeout(sui::script::TimerCallback callback,
+                                std::uint64_t delayMs) {
+    return sui::script::setTimeout(callback, delayMs);
+}
+inline std::uint64_t setInterval(sui::script::TimerCallback callback,
+                                 std::uint64_t periodMs) {
+    return sui::script::setInterval(callback, periodMs);
+}
+inline void clearTimeout(std::uint64_t id) { sui::script::clearTimeout(id); }
+inline void clearInterval(std::uint64_t id) { sui::script::clearInterval(id); }
+inline std::uint64_t requestAnimationFrame(sui::script::TimerCallback callback) {
+    return sui::script::requestAnimationFrame(callback);
+}
+inline void cancelAnimationFrame(std::uint64_t id) {
+    sui::script::cancelAnimationFrame(id);
+}
 #endif
 
 // Claims the href a <script> tag in the .sui refers to. The function name is

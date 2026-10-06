@@ -13,6 +13,7 @@
 #include "SUI/DOM/Element.h"
 #include "SUI/Markup/Parser.h"
 #include "SUI/Script/Script.h"
+#include "SUI/Script/Timers.h"
 
 #include <algorithm>
 #include <array>
@@ -819,6 +820,12 @@ void Application::run() {
             resolver_.setViewportSize(static_cast<float>(width), static_cast<float>(height));
         }
 
+        // Timers and animation frames are the loop's own events: a fired
+        // callback can change the page, so it counts as stale input the same way
+        // a pointer event does. An animation loop that re-arms rAF every frame
+        // keeps the page painting every frame, which is the contract.
+        const bool timerFired = sui::script::pumpTimers();
+
         // An idle page repaints nothing. DOM mutations, stylesheet changes,
         // explicit script invalidation, resizes, and unhandled input are the
         // only reasons the picture can differ from the last frame; when none of
@@ -827,7 +834,7 @@ void Application::run() {
         // it, so a skipped frame would swallow the click it carried.
         const bool stale =
             !frameDrawn_ || width != stamp_.width || height != stamp_.height ||
-            !platform_->inputEvents().empty() || !scriptedClicks.empty() ||
+            timerFired || !platform_->inputEvents().empty() || !scriptedClicks.empty() ||
             !scriptedMoves.empty() ||
             (document_ && document_->mutationCount() != stamp_.mutations) ||
             resolver_.generation() != stamp_.rules || scriptContext_.generation != stamp_.script;

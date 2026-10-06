@@ -8,8 +8,10 @@
 #include "SUI/Markup/Parser.h"
 #include "SUI/Script/Script.h"
 
+#include <chrono>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -17,6 +19,15 @@ namespace {
 int failures = 0;
 int callLog = 0;
 std::vector<std::string> calls;
+
+// Timer callbacks must be plain functions — TimerCallback is `void (*)()` — so
+// the counters they touch are file-scope statics.
+int timerFires = 0;
+void timerCb() { ++timerFires; }
+int intervalFires = 0;
+void intervalCb() { ++intervalFires; }
+int rafFires = 0;
+void rafCb() { ++rafFires; }
 
 void check(bool condition, const char* what) {
     if (!condition) {
@@ -395,6 +406,69 @@ void testRuntimeStyleSheet() {
     check(!document.styleSheets().deleteRule(-1), "deleteRule rejects a negative index");
 }
 
+// Timers and the animation frame: the scheduler is pumped by the event loop, so
+// these exercise pumpTimers() directly the way Application::run() does. Delays
+// and sleeps use generous margins because the machine's scheduler is not part of
+// the contract under test.
+void testTimersAndAnimationFrames() {
+    timerFires = 0;
+    intervalFires = 0;
+    rafFires = 0;
+
+    check(sui::script::setTimeout(nullptr, 100) == 0, "a null timeout registers nothing");
+    check(sui::script::requestAnimationFrame(nullptr) == 0,
+          "a null rAF registers nothing");
+    check(!sui::script::pumpTimers(), "an idle scheduler pumps for free");
+
+    sui::script::setTimeout(timerCb, 60);
+    const std::uint64_t interval = sui::script::setInterval(intervalCb, 30);
+    check(!sui::script::pumpTimers(), "future timeouts do not fire early");
+    check(timerFires == 0 && intervalFires == 0 && rafFires == 0,
+          "nothing ran ahead of time");
+
+    // rAF is due on the very next pump, regardless of the clock.
+    sui::script::requestAnimationFrame(rafCb);
+    check(sui::script::pumpTimers() && rafFires == 1, "rAF fires on the first pump");
+    check(!sui::script::pumpTimers() && rafFires == 1, "one rAF per arm: the next pump is free");
+    sui::script::cancelAnimationFrame(sui::script::requestAnimationFrame(rafCb));
+    check(!sui::script::pumpTimers() && rafFires == 1,
+          "a cancelled rAF never runs");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(90));
+
+    check(sui::script::pumpTimers(), "a due timeout makes the pump report work");
+    check(timerFires == 1, "the timeout fired exactly once");
+    check(intervalFires >= 1, "the interval fired at least once per caught-up period");
+
+    const int beforeClear = intervalFires;
+    sui::script::clearInterval(interval);
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    sui::script::pumpTimers();
+    check(intervalFires == beforeClear, "clearInterval stops the interval");
+
+    const int beforeClearTimeout = timerFires;
+    sui::script::clearTimeout(sui::script::setTimeout(timerCb, 40));
+    std::this_thread::sleep_for(std::chrono::milliseconds(70));
+    check(!sui::script::pumpTimers() && timerFires == beforeClearTimeout,
+          "clearTimeout stops a one-shot before it is due");
+
+    // A zero-delay timeout is due on the next pump, fires once, and drains.
+    const int beforeImmediate = timerFires;
+    sui::script::setTimeout(timerCb, 0);
+    check(sui::script::pumpTimers() && timerFires == beforeImmediate + 1,
+          "a zero-delay timeout fires once on the next pump");
+    check(!sui::script::pumpTimers(), "that fire drained the queue");
+
+    // The clocks: monotonic performance.now() and wall-clock Date.now().
+    const double tickA = sui::script::now();
+    const double tickB = sui::script::now();
+    check(tickA > 0.0 && tickB >= tickA, "now() is set and monotonic");
+    check(performance.now() >= tickB, "performance.now() reads the same clock");
+    const double epoch = sui::script::unixTimeMs();
+    check(epoch > 1700000000000.0, "Date.now() is milliseconds since the epoch");
+    check(Date::now() >= epoch - 1.0, "Date::now() reads the wall clock");
+}
+
 }  // namespace
 
 int main() {
@@ -409,6 +483,7 @@ int main() {
     testInlineStyleWrites();
     testComputedStyleReads();
     testRuntimeStyleSheet();
+    testTimersAndAnimationFrames();
 
     if (failures) {
         std::printf("\n%d check(s) failed\n", failures);
