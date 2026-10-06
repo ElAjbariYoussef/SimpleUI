@@ -162,6 +162,14 @@ bool LinuxPlatform::pumpEvents() {
                 input_.push_back(InputEvent{InputKind::PointerUp, event.button.x * scale,
                                             event.button.y * scale, event.button.button});
                 break;
+            case SDL_EVENT_MOUSE_WHEEL:
+                // Deltas travel in notches (SDL's float x/y); the engine turns them
+                // into pixels when it scrolls. The cursor position rides along so the
+                // wheel lands on the element it points at.
+                input_.push_back(InputEvent{InputKind::Wheel, event.wheel.mouse_x * scale,
+                                            event.wheel.mouse_y * scale, 0, event.wheel.x,
+                                            event.wheel.y});
+                break;
             case SDL_EVENT_WINDOW_MOUSE_LEAVE:
                 // Nothing is hovered once the pointer is out of the window, and the
                 // engine is never told about a motion again until it comes back. The

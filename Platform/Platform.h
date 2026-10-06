@@ -15,13 +15,15 @@ namespace sui {
 
 // Pointer input, in window coordinates, forwarded to the engine as SDL-free
 // structs so the DOM/event code stays platform independent.
-enum class InputKind : std::uint8_t { PointerDown, PointerUp, PointerMove };
+enum class InputKind : std::uint8_t { PointerDown, PointerUp, PointerMove, Wheel };
 
 struct InputEvent {
     InputKind kind = InputKind::PointerDown;
     float x = 0.0f;
     float y = 0.0f;
     int button = 0;  // 1 = left, 2 = middle, 3 = right
+    float dx = 0.0f;  // wheel delta per axis, in notches; only filled for Wheel
+    float dy = 0.0f;
 };
 
 struct WindowConfig {

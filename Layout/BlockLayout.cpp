@@ -1176,6 +1176,43 @@ private:
     const TextFont* font_ = nullptr;
 };
 
+struct ScrollExtent {
+    float right = 0.0f;
+    float bottom = 0.0f;
+};
+
+// After both passes, a box that clips has to know where its content actually
+// ends, and every laid-out element should report honest client/scroll extents to
+// script. One post-order walk folds the furthest descendant edge per element,
+// records them, and clamps the offsets of the boxes whose axis clips. Text runs
+// count as content, so a fixed-height box with too much text scrolls too.
+ScrollExtent measureScrollExtents(Element& el, const StyleResolver& resolver) {
+    float right = el.layoutX() + el.layoutWidth();
+    float bottom = el.layoutY() + el.layoutHeight();
+    for (const Element::TextRun& run : el.textRuns()) {
+        right = std::max(right, run.x + run.width);
+        bottom = std::max(bottom, run.y + run.height);
+    }
+    for (const auto& child : el.children()) {
+        if (child && !child->isTextNode()) {
+            const ScrollExtent childExtent = measureScrollExtents(*child, resolver);
+            right = std::max(right, childExtent.right);
+            bottom = std::max(bottom, childExtent.bottom);
+        }
+    }
+    if (el.isVisual()) {
+        const ComputedStyle s = resolver.resolve(el);
+        if (s.display != ComputedStyle::None) {
+            el.setScrollExtents(
+                el.paddingWidth(), el.paddingHeight(),
+                std::max(el.paddingWidth(), right - el.contentX()),
+                std::max(el.paddingHeight(), bottom - el.contentY()),
+                s.overflowX != ComputedStyle::Visible, s.overflowY != ComputedStyle::Visible);
+        }
+    }
+    return {right, bottom};
+}
+
 }  // namespace
 
 void BlockLayout::layout(Element* root, const LayoutInput& input) {
@@ -1185,6 +1222,7 @@ void BlockLayout::layout(Element* root, const LayoutInput& input) {
     Layout layout(*input.resolver, input.font, input.viewportWidth, input.viewportHeight);
     layout.run(*root, input.viewportWidth, 0.0f, 0.0f);
     layout.placeOutOfFlow();
+    measureScrollExtents(*root, *input.resolver);
 }
 
 }  // namespace sui

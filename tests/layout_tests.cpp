@@ -622,7 +622,7 @@ void testUnknownPropertyIsReported() {
     capturedLog.clear();
     if (document) {
         sui::StyleResolver resolver;
-        resolver.setRules(sui::CSSParser::parse("div { text-decoration: underline }"));
+        resolver.setRules(sui::CSSParser::parse("div { -nonexistent-prop: 1 }"));
         resolver.resolve(*document->getElementById("x"));
     }
     check(capturedLog.size() > 0, "each unsupported property is reported once");
@@ -2908,12 +2908,88 @@ void testCalc() {
               "var() inside calc substitutes before the expression is parsed");
 }
 
+void testScroll() {
+    // A clipping box reports its padding box as `client`, the furthest content
+    // edge as `scroll`, and clamps its offsets into the gap between them.
+    auto document = parseOrNull(
+        "<sui><body><div id=\"s\" style=\"width:200px; height:100px; overflow-y:auto\">"
+        "<div id=\"tall\" style=\"height:300px\"></div>"
+        "</div><div id=\"plain\"></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    layoutRoot(*document, resolver, 400.0f);
+    Element* s = document->getElementById("s");
+    if (!s) {
+        check(false, "scroll fixture element found");
+        return;
+    }
+    checkNear(s->clientHeight(), 100.0f, 0.01f, "clientHeight is the padding box");
+    checkNear(s->scrollHeight(), 300.0f, 0.01f, "scrollHeight reaches the overflowing child");
+    checkNear(s->scrollWidth(), 200.0f, 0.01f, "scrollWidth floors at the client width");
+    checkNear(s->scrollTop(), 0.0f, 0.01f, "scrollTop starts at zero");
+    checkNear(s->scrollLeft(), 0.0f, 0.01f, "scrollLeft starts at zero");
+    check(s->scrollHeight() >= s->clientHeight(), "scrollHeight never shrinks below clientHeight");
+
+    s->setScrollTop(999.0f);
+    checkNear(s->scrollTop(), 200.0f, 0.01f, "setScrollTop clamps at the end of the range");
+    s->setScrollTop(-5.0f);
+    checkNear(s->scrollTop(), 0.0f, 0.01f, "setScrollTop clamps below zero");
+    s->setScrollTop(60.0f);
+    checkNear(s->scrollTop(), 60.0f, 0.01f, "an in-range scrollTop sticks");
+    // The horizontal axis is `visible`, so it cannot hold an offset at all.
+    s->setScrollLeft(50.0f);
+    checkNear(s->scrollLeft(), 0.0f, 0.01f, "a visible axis ignores a scroll write");
+
+    // The computed overflow keeps `auto` distinct from `scroll`.
+    const sui::ComputedStyle sv = resolver.resolve(*s);
+    check(sv.overflowY == sui::ComputedStyle::Auto, "overflow: auto is its own computed value");
+    check(sv.overflowX == sui::ComputedStyle::Visible, "the other axis stays visible");
+
+    // A box that never clips reports honest extents but is not scrollable.
+    Element* plain = document->getElementById("plain");
+    if (!plain) {
+        check(false, "plain box found");
+        return;
+    }
+    plain->setScrollTop(30.0f);
+    checkNear(plain->scrollTop(), 0.0f, 0.01f, "an overflow-visible box cannot scroll");
+
+    // Horizontal overflow lets scrollLeft move; a positioned child escapes the
+    // content box without flexbox shrinking it to fit.
+    auto wideDoc = parseOrNull(
+        "<sui><body><div id=\"h\" style=\"position:relative; width:100px; height:50px; "
+        "overflow-x:auto\">"
+        "<div id=\"wide\" style=\"position:absolute; left:300px; width:120px\"></div>"
+        "</div></body></sui>");
+    if (!wideDoc) {
+        return;
+    }
+    sui::StyleResolver wideResolver;
+    layoutRoot(*wideDoc, wideResolver, 400.0f);
+    Element* h = wideDoc->getElementById("h");
+    if (!h) {
+        check(false, "wide scroll fixture element found");
+        return;
+    }
+    checkNear(h->scrollWidth(), 420.0f, 0.01f, "scrollWidth reaches the escaping child");
+    checkNear(h->scrollHeight(), 50.0f, 0.01f, "scrollHeight floors at the client height");
+    h->setScrollLeft(999.0f);
+    checkNear(h->scrollLeft(), 320.0f, 0.01f, "setScrollLeft clamps to the horizontal range");
+    h->setScrollTop(10.0f);
+    checkNear(h->scrollTop(), 0.0f, 0.01f, "a non-scrolling axis rejects the write");
+    const std::string overflowReadback = wideResolver.propertyValue(wideResolver.resolve(*h), "overflow");
+    check(overflowReadback == "auto visible", "the overflow pair reads back per axis");
+}
+
 int main() {
     testEasingAndTimingFunctions();
     testTransitionDeclarations();
     testTransitions();
     testKeyframeAnimations();
     testCalc();
+    testScroll();
     testRuleParsing();
     testSelectorMatching();
     testInteractivePseudoClasses();

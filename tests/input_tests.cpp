@@ -137,6 +137,28 @@ int main() {
     expectOne(*platform, sui::InputKind::PointerUp, 50.0f, 60.0f, SDL_BUTTON_LEFT,
               "a release is still a release");
 
+    // A wheel notch reaches the engine as a Wheel event carrying the delta it was
+    // aimed at and the cursor position under which it turned.
+    SDL_Event wheel{};
+    wheel.type = SDL_EVENT_MOUSE_WHEEL;
+    wheel.wheel.x = 1.5f;
+    wheel.wheel.y = -2.0f;
+    wheel.wheel.mouse_x = 100.0f;
+    wheel.wheel.mouse_y = 110.0f;
+    SDL_PushEvent(&wheel);
+    platform->pumpEvents();
+    {
+        const auto& events = platform->inputEvents();
+        ++checks;
+        const bool wheelOk = events.size() == 1 && events.front().kind == sui::InputKind::Wheel &&
+                             events.front().x == 100.0f && events.front().y == 110.0f &&
+                             events.front().dx == 1.5f && events.front().dy == -2.0f;
+        if (!wheelOk) {
+            ++failures;
+            std::printf("FAIL a wheel notch reports the delta and cursor position\n");
+        }
+    }
+
     platform->shutdown();
 
     std::printf("input_tests: %d checks, %d failures\n", checks, failures);

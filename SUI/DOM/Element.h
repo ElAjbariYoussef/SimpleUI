@@ -150,6 +150,22 @@ public:
     float contentWidth() const noexcept { return contentW_; }
     float contentHeight() const noexcept { return contentH_; }
 
+    // Scrolling. `client` is the padding box, `scroll` the furthest edge of any
+    // descendant, both in window pixels; the layout pass refreshes them and clamps
+    // the offsets. Scripts and wheel events write `scrollTop`/`scrollLeft`, which
+    // clamp as far as the current extents know; an axis that does not clip cannot
+    // hold an offset at all, so writing one is a no-op there.
+    void setScrollExtents(float clientW, float clientH, float scrollW, float scrollH,
+                          bool scrollsX, bool scrollsY) noexcept;
+    float scrollLeft() const noexcept;
+    void setScrollLeft(float v);
+    float scrollTop() const noexcept;
+    void setScrollTop(float v);
+    float clientWidth() const noexcept { return clientW_; }
+    float clientHeight() const noexcept { return clientH_; }
+    float scrollWidth() const noexcept { return scrollW_; }
+    float scrollHeight() const noexcept { return scrollH_; }
+
     // Text the layout pass placed inside this element's content box. The
     // painter reads these instead of re-running the formatter.
     struct TextRun {
@@ -190,6 +206,14 @@ private:
     float contentY_ = 0.0f;
     float contentW_ = 0.0f;
     float contentH_ = 0.0f;
+    float scrollLeft_ = 0.0f;
+    float scrollTop_ = 0.0f;
+    bool scrollsX_ = false;
+    bool scrollsY_ = false;
+    float clientW_ = 0.0f;
+    float clientH_ = 0.0f;
+    float scrollW_ = 0.0f;
+    float scrollH_ = 0.0f;
     std::vector<TextRun> textRuns_;
 };
 

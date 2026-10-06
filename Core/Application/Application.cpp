@@ -81,20 +81,34 @@ void dumpLayout(Element& el, int depth) {
 // Deepest drawn element whose border box contains the point. Walking front to
 // back over the paint order means the last match wins, which is the element the
 // user is actually pointing at.
-Element* hitTest(Element& el, float x, float y, const StyleResolver& resolver) {
+bool clipsAnything(const ComputedStyle& s);
+
+// Hit-testing walks the tree in paint order. `offX`/`offY` accumulate the scroll
+// offsets of clipping ancestors, so a scrolled box's children are hit where they
+// are drawn rather than where layout put them.
+Element* hitTest(Element& el, float x, float y, const StyleResolver& resolver, float offX,
+                 float offY) {
     Element* found = nullptr;
+    float childOffX = offX;
+    float childOffY = offY;
     if (el.isVisual()) {
         const ComputedStyle s = resolver.resolve(el);
         const bool drawn = s.display != ComputedStyle::None && s.visible;
-        if (drawn && el.layoutWidth() > 0.0f && el.layoutHeight() > 0.0f && x >= el.layoutX() &&
-            x < el.layoutX() + el.layoutWidth() && y >= el.layoutY() &&
-            y < el.layoutY() + el.layoutHeight()) {
+        if (drawn && el.layoutWidth() > 0.0f && el.layoutHeight() > 0.0f &&
+            x + offX >= el.layoutX() && x + offX < el.layoutX() + el.layoutWidth() &&
+            y + offY >= el.layoutY() && y + offY < el.layoutY() + el.layoutHeight()) {
             found = &el;
+        }
+        // A clipping box translates what is inside it, so the children are hit
+        // against positions shifted by its scroll offsets.
+        if (clipsAnything(s)) {
+            childOffX += s.overflowX != ComputedStyle::Visible ? el.scrollLeft() : 0.0f;
+            childOffY += s.overflowY != ComputedStyle::Visible ? el.scrollTop() : 0.0f;
         }
     }
     for (const auto& child : el.children()) {
         if (child && !child->isTextNode()) {
-            if (Element* deeper = hitTest(*child, x, y, resolver)) {
+            if (Element* deeper = hitTest(*child, x, y, resolver, childOffX, childOffY)) {
                 found = deeper;
             }
         }
@@ -111,6 +125,8 @@ const char* attributeForEvent(InputKind kind) {
             return "onmouseup";
         case InputKind::PointerMove:
             return "onmousemove";
+        case InputKind::Wheel:
+            break;
     }
     return nullptr;
 }
@@ -166,6 +182,11 @@ struct PaintItem {
     // The tightest rect every ancestor's `overflow` imposes, in window
     // coordinates. A width or height of zero or less means no clip at all.
     SDL_FRect clip{0.0f, 0.0f, 0.0f, 0.0f};
+    // Scroll offsets accumulated from clipping ancestors. Content moves up and
+    // left by them, so this element's box is drawn at layout minus the offset;
+    // its own scroll only shifts what is inside it.
+    float dx = 0.0f;
+    float dy = 0.0f;
     // Every ancestor's `opacity` multiplied together. Carried per item rather than
     // composited through an offscreen buffer, which differs only where two elements
     // inside the same group overlap.
@@ -191,11 +212,14 @@ bool clipsAnything(const ComputedStyle& s) {
 
 // Depth-first collection, so `order` is document order. The inherited clip is
 // threaded down: an element's own box is clipped by its ancestors, and it in turn
-// clips its descendants.
+// clips its descendants. `offX`/`offY` are the scroll offsets of the clipping
+// ancestors, which move this element's content up and left on screen.
 void collectPaint(Element& el, const StyleResolver& resolver, const SDL_FRect& inherited,
-                  float opacity, std::vector<PaintItem>& out) {
+                  float opacity, std::vector<PaintItem>& out, float offX, float offY) {
     SDL_FRect clip = inherited;
     bool drawable = false;
+    float childOffX = offX;
+    float childOffY = offY;
     ComputedStyle s;
     if (el.isVisual()) {
         s = resolver.resolve(el);
@@ -206,6 +230,9 @@ void collectPaint(Element& el, const StyleResolver& resolver, const SDL_FRect& i
             clip = intersectClip(clip,
                                  SDL_FRect{el.paddingX(), el.paddingY(), el.paddingWidth(),
                                            el.paddingHeight()});
+            // What the clip keeps is shifted by this box's own scroll offsets.
+            childOffX += s.overflowX != ComputedStyle::Visible ? el.scrollLeft() : 0.0f;
+            childOffY += s.overflowY != ComputedStyle::Visible ? el.scrollTop() : 0.0f;
         }
     }
 
@@ -218,6 +245,8 @@ void collectPaint(Element& el, const StyleResolver& resolver, const SDL_FRect& i
         // `overflow` crops the element's own content as well as its descendants,
         // so the clip has already included this element by the time it is stored.
         item.clip = clip;
+        item.dx = offX;
+        item.dy = offY;
         item.opacity = opacity;
         out.push_back(item);
     }
@@ -225,7 +254,7 @@ void collectPaint(Element& el, const StyleResolver& resolver, const SDL_FRect& i
     // Non-visual wrappers (<root>, <head>) still contain drawable descendants.
     for (const auto& child : el.children()) {
         if (child && !child->isTextNode()) {
-            collectPaint(*child, resolver, clip, opacity, out);
+            collectPaint(*child, resolver, clip, opacity, out, childOffX, childOffY);
         }
     }
 }
@@ -411,9 +440,10 @@ void paintTextShadow(const ComputedStyle::TextShadow& shadow, const Element::Tex
 
 void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
               const StyleResolver& resolver, const TextFont& font, float opacity,
-              ImageCache& images) {
+              ImageCache& images, float offX, float offY) {
     const ComputedStyle s = resolver.resolve(el);
-    const SDL_FRect box{el.layoutX(), el.layoutY(), el.layoutWidth(), el.layoutHeight()};
+    const SDL_FRect box{el.layoutX() - offX, el.layoutY() - offY, el.layoutWidth(),
+                        el.layoutHeight()};
     const float rootFontSize = resolver.rootFontSize();
     // Border widths take no percentages or font-relative units, so they need no
     // containing block to resolve.
@@ -430,8 +460,10 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         // the padding are not resolved a second time and have to be re-derived here.
         const BackgroundBoxes boxes{
             box,
-            {el.paddingX(), el.paddingY(), el.paddingWidth(), el.paddingHeight()},
-            {el.contentX(), el.contentY(), el.contentWidth(), el.contentHeight()}};
+            {el.paddingX() - offX, el.paddingY() - offY, el.paddingWidth(),
+             el.paddingHeight()},
+            {el.contentX() - offX, el.contentY() - offY, el.contentWidth(),
+             el.contentHeight()}};
         paintBackground(s, boxes, s.fontSize, rootFontSize, opacity, renderer, images, radii);
 
         paintInsetShadow(s, box, radii, renderer, rootFontSize, opacity);
@@ -518,7 +550,11 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         // the font's own ascent.
         float texW = 0.0f, texH = 0.0f;
         SDL_GetTextureSize(texture, &texW, &texH);
-        const SDL_FRect dst{std::floor(run.x), std::floor(run.y), texW, texH};
+        // A box that clips scrolls its own text along with its descendants: the
+        // run moves by this box's scroll on top of every ancestor's.
+        const float tx = offX + (s.overflowX != ComputedStyle::Visible ? el.scrollLeft() : 0.0f);
+        const float ty = offY + (s.overflowY != ComputedStyle::Visible ? el.scrollTop() : 0.0f);
+        const SDL_FRect dst{std::floor(run.x - tx), std::floor(run.y - ty), texW, texH};
         SDL_RenderTexture(sdlRenderer, texture, nullptr, &dst);
         SDL_DestroyTexture(texture);
     }
@@ -663,7 +699,7 @@ void Application::dispatch(const InputEvent& event) {
         return;
     }
 
-    Element* target = hitTest(*document_->root(), event.x, event.y, resolver_);
+    Element* target = hitTest(*document_->root(), event.x, event.y, resolver_, 0.0f, 0.0f);
 
     // Interactive state is set first and unconditionally. A move that changes what
     // is under the pointer has to clear `:hover` even when it lands on nothing, and
@@ -689,6 +725,28 @@ void Application::dispatch(const InputEvent& event) {
         case InputKind::PointerUp:
             resolver_.setActive(nullptr);
             break;
+        case InputKind::Wheel: {
+            if (!target) {
+                return;
+            }
+            // The wheel scrolls the nearest clipping ancestor of whatever is under
+            // the pointer, per notch at a fixed pixel pitch. The setter clamps to
+            // the box's range and marks the page stale.
+            const float pitch = 40.0f;
+            for (Element* current = target; current; current = current->parent()) {
+                const ComputedStyle scrolled = resolver_.resolve(*current);
+                if (clipsAnything(scrolled)) {
+                    if (scrolled.overflowY != ComputedStyle::Visible) {
+                        current->setScrollTop(current->scrollTop() - event.dy * pitch);
+                    }
+                    if (scrolled.overflowX != ComputedStyle::Visible) {
+                        current->setScrollLeft(current->scrollLeft() + event.dx * pitch);
+                    }
+                    break;
+                }
+            }
+            return;
+        }
     }
 
     if (!target) {
@@ -777,6 +835,24 @@ void Application::run() {
         }
     }
 
+    // SUI_WHEEL=x,y,dx,dy[;...] dispatches one synthetic wheel per frame, so the
+    // scroll path works headlessly. A pair with no delta is a zero scroll, which
+    // is useless, so both are required.
+    std::deque<InputEvent> scriptedWheels;
+    if (const char* wheels = SDL_getenv("SUI_WHEEL")) {
+        for (const std::string& pair : splitOnSemicolons(wheels)) {
+            float x = 0.0f;
+            float y = 0.0f;
+            float dx = 0.0f;
+            float dy = 0.0f;
+            if (std::sscanf(pair.c_str(), "%f,%f,%f,%f", &x, &y, &dx, &dy) == 4) {
+                scriptedWheels.push_back(InputEvent{InputKind::Wheel, x, y, 0, dx, dy});
+            } else {
+                SDL_Log("SUI_WHEEL expects x,y,dx,dy; got '%s'", pair.c_str());
+            }
+        }
+    }
+
     // SUI_FRAMES=n keeps the loop alive for n pumped frames instead of stopping
     // at the first clean one, so the skip path can be measured rather than
     // assumed: compare frames pumped against frames painted.
@@ -842,7 +918,7 @@ void Application::run() {
         const bool stale =
             !frameDrawn_ || width != stamp_.width || height != stamp_.height ||
             timerFired || animating || !platform_->inputEvents().empty() || !scriptedClicks.empty() ||
-            !scriptedMoves.empty() ||
+            !scriptedMoves.empty() || !scriptedWheels.empty() ||
             (document_ && document_->mutationCount() != stamp_.mutations) ||
             resolver_.generation() != stamp_.rules || scriptContext_.generation != stamp_.script;
         if (stale) {
@@ -880,6 +956,11 @@ void Application::run() {
                     scriptedMoves.pop_front();
                     mutated = true;
                 }
+                if (!scriptedWheels.empty()) {
+                    dispatch(scriptedWheels.front());
+                    scriptedWheels.pop_front();
+                    mutated = true;
+                }
                 if (mutated) {
                     // A handler may have rewritten the tree or the stylesheet; lay
                     // out again so the frame about to be painted reflects the
@@ -896,7 +977,8 @@ void Application::run() {
                 // `z-index`, each box clipped to whatever its ancestors' `overflow`
                 // allows.
                 std::vector<PaintItem> paintList;
-                collectPaint(*document_->root(), resolver_, SDL_FRect{}, 1.0f, paintList);
+                collectPaint(*document_->root(), resolver_, SDL_FRect{}, 1.0f, paintList,
+                             0.0f, 0.0f);
                 std::stable_sort(paintList.begin(), paintList.end(),
                                  [](const PaintItem& a, const PaintItem& b) {
                                      if (a.layer != b.layer) {
@@ -921,7 +1003,7 @@ void Application::run() {
                         SDL_SetRenderClipRect(sdlRenderer, nullptr);
                     }
                     paintBox(*item.el, renderer, sdlRenderer, resolver_, *font_, item.opacity,
-                             *images_);
+                             *images_, item.dx, item.dy);
                     SDL_SetRenderClipRect(sdlRenderer, &previous);
                 }
             } else {

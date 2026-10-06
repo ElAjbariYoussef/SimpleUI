@@ -155,6 +155,8 @@ struct ComputedStyle {
         InlineBlock,
         Flex,
         InlineFlex,
+        Grid,
+        InlineGrid,
         None
     };
 
@@ -162,6 +164,9 @@ struct ComputedStyle {
 
     bool isFlexContainer() const noexcept {
         return display == Display::Flex || display == Display::InlineFlex;
+    }
+    bool isGridContainer() const noexcept {
+        return display == Display::Grid || display == Display::InlineGrid;
     }
 
     // Dimensions. Lengths keep their unit until layout resolves them against the
@@ -394,6 +399,21 @@ struct ComputedStyle {
     bool fontBold = false;
     float lineHeight = 1.2f;  // multiplier
 
+    // Text properties (basic)
+    enum FontStyle : std::uint8_t { FontNormal, FontItalic, FontOblique };
+    FontStyle fontStyle = FontNormal;
+    enum TextDecorationLine : std::uint8_t { DecNone, DecUnderline, DecOverline, DecLineThrough };
+    TextDecorationLine textDecorationLine = DecNone;
+    Length letterSpacing;
+    Length wordSpacing;
+    Length textIndent;
+    enum TextTransform : std::uint8_t { TransformNone, TransformUppercase, TransformLowercase, TransformCapitalize };
+    TextTransform textTransform = TransformNone;
+    enum VerticalAlign : std::uint8_t { VAlignBaseline, VAlignTop, VAlignBottom, VAlignMiddle, VAlignSub, VAlignSuper };
+    VerticalAlign verticalAlign = VAlignBaseline;
+    std::string transform;
+    std::string filter;
+
     // Custom properties (`--name`). They are values, not styles: nothing types or
     // validates them, and `var(--name)` resolves against them once this element's
     // whole cascade has settled. They inherit like every other property — this
@@ -435,8 +455,9 @@ struct ComputedStyle {
     Length bottom;
 
     // Clipping. `Visible` means children may spill past the padding box; the other
-    // two crop them to it.
-    enum Overflow : std::uint8_t { Visible, Hidden, Scroll };
+    // three crop them to it. `Auto` is kept distinct from `Scroll` so the computed
+    // value reads back honestly even though the engine does not draw scrollbars.
+    enum Overflow : std::uint8_t { Visible, Hidden, Scroll, Auto };
     Overflow overflowX = Visible;
     Overflow overflowY = Visible;
 
@@ -468,6 +489,15 @@ struct ComputedStyle {
         SpecifiedFontBold = 1u << 3,
         SpecifiedLineHeight = 1u << 4,
         SpecifiedTextAlign = 1u << 5,
+        SpecifiedFontStyle = 1u << 6,
+        SpecifiedTextDecorationLine = 1u << 7,
+        SpecifiedLetterSpacing = 1u << 8,
+        SpecifiedWordSpacing = 1u << 9,
+        SpecifiedTextIndent = 1u << 10,
+        SpecifiedTextTransform = 1u << 11,
+        SpecifiedVerticalAlign = 1u << 12,
+        SpecifiedTransform = 1u << 13,
+        SpecifiedFilter = 1u << 14,
     };
     std::uint16_t specified = 0;
 };
@@ -566,6 +596,33 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     }
     if (!(style.specified & ComputedStyle::SpecifiedTextAlign)) {
         style.textAlign = parent.textAlign;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedFontStyle)) {
+        style.fontStyle = parent.fontStyle;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedTextDecorationLine)) {
+        style.textDecorationLine = parent.textDecorationLine;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedLetterSpacing)) {
+        style.letterSpacing = parent.letterSpacing;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedWordSpacing)) {
+        style.wordSpacing = parent.wordSpacing;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedTextIndent)) {
+        style.textIndent = parent.textIndent;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedTextTransform)) {
+        style.textTransform = parent.textTransform;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedVerticalAlign)) {
+        style.verticalAlign = parent.verticalAlign;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedTransform)) {
+        style.transform = parent.transform;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedFilter)) {
+        style.filter = parent.filter;
     }
     // Custom properties always inherit; the resolved element's own cascade then
     // overwrites the entries it declares locally.

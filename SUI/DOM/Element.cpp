@@ -180,6 +180,50 @@ void Element::touch() {
     }
 }
 
+namespace {
+
+// A scroll offset lives in `[0, scroll - client]`. Once the layout pass has a
+// client size the range is known, and the offset is pinned into it; before that
+// the raw value stands and the next pass fixes it.
+float clampOffset(float value, float scrollExtent, float clientExtent) {
+    if (clientExtent > 0.0f) {
+        return std::min(std::max(value, 0.0f), std::max(scrollExtent - clientExtent, 0.0f));
+    }
+    return value;
+}
+
+}  // namespace
+
+void Element::setScrollExtents(float clientW, float clientH, float scrollW, float scrollH,
+                               bool scrollsX, bool scrollsY) noexcept {
+    clientW_ = clientW;
+    clientH_ = clientH;
+    scrollW_ = scrollW;
+    scrollH_ = scrollH;
+    scrollsX_ = scrollsX;
+    scrollsY_ = scrollsY;
+    scrollLeft_ = scrollsX ? clampOffset(scrollLeft_, scrollW_, clientW_) : 0.0f;
+    scrollTop_ = scrollsY ? clampOffset(scrollTop_, scrollH_, clientH_) : 0.0f;
+}
+
+float Element::scrollLeft() const noexcept {
+    return scrollsX_ ? clampOffset(scrollLeft_, scrollW_, clientW_) : 0.0f;
+}
+
+void Element::setScrollLeft(float v) {
+    scrollLeft_ = scrollsX_ ? clampOffset(v, scrollW_, clientW_) : 0.0f;
+    touch();
+}
+
+float Element::scrollTop() const noexcept {
+    return scrollsY_ ? clampOffset(scrollTop_, scrollH_, clientH_) : 0.0f;
+}
+
+void Element::setScrollTop(float v) {
+    scrollTop_ = scrollsY_ ? clampOffset(v, scrollH_, clientH_) : 0.0f;
+    touch();
+}
+
 void Element::setText(std::string text) {
     text_ = std::move(text);
     touch();

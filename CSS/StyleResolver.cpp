@@ -847,8 +847,11 @@ ComputedStyle::Overflow parseOverflow(std::string_view v) {
     if (v == "hidden" || v == "clip") {
         return ComputedStyle::Hidden;
     }
-    if (v == "scroll" || v == "auto") {
+    if (v == "scroll") {
         return ComputedStyle::Scroll;
+    }
+    if (v == "auto") {
+        return ComputedStyle::Auto;
     }
     return ComputedStyle::Visible;
 }
@@ -1766,6 +1769,10 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.display = ComputedStyle::Flex;
         } else if (value == "inline-flex") {
             s.display = ComputedStyle::InlineFlex;
+        } else if (value == "grid") {
+            s.display = ComputedStyle::Grid;
+        } else if (value == "inline-grid") {
+            s.display = ComputedStyle::InlineGrid;
         } else {
             s.display = ComputedStyle::Block;
         }
@@ -2030,6 +2037,16 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             family.remove_suffix(1);
         }
         s.fontFamily = std::string(trim(family));
+        s.specified |= ComputedStyle::SpecifiedFontFamily;
+    } else if (property == "font-style") {
+        if (value == "italic") {
+            s.fontStyle = ComputedStyle::FontItalic;
+        } else if (value == "oblique") {
+            s.fontStyle = ComputedStyle::FontOblique;
+        } else {
+            s.fontStyle = ComputedStyle::FontNormal;
+        }
+        s.specified |= ComputedStyle::SpecifiedFontStyle;
     } else if (property == "line-height") {
         // Stored as a multiplier, so a length has to become a ratio against this
         // element's font size — which is what CSS computes it to as well. A bare
@@ -2049,6 +2066,71 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
                 s.lineHeight = ratio;
             }
         }
+        s.specified |= ComputedStyle::SpecifiedLineHeight;
+    } else if (property == "text-decoration-line") {
+        if (value == "underline") {
+            s.textDecorationLine = ComputedStyle::DecUnderline;
+        } else if (value == "line-through") {
+            s.textDecorationLine = ComputedStyle::DecLineThrough;
+        } else if (value == "overline") {
+            s.textDecorationLine = ComputedStyle::DecOverline;
+        } else {
+            s.textDecorationLine = ComputedStyle::DecNone;
+        }
+        s.specified |= ComputedStyle::SpecifiedTextDecorationLine;
+    } else if (property == "text-decoration") {
+        // simple support: only the line value
+        if (value.find("underline") != std::string_view::npos) {
+            s.textDecorationLine = ComputedStyle::DecUnderline;
+        } else if (value.find("line-through") != std::string_view::npos) {
+            s.textDecorationLine = ComputedStyle::DecLineThrough;
+        } else if (value.find("overline") != std::string_view::npos) {
+            s.textDecorationLine = ComputedStyle::DecOverline;
+        } else {
+            s.textDecorationLine = ComputedStyle::DecNone;
+        }
+        s.specified |= ComputedStyle::SpecifiedTextDecorationLine;
+    } else if (property == "letter-spacing") {
+        s.letterSpacing = parseLength(value);
+        s.specified |= ComputedStyle::SpecifiedLetterSpacing;
+    } else if (property == "word-spacing") {
+        s.wordSpacing = parseLength(value);
+        s.specified |= ComputedStyle::SpecifiedWordSpacing;
+    } else if (property == "text-indent") {
+        s.textIndent = parseLength(value);
+        s.specified |= ComputedStyle::SpecifiedTextIndent;
+    } else if (property == "text-transform") {
+        if (value == "uppercase") {
+            s.textTransform = ComputedStyle::TransformUppercase;
+        } else if (value == "lowercase") {
+            s.textTransform = ComputedStyle::TransformLowercase;
+        } else if (value == "capitalize") {
+            s.textTransform = ComputedStyle::TransformCapitalize;
+        } else {
+            s.textTransform = ComputedStyle::TransformNone;
+        }
+        s.specified |= ComputedStyle::SpecifiedTextTransform;
+    } else if (property == "vertical-align") {
+        if (value == "top") {
+            s.verticalAlign = ComputedStyle::VAlignTop;
+        } else if (value == "bottom") {
+            s.verticalAlign = ComputedStyle::VAlignBottom;
+        } else if (value == "middle") {
+            s.verticalAlign = ComputedStyle::VAlignMiddle;
+        } else if (value == "sub") {
+            s.verticalAlign = ComputedStyle::VAlignSub;
+        } else if (value == "super") {
+            s.verticalAlign = ComputedStyle::VAlignSuper;
+        } else {
+            s.verticalAlign = ComputedStyle::VAlignBaseline;
+        }
+        s.specified |= ComputedStyle::SpecifiedVerticalAlign;
+    } else if (property == "transform") {
+        s.transform = std::string(value);
+        s.specified |= ComputedStyle::SpecifiedTransform;
+    } else if (property == "filter") {
+        s.filter = std::string(value);
+        s.specified |= ComputedStyle::SpecifiedFilter;
     } else if (property == "text-align") {
         if (isCentre(value)) {
             s.textAlign = ComputedStyle::Center;
@@ -2388,6 +2470,8 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             case ComputedStyle::InlineBlock: return "inline-block";
             case ComputedStyle::Flex: return "flex";
             case ComputedStyle::InlineFlex: return "inline-flex";
+            case ComputedStyle::Grid: return "grid";
+            case ComputedStyle::InlineGrid: return "inline-grid";
             case ComputedStyle::None: return "none";
         }
         return {};
@@ -2400,6 +2484,57 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "line-height") return unitless(style.lineHeight);
     if (property == "font-weight") return style.fontBold ? "bold" : "normal";
     if (property == "font-family") return style.fontFamily;
+    if (property == "font-style") {
+        switch (style.fontStyle) {
+            case ComputedStyle::FontItalic: return "italic";
+            case ComputedStyle::FontOblique: return "oblique";
+            case ComputedStyle::FontNormal: return "normal";
+        }
+        return "normal";
+    }
+    if (property == "text-decoration-line") {
+        switch (style.textDecorationLine) {
+            case ComputedStyle::DecUnderline: return "underline";
+            case ComputedStyle::DecOverline: return "overline";
+            case ComputedStyle::DecLineThrough: return "line-through";
+            case ComputedStyle::DecNone: return "none";
+        }
+        return "none";
+    }
+    if (property == "text-decoration") {
+        switch (style.textDecorationLine) {
+            case ComputedStyle::DecUnderline: return "underline";
+            case ComputedStyle::DecOverline: return "overline";
+            case ComputedStyle::DecLineThrough: return "line-through";
+            case ComputedStyle::DecNone: return "none";
+        }
+        return "none";
+    }
+    if (property == "letter-spacing") return length(style.letterSpacing, "normal");
+    if (property == "word-spacing") return length(style.wordSpacing, "normal");
+    if (property == "text-indent") return length(style.textIndent, "0px");
+    if (property == "text-transform") {
+        switch (style.textTransform) {
+            case ComputedStyle::TransformUppercase: return "uppercase";
+            case ComputedStyle::TransformLowercase: return "lowercase";
+            case ComputedStyle::TransformCapitalize: return "capitalize";
+            case ComputedStyle::TransformNone: return "none";
+        }
+        return "none";
+    }
+    if (property == "vertical-align") {
+        switch (style.verticalAlign) {
+            case ComputedStyle::VAlignTop: return "top";
+            case ComputedStyle::VAlignBottom: return "bottom";
+            case ComputedStyle::VAlignMiddle: return "middle";
+            case ComputedStyle::VAlignSub: return "sub";
+            case ComputedStyle::VAlignSuper: return "super";
+            case ComputedStyle::VAlignBaseline: return "baseline";
+        }
+        return "baseline";
+    }
+    if (property == "transform") return style.transform;
+    if (property == "filter") return style.filter;
     if (property == "text-align") {
         switch (style.textAlign) {
             case ComputedStyle::Left: return "left";
@@ -2419,6 +2554,39 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         return style.boxSizing == BoxSizing::BorderBox ? "border-box" : "content-box";
     }
     if (property == "visibility") return style.visible ? "visible" : "hidden";
+    if (property == "overflow") {
+        const auto name = [](ComputedStyle::Overflow o) -> const char* {
+            switch (o) {
+                case ComputedStyle::Hidden: return "hidden";
+                case ComputedStyle::Scroll: return "scroll";
+                case ComputedStyle::Auto: return "auto";
+                case ComputedStyle::Visible: return "visible";
+            }
+            return "visible";
+        };
+        if (style.overflowX == style.overflowY) {
+            return name(style.overflowX);
+        }
+        return std::string(name(style.overflowX)) + " " + name(style.overflowY);
+    }
+    if (property == "overflow-x") {
+        switch (style.overflowX) {
+            case ComputedStyle::Hidden: return "hidden";
+            case ComputedStyle::Scroll: return "scroll";
+            case ComputedStyle::Auto: return "auto";
+            case ComputedStyle::Visible: return "visible";
+        }
+        return "visible";
+    }
+    if (property == "overflow-y") {
+        switch (style.overflowY) {
+            case ComputedStyle::Hidden: return "hidden";
+            case ComputedStyle::Scroll: return "scroll";
+            case ComputedStyle::Auto: return "auto";
+            case ComputedStyle::Visible: return "visible";
+        }
+        return "visible";
+    }
     if (property == "margin-top") return length(style.margin.top);
     if (property == "margin-right") return length(style.margin.right);
     if (property == "margin-bottom") return length(style.margin.bottom);
