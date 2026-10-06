@@ -2800,11 +2800,120 @@ void testKeyframeAnimations() {
     checkNear(reverted.opacity, 1.0f, 0.01f, "the element returns to its own style");
 }
 
+void testCalc() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"a\" style=\"width:calc(100% - 40px)\"></div>"
+        "<div id=\"b\" style=\"width:calc(2em + 1rem)\"></div>"
+        "<div id=\"c\" style=\"width:min(100px, 50%)\"></div>"
+        "<div id=\"d\" style=\"width:max(100px, 50%)\"></div>"
+        "<div id=\"e\" style=\"width:clamp(80px, 50%, 300px)\"></div>"
+        "<div id=\"f\" style=\"width:calc((100% - 2rem) / 2)\"></div>"
+        "<div id=\"g\" style=\"width:calc(100% - -10px)\"></div>"
+        "<div id=\"h\" style=\"width:calc(50% / 2)\"></div>"
+        "<div id=\"i\" style=\"width:calc(100px * 100px)\"></div>"
+        "<div id=\"k\" style=\"width:calc(50%)\"></div>"
+        "<div id=\"m\" style=\"margin: calc(50% - 10px) 4px\"></div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRootFontSize(16.0f);
+    resolver.setRules(sui::CSSParser::parse("#a,#b,#c,#d,#e,#f,#g,#h,#i,#j,#k,#m {}"));
+    const auto find = [&](const char* id) { return document->getElementById(id); };
+    const sui::ComputedStyle a = resolver.resolve(*find("a"));
+    checkNear(a.width.resolve(400.0f, 0.0f, 0.0f), 360.0f, 0.01f,
+              "calc % and px fold against the containing block");
+    const sui::ComputedStyle b = resolver.resolve(*find("b"));
+    checkNear(b.width.resolve(0.0f, 10.0f, 20.0f), 40.0f, 0.01f,
+              "calc mixes em and rem against their font bases");
+    const sui::ComputedStyle c = resolver.resolve(*find("c"));
+    checkNear(c.width.resolve(100.0f, 0.0f, 0.0f), 50.0f, 0.01f,
+              "min() picks the smaller resolved operand");
+    checkNear(c.width.resolve(400.0f, 0.0f, 0.0f), 100.0f, 0.01f,
+              "min() lets the percentage win when it is the smaller");
+    const sui::ComputedStyle d = resolver.resolve(*find("d"));
+    checkNear(d.width.resolve(400.0f, 0.0f, 0.0f), 200.0f, 0.01f,
+              "max() picks the larger resolved operand");
+    const sui::ComputedStyle e = resolver.resolve(*find("e"));
+    checkNear(e.width.resolve(100.0f, 0.0f, 0.0f), 80.0f, 0.01f,
+              "clamp() floors at its minimum");
+    checkNear(e.width.resolve(400.0f, 0.0f, 0.0f), 200.0f, 0.01f,
+              "clamp() passes values between its bounds");
+    const sui::ComputedStyle f = resolver.resolve(*find("f"));
+    checkNear(f.width.resolve(400.0f, 16.0f, 16.0f), 184.0f, 0.01f,
+              "a parenthesised calc divides after fixing the containing block");
+    const sui::ComputedStyle g = resolver.resolve(*find("g"));
+    checkNear(g.width.resolve(400.0f, 0.0f, 0.0f), 410.0f, 0.01f,
+              "a minus right after the operator subtracts a negative");
+    const sui::ComputedStyle h = resolver.resolve(*find("h"));
+    checkNear(h.width.resolve(400.0f, 0.0f, 0.0f), 100.0f, 0.01f,
+              "a percentage divides by a unitless number");
+    const sui::ComputedStyle i = resolver.resolve(*find("i"));
+    check(i.width.isAuto(), "calc px times px is invalid and drops to auto");
+    const sui::ComputedStyle k = resolver.resolve(*find("k"));
+    checkNear(k.width.resolve(400.0f, 0.0f, 0.0f), 200.0f, 0.01f,
+              "calc(50%) collapses to the plain percentage");
+    const sui::ComputedStyle m = resolver.resolve(*find("m"));
+    checkNear(m.margin.top.resolve(400.0f, 0.0f, 0.0f), 190.0f, 0.01f,
+              "a calc survives a top-level space-split margin list");
+    checkNear(m.margin.left.resolve(400.0f, 0.0f, 0.0f), 4.0f, 0.01f,
+              "the plain part of the list keeps its own unit");
+    check(resolver.propertyValue(a, "width") == "calc(100% - 40px)",
+          "a calc width serialises back to css");
+    check(resolver.propertyValue(c, "width") == "min(100px, 50%)",
+          "min() serialises with its arguments");
+    check(resolver.propertyValue(k, "width") == "50%",
+          "a collapsed calc serialises as the plain length");
+
+    // Layout: the child resolves this calc against its containing block.
+    auto layoutDoc = parseOrNull(
+        "<sui><body><div id=\"parent\" style=\"width:400px\">"
+        "<div id=\"child\" style=\"width:calc(100% - 20px)\"></div>"
+        "</div></body></sui>");
+    if (!layoutDoc) {
+        return;
+    }
+    sui::StyleResolver layoutResolver;
+    layoutResolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    layoutRoot(*layoutDoc, layoutResolver, 800.0f);
+    Element* child = layoutDoc->getElementById("child");
+    if (!child) {
+        check(false, "calc layout child found");
+        return;
+    }
+    checkNear(child->layoutWidth(), 380.0f, 0.01f,
+              "layout resolves a calc width against the containing block");
+
+    // A custom property feeds an operand the same way its literal text would.
+    auto varDoc = parseOrNull(
+        "<sui><body><div id=\"v\"></div></body></sui>");
+    if (!varDoc) {
+        return;
+    }
+    sui::StyleResolver varResolver;
+    varResolver.setRules(sui::CSSParser::parse(
+        "#v { --n: 2; width: calc(100% / var(--n)); --side: 4px; "
+        "margin: calc(50% - var(--side)); }"));
+    Element* v = varDoc->getElementById("v");
+    if (!v) {
+        check(false, "var-fed calc element found");
+        return;
+    }
+    const sui::ComputedStyle vs = varResolver.resolve(*v);
+    checkNear(vs.width.resolve(400.0f, 0.0f, 0.0f), 200.0f, 0.01f,
+              "var() supplies the unitless divisor of a calc");
+    checkNear(vs.margin.top.resolve(400.0f, 0.0f, 0.0f), 196.0f, 0.01f,
+              "var() inside calc substitutes before the expression is parsed");
+}
+
 int main() {
     testEasingAndTimingFunctions();
     testTransitionDeclarations();
     testTransitions();
     testKeyframeAnimations();
+    testCalc();
     testRuleParsing();
     testSelectorMatching();
     testInteractivePseudoClasses();

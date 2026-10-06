@@ -85,6 +85,343 @@ std::vector<float> parseNumberList(std::string_view value) {
     return out;
 }
 
+// --- calc()/min()/max()/clamp() ---
+//
+// A math value stays a tree of lengths until layout resolves it, so percentages
+// and font-relative units behave inside the expression exactly as they do in a
+// plain length. Multiplication and division only accept a unitless operand, the
+// CSS rule; a violation makes the whole expression invalid, which comes back as
+// an Auto length and drops the declaration that carried it.
+
+Length parseMathFunction(std::string_view name, std::string_view body);
+std::vector<std::string_view> splitTopLevel(std::string_view value, char separator);
+
+// `text` is `name( ... )` with the matching close parenthesis as the last
+// character; `body` receives the text between them.
+bool mathCallBody(std::string_view text, std::string_view name, std::string_view& body) {
+    if (text.size() < name.size() + 2 || text.compare(0, name.size(), name) != 0 ||
+        text[name.size()] != '(') {
+        return false;
+    }
+    int depth = 0;
+    for (std::size_t i = name.size(); i < text.size(); ++i) {
+        if (text[i] == '(') {
+            ++depth;
+        } else if (text[i] == ')') {
+            --depth;
+            if (depth == 0) {
+                body = text.substr(name.size() + 1, i - name.size() - 1);
+                return i + 1 == text.size();
+            }
+        }
+    }
+    return false;
+}
+
+// `text` is `( ... )`; `inner` receives what sits between the brackets.
+bool groupBody(std::string_view text, std::string_view& inner) {
+    if (text.size() < 2 || text.front() != '(') {
+        return false;
+    }
+    int depth = 0;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '(') {
+            ++depth;
+        } else if (text[i] == ')') {
+            --depth;
+            if (depth == 0) {
+                inner = text.substr(1, i - 1);
+                return i + 1 == text.size();
+            }
+        }
+    }
+    return false;
+}
+
+struct CalcOp {
+    char op = 0;
+    std::size_t pos = 0;
+};
+
+// The binary operators at depth zero. A '-' is binary only when it follows a
+// completed term (`100% - 2rem` and `100%-2rem` both split); a '-' at the head,
+// or right after an operator or '(', is the sign of the upcoming term
+// (`calc(-5px + 10px)`), and the term parser folds it into the number.
+std::vector<CalcOp> topLevelOps(std::string_view text) {
+    std::vector<CalcOp> ops;
+    int depth = 0;
+    bool termDone = false;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (c == '(') {
+            ++depth;
+            termDone = false;
+        } else if (c == ')') {
+            --depth;
+            termDone = true;
+        } else if (depth == 0 && (c == '*' || c == '/')) {
+            ops.push_back({c, i});
+            termDone = false;
+        } else if (depth == 0 && (c == '+' || c == '-') && termDone) {
+            ops.push_back({c, i});
+            termDone = false;
+        } else if (!std::isspace(static_cast<unsigned char>(c))) {
+            termDone = true;
+        }
+    }
+    return ops;
+}
+
+Length invalidLength() { return Length{}; }
+
+Length makeMath(MathExpr::Op op, std::vector<Length> args, bool dimensioned) {
+    MathExpr expr;
+    expr.op = op;
+    expr.args = std::move(args);
+    expr.dimensioned = dimensioned;
+    return Length{std::make_shared<MathExpr>(std::move(expr))};
+}
+
+// Whether a length carries a unit anywhere in its tree; the check that decides
+// which * and / combinations are legal and what a +/- may mix.
+bool lengthKeepsDimension(const Length& l) {
+    switch (l.unit) {
+        case Length::Px:
+        case Length::Percent:
+        case Length::Em:
+        case Length::Rem:
+            return true;
+        case Length::Calc:
+            return l.expr && l.expr->dimensioned;
+        default:
+            return false;
+    }
+}
+
+// A plain operand inside an expression. Unlike the outer parseLength, a bare
+// number comes back as a Number (unitless) so `calc(100% / 2)` can be
+// distinguished from the illegal `calc(100% / 2px)`.
+Length parseCalcAtom(std::string_view text) {
+    const std::string_view s = trim(text);
+    std::size_t i = 0;
+    if (i < s.size() && (s[i] == '+' || s[i] == '-')) {
+        ++i;
+    }
+    while (i < s.size() && (std::isdigit(static_cast<unsigned char>(s[i])) || s[i] == '.')) {
+        ++i;
+    }
+    if (i == 0) {
+        return invalidLength();
+    }
+    const float number = std::strtof(std::string(s.substr(0, i)).c_str(), nullptr);
+    const std::string_view unit = trim(s.substr(i));
+    if (unit.empty()) {
+        return Length{Length::Number, number};
+    }
+    if (unit == "px") {
+        return Length{number};
+    }
+    if (unit == "%") {
+        return Length{Length::Percent, number};
+    }
+    if (unit == "em") {
+        return Length{Length::Em, number};
+    }
+    if (unit == "rem") {
+        return Length{Length::Rem, number};
+    }
+    if (unit == "pt") {
+        return Length{number * (96.0f / 72.0f)};
+    }
+    return invalidLength();
+}
+
+Length parseCalcSum(std::string_view text);
+
+Length parseCalcPrimary(std::string_view text) {
+    const std::string_view s = trim(text);
+    if (s.empty()) {
+        return invalidLength();
+    }
+    std::string_view inner;
+    if (s.front() == '(' && groupBody(s, inner)) {
+        return parseCalcSum(inner);
+    }
+    for (const char* name : {"calc", "min", "max", "clamp"}) {
+        if (mathCallBody(s, name, inner)) {
+            return parseMathFunction(name, inner);
+        }
+    }
+    return parseCalcAtom(s);
+}
+
+Length parseCalcProduct(std::string_view text) {
+    const std::vector<CalcOp> ops = topLevelOps(text);
+    std::size_t start = 0;
+    std::vector<Length> operands;
+    std::vector<char> productOps;
+    for (const CalcOp& op : ops) {
+        if (op.op != '*' && op.op != '/') {
+            continue;
+        }
+        operands.push_back(parseCalcPrimary(trim(text.substr(start, op.pos - start))));
+        productOps.push_back(op.op);
+        start = op.pos + 1;
+    }
+    if (productOps.empty()) {
+        return parseCalcPrimary(text);
+    }
+    operands.push_back(parseCalcPrimary(trim(text.substr(start))));
+    Length acc = operands[0];
+    for (std::size_t i = 0; i < productOps.size(); ++i) {
+        const bool accDim = lengthKeepsDimension(acc);
+        const bool rhsDim = lengthKeepsDimension(operands[i + 1]);
+        // A product needs exactly one dimensioned side, and a divisor must be
+        // unitless on top of that.
+        if (accDim == rhsDim || (productOps[i] == '/' && rhsDim)) {
+            return invalidLength();
+        }
+        acc = makeMath(productOps[i] == '*' ? MathExpr::Op::Mul : MathExpr::Op::Div,
+                       {acc, operands[i + 1]}, accDim || rhsDim);
+    }
+    return acc;
+}
+
+Length parseCalcSum(std::string_view text) {
+    const std::vector<CalcOp> ops = topLevelOps(text);
+    std::size_t start = 0;
+    std::vector<Length> operands;
+    std::vector<char> sumOps;
+    for (const CalcOp& op : ops) {
+        if (op.op != '+' && op.op != '-') {
+            continue;
+        }
+        operands.push_back(parseCalcProduct(trim(text.substr(start, op.pos - start))));
+        sumOps.push_back(op.op);
+        start = op.pos + 1;
+    }
+    if (sumOps.empty()) {
+        return parseCalcProduct(text);
+    }
+    operands.push_back(parseCalcProduct(trim(text.substr(start))));
+
+    // + and - only mix operands of the same kind: two lengths blend, a length
+    // and a unitless number do not.
+    const bool dimensioned = lengthKeepsDimension(operands[0]);
+    for (const Length& operand : operands) {
+        if (lengthKeepsDimension(operand) != dimensioned) {
+            return invalidLength();
+        }
+    }
+    Length acc = operands[0];
+    for (std::size_t i = 0; i < sumOps.size(); ++i) {
+        acc = makeMath(sumOps[i] == '+' ? MathExpr::Op::Add : MathExpr::Op::Sub,
+                       {acc, operands[i + 1]}, dimensioned);
+    }
+    return acc;
+}
+
+Length parseMathFunction(std::string_view name, std::string_view body) {
+    const std::string_view s = trim(body);
+    if (name == "calc") {
+        const Length result = parseCalcSum(s);
+        if (result.isAuto()) {
+            return result;
+        }
+        // A calc whose whole body is one plain length ("calc(50%)") collapses to
+        // that length, so the value behaves exactly as the unwrapped form;
+        // a bare-number body stays invalid for a length position.
+        if (result.unit == Length::Calc && result.expr &&
+            result.expr->op == MathExpr::Op::Value) {
+            return result.expr->args[0];
+        }
+        return result;
+    }
+
+    const std::vector<std::string_view> args = splitTopLevel(s, ',');
+    if (args.empty()) {
+        return invalidLength();
+    }
+    if (name == "clamp") {
+        if (args.size() != 3) {
+            return invalidLength();
+        }
+        const Length lo = parseCalcSum(args[0]);
+        const Length middle = parseCalcSum(args[1]);
+        const Length hi = parseCalcSum(args[2]);
+        if (lo.isAuto() || middle.isAuto() || hi.isAuto() || !lengthKeepsDimension(lo) ||
+            !lengthKeepsDimension(middle) || !lengthKeepsDimension(hi)) {
+            return invalidLength();
+        }
+        return makeMath(MathExpr::Op::Clamp, {lo, middle, hi}, true);
+    }
+    std::vector<Length> values;
+    bool dimensioned = false;
+    for (const std::string_view arg : args) {
+        Length value = parseCalcSum(arg);
+        if (value.isAuto()) {
+            return invalidLength();
+        }
+        const bool dim = lengthKeepsDimension(value);
+        if (values.empty()) {
+            dimensioned = dim;
+        } else if (dim != dimensioned) {
+            return invalidLength();
+        }
+        values.push_back(std::move(value));
+    }
+    return makeMath(name == "min" ? MathExpr::Op::Min : MathExpr::Op::Max,
+                    std::move(values), dimensioned);
+}
+
+// The css text of a math node, so a computed calc value keeps round-tripping
+// through the parser, which is also what `inherit` relies on.
+std::string serializeMathNode(const MathExpr* expr) {
+    if (!expr) {
+        return "calc(0px)";
+    }
+    const auto leaf = [](const Length& l) {
+        if (l.unit == Length::Calc) {
+            return serializeMathNode(l.expr.get());
+        }
+        if (l.unit == Length::Number) {
+            return unitless(l.value);
+        }
+        const char* suffix = l.unit == Length::Px        ? "px"
+                             : l.unit == Length::Percent ? "%"
+                             : l.unit == Length::Em      ? "em"
+                                                         : "rem";
+        return unitless(l.value) + suffix;
+    };
+    switch (expr->op) {
+        case MathExpr::Op::Value:
+            return leaf(expr->args[0]);
+        case MathExpr::Op::Add:
+            return "calc(" + leaf(expr->args[0]) + " + " + leaf(expr->args[1]) + ")";
+        case MathExpr::Op::Sub:
+            return "calc(" + leaf(expr->args[0]) + " - " + leaf(expr->args[1]) + ")";
+        case MathExpr::Op::Mul:
+            return "calc(" + leaf(expr->args[0]) + " * " + leaf(expr->args[1]) + ")";
+        case MathExpr::Op::Div:
+            return "calc(" + leaf(expr->args[0]) + " / " + leaf(expr->args[1]) + ")";
+        case MathExpr::Op::Min:
+        case MathExpr::Op::Max: {
+            std::string out(expr->op == MathExpr::Op::Min ? "min(" : "max(");
+            for (std::size_t i = 0; i < expr->args.size(); ++i) {
+                if (i != 0) {
+                    out += ", ";
+                }
+                out += leaf(expr->args[i]);
+            }
+            return out + ")";
+        }
+        case MathExpr::Op::Clamp:
+            return "clamp(" + leaf(expr->args[0]) + ", " + leaf(expr->args[1]) + ", " +
+                   leaf(expr->args[2]) + ")";
+    }
+    return "calc(0px)";
+}
+
 // Parses one CSS length, keeping the unit so layout can resolve it against the
 // containing block. `auto` and `none` both come back as Auto, which is what the
 // width/height/max-* properties mean by them.
@@ -92,6 +429,15 @@ Length parseLength(std::string_view value) {
     const std::string_view text = trim(value);
     if (text.empty() || text == "auto" || text == "none") {
         return Length{};
+    }
+
+    // calc()/min()/max()/clamp() stay symbolic until layout resolves them.
+    for (const char* name : {"calc", "min", "max", "clamp"}) {
+        std::string_view body;
+        if (mathCallBody(text, name, body)) {
+            const Length result = parseMathFunction(name, body);
+            return result.isAuto() ? Length{} : result;
+        }
     }
 
     std::size_t i = 0;
@@ -417,22 +763,15 @@ bool parseColor(std::string_view value, SDL_Color& out) {
 }
 
 // Splits on whitespace and parses each piece as a length, so `margin: 5px 10%`
-// keeps both units rather than flattening them to pixels.
+// keeps both units rather than flattening them to pixels. The splitter brackets
+// `calc(...)` whole, so `margin: 10px calc(50% - 2rem)` stays two parts.
 std::vector<Length> parseLengthList(std::string_view value) {
     std::vector<Length> out;
-    std::size_t i = 0;
-    while (i < value.size() && out.size() < 4) {
-        while (i < value.size() && std::isspace(static_cast<unsigned char>(value[i]))) {
-            ++i;
+    for (const std::string_view part : splitTopLevel(value, ' ')) {
+        if (part.empty() || out.size() == 4) {
+            continue;
         }
-        const std::size_t start = i;
-        while (i < value.size() && !std::isspace(static_cast<unsigned char>(value[i]))) {
-            ++i;
-        }
-        if (i == start) {
-            break;
-        }
-        out.push_back(parseLength(value.substr(start, i - start)));
+        out.push_back(parseLength(part));
     }
     return out;
 }
@@ -2028,6 +2367,12 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     auto length = [&](const Length& l, const char* autoKeyword = "0px") {
         if (l.isAuto()) {
             return std::string(autoKeyword);
+        }
+        if (l.unit == Length::Calc) {
+            return serializeMathNode(l.expr.get());
+        }
+        if (l.unit == Length::Number) {
+            return unitless(l.value);
         }
         const char* suffix = l.unit == Length::Px        ? "px"
                              : l.unit == Length::Percent ? "%"

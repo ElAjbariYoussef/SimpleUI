@@ -8,25 +8,49 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace sui {
 
+struct Length;
+
+// A calc()/min()/max()/clamp() expression tree. A Value node holds one length
+// leaf; Add/Sub/Mul/Div and the range nodes hold their operands as lengths that
+// may themselves be further expressions. `dimensioned` records whether any leaf
+// carries a unit, which is what tells a legal `100% / 2` apart from an illegal
+// `100% / 2px` while the tree is being built.
+struct MathExpr {
+    enum class Op : std::uint8_t { Value, Add, Sub, Mul, Div, Min, Max, Clamp };
+
+    Op op = Op::Value;
+    std::vector<Length> args;
+    bool dimensioned = false;
+
+    float eval(float percentBase, float emBase, float remBase) const;
+};
+
 // A CSS length. Percentages and font-relative units cannot become a number until
 // layout knows the containing block, so the unit survives style resolution and
 // is only resolved at use. Constructing from a float means a plain px value,
-// which keeps `margin = {8, 0, 8, 0}` valid.
+// which keeps `margin = {8, 0, 8, 0}` valid. A Calc value carries a shared
+// expression tree instead of a number; Number marks the unitless operand that
+// only ever appears inside multiplication and division.
 struct Length {
-    enum Unit : std::uint8_t { Auto, Px, Percent, Em, Rem };
+    enum Unit : std::uint8_t { Auto, Px, Percent, Em, Rem, Number, Calc };
 
     Unit unit = Auto;
     float value = 0.0f;
+    std::shared_ptr<const MathExpr> expr;
 
     constexpr Length() noexcept = default;
     constexpr Length(float px) noexcept : unit(Px), value(px) {}
     constexpr Length(Unit u, float v) noexcept : unit(u), value(v) {}
+    explicit Length(std::shared_ptr<const MathExpr> e) noexcept
+        : unit(Calc), expr(std::move(e)) {}
 
     // `percentBase` is whatever the percentage is relative to: the containing
     // block's width or height, or the parent font size for font-size itself.
@@ -44,12 +68,57 @@ struct Length {
                 return value * emBase;
             case Rem:
                 return value * remBase;
+            case Number:
+                return value;
+            case Calc:
+                return expr ? expr->eval(percentBase, emBase, remBase) : 0.0f;
         }
         return 0.0f;
     }
 
     bool isAuto() const noexcept { return unit == Auto; }
 };
+
+inline float MathExpr::eval(float percentBase, float emBase, float remBase) const {
+    const auto at = [&](std::size_t i) {
+        return args[i].resolve(percentBase, emBase, remBase);
+    };
+    switch (op) {
+        case Op::Value:
+            return at(0);
+        case Op::Add:
+            return at(0) + at(1);
+        case Op::Sub:
+            return at(0) - at(1);
+        case Op::Mul:
+            return at(0) * at(1);
+        case Op::Div: {
+            const float divisor = at(1);
+            return divisor != 0.0f ? at(0) / divisor : 0.0f;
+        }
+        case Op::Min: {
+            float best = at(0);
+            for (std::size_t i = 1; i < args.size(); ++i) {
+                best = std::min(best, at(i));
+            }
+            return best;
+        }
+        case Op::Max: {
+            float best = at(0);
+            for (std::size_t i = 1; i < args.size(); ++i) {
+                best = std::max(best, at(i));
+            }
+            return best;
+        }
+        case Op::Clamp: {
+            const float lo = at(0);
+            const float middle = at(1);
+            const float hi = at(2);
+            return std::max(lo, std::min(middle, hi));
+        }
+    }
+    return 0.0f;
+}
 
 // Whether `width`/`height` describe the content box or the border box.
 enum class BoxSizing : std::uint8_t { ContentBox, BorderBox };

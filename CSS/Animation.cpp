@@ -69,6 +69,11 @@ bool canBlend(const AnimatableValue& from, const AnimatableValue& to) noexcept {
         return false;
     }
     if (from.kind == AnimatableValue::Kind::Length) {
+        // A calc() width depends on dimensions layout has not resolved yet, so it
+        // snaps to the target instead of blending its unresolved number.
+        if (from.length.unit == Length::Calc || to.length.unit == Length::Calc) {
+            return false;
+        }
         return from.length.unit == to.length.unit && from.length.unit != Length::Auto;
     }
     return true;
