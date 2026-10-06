@@ -24,17 +24,14 @@ body {
    focused element and restyles the frame whenever the pointer moves, so these
    work without any script at all. */
 button:hover {
-    background-color: #3f3f46;
+    background-color: #0000b6;
     border-color: #52525b;
 }
 
 button:active {
-    background-color: #52525b;
+    background-color: #ffffff;
 }
 
-button:focus {
-    border-color: #60a5fa;
-}
 
 #counter:hover {
     color: #fafafa;
