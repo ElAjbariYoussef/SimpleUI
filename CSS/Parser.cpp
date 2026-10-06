@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <map>
 #include <set>
 
 namespace sui {
@@ -685,8 +686,99 @@ namespace {
 // Reads a rule list, appending to `out`. `media` is what the caller is already
 // nested inside, and `order` is shared so source order stays one sequence
 // across nested `@media` blocks.
+// `from`/"0%" map to 0, `to`/"100%" to 1, `N%` to N/100. -1 means the token is
+// not a keyframe selector, so the caller skips it.
+float keyframeOffset(std::string_view token) {
+    if (token == "from") {
+        return 0.0f;
+    }
+    if (token == "to") {
+        return 1.0f;
+    }
+    if (token.size() > 1 && token.back() == '%') {
+        const std::string number =
+            std::string(token.substr(0, token.size() - 1));
+        char* end = nullptr;
+        const float value = std::strtof(number.c_str(), &end);
+        if (end != number.c_str() && *end == '\0' && value >= 0.0f && value <= 100.0f) {
+            return value * 0.01f;
+        }
+    }
+    return -1.0f;
+}
+
+// Parses the body of one `@keyframes` block: a list of `from`/`50%`/`to`
+// selector blocks that carry the declarations. A comma list shares its block
+// across offsets, and a repeated offset overrides the earlier one, which is
+// what CSS does. The result is sorted ascending by offset.
+void parseKeyframesBody(std::string_view source,
+                        std::vector<KeyframeBlock::Keyframe>& frames) {
+    std::map<float, std::vector<Declaration>> byOffset;
+    std::size_t i = 0;
+    while (i < source.size()) {
+        if (isSpace(source[i])) {
+            ++i;
+            continue;
+        }
+        if (source[i] == '/' && i + 1 < source.size() && source[i + 1] == '*') {
+            i = skipComment(source, i);
+            continue;
+        }
+        const std::size_t selStart = i;
+        while (i < source.size() && source[i] != '{') {
+            if (source[i] == '}') {
+                return;  // stray close brace
+            }
+            ++i;
+        }
+        if (i >= source.size()) {
+            break;
+        }
+        const std::string_view selector = trim(source.substr(selStart, i - selStart));
+        ++i;  // '{'
+
+        const std::size_t declStart = i;
+        int depth = 1;
+        while (i < source.size() && depth > 0) {
+            if (source[i] == '{') {
+                ++depth;
+            } else if (source[i] == '}') {
+                --depth;
+            }
+            ++i;
+        }
+        const std::size_t declEnd = i > declStart && source[i - 1] == '}' ? i - 1 : i;
+        auto declarations = parseDeclarations(source.substr(declStart, declEnd - declStart));
+        if (declarations.empty() || selector.empty()) {
+            continue;
+        }
+        // Split the selector on commas; every part is a timeline offset.
+        std::size_t partStart = 0;
+        for (std::size_t j = 0; j <= selector.size(); ++j) {
+            const bool last = j == selector.size();
+            const char c = last ? ',' : selector[j];
+            if (!last && c != ',') {
+                continue;
+            }
+            const float offset = keyframeOffset(trim(selector.substr(partStart, j - partStart)));
+            partStart = j + 1;
+            if (offset < 0.0f) {
+                continue;
+            }
+            byOffset[offset] = declarations;  // later source order wins
+        }
+    }
+    for (const auto& [offset, declarations] : byOffset) {
+        KeyframeBlock::Keyframe frame;
+        frame.offset = offset;
+        frame.declarations = declarations;
+        frames.push_back(std::move(frame));
+    }
+}
+
 void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
-                std::size_t& order, std::vector<Rule>& out) {
+                std::size_t& order, std::vector<Rule>& out,
+                std::vector<KeyframeBlock>& keyframes) {
     std::size_t i = 0;
 
     while (i < source.size()) {
@@ -750,7 +842,34 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                         combined.push_back(std::move(impossible));
                     }
                 }
-                parseRules(source.substr(bodyStart, bodyEnd - bodyStart), combined, order, out);
+                parseRules(source.substr(bodyStart, bodyEnd - bodyStart), combined, order, out,
+                           keyframes);
+                continue;
+            }
+
+            if (name == "keyframes" && i < source.size() && source[i] == '{') {
+                const std::string_view name_view =
+                    trim(source.substr(preludeStart, i - preludeStart));
+                ++i;  // '{'
+                const std::size_t bodyStart = i;
+                int depth = 1;
+                while (i < source.size() && depth > 0) {
+                    if (source[i] == '{') {
+                        ++depth;
+                    } else if (source[i] == '}') {
+                        --depth;
+                    }
+                    ++i;
+                }
+                const std::size_t bodyEnd = (i > bodyStart && source[i - 1] == '}') ? i - 1 : i;
+                if (!name_view.empty()) {
+                    KeyframeBlock block;
+                    block.name = std::string(name_view);
+                    parseKeyframesBody(source.substr(bodyStart, bodyEnd - bodyStart), block.frames);
+                    if (!block.frames.empty()) {
+                        keyframes.push_back(std::move(block));
+                    }
+                }
                 continue;
             }
 
@@ -832,10 +951,16 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
 
 }  // namespace
 
+void CSSParser::parseWithKeyframes(std::string_view source, std::vector<Rule>& rules,
+                                   std::vector<KeyframeBlock>& keyframes) {
+    std::size_t order = 0;
+    parseRules(source, {}, order, rules, keyframes);
+}
+
 std::vector<Rule> CSSParser::parse(std::string_view source) {
     std::vector<Rule> rules;
-    std::size_t order = 0;
-    parseRules(source, {}, order, rules);
+    std::vector<KeyframeBlock> keyframes;
+    parseWithKeyframes(source, rules, keyframes);
     return rules;
 }
 

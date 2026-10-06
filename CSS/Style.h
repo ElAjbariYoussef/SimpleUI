@@ -2,6 +2,8 @@
 
 #include <SDL3/SDL.h>
 
+#include "CSS/Easing.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -328,6 +330,28 @@ struct ComputedStyle {
     // whole cascade has settled. They inherit like every other property — this
     // engine has no per-property inheritance table, so they copy like the rest.
     std::map<std::string, std::string, std::less<>> custom;
+
+    // Transition and animation declarations, kept as the parallel lists CSS pairs
+    // positionally, always repeating a shorter list's last entry (see listAt in
+    // CSS/Animation.h). They are computed values, not inherited: an animation on
+    // a parent does not reach its children. The empty-initialised vectors are the
+    // "not authored" state, so `transition-property` alone (duration defaults to
+    // 0) and a shorthand both read naturally off the same shape.
+    std::vector<std::string> transitionProperties;
+    std::vector<float> transitionDurationsMs;
+    std::vector<Easing> transitionEasings;
+    std::vector<float> transitionDelaysMs;
+
+    std::vector<std::string> animationNames;
+    std::vector<float> animationDurationsMs;
+    std::vector<Easing> animationEasings;
+    std::vector<float> animationDelaysMs;
+    std::vector<float> animationIterations;  // < 0 = infinite
+    std::vector<std::string> animationDirections;
+    std::vector<std::string> animationFills;
+    // 0 = running, 1 = paused. A bool vector would make listAt() bind its proxy
+    // temporaries to a `const bool&`, so the flags are bytes.
+    std::vector<std::uint8_t> animationPaused;
 
     // Text alignment
     enum TextAlign : std::uint8_t { Left, Center, Right, Justify };

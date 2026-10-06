@@ -92,10 +92,28 @@ struct Rule {
     bool usesCustom = false;
 };
 
+// One `@keyframes` block: a name plus the stops on the animation timeline,
+// each carrying declarations. Stops are stored sorted by offset — `from` is 0,
+// `to` is 1, and a percentage maps to its fraction.
+struct KeyframeBlock {
+    struct Keyframe {
+        float offset = 0.0f;  // 0..1
+        std::vector<Declaration> declarations;
+    };
+    std::string name;
+    std::vector<Keyframe> frames;
+};
+
 class CSSParser {
 public:
     // Parses CSS source into rules, skipping comments and at-rules.
     static std::vector<Rule> parse(std::string_view source);
+
+    // Like parse(), but additionally captures `@keyframes` blocks. Both are
+    // returned so one stylesheet can carry rules and keyframes separately;
+    // parse() is this minus the keyframes.
+    static void parseWithKeyframes(std::string_view source, std::vector<Rule>& rules,
+                                   std::vector<KeyframeBlock>& keyframes);
 
     // Parses a single selector (no comma list, no declarations).
     static SimpleSelector parseSelector(std::string_view source);

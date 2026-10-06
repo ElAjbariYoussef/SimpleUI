@@ -1,10 +1,12 @@
 #pragma once
 
+#include "CSS/Animation.h"
 #include "CSS/DefaultStyle.h"
 #include "CSS/Parser.h"
 #include "CSS/Style.h"
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -20,6 +22,42 @@ struct PseudoState {
     const Element* hovered = nullptr;
     const Element* active = nullptr;
     const Element* focused = nullptr;
+};
+
+// Per-element animation state, kept between resolves. `target` is the previous
+// raw computed style (before interpolation): a transition compares author values
+// against it, so an interpolated output can never restart its own transition.
+// Runs live here, not in ComputedStyle, because resolution itself must stay
+// const and the runs are pure runtime bookkeeping.
+struct ElementAnim {
+    ComputedStyle target;
+    bool hasTarget = false;
+
+    // One property moving from a start value to a target over a delay.
+    struct Transition {
+        std::string property;
+        double startMs;  // clock time the run began
+        double durationMs;
+        double delayMs;
+        AnimatableValue from;
+        AnimatableValue to;
+        Easing easing;
+    };
+    std::vector<Transition> transitions;
+
+    // One named @keyframes animation playing on the element.
+    struct KeyframeRun {
+        std::string name;
+        double startMs;
+        double durationMs;
+        double delayMs;
+        float iterations;  // < 0 = infinite
+        std::string direction;  // normal/reverse/alternate/alternate-reverse
+        std::string fill;       // none/forwards/backwards/both
+        bool paused = false;
+        Easing easing;
+    };
+    std::vector<KeyframeRun> keyframeRuns;
 };
 
 // Resolves the computed style for an element: user-agent defaults, then
@@ -38,6 +76,24 @@ public:
 
     const std::vector<Rule>& rules() const noexcept { return rules_; }
     bool empty() const noexcept { return rules_.empty(); }
+
+    // Registers `@keyframes` blocks. A later block with the same name replaces
+    // the earlier one, like a second stylesheet winning a name collision.
+    void setKeyframes(std::vector<KeyframeBlock> keyframes);
+    void addKeyframes(std::vector<KeyframeBlock> keyframes);
+
+    // The clock transitions and keyframe animations tick against. Defaults to
+    // the script surface's monotonic clock; tests replace it so a frame can be
+    // stepped deterministically. The function stays owned by the caller and must
+    // outlive the resolver.
+    void setTimeSource(double (*timeSource)()) noexcept { timeSource_ = timeSource; }
+
+    // True while any element has a transition or animation in its moving span
+    // (the delay is counted too: the from-value is on screen and must stay
+    // there, and repainting through a short delay is cheaper than a scheduler
+    // hook). The frame loop folds this into its stale set, so a moving page
+    // keeps repainting without any script asking.
+    bool hasRunningAnimations() const;
 
     // Serialises one property of a resolved style back to CSS text, so a script
     // can read what it sees. Returns an empty string for an unsupported name.
@@ -76,8 +132,19 @@ public:
 private:
     ComputedStyle resolveWithParent(Element& element, const ComputedStyle& parent) const;
 
+    // Runs every transition and keyframe animation for `element` into `style`,
+    // which must still hold the raw computed values. Called at the end of
+    // resolveWithParent so layout and paint always see the interpolated picture.
+    void animateStyle(Element& element, ComputedStyle& style) const;
+    void reconcileKeyframes(ComputedStyle& style, ElementAnim& anim, double now) const;
+    void applyKeyframes(ComputedStyle& style, ElementAnim& anim, double now) const;
+    double currentTimeMs() const;
+
     // Kept sorted weakest-first so resolve() can apply rules in order.
     std::vector<Rule> rules_;
+    std::map<std::string, std::vector<KeyframeBlock::Keyframe>, std::less<>> keyframes_;
+    mutable std::map<const Element*, ElementAnim> animations_;
+    mutable double (*timeSource_)() = nullptr;
     std::uint64_t generation_ = 0;
     float rootFontSize_ = 16.0f;
     float viewportWidth_ = 0.0f;

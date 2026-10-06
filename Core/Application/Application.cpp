@@ -621,9 +621,13 @@ bool Application::start(std::string_view entrySuiPath, std::string& error) {
             script::warn("cannot read stylesheet " + link.href);
             continue;
         }
-        for (const auto& rule : CSSParser::parse(*css)) {
-            resolver_.addRule(rule);
+        std::vector<Rule> rules;
+        std::vector<KeyframeBlock> keyframes;
+        CSSParser::parseWithKeyframes(*css, rules, keyframes);
+        for (auto& rule : rules) {
+            resolver_.addRule(std::move(rule));
         }
+        resolver_.addKeyframes(std::move(keyframes));
     }
 
     scriptContext_.document = document_.get();
@@ -823,8 +827,11 @@ void Application::run() {
         // Timers and animation frames are the loop's own events: a fired
         // callback can change the page, so it counts as stale input the same way
         // a pointer event does. An animation loop that re-arms rAF every frame
-        // keeps the page painting every frame, which is the contract.
+        // keeps the page painting every frame, which is the contract. A running
+        // CSS transition or keyframe animation keeps the frame stale on its own,
+        // so an animated page repaints without any script.
         const bool timerFired = sui::script::pumpTimers();
+        const bool animating = resolver_.hasRunningAnimations();
 
         // An idle page repaints nothing. DOM mutations, stylesheet changes,
         // explicit script invalidation, resizes, and unhandled input are the
@@ -834,7 +841,7 @@ void Application::run() {
         // it, so a skipped frame would swallow the click it carried.
         const bool stale =
             !frameDrawn_ || width != stamp_.width || height != stamp_.height ||
-            timerFired || !platform_->inputEvents().empty() || !scriptedClicks.empty() ||
+            timerFired || animating || !platform_->inputEvents().empty() || !scriptedClicks.empty() ||
             !scriptedMoves.empty() ||
             (document_ && document_->mutationCount() != stamp_.mutations) ||
             resolver_.generation() != stamp_.rules || scriptContext_.generation != stamp_.script;

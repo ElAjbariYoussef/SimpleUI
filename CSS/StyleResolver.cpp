@@ -1,9 +1,11 @@
 #include "CSS/StyleResolver.h"
 
 #include "SUI/DOM/Element.h"
+#include "SUI/Script/Timers.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <set>
 #include <string_view>
@@ -1720,6 +1722,104 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         }
     } else if (property == "visibility") {
         s.visible = parseBool(value);
+    } else if (property == "transition") {
+        // The shorthand is a full reset of the four parallel lists, like CSS's
+        // declaration-level reset rather than a list append; later longhands in
+        // the same cascade then overwrite individual lists.
+        applyTransitionShorthand(decl.value, s);
+    } else if (property == "transition-property") {
+        s.transitionProperties.clear();
+        if (value != "none") {
+            s.transitionProperties = splitCommaList(decl.value);
+        }
+    } else if (property == "transition-duration") {
+        s.transitionDurationsMs.clear();
+        for (const std::string& part : splitCommaList(decl.value)) {
+            float ms = 0.0f;
+            if (!parseTimeMs(part, ms)) {
+                ms = 0.0f;  // an invalid time is a null duration, per CSS
+            }
+            s.transitionDurationsMs.push_back(ms);
+        }
+    } else if (property == "transition-timing-function") {
+        s.transitionEasings.clear();
+        for (const std::string& part : splitCommaList(decl.value)) {
+            s.transitionEasings.push_back(Easing::parse(part));
+        }
+    } else if (property == "transition-delay") {
+        s.transitionDelaysMs.clear();
+        for (const std::string& part : splitCommaList(decl.value)) {
+            float ms = 0.0f;
+            if (!parseTimeMs(part, ms)) {
+                ms = 0.0f;
+            }
+            s.transitionDelaysMs.push_back(ms);
+        }
+    } else if (property == "transition-behavior") {
+        // Accepted and ignored: the engine animates style values only, so there
+        // is no discrete/animate distinction for it to switch.
+    } else if (property == "animation") {
+        applyAnimationShorthand(decl.value, s);
+    } else if (property == "animation-name") {
+        s.animationNames.clear();
+        if (value != "none") {
+            s.animationNames = splitCommaList(decl.value);
+        }
+    } else if (property == "animation-duration") {
+        s.animationDurationsMs.clear();
+        for (const std::string& part : splitCommaList(decl.value)) {
+            float ms = 0.0f;
+            if (!parseTimeMs(part, ms)) {
+                ms = 0.0f;
+            }
+            s.animationDurationsMs.push_back(ms);
+        }
+    } else if (property == "animation-timing-function") {
+        s.animationEasings.clear();
+        for (const std::string& part : splitCommaList(decl.value)) {
+            s.animationEasings.push_back(Easing::parse(part));
+        }
+    } else if (property == "animation-delay") {
+        s.animationDelaysMs.clear();
+        for (const std::string& part : splitCommaList(decl.value)) {
+            float ms = 0.0f;
+            if (!parseTimeMs(part, ms)) {
+                ms = 0.0f;
+            }
+            s.animationDelaysMs.push_back(ms);
+        }
+    } else if (property == "animation-iteration-count") {
+        s.animationIterations.clear();
+        for (const std::string& part : splitCommaList(decl.value)) {
+            if (part == "infinite") {
+                s.animationIterations.push_back(-1.0f);
+                continue;
+            }
+            char* end = nullptr;
+            const float count = std::strtof(part.c_str(), &end);
+            s.animationIterations.push_back(end != part.c_str() && *end == '\0'
+                                                ? (count < 0.0f ? 1.0f : count)
+                                                : 1.0f);
+        }
+    } else if (property == "animation-direction") {
+        s.animationDirections.clear();
+        for (const std::string& part : splitCommaList(decl.value)) {
+            const bool known = part == "normal" || part == "reverse" ||
+                               part == "alternate" || part == "alternate-reverse";
+            s.animationDirections.push_back(known ? part : "normal");
+        }
+    } else if (property == "animation-fill-mode") {
+        s.animationFills.clear();
+        for (const std::string& part : splitCommaList(decl.value)) {
+            const bool known = part == "none" || part == "forwards" ||
+                               part == "backwards" || part == "both";
+            s.animationFills.push_back(known ? part : "none");
+        }
+    } else if (property == "animation-play-state") {
+        s.animationPaused.clear();
+        for (const std::string& part : splitCommaList(decl.value)) {
+            s.animationPaused.push_back(part == "paused");
+        }
     } else {
         warnUnknownProperty(property);
     }
@@ -2014,6 +2114,18 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "flex-grow") return unitless(style.flex.grow);
     if (property == "flex-shrink") return unitless(style.flex.shrink);
     if (property == "flex-basis") return length(style.flex.basis, "auto");
+    if (property == "transition" || property == "transition-property" ||
+        property == "transition-duration" || property == "transition-delay" ||
+        property == "transition-timing-function") {
+        return serializeTransition(property, style);
+    }
+    if (property == "animation" || property == "animation-name" ||
+        property == "animation-duration" || property == "animation-delay" ||
+        property == "animation-timing-function" ||
+        property == "animation-iteration-count" || property == "animation-direction" ||
+        property == "animation-fill-mode" || property == "animation-play-state") {
+        return serializeAnimation(property, style);
+    }
     return {};
 }
 
@@ -2281,7 +2393,336 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
     applyLevel(true);
 
     applyDimensionAttributes(style, element);
+    animateStyle(element, style);
     return style;
+}
+
+// --- Animation runtime ---
+
+namespace {
+
+// Two snapshots name-or-value equal? The transition diff compares author values,
+// so a changed target restarts a run and an untouched one lets it finish.
+bool sameAnimatable(const AnimatableValue& a, const AnimatableValue& b) {
+    if (a.kind != b.kind) {
+        return false;
+    }
+    switch (a.kind) {
+        case AnimatableValue::Kind::None:
+            return true;
+        case AnimatableValue::Kind::Length:
+            return a.length.unit == b.length.unit && a.length.value == b.length.value;
+        case AnimatableValue::Kind::Color:
+            return a.color.r == b.color.r && a.color.g == b.color.g &&
+                   a.color.b == b.color.b && a.color.a == b.color.a;
+        case AnimatableValue::Kind::Number:
+            return a.number == b.number;
+    }
+    return false;
+}
+
+bool easingEqual(const Easing& a, const Easing& b) {
+    if (a.type != b.type) {
+        return false;
+    }
+    if (a.type == Easing::Type::CubicBezier) {
+        return a.x1 == b.x1 && a.y1 == b.y1 && a.x2 == b.x2 && a.y2 == b.y2;
+    }
+    if (a.type == Easing::Type::Steps) {
+        return a.steps == b.steps && a.stepStart == b.stepStart;
+    }
+    return true;
+}
+
+// Applies every declaration of a keyframe onto the style, snapping. This is the
+// fill phase (before or after playback), where there is no progress to blend.
+void applyFrame(ComputedStyle& style, const KeyframeBlock::Keyframe& frame,
+                float rootFontSize) {
+    for (const Declaration& decl : frame.declarations) {
+        if (isCustomProperty(decl.property)) {
+            continue;  // custom properties have no animated form
+        }
+        applyDeclaration(style, decl, rootFontSize);
+    }
+}
+
+// Interpolates every property the two bracketing keyframes share. A property
+// declared in only one of them animates nothing and falls back to the element's
+// own value, which is the CSS rule; the writer only touches shared properties.
+void applyKeyframeSegment(ComputedStyle& style, const ElementAnim::KeyframeRun& run,
+                          const std::vector<KeyframeBlock::Keyframe>& frames, float t,
+                          float rootFontSize) {
+    const std::size_t count = frames.size();
+    if (count < 2) {
+        return;
+    }
+    if (t < frames.front().offset || t >= frames.back().offset) {
+        return;  // outside the declared span: the author value stands
+    }
+    std::size_t pair = 0;
+    while (pair + 1 < count && frames[pair + 1].offset <= t) {
+        ++pair;
+    }
+    const KeyframeBlock::Keyframe& a = frames[pair];
+    const KeyframeBlock::Keyframe& b = frames[pair + 1];
+    const float span = b.offset - a.offset;
+    const float segT = span > 0.0f ? (t - a.offset) / span : 0.0f;
+    const float eased = run.easing.apply(std::clamp(segT, 0.0f, 1.0f));
+
+    std::set<std::string, std::less<>> properties;
+    for (const Declaration& decl : a.declarations) {
+        if (!isCustomProperty(decl.property)) {
+            properties.insert(decl.property);
+        }
+    }
+    for (const Declaration& decl : b.declarations) {
+        if (!isCustomProperty(decl.property)) {
+            properties.insert(decl.property);
+        }
+    }
+    for (const std::string& property : properties) {
+        // Apply the frame declarations over a copy of the current style and read
+        // the property back, so keyframes parse through the same code as rules.
+        ComputedStyle nearA = style;
+        for (const Declaration& decl : a.declarations) {
+            if (!isCustomProperty(decl.property)) {
+                applyDeclaration(nearA, decl, rootFontSize);
+            }
+        }
+        const AnimatableValue from = animatableValue(property, nearA);
+        ComputedStyle nearB = style;
+        for (const Declaration& decl : b.declarations) {
+            if (!isCustomProperty(decl.property)) {
+                applyDeclaration(nearB, decl, rootFontSize);
+            }
+        }
+        const AnimatableValue to = animatableValue(property, nearB);
+        if (canBlend(from, to)) {
+            blendInto(style, property, from, to, eased);
+        } else if (to.kind != AnimatableValue::Kind::None) {
+            blendInto(style, property, to, to, 1.0f);  // discrete: snap to the far frame
+        }
+    }
+}
+
+}  // namespace
+
+void StyleResolver::animateStyle(Element& element, ComputedStyle& style) const {
+    ElementAnim& anim = animations_[&element];
+    const double now = currentTimeMs();
+    // The raw author-computed values, captured before any blend: transitions diff
+    // against this so an interpolated output can never restart its own run.
+    const ComputedStyle raw = style;
+
+    if (!anim.hasTarget) {
+        anim.target = raw;
+        anim.hasTarget = true;
+        reconcileKeyframes(style, anim, now);
+        applyKeyframes(style, anim, now);
+        return;
+    }
+
+    const auto atDistance = [&](const ElementAnim::Transition& t, double time) {
+        const double start = t.startMs + t.delayMs;
+        const double span = time - start;
+        const float p = t.durationMs > 0.0
+                            ? static_cast<float>(std::clamp(span / t.durationMs, 0.0, 1.0))
+                            : 1.0f;
+        return t.easing.apply(p);
+    };
+
+    // Diff the author values of every transitionable property against the last
+    // resolve's raw target and start or restart the matching run. An in-flight
+    // run restarts from where the eye currently is; a fresh one from the old
+    // target value, so a hover that flips a property twice never jumps.
+    const std::size_t declared = style.transitionProperties.size();
+    for (std::size_t i = 0; i < declared; ++i) {
+        const float durationMs = listAt(style.transitionDurationsMs, i);
+        const float delayMs = listAt(style.transitionDelaysMs, i);
+        const Easing& easing = listAt(style.transitionEasings, i);
+        for (const std::string& property : expandTransitionProperty(style.transitionProperties[i])) {
+            const AnimatableValue to = animatableValue(property, style);
+            if (to.kind == AnimatableValue::Kind::None) {
+                continue;
+            }
+            const AnimatableValue previous = animatableValue(property, anim.target);
+            auto run = std::find_if(anim.transitions.begin(), anim.transitions.end(),
+                                    [&](const ElementAnim::Transition& t) {
+                                        return t.property == property;
+                                    });
+            if (!sameAnimatable(previous, to)) {
+                AnimatableValue from = previous;
+                if (run != anim.transitions.end() &&
+                    now < run->startMs + run->delayMs + run->durationMs &&
+                    run->durationMs > 0.0) {
+                    from = blendValues(run->from, run->to, atDistance(*run, now));
+                }
+                ElementAnim::Transition next;
+                next.property = property;
+                next.startMs = now;
+                next.durationMs = durationMs;
+                next.delayMs = delayMs;
+                next.from = from;
+                next.to = to;
+                next.easing = easing;
+                if (run == anim.transitions.end()) {
+                    anim.transitions.push_back(std::move(next));
+                } else {
+                    *run = std::move(next);
+                }
+            }
+            // Unchanged author value: an in-flight run keeps going to its target.
+        }
+    }
+
+    // Overwrite the computed values with each running transition's blend, then
+    // drop the ones that finished. A finished run blends to exactly the target
+    // the style already holds, so erasing it changes nothing on screen.
+    for (const ElementAnim::Transition& t : anim.transitions) {
+        if (t.durationMs > 0.0 && now < t.startMs + t.delayMs + t.durationMs) {
+            blendInto(style, t.property, t.from, t.to, atDistance(t, now));
+        }
+    }
+    anim.transitions.erase(
+        std::remove_if(anim.transitions.begin(), anim.transitions.end(),
+                       [&](const ElementAnim::Transition& t) {
+                           return !(t.durationMs > 0.0 &&
+                                    now < t.startMs + t.delayMs + t.durationMs);
+                       }),
+        anim.transitions.end());
+
+    // Keyframe animations render after transitions, so an animation on the same
+    // property wins the frame, matching CSS.
+    reconcileKeyframes(style, anim, now);
+    applyKeyframes(style, anim, now);
+
+    anim.target = raw;  // the raw style, not the interpolated one
+}
+
+void StyleResolver::reconcileKeyframes(ComputedStyle& style, ElementAnim& anim,
+                                       double now) const {
+    std::vector<ElementAnim::KeyframeRun> next;
+    const std::size_t count = style.animationNames.size();
+    for (std::size_t i = 0; i < count; ++i) {
+        const std::string& name = style.animationNames[i];
+        if (name.empty()) {
+            continue;
+        }
+        const float durationMs = listAt(style.animationDurationsMs, i);
+        const float delayMs = listAt(style.animationDelaysMs, i);
+        const float iterations = listAt(style.animationIterations, i);
+        const std::string& direction = listAt(style.animationDirections, i);
+        const std::string& fill = listAt(style.animationFills, i);
+        const bool paused = listAt(style.animationPaused, i);
+        const Easing& easing = listAt(style.animationEasings, i);
+        auto existing = std::find_if(
+            anim.keyframeRuns.begin(), anim.keyframeRuns.end(),
+            [&](const ElementAnim::KeyframeRun& r) { return r.name == name; });
+        if (existing != anim.keyframeRuns.end() && existing->durationMs == durationMs &&
+            existing->delayMs == delayMs && existing->iterations == iterations &&
+            existing->direction == direction && existing->fill == fill &&
+            existing->paused == paused && easingEqual(existing->easing, easing)) {
+            next.push_back(std::move(*existing));
+            continue;
+        }
+        ElementAnim::KeyframeRun run;
+        run.name = name;
+        run.startMs = now;  // a new configuration starts the timeline here
+        run.durationMs = durationMs;
+        run.delayMs = delayMs;
+        run.iterations = iterations;
+        run.direction = direction;
+        run.fill = fill;
+        run.paused = paused;
+        run.easing = easing;
+        next.push_back(std::move(run));
+    }
+    anim.keyframeRuns = std::move(next);
+}
+
+void StyleResolver::applyKeyframes(ComputedStyle& style, ElementAnim& anim,
+                                   double now) const {
+    for (const ElementAnim::KeyframeRun& run : anim.keyframeRuns) {
+        if (run.paused) {
+            continue;
+        }
+        const auto found = keyframes_.find(run.name);
+        if (found == keyframes_.end() || found->second.empty()) {
+            continue;
+        }
+        const std::vector<KeyframeBlock::Keyframe>& frames = found->second;
+        const double start = run.startMs + run.delayMs;
+        const double elapsed = now - start;
+        if (elapsed < 0.0) {
+            if (run.fill == "backwards" || run.fill == "both") {
+                applyFrame(style, frames.front(), rootFontSize_);
+            }
+            continue;
+        }
+        const bool infinite = run.iterations < 0.0f;
+        const double total =
+            infinite ? 0.0 : static_cast<double>(run.durationMs) * run.iterations;
+        if (!infinite && elapsed >= total) {
+            if (run.fill == "forwards" || run.fill == "both") {
+                applyFrame(style, frames.back(), rootFontSize_);
+            }
+            continue;
+        }
+        const double durationMs = run.durationMs;
+        if (durationMs <= 0.0) {
+            continue;  // instantaneous, already past end: fill decides the picture
+        }
+        const std::int64_t iteration =
+            static_cast<std::int64_t>(std::floor(elapsed / durationMs));
+        double t = std::fmod(elapsed, durationMs) / durationMs;
+        if ((run.direction == "reverse") ||
+            (run.direction == "alternate" && (iteration % 2) == 1) ||
+            (run.direction == "alternate-reverse" && (iteration % 2) == 0)) {
+            t = 1.0 - t;
+        }
+        applyKeyframeSegment(style, run, frames, static_cast<float>(t), rootFontSize_);
+    }
+}
+
+double StyleResolver::currentTimeMs() const {
+    return timeSource_ ? timeSource_() : sui::script::now();
+}
+
+bool StyleResolver::hasRunningAnimations() const {
+    const double now = currentTimeMs();
+    for (const auto& [element, anim] : animations_) {
+        for (const auto& run : anim.transitions) {
+            // The delay counts as running too: nothing paints new pixels then,
+            // but the movement that follows needs the loop to keep ticking.
+            if (now < run.startMs + run.delayMs + run.durationMs) {
+                return true;
+            }
+        }
+        for (const auto& run : anim.keyframeRuns) {
+            if (run.paused || run.durationMs <= 0.0f) {
+                continue;
+            }
+            if (run.iterations < 0.0f) {
+                return true;
+            }
+            if (now < run.startMs + run.delayMs +
+                          static_cast<double>(run.durationMs) * run.iterations) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void StyleResolver::setKeyframes(std::vector<KeyframeBlock> keyframes) {
+    keyframes_.clear();
+    addKeyframes(std::move(keyframes));
+}
+
+void StyleResolver::addKeyframes(std::vector<KeyframeBlock> keyframes) {
+    for (auto& block : keyframes) {
+        keyframes_[std::move(block.name)] = std::move(block.frames);
+    }
 }
 
 void StyleResolver::setRootFontSize(float size) {

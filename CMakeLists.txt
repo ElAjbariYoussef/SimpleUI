@@ -27,6 +27,8 @@ add_library(sui STATIC
     SUI/DOM/Element.cpp
     SUI/DOM/Document.cpp
     CSS/DefaultStyle.cpp
+    CSS/Easing.cpp
+    CSS/Animation.cpp
     CSS/Parser.cpp
     CSS/StyleResolver.cpp
     CSS/PseudoElements.cpp

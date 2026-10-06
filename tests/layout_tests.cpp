@@ -622,7 +622,7 @@ void testUnknownPropertyIsReported() {
     capturedLog.clear();
     if (document) {
         sui::StyleResolver resolver;
-        resolver.setRules(sui::CSSParser::parse("div { transition: color 1s }"));
+        resolver.setRules(sui::CSSParser::parse("div { text-decoration: underline }"));
         resolver.resolve(*document->getElementById("x"));
     }
     check(capturedLog.size() > 0, "each unsupported property is reported once");
@@ -2482,7 +2482,329 @@ void testCustomProperties() {
     check(!probe.rules()[0].usesCustom, "a rule without one does not pay for the path");
 }
 
+// --- Transitions and animations (M5) ---
+
+// Animation time comes from the resolver's clock source, so the tests step a
+// frame by moving a fake clock instead of sleeping on the real one.
+double fakeNowMs = 0.0;
+double fakeClock() {
+    return fakeNowMs;
+}
+
+void testEasingAndTimingFunctions() {
+    using sui::Easing;
+    check(Easing::parse("linear").type == Easing::Type::Linear,
+          "linear parses as a linear ramp");
+    checkNear(Easing::parse("linear").apply(0.25f), 0.25f, 0.001f, "linear is identity");
+    check(Easing::parse("ease").type == Easing::Type::CubicBezier,
+          "ease folds onto a cubic-bezier");
+    checkNear(Easing::parse("ease-in-out").apply(0.5f), 0.5f, 0.001f,
+              "a symmetric curve maps 0.5 to 0.5");
+    checkNear(Easing::parse("steps(4)").apply(0.3f), 0.25f, 0.001f,
+              "jump-end steps floor to the previous step");
+    checkNear(Easing::parse("steps(4, start)").apply(0.3f), 0.5f, 0.001f,
+              "jump-start steps jump to the next step");
+    check(Easing::parse("step-start").stepStart && Easing::parse("step-end").steps == 1,
+          "step-start/step-end are single steps");
+    const Easing bezier = Easing::parse("cubic-bezier(0.25, 0.1, 0.25, 1)");
+    check(bezier.type == Easing::Type::CubicBezier && bezier.y1 == 0.1f && bezier.x2 == 0.25f,
+          "cubic-bezier() numbers are read");
+    checkNear(Easing::parse("garbage").apply(0.5f), 0.5f, 0.001f,
+              "an unparsable timing function fails to a linear ramp");
+    checkNear(Easing::parse("cubic-bezier(1, 2, 5, 0)").apply(0.5f), 0.5f, 0.001f,
+              "an out-of-range x axis is rejected as linear");
+
+    float ms = -1.0f;
+    check(sui::parseTimeMs("0.5s", ms) && std::fabs(ms - 500.0f) < 0.001f,
+          "`0.5s` is 500 milliseconds");
+    check(sui::parseTimeMs("250ms", ms) && std::fabs(ms - 250.0f) < 0.001f,
+          "`250ms` is 250 milliseconds");
+    check(sui::parseTimeMs("0", ms) && ms == 0.0f, "a bare zero is a valid time");
+    check(!sui::parseTimeMs("5", ms), "a bare non-zero number is not a time");
+    const auto parts = sui::splitCommaList("width 0.3s, color 1s, cubic-bezier(0, 1, 1, 0)");
+    check(parts.size() == 3 && parts[0] == "width 0.3s" && parts[1] == "color 1s",
+          "top-level comma split leaves function arguments intact");
+    const auto all = sui::expandTransitionProperty("all");
+    check(all.size() > 20, "`all` expands to the whole animatable table");
+    const auto margins = sui::expandTransitionProperty("margin");
+    check(margins.size() == 4 && margins[2] == "margin-bottom", "`margin` expands to its edges");
+}
+
+void testTransitionDeclarations() {
+    auto document = parseOrNull("<sui><body><div id=\"t\">x</div></body></sui>");
+    Element* t = document ? document->getElementById("t") : nullptr;
+    if (!t) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#t { transition: width 0.3s ease 0.2s, color 1s; }"));
+    const ComputedStyle s = resolver.resolve(*t);
+    check(s.transitionProperties.size() == 2 && s.transitionProperties[0] == "width" &&
+              s.transitionProperties[1] == "color",
+          "a shorthand list pairs one entry per property");
+    checkNear(s.transitionDurationsMs[0], 300.0f, 0.01f, "the first duration is kept");
+    checkNear(s.transitionDurationsMs[1], 1000.0f, 0.01f, "the second duration is kept");
+    checkNear(s.transitionDelaysMs[0], 200.0f, 0.01f, "a second time is the delay");
+    check(s.transitionEasings[0].type == sui::Easing::Type::CubicBezier,
+          "an easing word parses per part");
+    check(s.transitionEasings[1].type == sui::Easing::Type::Linear,
+          "a missing easing defaults to linear");
+
+    sui::StyleResolver r2;
+    r2.setRules(sui::CSSParser::parse(
+        "#t { transition: width 0.3s; transition-property: color, opacity }"));
+    const ComputedStyle s2 = r2.resolve(*t);
+    check(s2.transitionProperties.size() == 2 && s2.transitionProperties[1] == "opacity",
+          "transition-property replaces only the property list");
+    checkNear(sui::listAt(s2.transitionDurationsMs, 1), 300.0f, 0.01f,
+              "a shorter list repeats its last entry");
+    checkNear(sui::listAt(s2.transitionDelaysMs, 1), 0.0f, 0.01f, "the repeated entry keeps its delay");
+
+    sui::StyleResolver r3;
+    r3.setRules(sui::CSSParser::parse(
+        "body { transition: width 0.7s } #t { transition: inherit }"));
+    const ComputedStyle s3 = r3.resolve(*t);
+    check(s3.transitionProperties.size() == 1 && s3.transitionProperties[0] == "width",
+          "transition: inherit copies the parent's list");
+    checkNear(s3.transitionDurationsMs[0], 700.0f, 0.01f,
+              "inherit carries the duration through the round trip");
+
+    sui::StyleResolver r4;
+    r4.setRules(sui::CSSParser::parse(
+        "#t { transition: width 0.3s; transition-property: none }"));
+    check(r4.resolve(*t).transitionProperties.empty(),
+          "transition-property: none disables transitions");
+
+    sui::StyleResolver r5;
+    r5.setRules(sui::CSSParser::parse("#t { animation: pulse 2s ease 0.5s infinite alternate both }"));
+    const ComputedStyle s5 = r5.resolve(*t);
+    check(s5.animationNames.size() == 1 && s5.animationNames[0] == "pulse",
+          "the animation name is read first");
+    checkNear(s5.animationDurationsMs[0], 2000.0f, 0.01f, "the animation duration is read");
+    checkNear(s5.animationDelaysMs[0], 500.0f, 0.01f, "the animation delay is read");
+    check(s5.animationIterations[0] < 0.0f, "infinite folds onto a negative iteration count");
+    check(s5.animationDirections[0] == "alternate" && s5.animationFills[0] == "both",
+          "direction and fill keywords land in their lists");
+}
+
+void testTransitions() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"b\" style=\"width:100px;height:32px;background-color:#ffff00\">x</div>"
+        "<div id=\"r\" style=\"width:100px\">x</div>"
+        "<div id=\"o\" style=\"opacity:1\">x</div>"
+        "</body></sui>");
+    Element* b = document ? document->getElementById("b") : nullptr;
+    Element* r = document ? document->getElementById("r") : nullptr;
+    Element* o = document ? document->getElementById("o") : nullptr;
+    if (!b || !r || !o) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setTimeSource(fakeClock);
+    resolver.setRules(sui::CSSParser::parse(
+        "#b { transition: width 1s linear, background-color 1s linear; }"
+        "#r { transition: width 1s linear; }"
+        "#o { transition: opacity 1s linear 0.5s; }"));
+    const auto width = [](const ComputedStyle& s) {
+        return s.width.resolve(0.0f, 16.0f, 16.0f);
+    };
+
+    fakeNowMs = 1000.0;
+    const ComputedStyle base = resolver.resolve(*b);
+    checkNear(width(base), 100.0f, 0.01f, "the baseline resolve keeps the author width");
+
+    // Change the targets; the change is detected on the next resolve, whose
+    // frame still shows the old value (progress is 0 at the change instant).
+    b->style().setProperty("width", "200px");
+    b->style().setProperty("background-color", "#0000ff");
+    fakeNowMs = 1500.0;
+    const ComputedStyle atChange = resolver.resolve(*b);
+    checkNear(width(atChange), 100.0f, 0.01f, "the change frame holds the from-value");
+    fakeNowMs = 2000.0;
+    const ComputedStyle mid = resolver.resolve(*b);
+    checkNear(width(mid), 150.0f, 0.5f, "halfway through a 1s linear look");
+    check(mid.backgroundColor.a == 255 && mid.backgroundColor.r == 128 &&
+              mid.backgroundColor.b == 128,
+          "the background colour blends at the midpoint");
+    fakeNowMs = 3000.0;
+    const ComputedStyle done = resolver.resolve(*b);
+    checkNear(width(done), 200.0f, 0.01f, "the run lands exactly on the target");
+    check(done.backgroundColor.b == 255 && done.backgroundColor.r == 0,
+          "the colour reaches the target");
+
+    // A resting page: nothing moves, so nothing keeps the loop awake.
+    fakeNowMs = 4000.0;
+    const ComputedStyle rested = resolver.resolve(*b);
+    checkNear(width(rested), 200.0f, 0.01f, "an idle element is unchanged");
+    check(!resolver.hasRunningAnimations(), "no runs are left after a finished transition");
+
+    // Retargeting mid-flight restarts from where the eye is, not from the base.
+    // `r` runs its own timeline here, so its later frames cannot disturb the
+    // idle checks above, which must see only `b`'s finished run.
+    fakeNowMs = 4000.0;
+    resolver.resolve(*r);  // anchor: no change yet, holds the author width
+    r->style().setProperty("width", "200px");
+    fakeNowMs = 4500.0;
+    resolver.resolve(*r);  // the change frame holds the from-value
+    fakeNowMs = 5000.0;
+    checkNear(width(resolver.resolve(*r)), 150.0f, 0.5f, "the original run is mid-flight");
+    r->style().setProperty("width", "300px");
+    const ComputedStyle restarted = resolver.resolve(*r);  // same instant
+    checkNear(width(restarted), 150.0f, 0.5f, "restart shows the displayed value");
+    fakeNowMs = 5250.0;
+    const ComputedStyle restartedMid = resolver.resolve(*r);
+    checkNear(width(restartedMid), 187.5f, 0.5f, "restart eases from the displayed value");
+    fakeNowMs = 6250.0;
+    const ComputedStyle secondDone = resolver.resolve(*r);
+    checkNear(width(secondDone), 300.0f, 0.01f, "the restarted run finishes on target");
+
+    // Delay: the run holds its from-value through the delay, then moves.
+    fakeNowMs = 1000.0;
+    resolver.resolve(*o);  // baseline
+    o->style().setProperty("opacity", "0.5");
+    fakeNowMs = 1500.0;
+    checkNear(resolver.resolve(*o).opacity, 1.0f, 0.01f, "the delay holds the from-value");
+    fakeNowMs = 2250.0;
+    checkNear(resolver.resolve(*o).opacity, 0.875f, 0.01f,
+              "a quarter of the run has elapsed after the delay");
+    fakeNowMs = 3200.0;
+    checkNear(resolver.resolve(*o).opacity, 0.5f, 0.01f, "the delayed run finishes on target");
+}
+
+void testKeyframeAnimations() {
+    const auto width = [](const ComputedStyle& s) {
+        return s.width.resolve(0.0f, 16.0f, 16.0f);
+    };
+    const std::string pulse =
+        "@keyframes pulse {"
+        "  from { width: 100px; opacity: 0 }"
+        "  50% { width: 400px; opacity: 0.5 }"
+        "  to { width: 100px; opacity: 1 }"
+        "} ";
+
+    // Fill, finish, and restart stay on the only element this resolver animates,
+    // so `hasRunningAnimations` observes exactly that element's timeline.
+    auto kdoc = parseOrNull("<sui><body><div id=\"k\" style=\"width:100px\">x</div></body></sui>");
+    Element* k = kdoc ? kdoc->getElementById("k") : nullptr;
+    if (!k) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setTimeSource(fakeClock);
+    std::vector<sui::Rule> rules;
+    std::vector<sui::KeyframeBlock> keyframes;
+    sui::CSSParser::parseWithKeyframes(pulse + "#k { animation: pulse 2s linear both }",
+                                       rules, keyframes);
+    check(keyframes.size() == 1 && keyframes[0].name == "pulse",
+          "@keyframes hands its block to the resolver");
+    check(keyframes[0].frames.size() == 3 && keyframes[0].frames[1].offset == 0.5f &&
+              keyframes[0].frames[2].offset == 1.0f,
+          "frames are sorted by offset with from=0 and to=1");
+    resolver.setRules(std::move(rules));
+    resolver.setKeyframes(std::move(keyframes));
+
+    fakeNowMs = 0.0;
+    resolver.resolve(*k);
+    check(resolver.hasRunningAnimations(), "a keyframe animation keeps the loop awake");
+
+    fakeNowMs = 500.0;
+    const ComputedStyle s1 = resolver.resolve(*k);
+    checkNear(width(s1), 250.0f, 0.5f, "the 0%-50% segment is half-blended at 0.25");
+    checkNear(s1.opacity, 0.25f, 0.01f, "opacity blends across the same segment");
+    fakeNowMs = 1000.0;
+    checkNear(width(resolver.resolve(*k)), 400.0f, 0.5f, "the 50% keyframe is exact");
+    fakeNowMs = 1500.0;
+    const ComputedStyle s3 = resolver.resolve(*k);
+    checkNear(width(s3), 250.0f, 0.5f, "the 50%-100% segment returns downward");
+    checkNear(s3.opacity, 0.75f, 0.01f, "opacity keeps rising while width returns");
+    fakeNowMs = 2000.0;
+    const ComputedStyle ended = resolver.resolve(*k);
+    checkNear(width(ended), 100.0f, 0.01f, "fill forwards holds the last frame");
+    checkNear(ended.opacity, 1.0f, 0.01f, "the after-end fill holds opacity");
+    check(!resolver.hasRunningAnimations(), "a finished animation goes idle");
+
+    // Changing the animation configuration restarts the timeline from zero, so
+    // the change frame still holds the from-value; the new duration shows up on
+    // the frames that follow, and the run goes idle when the new span elapses.
+    k->style().setProperty("animation", "pulse 1s linear both");
+    fakeNowMs = 2500.0;
+    const ComputedStyle changed = resolver.resolve(*k);
+    checkNear(width(changed), 100.0f, 0.01f, "a config change restarts the timeline");
+    check(resolver.hasRunningAnimations(), "the restarted run is running again");
+    fakeNowMs = 2750.0;
+    const ComputedStyle shortened = resolver.resolve(*k);
+    checkNear(width(shortened), 250.0f, 0.5f, "the shortened run eases at the new duration");
+    fakeNowMs = 3500.0;
+    resolver.resolve(*k);
+    check(!resolver.hasRunningAnimations(), "the shortened run also finishes idle");
+
+    // Infinite alternate lives in its own resolver, so its never-ending loop
+    // cannot keep the idle checks above awake.
+    auto adoc = parseOrNull("<sui><body><div id=\"a\" style=\"width:100px\">x</div></body></sui>");
+    Element* a = adoc ? adoc->getElementById("a") : nullptr;
+    if (!a) {
+        return;
+    }
+    sui::StyleResolver ra;
+    ra.setTimeSource(fakeClock);
+    ra.setRules(sui::CSSParser::parse(pulse + "#a { animation: pulse 2s linear infinite alternate }"));
+    ra.setKeyframes([&] {
+        std::vector<sui::Rule> ignored;
+        std::vector<sui::KeyframeBlock> akeysInner;
+        sui::CSSParser::parseWithKeyframes(
+            pulse + "#a { animation: pulse 2s linear infinite alternate }", ignored, akeysInner);
+        return akeysInner;
+    }());
+    fakeNowMs = 0.0;
+    ra.resolve(*a);  // anchor the timeline
+    fakeNowMs = 2500.0;
+    const ComputedStyle oddReverse = ra.resolve(*a);
+    checkNear(oddReverse.opacity, 0.75f, 0.01f, "the first odd iteration runs reversed");
+    fakeNowMs = 4500.0;
+    const ComputedStyle evenNormal = ra.resolve(*a);
+    checkNear(evenNormal.opacity, 0.25f, 0.01f, "the next even iteration runs forward");
+
+    // A delay with backwards fill holds the first frame, then plays; its own
+    // resolver keeps the short timeline out of the others.
+    auto ddoc = parseOrNull("<sui><body><div id=\"d\" style=\"width:100px\">x</div></body></sui>");
+    Element* d = ddoc ? ddoc->getElementById("d") : nullptr;
+    if (!d) {
+        return;
+    }
+    sui::StyleResolver rd;
+    rd.setTimeSource(fakeClock);
+    rd.setRules(sui::CSSParser::parse(pulse + "#d { animation: pulse 2s linear 1s backwards }"));
+    rd.setKeyframes([&] {
+        std::vector<sui::Rule> ignored;
+        std::vector<sui::KeyframeBlock> dkeysInner;
+        sui::CSSParser::parseWithKeyframes(
+            pulse + "#d { animation: pulse 2s linear 1s backwards }", ignored, dkeysInner);
+        return dkeysInner;
+    }());
+    fakeNowMs = 0.0;
+    rd.resolve(*d);  // anchor the timeline
+    fakeNowMs = 500.0;
+    const ComputedStyle beforeStart = rd.resolve(*d);
+    checkNear(width(beforeStart), 100.0f, 0.01f, "backwards fill applies the first frame");
+    checkNear(beforeStart.opacity, 0.0f, 0.01f, "backwards fill applies the first values");
+    fakeNowMs = 1500.0;
+    const ComputedStyle afterStart = rd.resolve(*d);
+    checkNear(width(afterStart), 250.0f, 0.5f, "the run begins where the timeline says");
+    checkNear(afterStart.opacity, 0.25f, 0.01f, "progress restarts after the delay");
+    fakeNowMs = 4000.0;
+    const ComputedStyle reverted = rd.resolve(*d);
+    checkNear(width(reverted), 100.0f, 0.01f,
+              "backwards fill does not hold past the animation's end");
+    checkNear(reverted.opacity, 1.0f, 0.01f, "the element returns to its own style");
+}
+
 int main() {
+    testEasingAndTimingFunctions();
+    testTransitionDeclarations();
+    testTransitions();
+    testKeyframeAnimations();
     testRuleParsing();
     testSelectorMatching();
     testInteractivePseudoClasses();
