@@ -63,11 +63,11 @@ Element* layoutRoot(Document& document, sui::StyleResolver& resolver, float widt
 void testRuleParsing() {
     const auto rules = sui::CSSParser::parse(R"(
         /* a comment */
-        @media screen { .ignored { color: #fff; } }
+        @supports (display: grid) { .ignored { color: #fff; } }
         .sidebar, #main > p { color: #123456; font-size: 18px }
         p { margin: 4px 8px !important; }
     )");
-    check(rules.size() == 3, "comments and at-rules skipped");
+    check(rules.size() == 3, "comments and unimplemented at-rules skipped");
     if (rules.size() < 3) {
         return;
     }
@@ -2263,6 +2263,107 @@ void testFlexBoxSizingIsNotAppliedTwice() {
     checkNear(c->layoutHeight(), 70.0f, 0.5f, "a border-box column item keeps its height");
 }
 
+// `@media` was dropped whole, so a stylesheet written for a browser could not
+// adapt to the window: every breakpoint in it silently never applied.
+void testMediaQueries() {
+    const auto rules = sui::CSSParser::parse(
+        ".a { color: #fff }"
+        "@media screen { .b { color: #fff } }"
+        "@media (max-width: 768px) { .c { color: #fff } }"
+        "@media (min-width: 600px) and (max-width: 900px) { .d { color: #fff } }"
+        "@media (min-width: 600px), (min-height: 600px) { .e { color: #fff } }"
+        "@media not print { .f { color: #fff } }"
+        "@media (orientation: landscape) { .g { color: #fff } }"
+        "@media (hover: hover) { .h { color: #fff } }"
+        "@media print { .i { color: #fff } }"
+        "@media (max-height: 50vw) { .j { color: #fff } }");
+    check(rules.size() == 10, "an @media block contributes its rules instead of being skipped");
+    if (rules.size() < 10) {
+        return;
+    }
+
+    check(rules[0].media.empty(), "a rule outside any @media is unconditional");
+    check(rules[1].media.size() == 1 && rules[1].media[0].type == "screen",
+          "@media screen records the media type");
+
+    const auto& upper = rules[2].media[0];
+    check(upper.features.size() == 1, "(max-width: 768px) is one feature");
+    check(upper.features[0].kind == sui::MediaFeature::Kind::Width &&
+              upper.features[0].op == sui::MediaFeature::Op::Le &&
+              upper.features[0].number == 768.0f,
+          "max-width is read as a width upper bound");
+    check(rules[3].media[0].features.size() == 2, "and joins two features into one query");
+    check(rules[4].media.size() == 2, "a comma joins two alternatives");
+    check(rules[5].media[0].negate, "not is kept so it can negate the whole query");
+    check(rules[6].media[0].features.size() == 1 &&
+              rules[6].media[0].features[0].kind == sui::MediaFeature::Kind::Orientation,
+          "orientation is recognised");
+    check(rules[7].media[0].features.size() == 1 &&
+              rules[7].media[0].features[0].kind == sui::MediaFeature::Kind::Unknown,
+          "a feature the engine has no value for is kept as unknown rather than dropped");
+    check(rules[8].media[0].type == "print", "@media print records its type");
+    check(rules[9].media[0].features[0].unit == sui::MediaFeature::Unit::Vw &&
+              rules[9].media[0].features[0].kind == sui::MediaFeature::Kind::Height,
+          "a viewport unit is kept for evaluation against the viewport");
+
+    const auto matches = [](const sui::Rule& rule, float w, float h) {
+        return sui::mediaMatches(rule.media, w, h);
+    };
+    check(matches(rules[1], 700, 500), "the screen type matches what the engine draws to");
+    check(!matches(rules[8], 700, 500), "the print type does not match a screen engine");
+    check(matches(rules[2], 700, 500), "max-width matches below the breakpoint");
+    check(!matches(rules[2], 800, 500), "max-width misses above the breakpoint");
+    check(matches(rules[2], 768, 500), "max-width is inclusive at the breakpoint");
+    check(matches(rules[3], 700, 500), "a range matches inside itself");
+    check(!matches(rules[3], 500, 500), "a range misses below itself");
+    check(!matches(rules[3], 950, 500), "a range misses above itself");
+    check(matches(rules[4], 700, 500), "the first alternative matches on its own");
+    check(matches(rules[4], 500, 700), "the second alternative matches on its own");
+    check(!matches(rules[4], 500, 500), "neither alternative matching means the query does not");
+    check(matches(rules[5], 700, 500), "not print matches a screen");
+    check(matches(rules[6], 1000, 500), "orientation: landscape matches a wide viewport");
+    check(!matches(rules[6], 500, 1000), "orientation: landscape misses a tall one");
+    check(!matches(rules[7], 700, 500), "an unsupported feature makes its query match nothing");
+    check(!matches(rules[9], 900, 500),
+          "vw resolves against the viewport width even in a height feature");
+    check(matches(rules[9], 900, 400),
+          "the same query matches once the height falls under that width-derived bound");
+
+    // Nesting has to hold at both levels.
+    const auto nested = sui::CSSParser::parse(
+        "@media (min-width: 600px) { @media (orientation: landscape) { .n { color: #fff } } }");
+    check(nested.size() == 1, "a nested @media still produces its rule");
+    if (nested.size() == 1) {
+        check(nested[0].media.size() == 1 && nested[0].media[0].features.size() == 2,
+              "a nested @media is merged with its parent rather than replacing it");
+        check(sui::mediaMatches(nested[0].media, 700, 500), "a merged query needs both levels");
+        check(!sui::mediaMatches(nested[0].media, 700, 900), "a merged query fails on the inner level");
+        check(!sui::mediaMatches(nested[0].media, 500, 500), "a merged query fails on the outer level");
+    }
+
+    // End to end: which rule wins depends on the viewport, and changing it makes
+    // the next resolve see the other breakpoint.
+    auto document = parseOrNull("<sui><body><div id=\"t\">x</div></body></sui>");
+    Element* t = document ? document->getElementById("t") : nullptr;
+    if (!t) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#t { width: 10px }"
+        "@media (min-width: 600px) { #t { width: 200px } }"));
+    resolver.setViewportSize(500, 400);
+    checkNear(resolver.resolve(*t).width.resolve(0.0f, 16.0f, 16.0f), 10.0f, 0.01f,
+              "below the breakpoint the plain rule wins");
+    const std::uint64_t before = resolver.generation();
+    check(resolver.setViewportSize(900, 400), "a viewport that actually changes is reported");
+    check(!resolver.setViewportSize(900, 400), "repeating the same size changes nothing");
+    check(resolver.generation() > before, "changing the viewport bumps the generation");
+    checkNear(resolver.resolve(*t).width.resolve(0.0f, 16.0f, 16.0f), 200.0f, 0.01f,
+              "above the breakpoint the @media rule wins");
+    check(!resolver.setViewportSize(0, 400), "a zero dimension is not accepted as a viewport");
+}
+
 int main() {
     testRuleParsing();
     testSelectorMatching();
@@ -2273,6 +2374,7 @@ int main() {
     testPseudoElements();
     testImportantAndCssWideKeywords();
     testBorderWidthLonghands();
+    testMediaQueries();
     testCascade();
     testPropertyParsing();
     testBlockStacking();

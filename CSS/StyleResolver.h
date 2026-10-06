@@ -56,6 +56,15 @@ public:
     float rootFontSize() const noexcept { return rootFontSize_; }
     void setRootFontSize(float size);
 
+    // The viewport every `@media` is evaluated against, in CSS pixels. It starts
+    // at 0x0, so a rule under `max-width` matches until the application reports a
+    // size — which is why the application has to set this before the first
+    // resolve. Changing it bumps the generation, so the frame loop re-resolves
+    // and a resize switches breakpoints the same way the initial size does.
+    bool setViewportSize(float width, float height);
+    float viewportWidth() const noexcept { return viewportWidth_; }
+    float viewportHeight() const noexcept { return viewportHeight_; }
+
     // Interactive state the pseudo-classes are matched against. Each setter
     // returns whether anything changed, so the caller only re-lays-out on a real
     // transition rather than on every mouse move.
@@ -71,6 +80,8 @@ private:
     std::vector<Rule> rules_;
     std::uint64_t generation_ = 0;
     float rootFontSize_ = 16.0f;
+    float viewportWidth_ = 0.0f;
+    float viewportHeight_ = 0.0f;
     PseudoState state_;
 };
 

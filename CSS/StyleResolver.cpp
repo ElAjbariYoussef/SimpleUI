@@ -2059,6 +2059,12 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
             : std::vector<Declaration>{};
     const auto applyLevel = [&](bool important) {
         for (const auto& rule : rules_) {
+            // Only a rule under an `@media` pays for evaluating one, which keeps
+            // an ordinary stylesheet at the cost it had before.
+            if (!rule.media.empty() &&
+                !mediaMatches(rule.media, viewportWidth_, viewportHeight_)) {
+                continue;
+            }
             if (!selectorMatches(rule.selector, element, &state_)) {
                 continue;
             }
@@ -2096,6 +2102,19 @@ void StyleResolver::setRootFontSize(float size) {
         rootFontSize_ = size;
         ++generation_;
     }
+}
+
+// A viewport change re-decides which `@media` blocks apply, so it has to bump the
+// same generation the frame loop watches — otherwise a resize would re-lay-out
+// with the styles of the previous size.
+bool StyleResolver::setViewportSize(float width, float height) {
+    if (width <= 0.0f || height <= 0.0f || (width == viewportWidth_ && height == viewportHeight_)) {
+        return false;
+    }
+    viewportWidth_ = width;
+    viewportHeight_ = height;
+    ++generation_;
+    return true;
 }
 
 // Interactive state is part of the resolution input, so a change to it has to bump

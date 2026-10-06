@@ -720,6 +720,16 @@ void Application::run() {
     // Scripts placed before <body> run before anything is drawn.
     runScripts(false);
 
+    // `@media` is evaluated against the viewport and the resolver starts with
+    // none, so an unreported size would read as 0x0 and let every `max-width`
+    // rule through. Report it before the first resolve, not after it.
+    {
+        int width = 0;
+        int height = 0;
+        platform_->windowSize(width, height);
+        resolver_.setViewportSize(static_cast<float>(width), static_cast<float>(height));
+    }
+
     // `rem` and `font-size: <percentage>` on the root resolve against the
     // document's own font size, so it has to be known before the first layout.
     if (Element* body = document_->querySelector("body")) {
@@ -803,6 +813,10 @@ void Application::run() {
             viewportWidth_ = width;
             viewportHeight_ = height;
             platform_->setViewportSize(width, height);
+            // A resize re-decides which `@media` blocks apply, so the resolver has
+            // to hear about it in the same pass that re-lays-out. The generation
+            // bump is also what makes the frame loop below treat the page stale.
+            resolver_.setViewportSize(static_cast<float>(width), static_cast<float>(height));
         }
 
         // An idle page repaints nothing. DOM mutations, stylesheet changes,
