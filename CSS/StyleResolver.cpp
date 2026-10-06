@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <set>
+#include <string_view>
 
 namespace sui {
 namespace {
@@ -1285,6 +1287,20 @@ void applyBackgroundLonghand(ComputedStyle& s, std::string_view property,
 }
 
 
+// A property the engine does not implement is dropped by CSS anyway, but saying so
+// here is what makes the gap debuggable: it turns a hover rule with an unsupported
+// `transition` in it from "hover is broken" into a message. Logged once per name,
+// because resolve() walks every element of every stale frame and a repeat would
+// bury everything else in the log.
+void warnUnknownProperty(std::string_view property) {
+    static std::set<std::string, std::less<>> reported;
+    if (reported.emplace(property).second) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "ignoring unsupported CSS property '%.*s'",
+                    static_cast<int>(property.size()), property.data());
+    }
+}
+
+
 void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontSize) {
     const std::string& property = decl.property;
     const std::string_view value = trim(decl.value);
@@ -1338,6 +1354,19 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
     } else if (property == "border-width") {
         applyToSides(value, parseBorderWidth, s.borderWidth.top, s.borderWidth.right,
                      s.borderWidth.bottom, s.borderWidth.left);
+    } else if (property == "border-top-width" || property == "border-width-top") {
+        // `border-top-width` is the CSS spelling and `border-width-top` is the one
+        // this engine opened with, which getComputedStyle has always answered to.
+        // Both are accepted: these four were readable but had no setter at all, so
+        // writing one was reported as an unknown property while reading it back
+        // looked correct.
+        s.borderWidth.top = parseBorderWidth(value);
+    } else if (property == "border-right-width" || property == "border-width-right") {
+        s.borderWidth.right = parseBorderWidth(value);
+    } else if (property == "border-bottom-width" || property == "border-width-bottom") {
+        s.borderWidth.bottom = parseBorderWidth(value);
+    } else if (property == "border-left-width" || property == "border-width-left") {
+        s.borderWidth.left = parseBorderWidth(value);
     } else if (property == "border") {
         // Width, style and colour in any order, one value each; an unknown token is
         // dropped rather than guessed at, as an invalid declaration should be.
@@ -1582,6 +1611,8 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         }
     } else if (property == "visibility") {
         s.visible = parseBool(value);
+    } else {
+        warnUnknownProperty(property);
     }
 }
 
@@ -1672,9 +1703,60 @@ bool compoundMatches(const Selector& part, const Element& element) {
             if (!element.hasAttribute(part.value)) {
                 return false;
             }
-            // An empty `attributeValue` is the presence test `[data-role]`.
-            return part.attributeValue.empty() ||
-                   element.attribute(part.value) == part.attributeValue;
+            if (part.attributeOp == '\0') {
+                return true;  // `[data-role]`, the presence test
+            }
+            const std::string_view actual = element.attribute(part.value);
+            const std::string& wanted = part.attributeValue;
+            switch (part.attributeOp) {
+                case '=':
+                    return actual == wanted;
+                // Word list, for `class="a b c"`. Empty wanted cannot appear in
+                // practice, but would match nothing rather than everything.
+                case '~': {
+                    if (wanted.empty()) {
+                        return false;
+                    }
+                    std::size_t i = 0;
+                    while (i <= actual.size()) {
+                        const std::size_t end = actual.find(' ', i);
+                        const std::size_t stop = end == std::string::npos ? actual.size() : end;
+                        if (actual.compare(i, stop - i, wanted) == 0) {
+                            return true;
+                        }
+                        if (end == std::string::npos) {
+                            break;
+                        }
+                        i = end + 1;
+                    }
+                    return false;
+                }
+                // `|` also treats the whole value as an exact match when it has no
+                // following separator, which is why it cannot be a plain prefix test.
+                case '|': {
+                    if (actual == wanted) {
+                        return true;
+                    }
+                    return actual.size() > wanted.size() &&
+                           actual.compare(0, wanted.size(), wanted) == 0 &&
+                           actual[wanted.size()] == '-';
+                }
+                case '^':
+                    // An empty value is the beginning of every string, so `[att^=""]`
+                    // matches any element with the attribute. That is what the spec's
+                    // "begins with" means, and guarding against empty here would make
+                    // it match nothing instead.
+                    return actual.compare(0, wanted.size(), wanted) == 0;
+                case '$':
+                    if (wanted.size() > actual.size()) {
+                        return false;  // also keeps the offset below from wrapping
+                    }
+                    return actual.compare(actual.size() - wanted.size(), wanted.size(), wanted) ==
+                           0;
+                case '*':
+                    return actual.find(wanted) != std::string::npos;
+            }
+            return false;
         }
     }
     return false;
@@ -1783,10 +1865,14 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "padding-right") return length(style.padding.right);
     if (property == "padding-bottom") return length(style.padding.bottom);
     if (property == "padding-left") return length(style.padding.left);
-    if (property == "border-width-top") return length(style.borderWidth.top);
-    if (property == "border-width-right") return length(style.borderWidth.right);
-    if (property == "border-width-bottom") return length(style.borderWidth.bottom);
-    if (property == "border-width-left") return length(style.borderWidth.left);
+    if (property == "border-width-top" || property == "border-top-width")
+        return length(style.borderWidth.top);
+    if (property == "border-width-right" || property == "border-right-width")
+        return length(style.borderWidth.right);
+    if (property == "border-width-bottom" || property == "border-bottom-width")
+        return length(style.borderWidth.bottom);
+    if (property == "border-width-left" || property == "border-left-width")
+        return length(style.borderWidth.left);
     if (property == "flex-direction") {
         switch (style.flexDirection) {
             case ComputedStyle::Row: return "row";

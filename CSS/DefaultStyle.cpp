@@ -85,6 +85,29 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
         return s;
     }
 
+    // Phrasing tags. They have to stay inline: defaulted to block, each one forces a
+    // line break and the text either side of it lays out into no run at all, so it is
+    // never drawn. That made these the one gap here that damages correct markup
+    // rather than merely failing to decorate it.
+    //
+    // Deliberately only `mark`: `text-decoration` and `font-style` are unimplemented,
+    // and `font-family` is stored but never used to choose a font, so UA rules for
+    // underline, italic and monospace would be declarations that do nothing -- which
+    // is the failure mode this milestone exists to remove.
+    if (tag == "u" || tag == "s" || tag == "big" || tag == "kbd" || tag == "samp" ||
+        tag == "var" || tag == "q" || tag == "cite" || tag == "abbr" || tag == "mark" ||
+        tag == "del" || tag == "ins" || tag == "time" || tag == "data" || tag == "bdi" ||
+        tag == "bdo" || tag == "wbr") {
+        Style s;
+        s.display = Style::Inline;
+        if (tag == "mark") {
+            s.backgroundColor = {255, 255, 0, 255};
+            s.color = {0, 0, 0, 255};
+            s.specified = Style::SpecifiedColor;
+        }
+        return s;
+    }
+
     if (tag == "button") {
         Style s;
         s.display = Style::InlineBlock;

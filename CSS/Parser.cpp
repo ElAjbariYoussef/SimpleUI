@@ -74,8 +74,8 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
             while (i < src.size() && isIdentChar(src[i])) {
                 ++i;
             }
-            out.parts.push_back(
-                {kind, std::string(src.substr(nameStart, i - nameStart)), {}});
+            out.parts.push_back({kind, std::string(src.substr(nameStart, i - nameStart)),
+                                 '\0', {}});
             continue;
         }
         if (c == ':' && i + 1 < src.size() && src[i + 1] != ':') {
@@ -133,13 +133,13 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
             while (i < src.size() && isIdentChar(src[i])) {
                 ++i;
             }
-            out.parts.push_back(
-                {Selector::Kind::Type, std::string(src.substr(nameStart, i - nameStart)), {}});
+            out.parts.push_back({Selector::Kind::Type,
+                                 std::string(src.substr(nameStart, i - nameStart)), '\0', {}});
             continue;
         }
         if (c == '*') {
             ++i;
-            out.parts.push_back({Selector::Kind::Universal, std::string(), {}});
+            out.parts.push_back({Selector::Kind::Universal, std::string(), '\0', {}});
             continue;
         }
         if (c == '[') {
@@ -150,13 +150,32 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
             }
             const std::string name(src.substr(nameStart, i - nameStart));
             std::string value;
-            // `[attr]` tests presence; `[attr="v"]` compares the value. The
-            // operator (~= |= ^= $= *=) and any quotes are skipped, then whatever
-            // is left up to the bracket is the value to match against.
-            while (i < src.size() && (isSpace(src[i]) || src[i] == '=' || src[i] == '~' ||
-                                      src[i] == '|' || src[i] == '^' || src[i] == '$' ||
-                                      src[i] == '*')) {
+            // `[attr]` is the presence test and stops here. Anything else compares,
+            // and the operator is read rather than skipped: skipping it is what made
+            // `[href^="http"]` an exact match on the three letters `http`, which the
+            // engine reported as understood because nothing looked malformed.
+            char op = '\0';
+            while (i < src.size() && isSpace(src[i])) {
                 ++i;
+            }
+            if (i < src.size() && src[i] != ']') {
+                if (src[i] == '~' || src[i] == '|' || src[i] == '^' || src[i] == '$' ||
+                    src[i] == '*') {
+                    op = src[i++];
+                    while (i < src.size() && isSpace(src[i])) {
+                        ++i;
+                    }
+                }
+                if (i < src.size() && src[i] == '=') {
+                    ++i;
+                    if (op == '\0') {
+                        op = '=';
+                    }
+                } else {
+                    // `[attr ~ v]` and `[attr v]` are both malformed. Matching the
+                    // wrong way round would be worse than matching nothing.
+                    out.unsupported = true;
+                }
             }
             if (i < src.size() && (src[i] == '"' || src[i] == '\'')) {
                 const char quote = src[i++];
@@ -184,6 +203,7 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
             Selector part;
             part.kind = Selector::Kind::Attribute;
             part.value = name;
+            part.attributeOp = op;
             part.attributeValue = value;
             out.parts.push_back(std::move(part));
             continue;

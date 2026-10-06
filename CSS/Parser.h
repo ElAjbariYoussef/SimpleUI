@@ -12,7 +12,10 @@ struct Selector {
     enum class Kind { Type, Class, Id, Universal, Attribute, PseudoElement };
     Kind kind = Kind::Universal;
     std::string value;
-    // Only for Kind::Attribute: empty means "the attribute is present".
+    // Only for Kind::Attribute: the operator read between the name and the value,
+    // one of '=', '~', '|', '^', '$', '*'. '\0' means there was none, which is
+    // the presence test `[data-role]`; an empty value with '=' is `[data-role=""]`.
+    char attributeOp = '\0';
     std::string attributeValue;
 };
 

@@ -231,40 +231,69 @@ void testInteractivePseudoClasses() {
 
 void testAttributeSelectors() {
     auto document = parseOrNull(
-        "<sui><body><div id=\"main\" data-role=\"panel\" data-open></div>"
-        "<div id=\"other\" data-mode=\"aside\"></div></body></sui>");
+        "<sui><body><div id=\"a\" data-role=\"panel aside\" data-lang=\"en-GB\""
+        " data-url=\"https://example.com/page.html\" data-open></div>"
+        "<div id=\"b\" data-role=\"panel\" data-lang=\"en\"></div></body></sui>");
     if (!document) {
         return;
     }
-    Element* main = document->getElementById("main");
-    Element* other = document->getElementById("other");
-    check(main && other, "attribute-selector elements found");
-    if (!main || !other) {
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    check(a && b, "attribute-selector elements found");
+    if (!a || !b) {
         return;
     }
+    const auto sel = [](const char* text) { return sui::CSSParser::parseSelector(text); };
+    const auto on = [&](const char* text, Element& e) { return selectorMatches(sel(text), e); };
 
-    check(selectorMatches(sui::CSSParser::parseSelector("[data-role]"), *main),
-          "attribute presence matches");
-    check(!selectorMatches(sui::CSSParser::parseSelector("[data-role]"), *other),
-          "attribute presence does not match an element without it");
-    check(selectorMatches(sui::CSSParser::parseSelector("[data-open]"), *main),
-          "a valueless attribute is a presence test");
-    check(selectorMatches(sui::CSSParser::parseSelector("[data-role=\"panel\"]"), *main),
-          "attribute value matches when quoted");
-    check(selectorMatches(sui::CSSParser::parseSelector("[data-role=panel]"), *main),
-          "attribute value matches when unquoted");
-    check(!selectorMatches(sui::CSSParser::parseSelector("[data-role=\"panel\"]"), *other),
-          "attribute value does not match a different value");
-    check(!selectorMatches(sui::CSSParser::parseSelector("[data-missing=\"x\"]"), *main),
-          "a missing attribute never matches a value test");
-    // `~=` and friends are parsed the same way but only tested for equality here.
-    check(selectorMatches(sui::CSSParser::parseSelector("[data-role~=\"panel\"]"), *main),
-          "the word-list operator parses and compares the value");
+    // Presence and exact match, the two that were already right.
+    check(on("[data-role]", *a), "attribute presence matches");
+    check(!on("[data-open]", *b), "presence misses an absent attribute");
+    check(on("[data-open]", *a), "a valueless attribute is a presence test");
+    check(on("[data-role=\"panel aside\"]", *a), "attribute value matches when quoted");
+    check(on("[data-role=panel]", *b), "attribute value matches when unquoted");
+    check(!on("[data-role=\"panel aside\"]", *b), "exact match fails on a different value");
+    check(!on("[data-lang=\"en\"]", *a), "exact match does not prefix-match");
+
+    // Every operator must do what it says. Each one used to fall through to exact
+    // equality, so `[data-lang^="en"]` failed against `en-GB`.
+    check(on("[data-lang^=\"en\"]", *a), "^= matches a prefix");
+    check(on("[data-url^=\"https://\"]", *a), "^= matches a multi-character prefix");
+    check(!on("[data-url^=\"http/\"]", *a), "^= is not a naive contains");
+    check(on("[data-url$=\"page.html\"]", *a), "$= matches a suffix");
+    check(!on("[data-url$=\"https\"]", *a), "$= does not match a prefix");
+    check(on("[data-url*=\"example.com\"]", *a), "*= matches a substring");
+    check(on("[data-url*=\"/page\"]", *a), "*= matches a substring mid-word");
+    check(!on("[data-url*=\"nope\"]", *a), "*= misses an absent substring");
+    check(on("[data-role~=\"aside\"]", *a), "~= matches one word of a list");
+    check(on("[data-role~=\"panel\"]", *a), "~= matches every word in a list");
+    check(on("[data-role~=\"panel\"]", *b), "~= works on a single-word value");
+    check(!on("[data-role~=\"panels\"]", *a), "~= is whole words only");
+    check(on("[data-lang|=\"en\"]", *a), "|= matches the full value when no separator follows");
+    check(on("[data-lang|=\"en\"]", *b), "|= matches the exact value");
+    check(!on("[data-lang|=\"e\"]", *a), "|= needs a following hyphen");
+    check(on("[data-lang|=\"en-GB\"]", *a), "|= still matches the exact value");
+
+    // The spec's empty-value behaviour: everything begins with, ends with and contains
+    // the empty string, so these match on presence alone.
+    check(on("[data-url^=\"\"]", *a), "^= with an empty value matches on presence");
+    check(on("[data-url$=\"\"]", *a), "$= with an empty value matches on presence");
+    check(on("[data-url*=\"\"]", *a), "*= with an empty value matches on presence");
+    check(!on("[data-role~=\"\"]", *a), "~= with an empty value matches no word");
+
+    // A suffix longer than the value must not wrap the offset.
+    check(!on("[data-url$=\"https://example.com/does-not-fit\"]", *a),
+          "$= with a value longer than the attribute does not crash");
+
+    // Malformed operators must not silently degrade into equality.
+    check(sel("[data-role ~ panel]").unsupported, "an operator with no = is malformed");
+    check(sel("[data-role panel]").unsupported, "space-separated matching is unsupported");
+    check(!sel("[data-role=panel]").unsupported, "a well-formed selector stays supported");
 
     sui::StyleResolver resolver;
     resolver.setRules(sui::CSSParser::parse(
-        "body{margin:0} div{width:10px;height:5px} [data-role=\"panel\"]{width:99px}"));
-    const auto s = resolver.resolve(*main);
+        "body{margin:0} div{width:10px;height:5px} [data-lang^=\"en\"]{width:99px}"));
+    const auto s = resolver.resolve(*a);
     checkNear(s.width.resolve(0.0f, s.fontSize, 16.0f), 99.0f, 0.01f,
               "an attribute rule beats a type rule");
 }
@@ -490,6 +519,116 @@ void testDefaultStyles() {
     sui::ComputedStyle heading = sui::defaultStyleFor("h1");
     check(heading.fontSize > body.fontSize, "h1 is larger than body text");
     check(heading.fontBold, "h1 is bold");
+}
+
+// Phrasing tags that defaulted to block. Each one forced a line break, and the text
+// either side of it laid out into no run at all, so it was never drawn -- correct
+// markup lost its content rather than simply missing its decoration.
+void testPhrasingTagsStayInline() {
+    const char* phrasing[] = {"u",   "s",    "big", "kbd", "samp", "var", "q",
+                              "cite", "abbr", "mark", "del", "ins",  "time", "data",
+                              "bdi",  "bdo",  "wbr"};
+    for (const char* tag : phrasing) {
+        const std::string what = std::string("<") + tag + "> defaults to inline";
+        const sui::ComputedStyle s = sui::defaultStyleFor(tag);
+        check(s.display == sui::ComputedStyle::Inline, what.c_str());
+    }
+
+    const sui::ComputedStyle mark = sui::defaultStyleFor("mark");
+    check(mark.backgroundColor.r == 255 && mark.backgroundColor.b == 0,
+          "<mark> gets the browser's yellow background");
+    check(mark.specified & sui::ComputedStyle::SpecifiedColor,
+          "<mark>'s colour is flagged as set so inheritance leaves it alone");
+
+    auto document =
+        parseOrNull("<sui><body><p id=\"t\">alpha <u>beta</u> gamma</p></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+    layoutRoot(*document, resolver, 400.0f);
+    Element* p = document->getElementById("t");
+    check(p != nullptr, "paragraph found");
+    if (!p) {
+        return;
+    }
+    // Before the fix this was 0: the block-level <u> pushed its siblings out of the
+    // inline run list, and only "beta" was ever drawn.
+    check(p->textRuns().size() == 3, "text either side of an inline tag still lays out");
+    check(p->layoutHeight() <= 16.0f * 1.2f + 0.5f, "the paragraph stays one line box");
+    const auto& runs = p->textRuns();
+    check(runs.size() == 3 && runs[0].text.find("alpha") != std::string::npos &&
+              runs[1].text.find("beta") != std::string::npos &&
+              runs[2].text.find("gamma") != std::string::npos,
+          "all three pieces survive in document order");
+}
+
+namespace {
+// Captures log lines so a test can assert what the engine said. SDL routes every
+// SDL_Log* call through one function, so this is the only way to check a warning.
+std::vector<std::string> capturedLog;
+std::vector<std::string> resolvedLog;
+
+void captureLog(void*, int, SDL_LogPriority, const char* message) {
+    if (message) {
+        capturedLog.emplace_back(message);
+    }
+}
+}  // namespace
+
+// An unsupported property is dropped by CSS anyway, but silently is what makes a
+// stylesheet undiagnosable here: there is no devtools panel to show a warning.
+void testUnknownPropertyIsReported() {
+    SDL_LogOutputFunction previous = nullptr;
+    void* previousUserdata = nullptr;
+    SDL_GetLogOutputFunction(&previous, &previousUserdata);
+    SDL_SetLogOutputFunction(captureLog, nullptr);
+    // The default filter can sit above WARN depending on how the process started.
+    const SDL_LogPriority previousPriority =
+        SDL_GetLogPriority(SDL_LOG_CATEGORY_APPLICATION);
+    SDL_SetLogPriority(SDL_LOG_CATEGORY_APPLICATION, SDL_LOG_PRIORITY_VERBOSE);
+
+    capturedLog.clear();
+
+    auto document = parseOrNull("<sui><body><div id=\"x\">x</div></body></sui>");
+    if (document) {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("div { cursor: pointer; width: 10px }"));
+        resolver.resolve(*document->getElementById("x"));
+        resolvedLog = capturedLog;
+        const std::size_t afterFirst = capturedLog.size();
+
+        // Resolve again: resolve() walks every element of every stale frame, so
+        // without dedupe a single unsupported property would flood the log forever.
+        resolver.resolve(*document->getElementById("x"));
+        resolver.resolve(*document->getElementById("x"));
+        check(capturedLog.size() == afterFirst,
+              "repeating the resolve does not repeat the warning");
+    }
+
+    auto mentions = [](const char* property) {
+        for (const auto& line : resolvedLog) {
+            if (line.find(property) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+    check(mentions("cursor"), "an unsupported property is logged by name");
+    check(!mentions("width"), "a supported property is not reported");
+
+    // A different unsupported property is its own report; dedupe is per name.
+    capturedLog.clear();
+    if (document) {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("div { transition: color 1s }"));
+        resolver.resolve(*document->getElementById("x"));
+    }
+    check(capturedLog.size() > 0, "each unsupported property is reported once");
+
+    SDL_SetLogOutputFunction(previous, previousUserdata);
+    SDL_SetLogPriority(SDL_LOG_CATEGORY_APPLICATION, previousPriority);
 }
 
 void testLengthUnits() {
@@ -1410,12 +1549,45 @@ void testImportantAndCssWideKeywords() {
     checkNear(r6.resolve(*t).width.resolve(0.0f, 16.0f, 16.0f), 80.0f, 0.01f,
               "width:unset leaves the earlier declaration alone");
 
-    // `initial` and `revert` are not implemented and must not be mistaken for
-    // lengths: they leave the property exactly as the UA left it.
+    // `initial` and `revert` are not implemented: an unparseable token resolves to
+    // auto rather than to a number, and for a border side that is where the UA
+    // starts, so nothing moves.
     sui::StyleResolver r7;
     r7.setRules(sui::CSSParser::parse("#t{border-width-left:initial}"));
     check(r7.resolve(*t).borderWidth.left.isAuto(),
           "border-width-left is untouched by an unknown keyword");
+}
+
+// These four were readable through propertyValue() but had no setter branch, so
+// writing one was reported as an unknown property while reading it back looked
+// correct. CSS spells them `border-*-width`; the engine's own spelling is
+// `border-width-*`, and both are now accepted either way round.
+void testBorderWidthLonghands() {
+    auto document = parseOrNull("<sui><body><div id=\"t\">x</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* t = document->getElementById("t");
+    if (!t) {
+        return;
+    }
+
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#t{border-left-width:4px;border-top-width:6px;border-width-right:8px}"));
+    const auto s = resolver.resolve(*t);
+    checkNear(s.borderWidth.left.resolve(0.0f, 16.0f, 16.0f), 4.0f, 0.01f,
+              "border-left-width sets the left side");
+    checkNear(s.borderWidth.top.resolve(0.0f, 16.0f, 16.0f), 6.0f, 0.01f,
+              "border-top-width sets the top side");
+    checkNear(s.borderWidth.right.resolve(0.0f, 16.0f, 16.0f), 8.0f, 0.01f,
+              "the legacy border-width-right spelling still sets the right side");
+    check(s.borderWidth.bottom.isAuto(), "the sides no rule names are left alone");
+
+    check(sui::StyleResolver::propertyValue(s, "border-left-width") == "4px",
+          "the CSS spelling reads back");
+    check(sui::StyleResolver::propertyValue(s, "border-width-left") == "4px",
+          "the legacy spelling reads back too");
 }
 
 void testPositioning() {
@@ -2100,6 +2272,7 @@ int main() {
     testWhiteSpace();
     testPseudoElements();
     testImportantAndCssWideKeywords();
+    testBorderWidthLonghands();
     testCascade();
     testPropertyParsing();
     testBlockStacking();
@@ -2109,6 +2282,8 @@ int main() {
     testInheritance();
     testChildOverridesInherited();
     testDefaultStyles();
+    testPhrasingTagsStayInline();
+    testUnknownPropertyIsReported();
     testCommentsInsideDeclarationBlocks();
     testUnitsEndToEnd();
     testFlexRowBasics();
