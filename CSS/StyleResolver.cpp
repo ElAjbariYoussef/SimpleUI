@@ -1171,7 +1171,9 @@ bool parseGridTrack(std::string_view token, ComputedStyle::GridTrack& out) {
     return true;
 }
 
-std::vector<ComputedStyle::GridTrack> parseGridTrackList(std::string_view value) {
+std::vector<ComputedStyle::GridTrack> parseGridTrackList(std::string_view value,
+                                                        bool* autoFill = nullptr,
+                                                        bool* autoFit = nullptr) {
     std::vector<ComputedStyle::GridTrack> out;
     const std::string_view text = trim(value);
     const std::vector<std::string_view> tokens = splitTopLevelSpaces(text);
@@ -1203,12 +1205,36 @@ std::vector<ComputedStyle::GridTrack> parseGridTrackList(std::string_view value)
             }
             const std::string_view countText =
                 trim(std::string_view(group).substr(open + 1, comma - open - 1));
+            const std::string_view body =
+                std::string_view(group).substr(comma + 1, close - comma - 1);
+
+            // `auto-fill` / `auto-fit` have no fixed count: the body is stored and
+            // the layout repeats it to fill the container. Only the all-in-one
+            // `repeat(...)` form is handled; a mix with explicit tracks falls back
+            // to ignoring the repeat.
+            if (countText == "auto-fill" || countText == "auto-fit") {
+                if (tokens.size() != 1) {
+                    continue;
+                }
+                for (const std::string_view piece : splitTopLevelSpaces(trim(body))) {
+                    ComputedStyle::GridTrack track;
+                    if (parseGridTrack(piece, track)) {
+                        out.push_back(track);
+                    }
+                }
+                if (autoFill) {
+                    *autoFill = true;
+                }
+                if (autoFit) {
+                    *autoFit = countText == "auto-fit";
+                }
+                return out;
+            }
+
             const int count = std::atoi(std::string(countText).c_str());
             if (count <= 0) {
                 continue;
             }
-            const std::string_view body =
-                std::string_view(group).substr(comma + 1, close - comma - 1);
             const std::vector<std::string_view> inner = splitTopLevelSpaces(trim(body));
             for (int n = 0; n < count; ++n) {
                 for (const std::string_view piece : inner) {
@@ -2108,9 +2134,14 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.display = ComputedStyle::Block;
         }
     } else if (property == "grid-template-columns") {
-        s.gridColumns = parseGridTrackList(value);
+        s.gridColumnsAutoFill = false;
+        s.gridColumnsAutoFit = false;
+        s.gridColumns = parseGridTrackList(value, &s.gridColumnsAutoFill,
+                                          &s.gridColumnsAutoFit);
     } else if (property == "grid-template-rows") {
-        s.gridRows = parseGridTrackList(value);
+        s.gridRowsAutoFill = false;
+        s.gridRowsAutoFit = false;
+        s.gridRows = parseGridTrackList(value, &s.gridRowsAutoFill, &s.gridRowsAutoFit);
     } else if (property == "width") {
         s.width = parseLength(value);
     } else if (property == "height") {
@@ -2816,8 +2847,10 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         return {};
     }
     if (property == "grid-template-columns" || property == "grid-template-rows") {
-        const auto& tracks =
-            property == "grid-template-columns" ? style.gridColumns : style.gridRows;
+        const bool columns = property == "grid-template-columns";
+        const auto& tracks = columns ? style.gridColumns : style.gridRows;
+        const bool autoFill = columns ? style.gridColumnsAutoFill : style.gridRowsAutoFill;
+        const bool autoFit = columns ? style.gridColumnsAutoFit : style.gridRowsAutoFit;
         std::string out;
         for (const ComputedStyle::GridTrack& track : tracks) {
             if (!out.empty()) {
@@ -2836,6 +2869,10 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             } else {
                 out += max;
             }
+        }
+        if (autoFill) {
+            out = "repeat(" + std::string(autoFit ? "auto-fit" : "auto-fill") + ", " + out +
+                  ")";
         }
         return out;
     }

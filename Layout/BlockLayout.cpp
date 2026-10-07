@@ -1018,6 +1018,45 @@ private:
             only.isAuto = true;
             columns.push_back(only);
         }
+        // `repeat(auto-fill/auto-fit, <body>)`: the stored list is one repetition of
+        // the body, so repeat it to as many tracks as the container fits, each at
+        // least as wide as the body's own minimum. `auto-fit` drops the tracks no
+        // item lands in, which for this row-major placement is the same as capping
+        // the count at the number of items.
+        if (s.gridColumnsAutoFill && !columns.empty()) {
+            const float em = s.fontSize;
+            const float rem = resolver_.rootFontSize();
+            const float autoGap = std::max(0.0f, s.columnGap);
+            float bodyMin = 0.0f;
+            for (const ComputedStyle::GridTrack& track : columns) {
+                float floorSize =
+                    track.hasMin ? track.minSize.resolve(contentWidth, em, rem) : 0.0f;
+                if (!track.isFr && !track.isAuto) {
+                    floorSize = std::max(floorSize, track.size.resolve(contentWidth, em, rem));
+                }
+                bodyMin += std::max(0.0f, floorSize);
+            }
+            bodyMin += autoGap * static_cast<float>(columns.size() - 1);
+            const float denominator = bodyMin + autoGap;
+            std::size_t repeatCount =
+                denominator > 0.0f
+                    ? static_cast<std::size_t>(std::floor((contentWidth + autoGap) / denominator))
+                    : 1;
+            if (repeatCount < 1) {
+                repeatCount = 1;
+            }
+            if (s.gridColumnsAutoFit && !children.empty()) {
+                repeatCount = std::min(repeatCount, children.size());
+            }
+            std::vector<ComputedStyle::GridTrack> expanded;
+            expanded.reserve(repeatCount * columns.size());
+            for (std::size_t n = 0; n < repeatCount; ++n) {
+                for (const ComputedStyle::GridTrack& track : columns) {
+                    expanded.push_back(track);
+                }
+            }
+            columns = std::move(expanded);
+        }
         const std::size_t columnCount = columns.size();
         const std::size_t rowCount =
             children.empty() ? 0 : (children.size() + columnCount - 1) / columnCount;

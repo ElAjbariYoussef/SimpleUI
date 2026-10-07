@@ -433,6 +433,13 @@ struct ComputedStyle {
     };
     std::vector<GridTrack> gridColumns;
     std::vector<GridTrack> gridRows;
+    // Set when the track list is a single `repeat(auto-fill, ...)` / `repeat(auto-fit,
+    // ...)`. The body is stored in gridColumns/gridRows and layout repeats it to as
+    // many tracks as fit the container; `autoFit` collapses the leftovers.
+    bool gridColumnsAutoFill = false;
+    bool gridColumnsAutoFit = false;
+    bool gridRowsAutoFill = false;
+    bool gridRowsAutoFit = false;
 
     // Custom properties (`--name`). They are values, not styles: nothing types or
     // validates them, and `var(--name)` resolves against them once this element's

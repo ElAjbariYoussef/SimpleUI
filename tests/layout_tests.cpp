@@ -532,6 +532,56 @@ void testGridMinmax() {
     }
 }
 
+void testGridAutoFill() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"t\"><i></i><i></i><i></i><i></i></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body{margin:0} #t{display:grid;"
+        "grid-template-columns:repeat(auto-fill,minmax(100px,1fr));"
+        "width:350px;height:80px} #t i{height:10px}"));
+    layoutRoot(*document, resolver, 500.0f);
+
+    Element* t = document->getElementById("t");
+    if (t && t->children().size() == 4) {
+        // Three 100px tracks fit in 350px; the 50px left over is shared by their fr
+        // maxima, so each track is ~116.67px and the third starts at ~233.33px.
+        checkNear(t->children()[1]->layoutX(), 116.667f, 1.0f,
+                  "auto-fill repeats the body to fill the row");
+        checkNear(t->children()[2]->layoutX(), 233.333f, 1.0f,
+                  "the third auto-fill track follows the second");
+        checkNear(t->children()[3]->layoutY(), 10.0f, 1.0f,
+                  "the fourth item wraps to a second row");
+    }
+    if (t) {
+        const ComputedStyle s = resolver.resolve(*t);
+        check(sui::StyleResolver::propertyValue(s, "grid-template-columns") ==
+                  "repeat(auto-fill, minmax(100px, 1fr))",
+              "auto-fill serialises back");
+    }
+
+    // auto-fit drops tracks no item uses, so two items get two wide tracks rather
+    // than three narrow ones.
+    auto fit = parseOrNull("<sui><body><div id=\"f\"><i></i><i></i></div></body></sui>");
+    if (!fit) {
+        return;
+    }
+    sui::StyleResolver fitResolver;
+    fitResolver.setRules(sui::CSSParser::parse(
+        "body{margin:0} #f{display:grid;"
+        "grid-template-columns:repeat(auto-fit,minmax(100px,1fr));"
+        "width:350px;height:40px} #f i{height:10px}"));
+    layoutRoot(*fit, fitResolver, 500.0f);
+    Element* f = fit->getElementById("f");
+    if (f && f->children().size() == 2) {
+        checkNear(f->children()[1]->layoutX(), 175.0f, 1.0f,
+                  "auto-fit collapses unused tracks");
+    }
+}
+
 void testPropertyParsing() {
     auto document = parseOrNull("<sui><body><div>x</div></body></sui>");
     if (!document) {
@@ -3267,6 +3317,7 @@ int main() {
     testGridAlignment();
     testInputValue();
     testGridMinmax();
+    testGridAutoFill();
     testBlockStacking();
     testNestedContainer();
     testTextWrappingAndBr();
