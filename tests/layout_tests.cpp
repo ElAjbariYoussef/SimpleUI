@@ -127,8 +127,20 @@ void testSelectorMatching() {
           "a pseudo-element selector matches nothing");
     check(selectorMatches(sui::CSSParser::parseSelector("div:first-child"), *div),
           "first-child matches the first child of its parent");
-    check(!selectorMatches(sui::CSSParser::parseSelector("p:nth-child(2)"), *paragraph),
-          "nth-child(2) does not match the only child");
+    check(selectorMatches(sui::CSSParser::parseSelector("p:nth-child(1)"), *paragraph),
+          "nth-child(1) matches the only child");
+    check(selectorMatches(sui::CSSParser::parseSelector("p:nth-child(odd)"), *paragraph),
+          "nth-child(odd) matches the first child");
+    check(!selectorMatches(sui::CSSParser::parseSelector("p:nth-child(even)"), *paragraph),
+          "nth-child(even) misses the first child");
+    check(selectorMatches(sui::CSSParser::parseSelector("p:not(.missing)"), *paragraph),
+          ":not() matches when the inner selector misses");
+    check(!selectorMatches(sui::CSSParser::parseSelector("p:not(p)"), *paragraph),
+          ":not() rejects when the inner selector hits");
+    check(selectorMatches(sui::CSSParser::parseSelector("p:is(.missing, p)"), *paragraph),
+          ":is() matches when any branch matches");
+    check(!selectorMatches(sui::CSSParser::parseSelector("p:is(.missing, .absent)"), *paragraph),
+          ":is() rejects when no branch matches");
 }
 
 void testInteractivePseudoClasses() {

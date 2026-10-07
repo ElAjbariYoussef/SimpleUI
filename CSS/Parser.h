@@ -32,6 +32,11 @@ struct SimpleSelector {
     // Combinator linking parts[i] to parts[i + 1].
     std::vector<Combinator> combinators;
     std::vector<PseudoClass> pseudoClasses;
+    // The argument of a functional pseudo-class (`:nth-child(2)`, `:not(.x)`,
+    // `:is(a, b)`), stored verbatim without the surrounding parentheses. Only the
+    // last one is kept, which is enough for the single functional pseudo a compound
+    // selector carries in practice.
+    std::string pseudoArgument;
     // Set when the selector used something the engine cannot evaluate, such as a
     // pseudo-element or an unknown pseudo-class. It then matches nothing at all:
     // dropping the unknown part and matching the rest would make `#t:hover` apply

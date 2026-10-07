@@ -91,8 +91,8 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
                 ++i;
             }
             const std::string_view name = src.substr(nameStart, i - nameStart);
-            // The three interactive states are the only pseudo-classes the engine
-            // evaluates. Anything else leaves the selector matching nothing rather
+            // The interactive states plus the structural pseudo-classes the engine
+            // can evaluate. Anything else leaves the selector matching nothing rather
             // than silently matching every element the rest of it describes.
             if (name == "hover") {
                 out.pseudoClasses.push_back(PseudoClass::Hover);
@@ -119,10 +119,16 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
             if (i < src.size() && src[i] == '(') {
                 int depth = 1;
                 ++i;
+                const std::size_t argStart = i;
                 while (i < src.size() && depth > 0) {
                     if (src[i] == '(') ++depth;
                     if (src[i] == ')') --depth;
                     ++i;
+                }
+                const std::size_t argEnd = depth == 0 ? i - 1 : i;
+                if (argEnd > argStart) {
+                    out.pseudoArgument =
+                        std::string(src.substr(argStart, argEnd - argStart));
                 }
             }
             continue;

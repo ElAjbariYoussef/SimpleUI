@@ -2677,6 +2677,80 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     return {};
 }
 
+// Splits an `:is(...)` / `:not(...)` argument on top-level commas and parses each
+// branch. Commas nested inside another functional pseudo are ignored so that
+// `:not(:is(a, b))` stays one branch.
+std::vector<SimpleSelector> parseSelectorList(std::string_view text) {
+    std::vector<SimpleSelector> out;
+    std::size_t start = 0;
+    int depth = 0;
+    for (std::size_t i = 0; i <= text.size(); ++i) {
+        const bool atEnd = i == text.size();
+        const char c = atEnd ? '\0' : text[i];
+        if (!atEnd && c == '(') {
+            ++depth;
+        } else if (!atEnd && c == ')') {
+            --depth;
+        }
+        if (atEnd || (c == ',' && depth == 0)) {
+            std::string_view piece = text.substr(start, i - start);
+            while (!piece.empty() && std::isspace(static_cast<unsigned char>(piece.front()))) {
+                piece.remove_prefix(1);
+            }
+            while (!piece.empty() && std::isspace(static_cast<unsigned char>(piece.back()))) {
+                piece.remove_suffix(1);
+            }
+            if (!piece.empty()) {
+                out.push_back(CSSParser::parseSelector(piece));
+            }
+            start = i + 1;
+        }
+    }
+    return out;
+}
+
+// Evaluates the An+B microsyntax `:nth-child()` accepts, against a 1-based index.
+bool nthChildMatches(std::string_view arg, int index) {
+    std::string s;
+    for (char c : arg) {
+        if (!std::isspace(static_cast<unsigned char>(c))) {
+            s.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        }
+    }
+    if (s.empty()) {
+        return false;
+    }
+    if (s == "odd") {
+        return index % 2 == 1;
+    }
+    if (s == "even") {
+        return index % 2 == 0;
+    }
+    const std::size_t n = s.find('n');
+    if (n == std::string::npos) {
+        return std::atoi(s.c_str()) == index;
+    }
+    // An+B: the part before `n` is A (empty means 1, "-" means -1), the part after
+    // is a signed B offset that may be absent.
+    const std::string_view aPart = std::string_view(s).substr(0, n);
+    int a = 1;
+    if (aPart == "-") {
+        a = -1;
+    } else if (!aPart.empty()) {
+        a = std::atoi(std::string(aPart).c_str());
+    }
+    int b = 0;
+    const std::string_view bPart = std::string_view(s).substr(n + 1);
+    if (!bPart.empty()) {
+        b = std::atoi(std::string(bPart).c_str());
+    }
+    if (a == 0) {
+        return index == b;
+    }
+    const int diff = index - b;
+    return diff % a == 0 && diff / a >= 0;
+}
+
 bool selectorMatches(const SimpleSelector& selector, const Element& element,
                      const PseudoState* state) {
     if (selector.unsupported) {
@@ -2745,20 +2819,37 @@ bool selectorMatches(const SimpleSelector& selector, const Element& element,
                 return false;
             }
             const auto& c = p->children();
-            for (size_t i = 0; i < c.size(); ++i) {
+            int index = 0;
+            for (std::size_t i = 0; i < c.size(); ++i) {
                 if (c[i].get() == &element) {
-                    if ((i + 1) == 2) { // simple case from test p:nth-child(2)
-                        return true;
-                    }
-                    return false;
+                    index = static_cast<int>(i) + 1;
+                    break;
                 }
             }
-            return false;
+            if (index == 0) {
+                return false;
+            }
+            if (!nthChildMatches(selector.pseudoArgument, index)) {
+                return false;
+            }
+            continue;
         }
         if (pseudo == PseudoClass::Not || pseudo == PseudoClass::Is) {
-            // For now, if not/is are present, mark as not matching by our simple impl? Or treat as unsupported match false - but we want to evaluate minimally
-            // Keep simple: not matching structural complex ones for now? Return false to be safe
-            return false;
+            // `:not()` and `:is()` take a full selector list. Each branch is parsed
+            // and tested against the element with the same state, and the compound
+            // matches when every `:not` fails and any `:is` hits.
+            const std::vector<SimpleSelector> branches = parseSelectorList(selector.pseudoArgument);
+            bool any = false;
+            for (const SimpleSelector& branch : branches) {
+                if (selectorMatches(branch, element, state)) {
+                    any = true;
+                    break;
+                }
+            }
+            if (pseudo == PseudoClass::Not ? any : !any) {
+                return false;
+            }
+            continue;
         }
         return false;
     }
