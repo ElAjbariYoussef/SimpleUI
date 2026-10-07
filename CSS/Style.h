@@ -204,6 +204,9 @@ struct ComputedStyle {
     FlexAlign alignItems = AlignStretch;
     FlexAlign alignSelf = AlignStretch;
     FlexAlign alignContent = AlignStretch;
+    // Grid item alignment within its own area, on the inline and block axes.
+    FlexAlign justifyItems = AlignStretch;
+    FlexAlign justifySelf = AlignStretch;
     FlexWrap flexWrap = NoWrap;
     // `gap` sets both; `row-gap` and `column-gap` override one each. Auto means
     // "not authored", which is what makes the override detectable.

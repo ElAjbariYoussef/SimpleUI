@@ -409,6 +409,63 @@ void testVerticalAlign() {
           "vertical-align:super raises the inline run");
 }
 
+void testGridAlignment() {
+    // Track distribution: two 50px columns in a 300px box leave 200px, which
+    // `justify-content: center` splits into 100px of leading space.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"t\"><i></i><i></i></div></body></sui>");
+        if (!document) return;
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{display:grid;grid-template-columns:50px 50px;"
+            "justify-content:center;width:300px;height:40px} #t i{height:10px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* t = document->getElementById("t");
+        if (t && t->children().size() == 2) {
+            checkNear(t->children()[0]->layoutX(), 100.0f, 1.0f,
+                      "justify-content:center centres the track set");
+            checkNear(t->children()[1]->layoutX(), 150.0f, 1.0f,
+                      "the second centred track follows the first");
+        }
+    }
+    // Item alignment inside its own track: a 50px item pinned to the end of a
+    // 200px column starts 150px in.
+    {
+        auto document =
+            parseOrNull("<sui><body><div id=\"t\"><i></i></div></body></sui>");
+        if (!document) return;
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{display:grid;grid-template-columns:200px;"
+            "justify-items:end;width:200px;height:40px} #t i{width:50px;height:10px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* t = document->getElementById("t");
+        if (t && !t->children().empty()) {
+            checkNear(t->children()[0]->layoutX(), 150.0f, 1.0f,
+                      "justify-items:end pins the item to the track end");
+        }
+    }
+    // Block-axis alignment against a fixed row: a 20px item at the end of a
+    // 100px row sits 80px down.
+    {
+        auto document =
+            parseOrNull("<sui><body><div id=\"t\"><i></i></div></body></sui>");
+        if (!document) return;
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{display:grid;grid-template-columns:100px;"
+            "grid-template-rows:100px;align-items:end;width:100px;height:100px}"
+            "#t i{width:20px;height:20px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* t = document->getElementById("t");
+        if (t && !t->children().empty()) {
+            checkNear(t->children()[0]->layoutY(), 80.0f, 1.0f,
+                      "align-items:end pins the item to the row bottom");
+        }
+    }
+}
+
 void testPropertyParsing() {
     auto document = parseOrNull("<sui><body><div>x</div></body></sui>");
     if (!document) {
@@ -3141,6 +3198,7 @@ int main() {
     testColorFunctions();
     testSyntheticEmphasis();
     testVerticalAlign();
+    testGridAlignment();
     testBlockStacking();
     testNestedContainer();
     testTextWrappingAndBr();

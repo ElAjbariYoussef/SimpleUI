@@ -2199,6 +2199,10 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         s.alignSelf = parseAlign(value);
     } else if (property == "align-content") {
         s.alignContent = parseAlign(value);
+    } else if (property == "justify-items") {
+        s.justifyItems = parseAlign(value);
+    } else if (property == "justify-self") {
+        s.justifySelf = parseAlign(value);
     } else if (property == "gap" || property == "grid-gap") {
         const Length g = parseLength(value);
         const float px = g.resolve(0.0f, s.fontSize, rootFontSize);
@@ -2893,6 +2897,8 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "align-items") return alignName(style.alignItems);
     if (property == "align-self") return alignName(style.alignSelf);
     if (property == "align-content") return alignName(style.alignContent);
+    if (property == "justify-items") return alignName(style.justifyItems);
+    if (property == "justify-self") return alignName(style.justifySelf);
     if (property == "flex-grow") return unitless(style.flex.grow);
     if (property == "flex-shrink") return unitless(style.flex.shrink);
     if (property == "flex-basis") return length(style.flex.basis, "auto");

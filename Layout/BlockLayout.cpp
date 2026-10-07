@@ -1063,28 +1063,81 @@ private:
             }
         }
 
-        // Lay each item out at its column's width, at a temporary vertical spot, so
-        // its height can decide the row. The final Y is written once the rows are
-        // known, which avoids laying anything out twice.
-        std::vector<float> rowHeights(rowCount, 0.0f);
+        // Free space left after the tracks and gaps. `justify-content` /
+        // `align-content` decide whether it sits before, after, around or between
+        // the tracks; the default start leaves it all at the end.
+        auto distribute = [](float extra, std::size_t count, ComputedStyle::FlexAlign align,
+                             float& lead, float& gap) {
+            lead = 0.0f;
+            gap = 0.0f;
+            if (extra <= 0.0f || count == 0) {
+                return;
+            }
+            switch (align) {
+                case ComputedStyle::AlignEnd: lead = extra; break;
+                case ComputedStyle::AlignCenter: lead = extra * 0.5f; break;
+                case ComputedStyle::AlignSpaceBetween:
+                    gap = count > 1 ? extra / static_cast<float>(count - 1) : 0.0f;
+                    break;
+                case ComputedStyle::AlignSpaceAround:
+                    gap = extra / static_cast<float>(count);
+                    lead = gap * 0.5f;
+                    break;
+                case ComputedStyle::AlignSpaceEvenly:
+                    gap = extra / static_cast<float>(count + 1);
+                    lead = gap;
+                    break;
+                default: break;
+            }
+        };
+
+        float trackSum = 0.0f;
+        for (float trackWidth : widths) {
+            trackSum += trackWidth;
+        }
+        float columnLead = 0.0f;
+        float columnExtra = 0.0f;
+        distribute(std::max(0.0f, contentWidth - trackSum - gapTotal), columnCount,
+                   s.justifyContent, columnLead, columnExtra);
+
         std::vector<float> columnX(columnCount, 0.0f);
-        float x = 0.0f;
+        float x = columnLead;
         for (std::size_t c = 0; c < columnCount; ++c) {
             columnX[c] = x;
-            x += widths[c] + columnGap;
+            x += widths[c] + columnGap + columnExtra;
         }
 
+        // Lay each item out at the width `justify-self` gives it, at a temporary
+        // vertical spot, so its height can decide the row. The final Y is written
+        // once the rows are known, which avoids laying anything out twice.
+        std::vector<float> rowHeights(rowCount, 0.0f);
+        std::vector<float> itemX(children.size(), 0.0f);
         float maxRight = 0.0f;
         for (std::size_t i = 0; i < children.size(); ++i) {
             const std::size_t col = i % columnCount;
             const std::size_t row = i / columnCount;
             ComputedStyle sized = resolver_.resolve(*children[i]);
-            sized.width = Length(widths[col]);
+            const ComputedStyle::FlexAlign justify =
+                sized.justifySelf != ComputedStyle::AlignStretch ? sized.justifySelf
+                                                                 : s.justifyItems;
+            float w = widths[col];
+            float off = 0.0f;
+            if (justify != ComputedStyle::AlignStretch) {
+                const float natural = measureNatural(*children[i], sized, true);
+                w = std::min(natural, widths[col]);
+                if (justify == ComputedStyle::AlignCenter) {
+                    off = (widths[col] - w) * 0.5f;
+                } else if (justify == ComputedStyle::AlignEnd) {
+                    off = widths[col] - w;
+                }
+            }
+            sized.width = Length(w);
             sized.boxSizing = BoxSizing::ContentBox;
             sized.margin = {};
-            runWith(*children[i], sized, widths[col], contentX + columnX[col], contentY);
+            runWith(*children[i], sized, w, contentX + columnX[col] + off, contentY);
+            itemX[i] = columnX[col] + off;
             rowHeights[row] = std::max(rowHeights[row], children[i]->layoutHeight());
-            maxRight = std::max(maxRight, columnX[col] + children[i]->layoutWidth());
+            maxRight = std::max(maxRight, itemX[i] + children[i]->layoutWidth());
         }
 
         // `grid-template-rows` overrides a content row with its own track; an
@@ -1098,22 +1151,41 @@ private:
                 }
             }
         }
+        float rowSum = 0.0f;
+        for (float trackHeight : rowHeights) {
+            rowSum += trackHeight;
+        }
+        const float rowGapTotal = rowGap * static_cast<float>(rowCount > 0 ? rowCount - 1 : 0);
+        float rowLead = 0.0f;
+        float rowExtra = 0.0f;
+        distribute(std::max(0.0f, (box.height > 0.0f ? box.height : 0.0f) - rowSum - rowGapTotal),
+                   rowCount, s.alignContent, rowLead, rowExtra);
+
         std::vector<float> rowY(rowCount, 0.0f);
-        float y = 0.0f;
+        float y = rowLead;
         for (std::size_t r = 0; r < rowCount; ++r) {
             rowY[r] = y;
-            y += rowHeights[r] + rowGap;
+            y += rowHeights[r] + rowGap + rowExtra;
         }
         for (std::size_t i = 0; i < children.size(); ++i) {
             const std::size_t row = i / columnCount;
-            children[i]->setLayoutY(contentY + rowY[row]);
+            const ComputedStyle cs = resolver_.resolve(*children[i]);
+            const ComputedStyle::FlexAlign align =
+                cs.alignSelf != ComputedStyle::AlignStretch ? cs.alignSelf : s.alignItems;
+            float off = 0.0f;
+            if (align == ComputedStyle::AlignCenter) {
+                off = (rowHeights[row] - children[i]->layoutHeight()) * 0.5f;
+            } else if (align == ComputedStyle::AlignEnd) {
+                off = rowHeights[row] - children[i]->layoutHeight();
+            }
+            children[i]->setLayoutY(contentY + rowY[row] + off);
         }
 
         outWidth = box.width > 0.0f ? box.width : maxRight;
         if (box.height > 0.0f) {
             return box.height;
         }
-        return rowCount == 0 ? 0.0f : y - rowGap;
+        return rowCount == 0 ? 0.0f : std::max(0.0f, y - rowGap - rowExtra);
     }
 
     // Every inline descendant of `el` flows into one line-breaking context, so
