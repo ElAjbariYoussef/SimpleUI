@@ -468,6 +468,31 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
              el.contentHeight()}};
         paintBackground(s, boxes, s.fontSize, rootFontSize, opacity, renderer, images, radii);
 
+        // An <img> paints its decoded source into the content box. The source keeps
+        // its aspect ratio and is scaled down to fit, which is the common case for a
+        // photo dropped into a fixed box.
+        if (el.tag() == "img") {
+            const std::string_view src = el.attribute("src");
+            if (!src.empty()) {
+                if (SDL_Texture* tex = images.texture(sdlRenderer, src)) {
+                    float iw = 0.0f, ih = 0.0f;
+                    SDL_GetTextureSize(tex, &iw, &ih);
+                    const SDL_FRect content{el.contentX() - offX, el.contentY() - offY,
+                                            el.contentWidth(), el.contentHeight()};
+                    if (iw > 0.0f && ih > 0.0f && content.w > 0.0f && content.h > 0.0f) {
+                        const float scale = std::min(content.w / iw, content.h / ih);
+                        const float dw = iw * scale;
+                        const float dh = ih * scale;
+                        const SDL_FRect dst{content.x + (content.w - dw) * 0.5f,
+                                            content.y + (content.h - dh) * 0.5f, dw, dh};
+                        renderer.drawTexture(tex, dst, nullptr,
+                                             Color{255, 255, 255,
+                                                   static_cast<Uint8>(opacity * 255.0f)});
+                    }
+                }
+            }
+        }
+
         paintInsetShadow(s, box, radii, renderer, rootFontSize, opacity);
 
         if (border.a > 0) {
