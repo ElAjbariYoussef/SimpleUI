@@ -1,3 +1,4 @@
+#include <sstream>
 #include "CSS/StyleResolver.h"
 
 #include "SUI/DOM/Element.h"
@@ -732,6 +733,40 @@ constexpr NamedColor kNamedColors[] = {
     {"yellowgreen", 154, 205, 50},
 };
 
+static bool parseHsl(std::string_view value, SDL_Color& out) {
+    std::string t(value);
+    for (char& c : t) {
+        if (c == ',' || c == '(' || c == ')' || c == '%') c = ' ';
+    }
+    std::stringstream ss(t);
+    std::string fn;
+    float h = 0, s = 0, l = 0, a = 1.0f;
+    ss >> fn >> h >> s >> l >> a;
+    if (fn != "hsl" && fn != "hsla") return false;
+    if (s < 0) s = 0; if (s > 100) s = 100;
+    if (l < 0) l = 0; if (l > 100) l = 100;
+    if (a < 0) a = 0; if (a > 1) a = 1;
+    auto hsl_to_rgb = [](float h, float s, float l) -> std::tuple<int,int,int> {
+        s /= 100.0f; l /= 100.0f;
+        float c = (1.0f - std::fabs(2.0f*l - 1.0f)) * s;
+        float x = c * (1.0f - std::fabs(fmodf(h/60.0f, 2.0f) - 1.0f));
+        float m = l - c/2.0f;
+        float r=0,g=0,b=0;
+        if (h < 60) { r=c; g=x; b=0; }
+        else if (h < 120) { r=x; g=c; b=0; }
+        else if (h < 180) { r=0; g=c; b=x; }
+        else if (h < 240) { r=0; g=x; b=c; }
+        else if (h < 300) { r=x; g=0; b=c; }
+        else { r=c; g=0; b=x; }
+        return {int((r+m)*255+0.5f), int((g+m)*255+0.5f), int((b+m)*255+0.5f)};
+    };
+    auto [r,g,b] = hsl_to_rgb(h, s, l);
+    out = {Uint8(r), Uint8(g), Uint8(b), Uint8(a*255)};
+    return true;
+}
+static bool parseOklch(std::string_view, SDL_Color&) { return false; }
+static bool parseColorMix(std::string_view, SDL_Color&) { return false; }
+
 bool parseNamedColor(std::string_view name, SDL_Color& out) {
     if (name == "transparent") {
         out = {0, 0, 0, 0};
@@ -759,7 +794,7 @@ bool parseNamedColor(std::string_view name, SDL_Color& out) {
 // parser directly, because `red` is at least as common as `#ff0000` and a property
 // that silently ignored it would look like a bug in the stylesheet.
 bool parseColor(std::string_view value, SDL_Color& out) {
-    return parseHexColor(value, out) || parseNamedColor(value, out);
+    return parseHexColor(value, out) || parseNamedColor(value, out) || parseHsl(value, out) || parseOklch(value, out) || parseColorMix(value, out);
 }
 
 // Splits on whitespace and parses each piece as a length, so `margin: 5px 10%`
