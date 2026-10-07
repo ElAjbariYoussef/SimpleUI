@@ -1179,7 +1179,10 @@ private:
                 penX_ + metrics_.spaceWidth + wWidth > maxWidth_) {
                 newLine();
             }
-            const float space = lineHasContent_ ? metrics_.spaceWidth : 0.0f;
+            float space = lineHasContent_ ? metrics_.spaceWidth : 0.0f;
+            if (lineHasContent_ && s.wordSpacing.unit != sui::Length::Auto) {
+                space += s.wordSpacing.resolve(s.fontSize, s.fontSize, 16.0f);
+            }
             std::string wt = transformText(s, w);
             ownerEl_.addTextRun({wt, originX_ + penX_ + space,
                                  originY_ + cursorY_, wWidth, metrics_.lineHeight,
