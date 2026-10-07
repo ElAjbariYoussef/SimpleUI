@@ -210,6 +210,31 @@ bool clipsAnything(const ComputedStyle& s) {
     return s.overflowX != ComputedStyle::Visible || s.overflowY != ComputedStyle::Visible;
 }
 
+// A `filter: opacity(x)` is the one filter the painter can honour without an
+// offscreen surface: it scales the same group alpha `opacity` already threads
+// down. Other filter functions are left for a renderer that can blur or colour-
+// shift a surface. Returns 1 when there is no opacity() in the chain.
+float filterOpacity(std::string_view filter) {
+    float result = 1.0f;
+    std::size_t at = 0;
+    while ((at = filter.find("opacity(", at)) != std::string_view::npos) {
+        at += 8;
+        const std::size_t end = filter.find(')', at);
+        if (end == std::string_view::npos) {
+            break;
+        }
+        const std::string_view number = filter.substr(at, end - at);
+        char* stop = nullptr;
+        const std::string owned(number);
+        const float value = std::strtof(owned.c_str(), &stop);
+        if (stop != owned.c_str()) {
+            result *= value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
+        }
+        at = end + 1;
+    }
+    return result;
+}
+
 // Depth-first collection, so `order` is document order. The inherited clip is
 // threaded down: an element's own box is clipped by its ancestors, and it in turn
 // clips its descendants. `offX`/`offY` are the scroll offsets of the clipping
@@ -225,6 +250,7 @@ void collectPaint(Element& el, const StyleResolver& resolver, const SDL_FRect& i
         s = resolver.resolve(el);
         drawable = s.display != ComputedStyle::None && s.visible;
         opacity *= s.opacity;
+        opacity *= filterOpacity(s.filter);
         if (drawable && clipsAnything(s)) {
             // `overflow` crops to the padding box, which in CSS includes the padding.
             clip = intersectClip(clip,
