@@ -1180,6 +1180,22 @@ private:
             sized.width = Length(w);
             sized.boxSizing = BoxSizing::ContentBox;
             sized.margin = {};
+            // `align-self: stretch` fills a row whose height is fixed by
+            // `grid-template-rows`; a content-sized row already matches its tallest
+            // item, so there is nothing to stretch to.
+            const ComputedStyle::FlexAlign vAlign =
+                sized.alignSelf != ComputedStyle::AlignStretch ? sized.alignSelf
+                                                               : s.alignItems;
+            if (vAlign == ComputedStyle::AlignStretch && row < s.gridRows.size()) {
+                const ComputedStyle::GridTrack& rowTrack = s.gridRows[row];
+                if (!rowTrack.isAuto && !rowTrack.isFr) {
+                    const float trackHeight =
+                        std::max(0.0f, rowTrack.size.resolve(0.0f, s.fontSize,
+                                                             resolver_.rootFontSize()));
+                    const float chrome = usedBox(sized, w).verticalChrome();
+                    sized.height = Length(std::max(0.0f, trackHeight - chrome));
+                }
+            }
             runWith(*children[i], sized, w, contentX + columnX[col] + off, contentY);
             itemX[i] = columnX[col] + off;
             rowHeights[row] = std::max(rowHeights[row], children[i]->layoutHeight());

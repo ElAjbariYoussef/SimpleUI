@@ -582,6 +582,29 @@ void testGridAutoFill() {
     }
 }
 
+void testGridStretch() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"g\"><i id=\"a\"></i><i id=\"b\"></i></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body{margin:0} #g{display:grid;grid-template-columns:1fr 1fr;"
+        "grid-template-rows:60px;width:200px} "
+        "#a{height:10px} #b{align-self:start;height:10px}"));
+    layoutRoot(*document, resolver, 400.0f);
+
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    // The default align-self:stretch fills the 60px row; align-self:start keeps the
+    // item at its own 10px height and top-aligns it.
+    check(a != nullptr && std::fabs(a->layoutHeight() - 60.0f) < 0.5f,
+          "a grid item stretches to a definite row track");
+    check(b != nullptr && std::fabs(b->layoutHeight() - 10.0f) < 0.5f,
+          "align-self:start opts a grid item out of stretch");
+}
+
 void testPropertyParsing() {
     auto document = parseOrNull("<sui><body><div>x</div></body></sui>");
     if (!document) {
@@ -3318,6 +3341,7 @@ int main() {
     testInputValue();
     testGridMinmax();
     testGridAutoFill();
+    testGridStretch();
     testBlockStacking();
     testNestedContainer();
     testTextWrappingAndBr();
