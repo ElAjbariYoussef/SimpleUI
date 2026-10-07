@@ -1202,6 +1202,7 @@ private:
         float originY_ = 0.0f;
         float penX_ = 0.0f;
         float cursorY_ = 0.0f;
+        bool firstLine_ = true;
         float bottom_ = 0.0f;
         float widest_ = 0.0f;
         bool lineHasContent_ = false;
