@@ -364,6 +364,32 @@ void testColorFunctions() {
           "oklch with zero chroma stays grey");
 }
 
+void testSyntheticEmphasis() {
+    auto document = parseOrNull(
+        "<sui><body><p id=\"a\">Hello</p><p id=\"b\">Hello</p></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body{margin:0;font-size:20px} #b{font-weight:bold;font-style:italic}"));
+    layoutRoot(*document, resolver, 400.0f);
+
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    check(a && b && !a->textRuns().empty() && !b->textRuns().empty(),
+          "emphasis paragraphs laid out");
+    if (!a || !b || a->textRuns().empty() || b->textRuns().empty()) {
+        return;
+    }
+    check(!a->textRuns()[0].bold && !a->textRuns()[0].italic,
+          "a normal run carries no synthetic emphasis");
+    check(b->textRuns()[0].bold, "font-weight:bold reaches the text run");
+    check(b->textRuns()[0].italic, "font-style:italic reaches the text run");
+    check(b->textRuns()[0].width > a->textRuns()[0].width + 1.0f,
+          "a synthetic italic reserves extra width for its lean");
+}
+
 void testPropertyParsing() {
     auto document = parseOrNull("<sui><body><div>x</div></body></sui>");
     if (!document) {
@@ -3094,6 +3120,7 @@ int main() {
     testCascade();
     testPropertyParsing();
     testColorFunctions();
+    testSyntheticEmphasis();
     testBlockStacking();
     testNestedContainer();
     testTextWrappingAndBr();

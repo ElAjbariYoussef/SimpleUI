@@ -52,7 +52,7 @@ public:
     // returned texture (SDL_DestroyTexture). The texture is exactly
     // (measureText(text, size), verticalMetrics(size).height) pixels.
     SDL_Texture* renderText(SDL_Renderer* renderer, std::string_view text, float size,
-                            SDL_Color color) const;
+                            SDL_Color color, bool bold = false, bool italic = false) const;
 
     bool hasFont() const noexcept { return font_ != nullptr; }
 

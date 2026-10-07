@@ -95,6 +95,11 @@ float textWidth(const TextFont* font, const ComputedStyle& s, std::string_view t
         const float ls = s.letterSpacing.resolve(s.fontSize, s.fontSize, 16.0f);
         w += ls * static_cast<float>(tt.size() - 1);
     }
+    // A synthetic italic leans the glyph tops to the right, so the run claims the
+    // extra width rather than letting the last letter overlap what follows.
+    if (s.fontStyle != ComputedStyle::FontNormal && !tt.empty()) {
+        w += s.fontSize * 0.21f;
+    }
     return w;
 }
 
@@ -1311,7 +1316,8 @@ private:
             ownerEl_.addTextRun({wt, originX_ + penX_ + space,
                                  originY_ + cursorY_, wWidth, metrics_.lineHeight,
                                  metrics_.ascent + ascentDelta, s.fontSize, s.color.r,
-                                 s.color.g, s.color.b, s.color.a});
+                                 s.color.g, s.color.b, s.color.a, s.fontBold,
+                                 s.fontStyle != ComputedStyle::FontNormal});
             penX_ += space + wWidth;
             lineHasContent_ = true;
             widest_ = std::max(widest_, penX_);

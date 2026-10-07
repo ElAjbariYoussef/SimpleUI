@@ -177,6 +177,10 @@ public:
         float baseline = 0.0f;
         float fontSize = 0.0f;
         std::uint8_t r = 255, g = 255, b = 255, a = 255;
+        // Synthetic emphasis: there is only one font face loaded, so bold is a
+        // one-pixel smear and italic is a shear applied while the glyph rasterises.
+        bool bold = false;
+        bool italic = false;
     };
     const std::vector<TextRun>& textRuns() const noexcept { return textRuns_; }
     void addTextRun(TextRun run) { textRuns_.push_back(std::move(run)); }

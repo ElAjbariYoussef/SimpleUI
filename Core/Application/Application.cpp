@@ -503,7 +503,8 @@ void paintTextShadow(const ComputedStyle::TextShadow& shadow, const Element::Tex
         const float len = std::hypot(dx, dy);
         const float ux = len > 0.0f ? dx / len : 0.707f;
         const float uy = len > 0.0f ? dy / len : 0.707f;
-        SDL_Texture* texture = font.renderText(sdlRenderer, run.text, run.fontSize, tint);
+        SDL_Texture* texture = font.renderText(sdlRenderer, run.text, run.fontSize, tint,
+                                               run.bold, run.italic);
         if (!texture) {
             continue;
         }
@@ -646,7 +647,8 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         SDL_Texture* texture = font.renderText(
             sdlRenderer, run.text, run.fontSize,
             SDL_Color{run.r, run.g, run.b,
-                      static_cast<Uint8>(static_cast<float>(run.a) * opacity)});
+                      static_cast<Uint8>(static_cast<float>(run.a) * opacity)},
+            run.bold, run.italic);
         if (!texture) {
             continue;
         }

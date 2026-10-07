@@ -187,7 +187,8 @@ float TextFont::measureText(std::string_view text, float size) const {
 }
 
 SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
-                                  float size, SDL_Color color) const {
+                                  float size, SDL_Color color, bool bold,
+                                  bool italic) const {
     if (!font_ || !renderer || text.empty() || size <= 0.0f) {
         return nullptr;
     }
@@ -196,8 +197,18 @@ SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
     const VerticalMetrics vm = verticalMetrics(size);
     const int ascentPx = static_cast<int>(std::ceil(vm.ascent));
 
-    const int w = static_cast<int>(std::ceil(measureText(text, size)));
+    // A synthetic italic is a shear about the baseline: a glyph pixel `d` above the
+    // baseline moves right by `slant * d`. That leans tops right and descenders
+    // left, so the surface needs padding on both sides to keep them. Bold is a
+    // one-pixel copy smeared to the right.
+    constexpr float kItalicSlant = 0.21f;
+    const int italicLeft = italic ? static_cast<int>(std::ceil(kItalicSlant * vm.descent)) : 0;
+    const int italicRight = italic ? static_cast<int>(std::ceil(kItalicSlant * vm.ascent)) : 0;
+    const int boldRight = bold ? 1 : 0;
+
     const int h = static_cast<int>(std::ceil(vm.height));
+    const int w = static_cast<int>(std::ceil(measureText(text, size))) + italicLeft +
+                  italicRight + boldRight;
     if (w <= 0 || h <= 0) {
         return nullptr;
     }
@@ -210,6 +221,22 @@ SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
     SDL_FillSurfaceRect(surf, nullptr, SDL_MapRGBA(pf, nullptr, 0, 0, 0, 0));
 
     auto* pixels = static_cast<Uint8*>(surf->pixels);
+    // Coverage is accumulated as the maximum alpha so overlapping strokes of the
+    // same glyph (bold's smear) do not darken or erase one another.
+    auto put = [&](int px, int py, unsigned char coverage) {
+        if (px < 0 || py < 0 || px >= w || py >= h) {
+            return;
+        }
+        const unsigned char aa = static_cast<unsigned char>((coverage * color.a) / 255);
+        Uint8* p = pixels + py * surf->pitch + px * 4;
+        if (aa > p[3]) {
+            p[0] = color.r;
+            p[1] = color.g;
+            p[2] = color.b;
+            p[3] = aa;
+        }
+    };
+
     float penX = 0.0f;
     std::size_t i = 0;
     while (i < text.size()) {
@@ -224,21 +251,20 @@ SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
             stbtt_MakeCodepointBitmap(info, bmp.data(), gw, gh, gw, scale, scale,
                                       static_cast<int>(cp));
             for (int gy = 0; gy < gh; ++gy) {
+                const int destY = ascentPx + y0 + gy;
+                // Distance above the baseline; used by the italic shear.
+                const float above = static_cast<float>(-(y0 + gy));
+                const int shear = italic ? static_cast<int>(std::lround(kItalicSlant * above)) : 0;
                 for (int gx = 0; gx < gw; ++gx) {
                     const unsigned char a = bmp[static_cast<std::size_t>(gy) * gw + gx];
                     if (a == 0) {
                         continue;
                     }
-                    const int px = static_cast<int>(std::floor(penX)) + x0 + gx;
-                    const int py = ascentPx + y0 + gy;
-                    if (px < 0 || py < 0 || px >= w || py >= h) {
-                        continue;
+                    const int px = italicLeft + static_cast<int>(std::floor(penX)) + x0 + gx + shear;
+                    put(px, destY, a);
+                    if (bold) {
+                        put(px + 1, destY, a);
                     }
-                    Uint8* p = pixels + py * surf->pitch + px * 4;
-                    p[0] = color.r;
-                    p[1] = color.g;
-                    p[2] = color.b;
-                    p[3] = static_cast<Uint8>((a * color.a) / 255);
                 }
             }
         }
