@@ -932,6 +932,90 @@ ComputedStyle::FlexAlign parseAlign(std::string_view v) {
     return ComputedStyle::AlignStretch;
 }
 
+// `grid-template-columns` / `grid-template-rows`: a whitespace-separated track
+// list, where a track is a length, a `<number>fr` share, `auto`, or a
+// `repeat(<count>, <tracks>)` group. `minmax()` and named lines are not read.
+bool parseGridTrack(std::string_view token, ComputedStyle::GridTrack& out) {
+    token = trim(token);
+    if (token.empty()) {
+        return false;
+    }
+    if (token == "auto") {
+        out.isAuto = true;
+        return true;
+    }
+    if (token.size() > 2 && token.substr(token.size() - 2) == "fr") {
+        const std::string number(token.substr(0, token.size() - 2));
+        char* stop = nullptr;
+        const float fr = std::strtof(number.c_str(), &stop);
+        if (stop == number.c_str()) {
+            return false;
+        }
+        out.isFr = true;
+        out.fr = fr;
+        return true;
+    }
+    out.size = parseLength(token);
+    return true;
+}
+
+std::vector<ComputedStyle::GridTrack> parseGridTrackList(std::string_view value) {
+    std::vector<ComputedStyle::GridTrack> out;
+    const std::string_view text = trim(value);
+    const std::vector<std::string_view> tokens = splitOnSpaces(text);
+    for (std::size_t i = 0; i < tokens.size(); ++i) {
+        const std::string_view token = trim(tokens[i]);
+        if (token.substr(0, 7) == "repeat(") {
+            // A repeat group can contain spaces, so join tokens until the parens
+            // balance before reading it.
+            std::string group(token);
+            int depth = 1;
+            for (char c : group) {
+                if (c == '(') ++depth;
+                else if (c == ')') --depth;
+            }
+            while (depth > 0 && i + 1 < tokens.size()) {
+                group += " ";
+                group += std::string(tokens[++i]);
+                for (char c : tokens[i]) {
+                    if (c == '(') ++depth;
+                    else if (c == ')') --depth;
+                }
+            }
+            const std::size_t open = group.find('(');
+            const std::size_t comma = group.find(',', open);
+            const std::size_t close = group.rfind(')');
+            if (open == std::string::npos || comma == std::string::npos ||
+                close == std::string::npos) {
+                continue;
+            }
+            const std::string_view countText =
+                trim(std::string_view(group).substr(open + 1, comma - open - 1));
+            const int count = std::atoi(std::string(countText).c_str());
+            if (count <= 0) {
+                continue;
+            }
+            const std::string_view body =
+                std::string_view(group).substr(comma + 1, close - comma - 1);
+            const std::vector<std::string_view> inner = splitOnSpaces(trim(body));
+            for (int n = 0; n < count; ++n) {
+                for (const std::string_view piece : inner) {
+                    ComputedStyle::GridTrack track;
+                    if (parseGridTrack(piece, track)) {
+                        out.push_back(track);
+                    }
+                }
+            }
+            continue;
+        }
+        ComputedStyle::GridTrack track;
+        if (parseGridTrack(token, track)) {
+            out.push_back(track);
+        }
+    }
+    return out;
+}
+
 // `flex` is a shorthand over grow, shrink and basis, where the one-value form
 // `flex: 1` means `1 1 0%` and anything numeric other than 0 sets shrink to 0.
 void applyFlexShorthand(ComputedStyle& s, std::string_view value, float rootFontSize) {
@@ -1811,6 +1895,10 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         } else {
             s.display = ComputedStyle::Block;
         }
+    } else if (property == "grid-template-columns") {
+        s.gridColumns = parseGridTrackList(value);
+    } else if (property == "grid-template-rows") {
+        s.gridRows = parseGridTrackList(value);
     } else if (property == "width") {
         s.width = parseLength(value);
     } else if (property == "height") {
@@ -2510,6 +2598,24 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             case ComputedStyle::None: return "none";
         }
         return {};
+    }
+    if (property == "grid-template-columns" || property == "grid-template-rows") {
+        const auto& tracks =
+            property == "grid-template-columns" ? style.gridColumns : style.gridRows;
+        std::string out;
+        for (const ComputedStyle::GridTrack& track : tracks) {
+            if (!out.empty()) {
+                out += ' ';
+            }
+            if (track.isAuto) {
+                out += "auto";
+            } else if (track.isFr) {
+                out += unitless(track.fr) + "fr";
+            } else {
+                out += length(track.size, "0px");
+            }
+        }
+        return out;
     }
     if (property == "color") return color(style.color);
     if (property == "background-color") return color(style.backgroundColor);

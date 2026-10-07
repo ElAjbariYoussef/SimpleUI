@@ -539,6 +539,10 @@ private:
             return layoutFlexContainer(el, s, box, availableWidth, contentX, contentY,
                                        outWidth);
         }
+        if (s.isGridContainer()) {
+            return layoutGridContainer(el, s, box, availableWidth, contentX, contentY,
+                                       outWidth);
+        }
         if (hasBlockChild(el)) {
             float height = 0.0f;
             layoutBlockContainer(el, box, availableWidth, contentX, contentY, height, outWidth);
@@ -976,6 +980,122 @@ private:
             line.crossPos = cursor;
             cursor += line.crossSize + std::max(0.0f, s.gap);
         }
+    }
+
+    // Grid. A container places its children row-major into a track list sized by
+    // `grid-template-columns`; rows are content-sized unless `grid-template-rows`
+    // gives them tracks. Track sizes are fixed lengths, `fr` shares of the leftover
+    // space, or `auto` content widths -- enough for the common card and form grids.
+    float layoutGridContainer(Element& el, const ComputedStyle& s, const UsedBox& box,
+                              float availableWidth, float contentX, float contentY,
+                              float& outWidth) {
+        std::vector<Element*> children = flexChildren(el);
+        const float contentWidth =
+            box.width > 0.0f ? box.width
+                             : std::max(0.0f, availableWidth - box.horizontalChrome());
+
+        std::vector<ComputedStyle::GridTrack> columns = s.gridColumns;
+        if (columns.empty()) {
+            ComputedStyle::GridTrack only;
+            only.isAuto = true;
+            columns.push_back(only);
+        }
+        const std::size_t columnCount = columns.size();
+        const std::size_t rowCount =
+            children.empty() ? 0 : (children.size() + columnCount - 1) / columnCount;
+
+        // Resolve the fixed and auto parts of every column. An `auto` track takes
+        // the widest natural size among the items that land in it.
+        std::vector<float> widths(columnCount, 0.0f);
+        float fixedTotal = 0.0f;
+        float frTotal = 0.0f;
+        for (std::size_t c = 0; c < columnCount; ++c) {
+            const ComputedStyle::GridTrack& track = columns[c];
+            if (track.isFr) {
+                frTotal += std::max(0.0f, track.fr);
+                continue;
+            }
+            if (track.isAuto) {
+                float natural = 0.0f;
+                for (std::size_t i = 0; i < children.size(); ++i) {
+                    if (i % columnCount != c) {
+                        continue;
+                    }
+                    const ComputedStyle cs = resolver_.resolve(*children[i]);
+                    natural = std::max(natural, measureNatural(*children[i], cs, true));
+                }
+                widths[c] = natural;
+                fixedTotal += natural;
+                continue;
+            }
+            widths[c] = std::max(0.0f, track.size.resolve(contentWidth, s.fontSize,
+                                                          resolver_.rootFontSize()));
+            fixedTotal += widths[c];
+        }
+        // The gap between tracks; the number of interior gaps is one per boundary.
+        const float columnGap = std::max(0.0f, s.columnGap);
+        const float rowGap = std::max(0.0f, s.rowGap);
+        const float gapTotal = columnGap * static_cast<float>(columnCount - 1);
+        if (frTotal > 0.0f) {
+            const float leftover = std::max(0.0f, contentWidth - fixedTotal - gapTotal);
+            for (std::size_t c = 0; c < columnCount; ++c) {
+                if (columns[c].isFr) {
+                    widths[c] = leftover * (std::max(0.0f, columns[c].fr) / frTotal);
+                }
+            }
+        }
+
+        // Lay each item out at its column's width, at a temporary vertical spot, so
+        // its height can decide the row. The final Y is written once the rows are
+        // known, which avoids laying anything out twice.
+        std::vector<float> rowHeights(rowCount, 0.0f);
+        std::vector<float> columnX(columnCount, 0.0f);
+        float x = 0.0f;
+        for (std::size_t c = 0; c < columnCount; ++c) {
+            columnX[c] = x;
+            x += widths[c] + columnGap;
+        }
+
+        float maxRight = 0.0f;
+        for (std::size_t i = 0; i < children.size(); ++i) {
+            const std::size_t col = i % columnCount;
+            const std::size_t row = i / columnCount;
+            ComputedStyle sized = resolver_.resolve(*children[i]);
+            sized.width = Length(widths[col]);
+            sized.boxSizing = BoxSizing::ContentBox;
+            sized.margin = {};
+            runWith(*children[i], sized, widths[col], contentX + columnX[col], contentY);
+            rowHeights[row] = std::max(rowHeights[row], children[i]->layoutHeight());
+            maxRight = std::max(maxRight, columnX[col] + children[i]->layoutWidth());
+        }
+
+        // `grid-template-rows` overrides a content row with its own track; an
+        // absent list leaves every row at its tallest item.
+        if (!s.gridRows.empty()) {
+            for (std::size_t r = 0; r < rowCount && r < s.gridRows.size(); ++r) {
+                const ComputedStyle::GridTrack& track = s.gridRows[r];
+                if (!track.isAuto && !track.isFr) {
+                    rowHeights[r] = std::max(0.0f, track.size.resolve(0.0f, s.fontSize,
+                                                                     resolver_.rootFontSize()));
+                }
+            }
+        }
+        std::vector<float> rowY(rowCount, 0.0f);
+        float y = 0.0f;
+        for (std::size_t r = 0; r < rowCount; ++r) {
+            rowY[r] = y;
+            y += rowHeights[r] + rowGap;
+        }
+        for (std::size_t i = 0; i < children.size(); ++i) {
+            const std::size_t row = i / columnCount;
+            children[i]->setLayoutY(contentY + rowY[row]);
+        }
+
+        outWidth = box.width > 0.0f ? box.width : maxRight;
+        if (box.height > 0.0f) {
+            return box.height;
+        }
+        return rowCount == 0 ? 0.0f : y - rowGap;
     }
 
     // Every inline descendant of `el` flows into one line-breaking context, so

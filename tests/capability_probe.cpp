@@ -144,6 +144,10 @@ int main() {
           "body{margin:0} #t{width:300px;max-width:120px;height:10px}", "t");
     probe("margin offsets", "<sui><body><div id=\"t\"></div></body></sui>",
           "body{margin:0} #t{margin:30px;width:10px;height:10px}", "t");
+    probe("grid 1fr 1fr", "<sui><body><div id=\"t\"><i></i><i></i></div></body></sui>",
+          "body{margin:0} #t{display:grid;grid-template-columns:1fr 1fr;width:300px}"
+          "#t i{height:20px}",
+          "t");
 
     report("text");
     probe("wraps at max width", "<sui><body><p id=\"t\">aaa bbb ccc ddd eee</p></body></sui>",
@@ -213,10 +217,6 @@ int main() {
           "body{margin:0} #t{white-space:nowrap;width:40px;font-size:20px}", "t");
     probe("text-overflow ignored", "<sui><body><p id=\"t\">abcdefghij</p></body></sui>",
           "body{margin:0} #t{text-overflow:ellipsis;width:40px;font-size:20px}", "t");
-    probe("grid ignored", "<sui><body><div id=\"t\"><i></i><i></i></div></body></sui>",
-          "body{margin:0} #t{display:grid;grid-template-columns:1fr 1fr;width:300px}"
-          "#t i{width:50px;height:20px}",
-          "t");
     probe("float ignored", "<sui><body><div id=\"t\"></div></body></sui>",
           "body{margin:0} #t{float:left;width:50px;height:50px}", "t");
     probe("transform ignored", "<sui><body><div id=\"t\"></div></body></sui>",

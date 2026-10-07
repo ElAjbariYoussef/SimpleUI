@@ -414,6 +414,19 @@ struct ComputedStyle {
     std::string transform;
     std::string filter;
 
+    // Grid track sizing from `grid-template-columns` / `grid-template-rows`. A
+    // track is a fixed length, an `fr` share of the leftover space, or `auto`
+    // (content-sized). Kept as a list so several tracks can be described; a
+    // missing row list means every row is content-sized.
+    struct GridTrack {
+        Length size;      // used when !isFr && !isAuto
+        float fr = 0.0f;  // used when isFr
+        bool isFr = false;
+        bool isAuto = false;
+    };
+    std::vector<GridTrack> gridColumns;
+    std::vector<GridTrack> gridRows;
+
     // Custom properties (`--name`). They are values, not styles: nothing types or
     // validates them, and `var(--name)` resolves against them once this element's
     // whole cascade has settled. They inherit like every other property — this

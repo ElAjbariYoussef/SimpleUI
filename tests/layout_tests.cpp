@@ -412,6 +412,32 @@ void testNestedContainer() {
               "outer height grows to fit the child");
 }
 
+void testGridLayout() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"t\"><i></i><i></i><i></i><i></i></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body{margin:0} #t{display:grid;grid-template-columns:1fr 1fr;width:300px}"
+        "#t i{height:20px}"));
+    layoutRoot(*document, resolver, 400.0f);
+
+    Element* t = document->getElementById("t");
+    check(t != nullptr && t->children().size() == 4, "grid container and items found");
+    if (!t || t->children().size() != 4) {
+        return;
+    }
+    Element* a = t->children()[0].get();
+    Element* b = t->children()[1].get();
+    Element* c = t->children()[2].get();
+    checkNear(a->layoutWidth(), 150.0f, 1.0f, "fr tracks split the row evenly");
+    checkNear(b->layoutX() - a->layoutX(), 150.0f, 1.0f, "second column starts after the first");
+    checkNear(a->layoutY(), b->layoutY(), 0.5f, "the first two items share a row");
+    checkNear(c->layoutY() - a->layoutY(), 20.0f, 1.0f, "the third item wraps to a new row");
+}
+
 void testTextIndent() {
     auto document = parseOrNull(
         "<sui><body><p id=\"a\">alpha beta</p></body></sui>");
@@ -3036,6 +3062,7 @@ int main() {
     testBlockStacking();
     testNestedContainer();
     testTextWrappingAndBr();
+    testGridLayout();
     testTextIndent();
     testDisplayNoneIsSkipped();
     testInheritance();
