@@ -390,6 +390,25 @@ void testSyntheticEmphasis() {
           "a synthetic italic reserves extra width for its lean");
 }
 
+void testVerticalAlign() {
+    auto document = parseOrNull("<sui><body><p id=\"a\">x<span id=\"b\">y</span></p></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(
+        sui::CSSParser::parse("body{margin:0;font-size:20px} #b{vertical-align:super}"));
+    layoutRoot(*document, resolver, 400.0f);
+
+    Element* a = document->getElementById("a");
+    check(a != nullptr && a->textRuns().size() == 2, "inline runs laid out around the span");
+    if (!a || a->textRuns().size() != 2) {
+        return;
+    }
+    check(a->textRuns()[1].y < a->textRuns()[0].y - 1.0f,
+          "vertical-align:super raises the inline run");
+}
+
 void testPropertyParsing() {
     auto document = parseOrNull("<sui><body><div>x</div></body></sui>");
     if (!document) {
@@ -3121,6 +3140,7 @@ int main() {
     testPropertyParsing();
     testColorFunctions();
     testSyntheticEmphasis();
+    testVerticalAlign();
     testBlockStacking();
     testNestedContainer();
     testTextWrappingAndBr();

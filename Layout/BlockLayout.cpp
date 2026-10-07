@@ -80,6 +80,19 @@ std::string transformText(const ComputedStyle& s, std::string_view t) {
     return out;
 }
 
+// Vertical-align as a baseline offset in pixels, positive downward. Only the
+// baseline-relative keywords are modelled: `super`/`sub` raise and lower the box,
+// and `middle` centres it on half the x-height. `top`/`bottom` would need the line
+// box's own extent, which the flow only knows once the line is closed.
+float verticalAlignShift(const ComputedStyle& s) {
+    switch (s.verticalAlign) {
+        case ComputedStyle::VAlignSub: return s.fontSize * 0.16f;
+        case ComputedStyle::VAlignSuper: return -s.fontSize * 0.33f;
+        case ComputedStyle::VAlignMiddle: return -s.fontSize * 0.25f;
+        default: return 0.0f;
+    }
+}
+
 float textWidth(const TextFont* font, const ComputedStyle& s, std::string_view t) {
     if (t.empty()) {
         return 0.0f;
@@ -1233,7 +1246,8 @@ private:
             if (lineHasContent_ && penX_ + outerW > maxWidth_) {
                 newLine();
             }
-            const float top = originY_ + cursorY_ + box.margin.top;
+            const float top =
+                originY_ + cursorY_ + box.margin.top + verticalAlignShift(cs);
             owner_.run(child, maxWidth_, originX_ + penX_ + box.margin.left, top);
             penX_ += box.margin.left + child.layoutWidth() + box.margin.right;
             lineHasContent_ = true;
@@ -1314,10 +1328,10 @@ private:
             }
             std::string wt = transformText(s, w);
             ownerEl_.addTextRun({wt, originX_ + penX_ + space,
-                                 originY_ + cursorY_, wWidth, metrics_.lineHeight,
-                                 metrics_.ascent + ascentDelta, s.fontSize, s.color.r,
-                                 s.color.g, s.color.b, s.color.a, s.fontBold,
-                                 s.fontStyle != ComputedStyle::FontNormal});
+                                 originY_ + cursorY_ + verticalAlignShift(s), wWidth,
+                                 metrics_.lineHeight, metrics_.ascent + ascentDelta,
+                                 s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
+                                 s.fontBold, s.fontStyle != ComputedStyle::FontNormal});
             penX_ += space + wWidth;
             lineHasContent_ = true;
             widest_ = std::max(widest_, penX_);
