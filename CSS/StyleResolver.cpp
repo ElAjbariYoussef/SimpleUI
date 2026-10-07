@@ -2581,6 +2581,10 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.verticalAlign = ComputedStyle::VAlignSub;
         } else if (value == "super") {
             s.verticalAlign = ComputedStyle::VAlignSuper;
+        } else if (value == "text-top") {
+            s.verticalAlign = ComputedStyle::VAlignTextTop;
+        } else if (value == "text-bottom") {
+            s.verticalAlign = ComputedStyle::VAlignTextBottom;
         } else {
             s.verticalAlign = ComputedStyle::VAlignBaseline;
         }
@@ -3025,6 +3029,8 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             case ComputedStyle::VAlignMiddle: return "middle";
             case ComputedStyle::VAlignSub: return "sub";
             case ComputedStyle::VAlignSuper: return "super";
+            case ComputedStyle::VAlignTextTop: return "text-top";
+            case ComputedStyle::VAlignTextBottom: return "text-bottom";
             case ComputedStyle::VAlignBaseline: return "baseline";
         }
         return "baseline";

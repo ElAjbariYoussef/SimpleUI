@@ -412,7 +412,16 @@ struct ComputedStyle {
     Length textIndent;
     enum TextTransform : std::uint8_t { TransformNone, TransformUppercase, TransformLowercase, TransformCapitalize };
     TextTransform textTransform = TransformNone;
-    enum VerticalAlign : std::uint8_t { VAlignBaseline, VAlignTop, VAlignBottom, VAlignMiddle, VAlignSub, VAlignSuper };
+    enum VerticalAlign : std::uint8_t {
+        VAlignBaseline,
+        VAlignTop,
+        VAlignBottom,
+        VAlignMiddle,
+        VAlignSub,
+        VAlignSuper,
+        VAlignTextTop,
+        VAlignTextBottom
+    };
     VerticalAlign verticalAlign = VAlignBaseline;
     std::string transform;
     std::string filter;

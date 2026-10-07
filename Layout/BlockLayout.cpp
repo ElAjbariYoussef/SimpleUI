@@ -1484,11 +1484,17 @@ private:
             // on it, `top` seats its outer top on it.
             float boxBottom = cursorY_ + box.margin.top + child.layoutHeight() +
                               box.margin.bottom;
-            if (cs.verticalAlign == ComputedStyle::VAlignBottom) {
+            // `text-top`/`text-bottom` measure against the parent's content area
+            // rather than the line box; here the line box is the container's own
+            // line height, which is what the content area spans, so they land
+            // together with `top`/`bottom`.
+            if (cs.verticalAlign == ComputedStyle::VAlignBottom ||
+                cs.verticalAlign == ComputedStyle::VAlignTextBottom) {
                 child.setLayoutY(lineTop + metrics_.lineHeight - child.layoutHeight() -
                                  box.margin.bottom);
                 boxBottom = cursorY_ + metrics_.lineHeight;
-            } else if (cs.verticalAlign == ComputedStyle::VAlignTop) {
+            } else if (cs.verticalAlign == ComputedStyle::VAlignTop ||
+                       cs.verticalAlign == ComputedStyle::VAlignTextTop) {
                 child.setLayoutY(lineTop + box.margin.top);
             }
             penX_ += box.margin.left + child.layoutWidth() + box.margin.right;

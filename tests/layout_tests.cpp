@@ -434,6 +434,31 @@ void testVerticalAlignTopBottom() {
     }
     check(b->layoutY() > t->layoutY() + 1.0f,
           "vertical-align:bottom seats an inline-block on the line's bottom edge");
+
+    // text-top / text-bottom read back distinctly and place an inline-block the
+    // same way top/bottom do here, where the content area spans the line box.
+    auto tb = parseOrNull(
+        "<sui><body><p id=\"p\">"
+        "<span id=\"t\" style=\"display:inline-block;width:20px;height:10px;"
+        "vertical-align:text-top\"></span>"
+        "<span id=\"b\" style=\"display:inline-block;width:20px;height:10px;"
+        "vertical-align:text-bottom\"></span>"
+        "</p></body></sui>");
+    if (!tb) {
+        return;
+    }
+    sui::StyleResolver tbResolver;
+    tbResolver.setRules(sui::CSSParser::parse("body{margin:0} #p{margin:0;font-size:16px}"));
+    layoutRoot(*tb, tbResolver, 400.0f);
+    Element* tt = tb->getElementById("t");
+    Element* bb = tb->getElementById("b");
+    check(tt != nullptr && bb != nullptr && bb->layoutY() > tt->layoutY() + 1.0f,
+          "vertical-align:text-bottom drops an inline-block to the line's bottom");
+    if (tt) {
+        const ComputedStyle s = tbResolver.resolve(*tt);
+        check(sui::StyleResolver::propertyValue(s, "vertical-align") == "text-top",
+              "vertical-align:text-top serialises back");
+    }
 }
 
 void testGridAlignment() {
