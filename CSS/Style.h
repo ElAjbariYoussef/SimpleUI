@@ -658,12 +658,11 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     if (!(style.specified & ComputedStyle::SpecifiedVerticalAlign)) {
         style.verticalAlign = parent.verticalAlign;
     }
-    if (!(style.specified & ComputedStyle::SpecifiedTransform)) {
-        style.transform = parent.transform;
-    }
-    if (!(style.specified & ComputedStyle::SpecifiedFilter)) {
-        style.filter = parent.filter;
-    }
+    // `transform` and `filter` are not inherited in CSS: they describe the box
+    // they are declared on. The paint walk already carries a translated or
+    // filtered box's contents with it, so copying the string down would apply the
+    // effect a second time per descendant (and make every descendant claim a
+    // stacking context of its own).
     // Custom properties always inherit; the resolved element's own cascade then
     // overwrites the entries it declares locally.
     style.custom = parent.custom;

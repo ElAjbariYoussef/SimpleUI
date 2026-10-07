@@ -21,6 +21,7 @@ add_library(sui STATIC
     Core/Object/Object.cpp
     Core/Resources/Resources.cpp
     Core/Application/Application.cpp
+    Core/Application/PaintOrder.cpp
     SUI/Markup/Parser.cpp
     SUI/Script/Script.cpp
     SUI/Script/Timers.cpp

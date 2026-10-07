@@ -30,6 +30,12 @@ target_link_libraries(render_tests PRIVATE sui)
 target_compile_definitions(render_tests PRIVATE SUI_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME render_tests COMMAND render_tests)
 
+# Paint order and stacking contexts: a pure walk over a laid-out document, so it
+# needs no device either.
+add_executable(paint_tests paint_tests.cpp)
+target_link_libraries(paint_tests PRIVATE sui)
+add_test(NAME paint_tests COMMAND paint_tests)
+
 # Prints what the engine measures for each documented capability. Not a pass/fail
 # test: it is the evidence behind Difference.md.
 add_executable(capability_probe capability_probe.cpp)

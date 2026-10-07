@@ -1,6 +1,7 @@
 #include "Core/Application/Application.h"
 
 #include "Core/Application/Background.h"
+#include "Core/Application/PaintOrder.h"
 
 #include "CSS/Parser.h"
 #include "CSS/PseudoElements.h"
@@ -78,12 +79,9 @@ void dumpLayout(Element& el, int depth) {
     }
 }
 
-// Deepest drawn element whose border box contains the point. Walking front to
-// back over the paint order means the last match wins, which is the element the
-// user is actually pointing at.
-bool clipsAnything(const ComputedStyle& s);
-
-// Hit-testing walks the tree in paint order. `offX`/`offY` accumulate the scroll
+// Hit-testing walks the tree in paint order: the deepest drawn element whose
+// border box contains the point wins, which is the element the user is actually
+// pointing at. `offX`/`offY` accumulate the scroll
 // offsets of clipping ancestors, so a scrolled box's children are hit where they
 // are drawn rather than where layout put them.
 Element* hitTest(Element& el, float x, float y, const StyleResolver& resolver, float offX,
@@ -169,179 +167,6 @@ bool loadFirstAvailable(TextFont& font, const Resources* resources) {
         }
     }
     return false;
-}
-
-// CSS paint order, as far as a flat list can express it. In CSS the root stacking
-// context paints in this order: its own background, then negative `z-index`,
-// then every in-flow box, then positioned boxes with `z-index: auto` or `0`, then
-// positive `z-index`. Document order breaks ties inside a layer.
-//
-// The engine has one stacking context per document. That is exact for everything
-// except nested contexts, which CSS also creates from `transform`, `opacity` under
-// 1, `filter`, `will-change`, and a few others -- none of which the engine
-// supports, so no nesting can arise.
-struct PaintItem {
-    Element* el;
-    int layer = 0;
-    int zIndex = 0;
-    std::size_t order = 0;
-    // The tightest rect every ancestor's `overflow` imposes, in window
-    // coordinates. A width or height of zero or less means no clip at all.
-    SDL_FRect clip{0.0f, 0.0f, 0.0f, 0.0f};
-    // Scroll offsets accumulated from clipping ancestors. Content moves up and
-    // left by them, so this element's box is drawn at layout minus the offset;
-    // its own scroll only shifts what is inside it.
-    float dx = 0.0f;
-    float dy = 0.0f;
-    // Every ancestor's `opacity` multiplied together. Carried per item rather than
-    // composited through an offscreen buffer, which differs only where two elements
-    // inside the same group overlap.
-    float opacity = 1.0f;
-};
-
-SDL_FRect intersectClip(const SDL_FRect& a, const SDL_FRect& b) {
-    if (a.w <= 0.0f || a.h <= 0.0f) {
-        return b;
-    }
-    if (b.w <= 0.0f || b.h <= 0.0f) {
-        return a;
-    }
-    const float x = std::max(a.x, b.x);
-    const float y = std::max(a.y, b.y);
-    return {x, y, std::max(0.0f, std::min(a.x + a.w, b.x + b.w) - x),
-            std::max(0.0f, std::min(a.y + a.h, b.y + b.h) - y)};
-}
-
-bool clipsAnything(const ComputedStyle& s) {
-    return s.overflowX != ComputedStyle::Visible || s.overflowY != ComputedStyle::Visible;
-}
-
-// A `filter: opacity(x)` is the one filter the painter can honour without an
-// offscreen surface: it scales the same group alpha `opacity` already threads
-// down. Other filter functions are left for a renderer that can blur or colour-
-// shift a surface. Returns 1 when there is no opacity() in the chain.
-float filterOpacity(std::string_view filter) {
-    float result = 1.0f;
-    std::size_t at = 0;
-    while ((at = filter.find("opacity(", at)) != std::string_view::npos) {
-        at += 8;
-        const std::size_t end = filter.find(')', at);
-        if (end == std::string_view::npos) {
-            break;
-        }
-        const std::string_view number = filter.substr(at, end - at);
-        char* stop = nullptr;
-        const std::string owned(number);
-        const float value = std::strtof(owned.c_str(), &stop);
-        if (stop != owned.c_str()) {
-            result *= value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
-        }
-        at = end + 1;
-    }
-    return result;
-}
-
-// Pulls the pixel translation out of a `transform` list. Only `translate()` and
-// its single-axis forms are honoured: they can be folded into the scroll offset
-// the painter already threads through the tree, whereas a scale or rotate would
-// need a real matrix on every draw. A percentage axis is left at zero because it
-// resolves against the box and is the rarer spelling.
-void transformTranslate(std::string_view transform, float& dx, float& dy) {
-    std::size_t at = 0;
-    while ((at = transform.find("translate", at)) != std::string_view::npos) {
-        const std::size_t open = transform.find('(', at);
-        if (open == std::string_view::npos) {
-            return;
-        }
-        const std::size_t close = transform.find(')', open);
-        if (close == std::string_view::npos) {
-            return;
-        }
-        const std::string_view body = transform.substr(open + 1, close - open - 1);
-        const std::size_t comma = body.find(',');
-        const std::string_view first = body.substr(0, comma);
-        const std::string_view second =
-            comma == std::string_view::npos ? std::string_view() : body.substr(comma + 1);
-        auto px = [](std::string_view piece, float& out) {
-            const std::string owned(piece);
-            char* stop = nullptr;
-            const float value = std::strtof(owned.c_str(), &stop);
-            if (stop != owned.c_str() && stop[0] != '%') {
-                out = value;
-            }
-        };
-        const bool xOnly = transform.compare(at, 10, "translateX") == 0;
-        const bool yOnly = transform.compare(at, 10, "translateY") == 0;
-        float tx = 0.0f, ty = 0.0f;
-        px(first, tx);
-        px(second, ty);
-        if (xOnly) {
-            dx += tx;
-        } else if (yOnly) {
-            dy += tx;
-        } else {
-            dx += tx;
-            dy += ty;
-        }
-        at = close + 1;
-    }
-}
-
-// Depth-first collection, so `order` is document order. The inherited clip is
-// threaded down: an element's own box is clipped by its ancestors, and it in turn
-// clips its descendants. `offX`/`offY` are the scroll offsets of the clipping
-// ancestors, which move this element's content up and left on screen.
-void collectPaint(Element& el, const StyleResolver& resolver, const SDL_FRect& inherited,
-                  float opacity, std::vector<PaintItem>& out, float offX, float offY) {
-    SDL_FRect clip = inherited;
-    bool drawable = false;
-    ComputedStyle s;
-    if (el.isVisual()) {
-        s = resolver.resolve(el);
-        drawable = s.display != ComputedStyle::None && s.visible;
-        opacity *= s.opacity;
-        opacity *= filterOpacity(s.filter);
-        // A translate folds into the offsets the painter subtracts, so the box and
-        // every descendant move together without touching layout.
-        transformTranslate(s.transform, offX, offY);
-    }
-    // Children inherit this element's scroll offsets (and any translation), so the
-    // copy is taken after both have been folded in.
-    float childOffX = offX;
-    float childOffY = offY;
-    if (el.isVisual()) {
-        if (drawable && clipsAnything(s)) {
-            // `overflow` crops to the padding box, which in CSS includes the padding.
-            clip = intersectClip(clip,
-                                 SDL_FRect{el.paddingX(), el.paddingY(), el.paddingWidth(),
-                                           el.paddingHeight()});
-            // What the clip keeps is shifted by this box's own scroll offsets.
-            childOffX += s.overflowX != ComputedStyle::Visible ? el.scrollLeft() : 0.0f;
-            childOffY += s.overflowY != ComputedStyle::Visible ? el.scrollTop() : 0.0f;
-        }
-    }
-
-    if (drawable) {
-        PaintItem item;
-        item.el = &el;
-        item.zIndex = s.positioned ? s.zIndex : 0;
-        item.layer = !s.positioned ? 0 : (s.zIndex < 0 ? -1 : (s.zIndex > 0 ? 2 : 1));
-        item.order = out.size();
-        // `overflow` crops the element's own content as well as its descendants,
-        // so the clip has already included this element by the time it is stored.
-        item.clip = clip;
-        item.dx = offX;
-        item.dy = offY;
-        item.opacity = opacity;
-        out.push_back(item);
-    }
-
-    // Non-visual wrappers (<root>, <head>) still contain drawable descendants.
-    for (const auto& child : el.children()) {
-        if (child && !child->isTextNode()) {
-            collectPaint(*child, resolver, clip, opacity, out, childOffX, childOffY);
-        }
-    }
 }
 
 // A percentage radius resolves against the box's own width and height, and an `em`
@@ -1135,22 +960,11 @@ void Application::run() {
                     dumpLayout(*document_->root(), 0);
                 }
 
-                // Paint in CSS order: a flat list sorted by stacking layer and
-                // `z-index`, each box clipped to whatever its ancestors' `overflow`
-                // allows.
-                std::vector<PaintItem> paintList;
-                collectPaint(*document_->root(), resolver_, SDL_FRect{}, 1.0f, paintList,
-                             0.0f, 0.0f);
-                std::stable_sort(paintList.begin(), paintList.end(),
-                                 [](const PaintItem& a, const PaintItem& b) {
-                                     if (a.layer != b.layer) {
-                                         return a.layer < b.layer;
-                                     }
-                                     if (a.zIndex != b.zIndex) {
-                                         return a.zIndex < b.zIndex;
-                                     }
-                                     return a.order < b.order;
-                                 });
+                // Paint in CSS order: back to front, each box clipped to whatever
+                // its ancestors' `overflow` allows, and each stacking context
+                // emitted right after the box that opens it.
+                const std::vector<PaintItem> paintList =
+                    computePaintOrder(*document_->root(), resolver_);
                 SDL_Renderer* sdlRenderer = platform_->renderer();
                 for (const PaintItem& item : paintList) {
                     SDL_Rect previous;
