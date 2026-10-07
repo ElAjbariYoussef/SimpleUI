@@ -82,8 +82,9 @@ std::string transformText(const ComputedStyle& s, std::string_view t) {
 
 // Vertical-align as a baseline offset in pixels, positive downward. Only the
 // baseline-relative keywords are modelled: `super`/`sub` raise and lower the box,
-// and `middle` centres it on half the x-height. `top`/`bottom` would need the line
-// box's own extent, which the flow only knows once the line is closed.
+// and `middle` centres it on half the x-height. `top`/`bottom` are handled where
+// the line box is known (see `Flow::atomic`); for text, whose run already spans
+// the line height, they land where the default does.
 float verticalAlignShift(const ComputedStyle& s) {
     switch (s.verticalAlign) {
         case ComputedStyle::VAlignSub: return s.fontSize * 0.16f;
@@ -1474,14 +1475,26 @@ private:
             if (lineHasContent_ && penX_ + outerW > maxWidth_) {
                 newLine();
             }
-            const float top =
-                originY_ + cursorY_ + box.margin.top + verticalAlignShift(cs);
+            const float lineTop = originY_ + cursorY_;
+            const float top = lineTop + box.margin.top + verticalAlignShift(cs);
             owner_.run(child, maxWidth_, originX_ + penX_ + box.margin.left, top);
+            // `top` and `bottom` align the box against the line box rather than the
+            // baseline. The line box is the container's own line height, so its
+            // extent is known here: `bottom` drops the box so its outer bottom sits
+            // on it, `top` seats its outer top on it.
+            float boxBottom = cursorY_ + box.margin.top + child.layoutHeight() +
+                              box.margin.bottom;
+            if (cs.verticalAlign == ComputedStyle::VAlignBottom) {
+                child.setLayoutY(lineTop + metrics_.lineHeight - child.layoutHeight() -
+                                 box.margin.bottom);
+                boxBottom = cursorY_ + metrics_.lineHeight;
+            } else if (cs.verticalAlign == ComputedStyle::VAlignTop) {
+                child.setLayoutY(lineTop + box.margin.top);
+            }
             penX_ += box.margin.left + child.layoutWidth() + box.margin.right;
             lineHasContent_ = true;
             widest_ = std::max(widest_, penX_);
-            bottom_ = std::max(bottom_, cursorY_ + box.margin.top + child.layoutHeight() +
-                                                box.margin.bottom);
+            bottom_ = std::max(bottom_, boxBottom);
         }
 
         void newLine() {

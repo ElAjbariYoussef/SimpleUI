@@ -409,6 +409,33 @@ void testVerticalAlign() {
           "vertical-align:super raises the inline run");
 }
 
+void testVerticalAlignTopBottom() {
+    // Two inline-blocks on one line: the default sits at the line's top (its
+    // baseline here), `bottom` drops its outer edge onto the line's bottom, so it
+    // lands strictly lower than its neighbour.
+    auto document = parseOrNull(
+        "<sui><body><p id=\"p\">"
+        "<span id=\"t\" style=\"display:inline-block;width:20px;height:10px\"></span>"
+        "<span id=\"b\" style=\"display:inline-block;width:20px;height:10px;"
+        "vertical-align:bottom\"></span>"
+        "</p></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0} #p{margin:0;font-size:16px}"));
+    layoutRoot(*document, resolver, 400.0f);
+
+    Element* t = document->getElementById("t");
+    Element* b = document->getElementById("b");
+    check(t != nullptr && b != nullptr, "both inline-blocks were laid out");
+    if (!t || !b) {
+        return;
+    }
+    check(b->layoutY() > t->layoutY() + 1.0f,
+          "vertical-align:bottom seats an inline-block on the line's bottom edge");
+}
+
 void testGridAlignment() {
     // Track distribution: two 50px columns in a 300px box leave 200px, which
     // `justify-content: center` splits into 100px of leading space.
@@ -3396,6 +3423,7 @@ int main() {
     testColorFunctions();
     testSyntheticEmphasis();
     testVerticalAlign();
+    testVerticalAlignTopBottom();
     testGridAlignment();
     testInputValue();
     testGridMinmax();
