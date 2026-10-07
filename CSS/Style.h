@@ -440,6 +440,10 @@ struct ComputedStyle {
     bool gridColumnsAutoFit = false;
     bool gridRowsAutoFill = false;
     bool gridRowsAutoFit = false;
+    // `grid-column` / `grid-row` span in cells. Line numbers and `grid-area` names
+    // are not modelled; only the `span` counts (and numeric `a / b` ranges) are read.
+    int gridColumnSpan = 1;
+    int gridRowSpan = 1;
 
     // Custom properties (`--name`). They are values, not styles: nothing types or
     // validates them, and `var(--name)` resolves against them once this element's

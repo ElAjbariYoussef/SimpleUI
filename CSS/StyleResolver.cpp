@@ -114,6 +114,22 @@ std::vector<std::string_view> splitTopLevelCommas(std::string_view value) {
     return out;
 }
 
+// Splits on `/`, which is how `grid-area` and `border-style` list their values.
+std::vector<std::string_view> splitOnSlashes(std::string_view value) {
+    std::vector<std::string_view> out;
+    std::size_t start = 0;
+    while (start <= value.size()) {
+        const std::size_t slash = value.find('/', start);
+        out.push_back(value.substr(
+            start, slash == std::string_view::npos ? slash : slash - start));
+        if (slash == std::string_view::npos) {
+            break;
+        }
+        start = slash + 1;
+    }
+    return out;
+}
+
 // Splits a value on whitespace into up to `maxParts` numbers.
 std::vector<float> parseNumberList(std::string_view value) {
     std::vector<float> out;
@@ -1254,6 +1270,60 @@ std::vector<ComputedStyle::GridTrack> parseGridTrackList(std::string_view value,
     return out;
 }
 
+// How many cells a `grid-column` / `grid-row` / `grid-area` value spans. Only the
+// `span <n>` keyword and numeric `a / b` line ranges are read; a lone line number
+// spans one cell (that is what auto-placement fills), and anything unreadable
+// falls back to 1.
+int parseGridSpan(std::string_view value) {
+    // Reads one slash-separated part: `span n` contributes its count, a plain
+    // number records the line so the two ends can be subtracted.
+    int explicitSpan = 0;
+    int lineA = 0;
+    int lineB = 0;
+    bool hasA = false;
+    bool hasB = false;
+    bool first = true;
+    std::size_t start = 0;
+    while (start <= value.size()) {
+        const std::size_t slash = value.find('/', start);
+        const std::string_view part =
+            trim(value.substr(start, slash == std::string_view::npos ? slash : slash - start));
+        int num = 0;
+        const bool spanWord = part.size() > 4 && part.substr(0, 4) == "span";
+        const std::string_view numText = spanWord ? trim(part.substr(4)) : part;
+        if (!numText.empty()) {
+            const std::string text(numText);
+            char* stop = nullptr;
+            num = static_cast<int>(std::strtol(text.c_str(), &stop, 10));
+            if (stop != text.c_str()) {
+                if (spanWord) {
+                    if (num > 1) {
+                        explicitSpan = std::max(explicitSpan, num);
+                    }
+                } else if (first) {
+                    lineA = num;
+                    hasA = true;
+                } else {
+                    lineB = num;
+                    hasB = true;
+                }
+            }
+        }
+        first = false;
+        if (slash == std::string_view::npos) {
+            break;
+        }
+        start = slash + 1;
+    }
+    if (explicitSpan > 1) {
+        return explicitSpan;
+    }
+    if (hasA && hasB && lineA != lineB) {
+        return std::max(1, std::abs(lineB - lineA));
+    }
+    return 1;
+}
+
 // `flex` is a shorthand over grow, shrink and basis, where the one-value form
 // `flex: 1` means `1 1 0%` and anything numeric other than 0 sets shrink to 0.
 void applyFlexShorthand(ComputedStyle& s, std::string_view value, float rootFontSize) {
@@ -2142,6 +2212,26 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         s.gridRowsAutoFill = false;
         s.gridRowsAutoFit = false;
         s.gridRows = parseGridTrackList(value, &s.gridRowsAutoFill, &s.gridRowsAutoFit);
+    } else if (property == "grid-column") {
+        s.gridColumnSpan = parseGridSpan(value);
+    } else if (property == "grid-row") {
+        s.gridRowSpan = parseGridSpan(value);
+    } else if (property == "grid-area") {
+        // row-start / col-start / row-end / col-end; each end may be `span <n>` or a
+        // line number. Only the row and column spans are read.
+        const std::vector<std::string_view> parts = splitOnSlashes(value);
+        if (parts.size() >= 4) {
+            const std::string rowRange =
+                std::string(parts[0]) + "/" + std::string(parts[2]);
+            const std::string colRange =
+                std::string(parts[1]) + "/" + std::string(parts[3]);
+            s.gridRowSpan = parseGridSpan(rowRange);
+            s.gridColumnSpan = parseGridSpan(colRange);
+        } else if (parts.size() == 1) {
+            const int span = parseGridSpan(value);
+            s.gridRowSpan = span;
+            s.gridColumnSpan = span;
+        }
     } else if (property == "width") {
         s.width = parseLength(value);
     } else if (property == "height") {
@@ -2875,6 +2965,12 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
                   ")";
         }
         return out;
+    }
+    if (property == "grid-column" && style.gridColumnSpan > 1) {
+        return "span " + std::to_string(style.gridColumnSpan);
+    }
+    if (property == "grid-row" && style.gridRowSpan > 1) {
+        return "span " + std::to_string(style.gridRowSpan);
     }
     if (property == "color") return color(style.color);
     if (property == "background-color") return color(style.backgroundColor);

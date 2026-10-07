@@ -1058,11 +1058,76 @@ private:
             columns = std::move(expanded);
         }
         const std::size_t columnCount = columns.size();
-        const std::size_t rowCount =
-            children.empty() ? 0 : (children.size() + columnCount - 1) / columnCount;
+
+        // Auto-placement. Items fill the rows in order, each claiming a
+        // cSpan x rSpan block of cells; the cursor never moves backwards, so a
+        // spanning item that does not fit in the remaining columns drops to the
+        // next row. With every span one this reproduces plain row-major order.
+        std::vector<int> cSpan(children.size(), 1);
+        std::vector<int> rSpan(children.size(), 1);
+        std::vector<std::size_t> itemCol(children.size(), 0);
+        std::vector<std::size_t> itemRow(children.size(), 0);
+        std::vector<float> naturalWidth(children.size(), 0.0f);
+        for (std::size_t i = 0; i < children.size(); ++i) {
+            const ComputedStyle cs = resolver_.resolve(*children[i]);
+            cSpan[i] = std::min<int>(columnCount, std::max(1, cs.gridColumnSpan));
+            rSpan[i] = std::max(1, cs.gridRowSpan);
+            naturalWidth[i] = measureNatural(*children[i], cs, true);
+        }
+        std::vector<std::vector<bool>> occupied;
+        auto claimRows = [&occupied](std::size_t row, std::size_t columns) {
+            while (occupied.size() <= row) {
+                occupied.push_back(std::vector<bool>(columns, false));
+            }
+        };
+        std::size_t nextRow = 0;
+        std::size_t nextCol = 0;
+        for (std::size_t i = 0; i < children.size(); ++i) {
+            const std::size_t csz = static_cast<std::size_t>(cSpan[i]);
+            const std::size_t rsz = static_cast<std::size_t>(rSpan[i]);
+            std::size_t r = nextRow;
+            std::size_t c = nextCol;
+            while (true) {
+                if (c + csz > columnCount) {
+                    c = 0;
+                    ++r;
+                    continue;
+                }
+                claimRows(r + rsz - 1, columnCount);
+                bool free = true;
+                for (std::size_t rr = r; rr < r + rsz && free; ++rr) {
+                    for (std::size_t cc = c; cc < c + csz && free; ++cc) {
+                        free = !occupied[rr][cc];
+                    }
+                }
+                if (free) {
+                    break;
+                }
+                ++c;
+            }
+            claimRows(r + rsz - 1, columnCount);
+            for (std::size_t rr = r; rr < r + rsz; ++rr) {
+                for (std::size_t cc = c; cc < c + csz; ++cc) {
+                    occupied[rr][cc] = true;
+                }
+            }
+            itemCol[i] = c;
+            itemRow[i] = r;
+            nextCol = c + csz;
+            nextRow = r;
+            if (nextCol >= columnCount) {
+                nextCol = 0;
+                nextRow = r + 1;
+            }
+        }
+        std::size_t rowCount = 0;
+        for (std::size_t i = 0; i < children.size(); ++i) {
+            rowCount = std::max(rowCount, itemRow[i] + static_cast<std::size_t>(rSpan[i]));
+        }
 
         // Resolve the fixed and auto parts of every column. An `auto` track takes
-        // the widest natural size among the items that land in it.
+        // the widest natural size among the items that land in it, divided across
+        // any columns they span.
         std::vector<float> widths(columnCount, 0.0f);
         float fixedTotal = 0.0f;
         float frTotal = 0.0f;
@@ -1082,11 +1147,10 @@ private:
             if (track.isAuto) {
                 float natural = 0.0f;
                 for (std::size_t i = 0; i < children.size(); ++i) {
-                    if (i % columnCount != c) {
+                    if (!(itemCol[i] <= c && c < itemCol[i] + static_cast<std::size_t>(cSpan[i]))) {
                         continue;
                     }
-                    const ComputedStyle cs = resolver_.resolve(*children[i]);
-                    natural = std::max(natural, measureNatural(*children[i], cs, true));
+                    natural = std::max(natural, naturalWidth[i] / static_cast<float>(cSpan[i]));
                 }
                 widths[c] = std::max(floor, natural);
                 fixedTotal += widths[c];
@@ -1160,21 +1224,27 @@ private:
         std::vector<float> itemX(children.size(), 0.0f);
         float maxRight = 0.0f;
         for (std::size_t i = 0; i < children.size(); ++i) {
-            const std::size_t col = i % columnCount;
-            const std::size_t row = i / columnCount;
+            const std::size_t col = itemCol[i];
+            const std::size_t row = itemRow[i];
             ComputedStyle sized = resolver_.resolve(*children[i]);
             const ComputedStyle::FlexAlign justify =
                 sized.justifySelf != ComputedStyle::AlignStretch ? sized.justifySelf
                                                                  : s.justifyItems;
-            float w = widths[col];
+            // The width an item may claim is its own cell plus every cell it spans,
+            // with the gaps between them.
+            float spanWidth = 0.0f;
+            for (std::size_t k = 0; k < static_cast<std::size_t>(cSpan[i]); ++k) {
+                spanWidth += widths[col + k];
+            }
+            spanWidth += columnGap * static_cast<float>(cSpan[i] - 1);
+            float w = spanWidth;
             float off = 0.0f;
             if (justify != ComputedStyle::AlignStretch) {
-                const float natural = measureNatural(*children[i], sized, true);
-                w = std::min(natural, widths[col]);
+                w = std::min(naturalWidth[i], spanWidth);
                 if (justify == ComputedStyle::AlignCenter) {
-                    off = (widths[col] - w) * 0.5f;
+                    off = (spanWidth - w) * 0.5f;
                 } else if (justify == ComputedStyle::AlignEnd) {
-                    off = widths[col] - w;
+                    off = spanWidth - w;
                 }
             }
             sized.width = Length(w);
@@ -1182,11 +1252,13 @@ private:
             sized.margin = {};
             // `align-self: stretch` fills a row whose height is fixed by
             // `grid-template-rows`; a content-sized row already matches its tallest
-            // item, so there is nothing to stretch to.
+            // item, so there is nothing to stretch to. A row-spanning item would have
+            // to measure every row it covers, so it is left alone.
             const ComputedStyle::FlexAlign vAlign =
                 sized.alignSelf != ComputedStyle::AlignStretch ? sized.alignSelf
                                                                : s.alignItems;
-            if (vAlign == ComputedStyle::AlignStretch && row < s.gridRows.size()) {
+            if (vAlign == ComputedStyle::AlignStretch && rSpan[i] == 1 &&
+                row < s.gridRows.size()) {
                 const ComputedStyle::GridTrack& rowTrack = s.gridRows[row];
                 if (!rowTrack.isAuto && !rowTrack.isFr) {
                     const float trackHeight =
@@ -1198,7 +1270,15 @@ private:
             }
             runWith(*children[i], sized, w, contentX + columnX[col] + off, contentY);
             itemX[i] = columnX[col] + off;
-            rowHeights[row] = std::max(rowHeights[row], children[i]->layoutHeight());
+            // A row-spanning item's height is shared by the rows it covers; a
+            // single-row item simply raises its own row, which is the common case.
+            const float perRow = std::max(
+                0.0f, (children[i]->layoutHeight() -
+                       rowGap * static_cast<float>(rSpan[i] - 1)) /
+                          static_cast<float>(rSpan[i]));
+            for (std::size_t r = row; r < row + static_cast<std::size_t>(rSpan[i]); ++r) {
+                rowHeights[r] = std::max(rowHeights[r], perRow);
+            }
             maxRight = std::max(maxRight, itemX[i] + children[i]->layoutWidth());
         }
 
@@ -1230,17 +1310,22 @@ private:
             y += rowHeights[r] + rowGap + rowExtra;
         }
         for (std::size_t i = 0; i < children.size(); ++i) {
-            const std::size_t row = i / columnCount;
+            const std::size_t row = itemRow[i];
             const ComputedStyle cs = resolver_.resolve(*children[i]);
             const ComputedStyle::FlexAlign align =
                 cs.alignSelf != ComputedStyle::AlignStretch ? cs.alignSelf : s.alignItems;
+            // The block an item may align inside is every row it spans, gaps
+            // included; for a single row that is just its own track.
+            const std::size_t last = row + static_cast<std::size_t>(rSpan[i]) - 1;
+            const float spanTop = rowY[row];
+            const float spanHeight = rowY[last] + rowHeights[last] - spanTop;
             float off = 0.0f;
             if (align == ComputedStyle::AlignCenter) {
-                off = (rowHeights[row] - children[i]->layoutHeight()) * 0.5f;
+                off = (spanHeight - children[i]->layoutHeight()) * 0.5f;
             } else if (align == ComputedStyle::AlignEnd) {
-                off = rowHeights[row] - children[i]->layoutHeight();
+                off = spanHeight - children[i]->layoutHeight();
             }
-            children[i]->setLayoutY(contentY + rowY[row] + off);
+            children[i]->setLayoutY(contentY + spanTop + off);
         }
 
         outWidth = box.width > 0.0f ? box.width : maxRight;

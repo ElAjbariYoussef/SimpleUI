@@ -605,6 +605,65 @@ void testGridStretch() {
           "align-self:start opts a grid item out of stretch");
 }
 
+void testGridSpans() {
+    // A column-spanning item takes two cells, so the next item slides into what is
+    // left and the following one starts a new row.
+    auto cols = parseOrNull("<sui><body><div id=\"g\">"
+                            "<i id=\"a\" style=\"grid-column:span 2\"></i>"
+                            "<i id=\"b\"></i><i id=\"c\"></i><i id=\"d\"></i>"
+                            "<i id=\"e\"></i></div></body></sui>");
+    if (cols) {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;grid-template-columns:repeat(3,100px);"
+            "width:300px} #g i{height:10px}"));
+        layoutRoot(*cols, resolver, 500.0f);
+
+        Element* a = cols->getElementById("a");
+        Element* b = cols->getElementById("b");
+        Element* c = cols->getElementById("c");
+        Element* e = cols->getElementById("e");
+        check(a && std::fabs(a->layoutWidth() - 200.0f) < 0.5f,
+              "a column span claims two cells");
+        check(b && std::fabs(b->layoutX() - 200.0f) < 0.5f,
+              "the next item slides past the spanned cells");
+        check(c && std::fabs(c->layoutY() - 10.0f) < 0.5f,
+              "the row fills after the spanned cells are used");
+        check(e && std::fabs(e->layoutY() - 10.0f) < 0.5f,
+              "five items land on two rows");
+        if (a) {
+            const ComputedStyle s = resolver.resolve(*a);
+            check(sui::StyleResolver::propertyValue(s, "grid-column") == "span 2",
+                  "the column span serialises back");
+        }
+    }
+
+    // A row-spanning item holds its column across both rows, so the following
+    // items are pushed one column to the right on each row.
+    auto rows = parseOrNull("<sui><body><div id=\"g\">"
+                            "<i id=\"a\" style=\"grid-row:span 2;height:80px\"></i>"
+                            "<i id=\"b\"></i><i id=\"c\"></i></div></body></sui>");
+    if (rows) {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;grid-template-columns:100px 100px;"
+            "grid-template-rows:40px 40px;width:200px} #g i{height:10px}"));
+        layoutRoot(*rows, resolver, 500.0f);
+
+        Element* a = rows->getElementById("a");
+        Element* b = rows->getElementById("b");
+        Element* c = rows->getElementById("c");
+        check(a && std::fabs(a->layoutWidth() - 100.0f) < 0.5f,
+              "a row span keeps the first column");
+        check(b && std::fabs(b->layoutX() - 100.0f) < 0.5f &&
+                  std::fabs(b->layoutY() - 0.0f) < 0.5f,
+              "the next item sits in the first row beside the span");
+        check(c && std::fabs(c->layoutX() - 100.0f) < 0.5f &&
+                  std::fabs(c->layoutY() - 40.0f) < 0.5f,
+              "the last item sits in the second row beside the span");
+    }
+}
+
 void testPropertyParsing() {
     auto document = parseOrNull("<sui><body><div>x</div></body></sui>");
     if (!document) {
@@ -3342,6 +3401,7 @@ int main() {
     testGridMinmax();
     testGridAutoFill();
     testGridStretch();
+    testGridSpans();
     testBlockStacking();
     testNestedContainer();
     testTextWrappingAndBr();
