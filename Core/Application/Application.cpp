@@ -235,6 +235,52 @@ float filterOpacity(std::string_view filter) {
     return result;
 }
 
+// Pulls the pixel translation out of a `transform` list. Only `translate()` and
+// its single-axis forms are honoured: they can be folded into the scroll offset
+// the painter already threads through the tree, whereas a scale or rotate would
+// need a real matrix on every draw. A percentage axis is left at zero because it
+// resolves against the box and is the rarer spelling.
+void transformTranslate(std::string_view transform, float& dx, float& dy) {
+    std::size_t at = 0;
+    while ((at = transform.find("translate", at)) != std::string_view::npos) {
+        const std::size_t open = transform.find('(', at);
+        if (open == std::string_view::npos) {
+            return;
+        }
+        const std::size_t close = transform.find(')', open);
+        if (close == std::string_view::npos) {
+            return;
+        }
+        const std::string_view body = transform.substr(open + 1, close - open - 1);
+        const std::size_t comma = body.find(',');
+        const std::string_view first = body.substr(0, comma);
+        const std::string_view second =
+            comma == std::string_view::npos ? std::string_view() : body.substr(comma + 1);
+        auto px = [](std::string_view piece, float& out) {
+            const std::string owned(piece);
+            char* stop = nullptr;
+            const float value = std::strtof(owned.c_str(), &stop);
+            if (stop != owned.c_str() && stop[0] != '%') {
+                out = value;
+            }
+        };
+        const bool xOnly = transform.compare(at, 10, "translateX") == 0;
+        const bool yOnly = transform.compare(at, 10, "translateY") == 0;
+        float tx = 0.0f, ty = 0.0f;
+        px(first, tx);
+        px(second, ty);
+        if (xOnly) {
+            dx += tx;
+        } else if (yOnly) {
+            dy += tx;
+        } else {
+            dx += tx;
+            dy += ty;
+        }
+        at = close + 1;
+    }
+}
+
 // Depth-first collection, so `order` is document order. The inherited clip is
 // threaded down: an element's own box is clipped by its ancestors, and it in turn
 // clips its descendants. `offX`/`offY` are the scroll offsets of the clipping
@@ -243,14 +289,21 @@ void collectPaint(Element& el, const StyleResolver& resolver, const SDL_FRect& i
                   float opacity, std::vector<PaintItem>& out, float offX, float offY) {
     SDL_FRect clip = inherited;
     bool drawable = false;
-    float childOffX = offX;
-    float childOffY = offY;
     ComputedStyle s;
     if (el.isVisual()) {
         s = resolver.resolve(el);
         drawable = s.display != ComputedStyle::None && s.visible;
         opacity *= s.opacity;
         opacity *= filterOpacity(s.filter);
+        // A translate folds into the offsets the painter subtracts, so the box and
+        // every descendant move together without touching layout.
+        transformTranslate(s.transform, offX, offY);
+    }
+    // Children inherit this element's scroll offsets (and any translation), so the
+    // copy is taken after both have been folded in.
+    float childOffX = offX;
+    float childOffY = offY;
+    if (el.isVisual()) {
         if (drawable && clipsAnything(s)) {
             // `overflow` crops to the padding box, which in CSS includes the padding.
             clip = intersectClip(clip,
