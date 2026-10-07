@@ -127,6 +127,12 @@ const char* attributeForEvent(InputKind kind) {
             return "onmousemove";
         case InputKind::Wheel:
             break;
+        case InputKind::KeyDown:
+            return "onkeydown";
+        case InputKind::KeyUp:
+            return "onkeyup";
+        case InputKind::TextInput:
+            return "oninput";
     }
     return nullptr;
 }
@@ -675,19 +681,16 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
             const float lineThick = std::max(1.0f, run.fontSize * 0.06f);
             const SDL_Color c = {run.r, run.g, run.b, static_cast<Uint8>(static_cast<float>(run.a) * opacity)};
             SDL_SetRenderDrawColor(sdlRenderer, c.r, c.g, c.b, c.a);
-            if (s.textDecorationLine == ComputedStyle::DecUnderline) {
-                SDL_FRect r = {x0, y0 + run.baseline, w, lineThick};
-                SDL_RenderFillRect(sdlRenderer, &r);
-            } else if (s.textDecorationLine == ComputedStyle::DecOverline) {
-                SDL_FRect r = {x0, y0 + (run.y - (run.y - (run.baseline - run.fontSize))) ? y0 + run.baseline - run.fontSize : y0, w, lineThick};
-            }
+            // Each decoration is one rule at its own offset from the baseline:
+            // under it, over the ascender, or through roughly the middle.
+            float lineY = y0 + run.baseline;
             if (s.textDecorationLine == ComputedStyle::DecOverline) {
-                SDL_FRect r = {x0, y0 + run.baseline - run.fontSize, w, lineThick};
-                SDL_RenderFillRect(sdlRenderer, &r);
+                lineY = y0 + run.baseline - run.fontSize;
             } else if (s.textDecorationLine == ComputedStyle::DecLineThrough) {
-                SDL_FRect r = {x0, y0 + run.baseline - run.fontSize * 0.3f, w, lineThick};
-                SDL_RenderFillRect(sdlRenderer, &r);
+                lineY = y0 + run.baseline - run.fontSize * 0.3f;
             }
+            const SDL_FRect rule{x0, lineY, w, lineThick};
+            SDL_RenderFillRect(sdlRenderer, &rule);
         }
         SDL_DestroyTexture(texture);
     }
@@ -832,7 +835,13 @@ void Application::dispatch(const InputEvent& event) {
         return;
     }
 
-    Element* target = hitTest(*document_->root(), event.x, event.y, resolver_, 0.0f, 0.0f);
+    const bool keyboard = event.kind == InputKind::KeyDown ||
+                          event.kind == InputKind::KeyUp || event.kind == InputKind::TextInput;
+    // A key event has no coordinates and belongs to whatever holds focus; a pointer
+    // event belongs to whatever is under it.
+    Element* target = keyboard ? document_->focused()
+                               : hitTest(*document_->root(), event.x, event.y, resolver_, 0.0f,
+                                         0.0f);
 
     // Interactive state is set first and unconditionally. A move that changes what
     // is under the pointer has to clear `:hover` even when it lands on nothing, and
@@ -879,6 +888,26 @@ void Application::dispatch(const InputEvent& event) {
                 }
             }
             return;
+        }
+        case InputKind::KeyDown:
+        case InputKind::KeyUp:
+        case InputKind::TextInput:
+            break;
+    }
+
+    // A focused text field edits its `value` before any handler sees the event, so
+    // an `oninput` handler reads the text the field now holds.
+    if (target && target->tag() == "input") {
+        // SDL's backspace keycode; Application.cpp keeps SDL out of its includes.
+        constexpr int kBackspace = 0x08;
+        if (event.kind == InputKind::TextInput && !event.text.empty()) {
+            target->setValue(target->value() + event.text);
+        } else if (event.kind == InputKind::KeyDown && event.key == kBackspace) {
+            std::string value = target->value();
+            if (!value.empty()) {
+                value.pop_back();
+                target->setValue(std::move(value));
+            }
         }
     }
 

@@ -466,6 +466,29 @@ void testGridAlignment() {
     }
 }
 
+void testInputValue() {
+    auto document =
+        parseOrNull("<sui><body><input id=\"i\" value=\"hi\"></input></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0} #i{width:100px}"));
+    layoutRoot(*document, resolver, 400.0f);
+
+    Element* i = document->getElementById("i");
+    check(i != nullptr && !i->textRuns().empty() && i->textRuns()[0].text == "hi",
+          "a text field renders its value as content");
+    if (!i) {
+        return;
+    }
+    // Editing writes the value, so the next layout has to show the new text.
+    i->setValue("bye");
+    layoutRoot(*document, resolver, 400.0f);
+    check(!i->textRuns().empty() && i->textRuns()[0].text == "bye",
+          "the field re-renders after setValue");
+}
+
 void testPropertyParsing() {
     auto document = parseOrNull("<sui><body><div>x</div></body></sui>");
     if (!document) {
@@ -3199,6 +3222,7 @@ int main() {
     testSyntheticEmphasis();
     testVerticalAlign();
     testGridAlignment();
+    testInputValue();
     testBlockStacking();
     testNestedContainer();
     testTextWrappingAndBr();

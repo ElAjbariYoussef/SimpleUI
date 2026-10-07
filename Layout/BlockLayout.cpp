@@ -1276,6 +1276,15 @@ private:
         // transparent here: their contents continue the same line. Anything
         // atomic (inline-block, replaced media) is placed as a unit.
         void inlineBox(Element& el, const ComputedStyle& container) {
+            // A text field draws its current value where a normal element would draw
+            // its children, so its text takes part in the same line context.
+            if (el.tag() == "input") {
+                const std::string value = el.value();
+                if (!value.empty()) {
+                    text(value, container);
+                }
+                return;
+            }
             for (const auto& child : el.children()) {
                 if (!child) {
                     continue;

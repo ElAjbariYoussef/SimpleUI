@@ -79,6 +79,11 @@ bool LinuxPlatform::initialize(const WindowConfig& config, std::string& error) {
     SDL_SetDefaultTextureScaleMode(renderer_, SDL_SCALEMODE_NEAREST);
     setViewportSize(config.width, config.height);
 
+    // Enables SDL_EVENT_TEXT_INPUT, which is what carries typed characters to a
+    // focused field. Without it only raw key events arrive and IME/text entry is
+    // lost.
+    SDL_StartTextInput(window_);
+
     return true;
 }
 
@@ -177,6 +182,26 @@ bool LinuxPlatform::pumpEvents() {
                 // `:hover` clears, which is what a browser does on the same event.
                 input_.push_back(InputEvent{InputKind::PointerMove, -1.0f, -1.0f, 0});
                 break;
+            case SDL_EVENT_KEY_DOWN: {
+                InputEvent ev{InputKind::KeyDown};
+                ev.key = static_cast<int>(event.key.key);
+                input_.push_back(std::move(ev));
+                break;
+            }
+            case SDL_EVENT_KEY_UP: {
+                InputEvent ev{InputKind::KeyUp};
+                ev.key = static_cast<int>(event.key.key);
+                input_.push_back(std::move(ev));
+                break;
+            }
+            case SDL_EVENT_TEXT_INPUT: {
+                InputEvent ev{InputKind::TextInput};
+                if (event.text.text) {
+                    ev.text = event.text.text;
+                }
+                input_.push_back(std::move(ev));
+                break;
+            }
             default:
                 break;
         }

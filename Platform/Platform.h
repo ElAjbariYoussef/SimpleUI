@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 struct SDL_Window;
@@ -13,9 +14,17 @@ struct SDL_Renderer;
 
 namespace sui {
 
-// Pointer input, in window coordinates, forwarded to the engine as SDL-free
-// structs so the DOM/event code stays platform independent.
-enum class InputKind : std::uint8_t { PointerDown, PointerUp, PointerMove, Wheel };
+// Pointer and keyboard input, in window coordinates, forwarded to the engine as
+// SDL-free structs so the DOM/event code stays platform independent.
+enum class InputKind : std::uint8_t {
+    PointerDown,
+    PointerUp,
+    PointerMove,
+    Wheel,
+    KeyDown,
+    KeyUp,
+    TextInput
+};
 
 struct InputEvent {
     InputKind kind = InputKind::PointerDown;
@@ -24,6 +33,15 @@ struct InputEvent {
     int button = 0;  // 1 = left, 2 = middle, 3 = right
     float dx = 0.0f;  // wheel delta per axis, in notches; only filled for Wheel
     float dy = 0.0f;
+    // Platform key code (SDL's keycode), filled for the key events. `text` holds
+    // the UTF-8 produced by a key press, which is what a text field inserts.
+    int key = 0;
+    std::string text;
+
+    InputEvent() = default;
+    InputEvent(InputKind k, float px = 0.0f, float py = 0.0f, int b = 0, float ddx = 0.0f,
+               float ddy = 0.0f, int kk = 0, std::string t = {})
+        : kind(k), x(px), y(py), button(b), dx(ddx), dy(ddy), key(kk), text(std::move(t)) {}
 };
 
 struct WindowConfig {

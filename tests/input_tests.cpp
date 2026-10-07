@@ -159,6 +159,59 @@ int main() {
         }
     }
 
+    // A key press reaches the engine as its platform key code, which is what a
+    // focused field inspects for Backspace and the like.
+    SDL_Event keyDown{};
+    keyDown.type = SDL_EVENT_KEY_DOWN;
+    keyDown.key.key = SDLK_A;
+    SDL_PushEvent(&keyDown);
+    platform->pumpEvents();
+    {
+        const auto& events = platform->inputEvents();
+        ++checks;
+        const bool ok = events.size() == 1 && events.front().kind == sui::InputKind::KeyDown &&
+                        events.front().key == SDLK_A;
+        if (!ok) {
+            ++failures;
+            std::printf("FAIL a key press reports its key code\n");
+        }
+    }
+
+    SDL_Event keyUp{};
+    keyUp.type = SDL_EVENT_KEY_UP;
+    keyUp.key.key = SDLK_A;
+    SDL_PushEvent(&keyUp);
+    platform->pumpEvents();
+    {
+        const auto& events = platform->inputEvents();
+        ++checks;
+        const bool keyUpOk = events.size() == 1 && events.front().kind == sui::InputKind::KeyUp &&
+                             events.front().key == SDLK_A;
+        if (!keyUpOk) {
+            ++failures;
+            std::printf("FAIL a key release reports the same key code\n");
+        }
+    }
+
+    // Typed characters arrive separately from the raw key, which is what lets a
+    // text field insert what the layout actually produced.
+    SDL_Event input{};
+    input.type = SDL_EVENT_TEXT_INPUT;
+    input.text.text = "hi";
+    SDL_PushEvent(&input);
+    platform->pumpEvents();
+    {
+        const auto& events = platform->inputEvents();
+        ++checks;
+        const bool textOk = events.size() == 1 &&
+                            events.front().kind == sui::InputKind::TextInput &&
+                            events.front().text == "hi";
+        if (!textOk) {
+            ++failures;
+            std::printf("FAIL typed text reports the committed characters\n");
+        }
+    }
+
     platform->shutdown();
 
     std::printf("input_tests: %d checks, %d failures\n", checks, failures);
