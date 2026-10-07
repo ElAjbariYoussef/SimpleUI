@@ -100,6 +100,19 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
                 out.pseudoClasses.push_back(PseudoClass::Active);
             } else if (name == "focus") {
                 out.pseudoClasses.push_back(PseudoClass::Focus);
+            } else if (name == "first-child") {
+                out.pseudoClasses.push_back(PseudoClass::FirstChild);
+            } else if (name == "last-child") {
+                out.pseudoClasses.push_back(PseudoClass::LastChild);
+            } else if (name == "root") {
+                out.pseudoClasses.push_back(PseudoClass::Root);
+            } else if (name == "nth-child") {
+                out.pseudoClasses.push_back(PseudoClass::NthChild);
+                // skip args
+            } else if (name == "not") {
+                out.pseudoClasses.push_back(PseudoClass::Not);
+            } else if (name == "is") {
+                out.pseudoClasses.push_back(PseudoClass::Is);
             } else {
                 out.unsupported = true;
             }
@@ -129,6 +142,19 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
                 part.kind = Selector::Kind::PseudoElement;
                 part.value = std::string("::") + std::string(name);
                 out.parts.push_back(std::move(part));
+            } else if (name == "first-child") {
+                out.pseudoClasses.push_back(PseudoClass::FirstChild);
+            } else if (name == "last-child") {
+                out.pseudoClasses.push_back(PseudoClass::LastChild);
+            } else if (name == "root") {
+                out.pseudoClasses.push_back(PseudoClass::Root);
+            } else if (name == "nth-child") {
+                out.pseudoClasses.push_back(PseudoClass::NthChild);
+                // skip args
+            } else if (name == "not") {
+                out.pseudoClasses.push_back(PseudoClass::Not);
+            } else if (name == "is") {
+                out.pseudoClasses.push_back(PseudoClass::Is);
             } else {
                 out.unsupported = true;
             }

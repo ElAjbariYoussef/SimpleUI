@@ -125,10 +125,10 @@ void testSelectorMatching() {
           "a selector with an unevaluated pseudo-class matches nothing");
     check(!selectorMatches(sui::CSSParser::parseSelector("div::before"), *div),
           "a pseudo-element selector matches nothing");
-    check(!selectorMatches(sui::CSSParser::parseSelector("div:first-child"), *div),
-          "an unknown pseudo-class matches nothing");
+    check(selectorMatches(sui::CSSParser::parseSelector("div:first-child"), *div),
+          "first-child matches the first child of its parent");
     check(!selectorMatches(sui::CSSParser::parseSelector("p:nth-child(2)"), *paragraph),
-          "a functional pseudo-class matches nothing");
+          "nth-child(2) does not match the only child");
 }
 
 void testInteractivePseudoClasses() {
