@@ -1029,8 +1029,15 @@ private:
         float frTotal = 0.0f;
         for (std::size_t c = 0; c < columnCount; ++c) {
             const ComputedStyle::GridTrack& track = columns[c];
+            // A `minmax()` floor is a base size every kind of track respects.
+            const float floor = track.hasMin && !track.minSize.isAuto()
+                                    ? std::max(0.0f, track.minSize.resolve(contentWidth, s.fontSize,
+                                                                           resolver_.rootFontSize()))
+                                    : 0.0f;
             if (track.isFr) {
                 frTotal += std::max(0.0f, track.fr);
+                widths[c] = floor;
+                fixedTotal += floor;
                 continue;
             }
             if (track.isAuto) {
@@ -1042,12 +1049,12 @@ private:
                     const ComputedStyle cs = resolver_.resolve(*children[i]);
                     natural = std::max(natural, measureNatural(*children[i], cs, true));
                 }
-                widths[c] = natural;
-                fixedTotal += natural;
+                widths[c] = std::max(floor, natural);
+                fixedTotal += widths[c];
                 continue;
             }
-            widths[c] = std::max(0.0f, track.size.resolve(contentWidth, s.fontSize,
-                                                          resolver_.rootFontSize()));
+            widths[c] = std::max(floor, track.size.resolve(contentWidth, s.fontSize,
+                                                           resolver_.rootFontSize()));
             fixedTotal += widths[c];
         }
         // The gap between tracks; the number of interior gaps is one per boundary.
@@ -1058,7 +1065,7 @@ private:
             const float leftover = std::max(0.0f, contentWidth - fixedTotal - gapTotal);
             for (std::size_t c = 0; c < columnCount; ++c) {
                 if (columns[c].isFr) {
-                    widths[c] = leftover * (std::max(0.0f, columns[c].fr) / frTotal);
+                    widths[c] += leftover * (std::max(0.0f, columns[c].fr) / frTotal);
                 }
             }
         }

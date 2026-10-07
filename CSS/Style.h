@@ -426,6 +426,10 @@ struct ComputedStyle {
         float fr = 0.0f;  // used when isFr
         bool isFr = false;
         bool isAuto = false;
+        // `minmax(min, max)` floor. `hasMin` says to take `max(size, minSize)`;
+        // an `auto` or unitless minimum resolves to zero.
+        bool hasMin = false;
+        Length minSize;
     };
     std::vector<GridTrack> gridColumns;
     std::vector<GridTrack> gridRows;

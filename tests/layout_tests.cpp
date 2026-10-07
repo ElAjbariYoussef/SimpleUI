@@ -489,6 +489,49 @@ void testInputValue() {
           "the field re-renders after setValue");
 }
 
+void testGridMinmax() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"t\"><i></i><i></i></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body{margin:0} #t{display:grid;"
+        "grid-template-columns:repeat(2,minmax(100px,1fr));width:400px;height:40px}"
+        "#t i{height:10px}"));
+    layoutRoot(*document, resolver, 500.0f);
+
+    Element* t = document->getElementById("t");
+    if (t && t->children().size() == 2) {
+        checkNear(t->children()[0]->layoutX(), 0.0f, 1.0f, "minmax first track starts at zero");
+        checkNear(t->children()[1]->layoutX(), 200.0f, 1.0f,
+                  "minmax fr tracks split the leftover after their floor");
+    }
+    if (t) {
+        const ComputedStyle s = resolver.resolve(*t);
+        check(sui::StyleResolver::propertyValue(s, "grid-template-columns") ==
+                  "minmax(100px, 1fr) minmax(100px, 1fr)",
+              "minmax tracks serialise back");
+    }
+
+    // The floor wins when the container is narrower than the sum of the minimums.
+    auto narrow = parseOrNull("<sui><body><div id=\"n\"><i></i></div></body></sui>");
+    if (!narrow) {
+        return;
+    }
+    sui::StyleResolver narrowResolver;
+    narrowResolver.setRules(sui::CSSParser::parse(
+        "body{margin:0} #n{display:grid;grid-template-columns:minmax(150px,1fr);"
+        "width:100px;height:20px} #n i{height:10px}"));
+    layoutRoot(*narrow, narrowResolver, 500.0f);
+    Element* n = narrow->getElementById("n");
+    if (n && !n->children().empty()) {
+        check(n->children()[0]->layoutWidth() >= 149.0f,
+              "a minmax minimum overflows a container too narrow for it");
+    }
+}
+
 void testPropertyParsing() {
     auto document = parseOrNull("<sui><body><div>x</div></body></sui>");
     if (!document) {
@@ -3223,6 +3266,7 @@ int main() {
     testVerticalAlign();
     testGridAlignment();
     testInputValue();
+    testGridMinmax();
     testBlockStacking();
     testNestedContainer();
     testTextWrappingAndBr();

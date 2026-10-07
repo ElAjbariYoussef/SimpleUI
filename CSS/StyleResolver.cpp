@@ -65,6 +65,55 @@ float parseNumber(std::string_view value) {
     return std::strtof(std::string(value).c_str(), nullptr);
 }
 
+// Splits on whitespace, but only at paren depth zero, so a function argument such
+// as `minmax(100px, 1fr)` stays one token.
+std::vector<std::string_view> splitTopLevelSpaces(std::string_view value) {
+    std::vector<std::string_view> out;
+    std::size_t start = std::string_view::npos;
+    int depth = 0;
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        const char c = value[i];
+        if (c == '(') {
+            ++depth;
+        } else if (c == ')') {
+            --depth;
+        }
+        const bool space = std::isspace(static_cast<unsigned char>(c)) != 0;
+        if (space && depth == 0) {
+            if (start != std::string_view::npos) {
+                out.push_back(value.substr(start, i - start));
+                start = std::string_view::npos;
+            }
+        } else if (start == std::string_view::npos) {
+            start = i;
+        }
+    }
+    if (start != std::string_view::npos) {
+        out.push_back(value.substr(start));
+    }
+    return out;
+}
+
+// Splits on the top-level commas of a function argument list.
+std::vector<std::string_view> splitTopLevelCommas(std::string_view value) {
+    std::vector<std::string_view> out;
+    std::size_t start = 0;
+    int depth = 0;
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        const char c = value[i];
+        if (c == '(') {
+            ++depth;
+        } else if (c == ')') {
+            --depth;
+        } else if (c == ',' && depth == 0) {
+            out.push_back(value.substr(start, i - start));
+            start = i + 1;
+        }
+    }
+    out.push_back(value.substr(start));
+    return out;
+}
+
 // Splits a value on whitespace into up to `maxParts` numbers.
 std::vector<float> parseNumberList(std::string_view value) {
     std::vector<float> out;
@@ -743,9 +792,12 @@ static bool parseHsl(std::string_view value, SDL_Color& out) {
     float h = 0, s = 0, l = 0, a = 1.0f;
     ss >> fn >> h >> s >> l >> a;
     if (fn != "hsl" && fn != "hsla") return false;
-    if (s < 0) s = 0; if (s > 100) s = 100;
-    if (l < 0) l = 0; if (l > 100) l = 100;
-    if (a < 0) a = 0; if (a > 1) a = 1;
+    if (s < 0) s = 0;
+    if (s > 100) s = 100;
+    if (l < 0) l = 0;
+    if (l > 100) l = 100;
+    if (a < 0) a = 0;
+    if (a > 1) a = 1;
     auto hsl_to_rgb = [](float h, float s, float l) -> std::tuple<int,int,int> {
         s /= 100.0f; l /= 100.0f;
         float c = (1.0f - std::fabs(2.0f*l - 1.0f)) * s;
@@ -781,9 +833,11 @@ static bool parseOklch(std::string_view value, SDL_Color& out) {
     // percentage. Alpha is a plain 0-1 fraction.
     if (l > 1.0f) l /= 100.0f;
     if (a > 1.0f) a /= 100.0f;
-    if (l < 0) l = 0; if (l > 1) l = 1;
+    if (l < 0) l = 0;
+    if (l > 1) l = 1;
     if (c < 0) c = 0;
-    if (a < 0) a = 0; if (a > 1) a = 1;
+    if (a < 0) a = 0;
+    if (a > 1) a = 1;
 
     // OKLCh -> OKLab -> linear sRGB -> gamma-encoded sRGB, using the standard
     // Björn Ottosson matrices.
@@ -881,8 +935,10 @@ static bool parseColorMix(std::string_view value, SDL_Color& out) {
     if (!h1 && !h2) { w1 = 0.5f; w2 = 0.5f; }
     else if (h1 && !h2) { w2 = 1.0f - w1; }
     else if (!h1 && h2) { w1 = 1.0f - w2; }
-    if (w1 < 0) w1 = 0; if (w1 > 1) w1 = 1;
-    if (w2 < 0) w2 = 0; if (w2 > 1) w2 = 1;
+    if (w1 < 0) w1 = 0;
+    if (w1 > 1) w1 = 1;
+    if (w2 < 0) w2 = 0;
+    if (w2 > 1) w2 = 1;
     const float total = w1 + w2;
     if (total <= 0.0f) return false;
     w1 /= total;
@@ -1068,6 +1124,34 @@ bool parseGridTrack(std::string_view token, ComputedStyle::GridTrack& out) {
     if (token.empty()) {
         return false;
     }
+    if (token.size() > 7 && token.substr(0, 7) == "minmax(") {
+        // `minmax(min, max)` keeps the max's kind (length, `auto`, or `fr`) and
+        // records the min as a floor. A nested minmax is not meaningful here.
+        const std::size_t open = token.find('(');
+        const std::size_t close = token.rfind(')');
+        if (open == std::string_view::npos || close == std::string_view::npos ||
+            close < open) {
+            return false;
+        }
+        const std::vector<std::string_view> parts =
+            splitTopLevelCommas(token.substr(open + 1, close - open - 1));
+        if (parts.size() != 2) {
+            return false;
+        }
+        ComputedStyle::GridTrack minTrack;
+        ComputedStyle::GridTrack maxTrack;
+        if (!parseGridTrack(trim(parts[0]), minTrack) ||
+            !parseGridTrack(trim(parts[1]), maxTrack)) {
+            return false;
+        }
+        out = maxTrack;
+        // `auto` and `0` minimums impose no floor; everything else does.
+        if (!minTrack.isAuto) {
+            out.hasMin = true;
+            out.minSize = minTrack.size;
+        }
+        return true;
+    }
     if (token == "auto") {
         out.isAuto = true;
         return true;
@@ -1090,7 +1174,7 @@ bool parseGridTrack(std::string_view token, ComputedStyle::GridTrack& out) {
 std::vector<ComputedStyle::GridTrack> parseGridTrackList(std::string_view value) {
     std::vector<ComputedStyle::GridTrack> out;
     const std::string_view text = trim(value);
-    const std::vector<std::string_view> tokens = splitOnSpaces(text);
+    const std::vector<std::string_view> tokens = splitTopLevelSpaces(text);
     for (std::size_t i = 0; i < tokens.size(); ++i) {
         const std::string_view token = trim(tokens[i]);
         if (token.substr(0, 7) == "repeat(") {
@@ -1125,7 +1209,7 @@ std::vector<ComputedStyle::GridTrack> parseGridTrackList(std::string_view value)
             }
             const std::string_view body =
                 std::string_view(group).substr(comma + 1, close - comma - 1);
-            const std::vector<std::string_view> inner = splitOnSpaces(trim(body));
+            const std::vector<std::string_view> inner = splitTopLevelSpaces(trim(body));
             for (int n = 0; n < count; ++n) {
                 for (const std::string_view piece : inner) {
                     ComputedStyle::GridTrack track;
@@ -2739,12 +2823,18 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             if (!out.empty()) {
                 out += ' ';
             }
+            std::string max;
             if (track.isAuto) {
-                out += "auto";
+                max = "auto";
             } else if (track.isFr) {
-                out += unitless(track.fr) + "fr";
+                max = unitless(track.fr) + "fr";
             } else {
-                out += length(track.size, "0px");
+                max = length(track.size, "0px");
+            }
+            if (track.hasMin) {
+                out += "minmax(" + length(track.minSize, "0px") + ", " + max + ")";
+            } else {
+                out += max;
             }
         }
         return out;
