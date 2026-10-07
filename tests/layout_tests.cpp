@@ -330,6 +330,40 @@ void testCascade() {
           "inline style beats every stylesheet rule");
 }
 
+void testColorFunctions() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"a\">x</div><div id=\"b\">x</div><div id=\"c\">x</div>"
+        "<div id=\"d\">x</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#a { color: oklch(0 0 0) }"
+        "#b { color: oklch(1 0 0) }"
+        "#c { color: color-mix(in srgb, red, blue) }"
+        "#d { color: color-mix(in srgb, red 25%, blue) }"));
+    const auto a = resolver.resolve(*document->getElementById("a"));
+    const auto b = resolver.resolve(*document->getElementById("b"));
+    const auto c = resolver.resolve(*document->getElementById("c"));
+    const auto d = resolver.resolve(*document->getElementById("d"));
+    check(a.color.r == 0 && a.color.g == 0 && a.color.b == 0, "oklch black converts");
+    check(b.color.r == 255 && b.color.g == 255 && b.color.b == 255,
+          "oklch white converts to near-white");
+    checkNear(c.color.r, 128.0f, 1.0f, "color-mix splits two colours evenly (r)");
+    checkNear(c.color.b, 128.0f, 1.0f, "color-mix splits two colours evenly (b)");
+    checkNear(d.color.r, 64.0f, 1.0f, "color-mix honours an explicit weight (r)");
+    checkNear(d.color.b, 191.0f, 1.0f, "color-mix gives the remainder to the other (b)");
+
+    // A rounded-trip check: the OKLab round trip of mid grey stays neutral.
+    sui::StyleResolver grey;
+    grey.setRules(sui::CSSParser::parse("#a { color: oklch(0.5 0 0) }"));
+    const auto g = grey.resolve(*document->getElementById("a"));
+    check(std::abs(int(g.color.r) - int(g.color.g)) <= 1 &&
+              std::abs(int(g.color.g) - int(g.color.b)) <= 1,
+          "oklch with zero chroma stays grey");
+}
+
 void testPropertyParsing() {
     auto document = parseOrNull("<sui><body><div>x</div></body></sui>");
     if (!document) {
@@ -3059,6 +3093,7 @@ int main() {
     testCustomProperties();
     testCascade();
     testPropertyParsing();
+    testColorFunctions();
     testBlockStacking();
     testNestedContainer();
     testTextWrappingAndBr();

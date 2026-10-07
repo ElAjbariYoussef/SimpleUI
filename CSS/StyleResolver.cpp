@@ -764,8 +764,136 @@ static bool parseHsl(std::string_view value, SDL_Color& out) {
     out = {Uint8(r), Uint8(g), Uint8(b), Uint8(a*255)};
     return true;
 }
-static bool parseOklch(std::string_view, SDL_Color&) { return false; }
-static bool parseColorMix(std::string_view, SDL_Color&) { return false; }
+static bool parseOklch(std::string_view value, SDL_Color& out) {
+    std::string t(value);
+    for (char& c : t) {
+        if (c == ',' || c == '(' || c == ')' || c == '/' || c == '%') c = ' ';
+    }
+    std::stringstream ss(t);
+    std::string fn;
+    float l = 0, c = 0, h = 0, a = 1.0f;
+    if (!(ss >> fn)) return false;
+    if (fn != "oklch") return false;
+    if (!(ss >> l >> c >> h)) return false;
+    ss >> a;
+    // `oklch()` accepts a percentage for any axis; the space-separated form makes
+    // that hard to tell apart from a 0-1 number, so a value above 1 is read as a
+    // percentage. Alpha is a plain 0-1 fraction.
+    if (l > 1.0f) l /= 100.0f;
+    if (a > 1.0f) a /= 100.0f;
+    if (l < 0) l = 0; if (l > 1) l = 1;
+    if (c < 0) c = 0;
+    if (a < 0) a = 0; if (a > 1) a = 1;
+
+    // OKLCh -> OKLab -> linear sRGB -> gamma-encoded sRGB, using the standard
+    // Björn Ottosson matrices.
+    const float hr = h * 3.14159265358979323846f / 180.0f;
+    const float oa = c * std::cos(hr);
+    const float ob = c * std::sin(hr);
+    const float l_ = l + 0.3963377774f * oa + 0.2158037573f * ob;
+    const float m_ = l - 0.1055613458f * oa - 0.0638541728f * ob;
+    const float s_ = l - 0.0894841775f * oa - 1.2914855480f * ob;
+    const float ll = l_ * l_ * l_;
+    const float mm = m_ * m_ * m_;
+    const float sss = s_ * s_ * s_;
+    const float rl = 4.0767416621f * ll - 3.3077115913f * mm + 0.2309699292f * sss;
+    const float gl = -1.2684380046f * ll + 2.6097574011f * mm - 0.3413193965f * sss;
+    const float bl = -0.0041960863f * ll - 0.7034186147f * mm + 1.7076147010f * sss;
+    auto encode = [](float x) {
+        if (x <= 0.0f) return 0.0f;
+        if (x >= 1.0f) return 1.0f;
+        if (x <= 0.0031308f) return 12.92f * x;
+        return 1.055f * std::pow(x, 1.0f / 2.4f) - 0.055f;
+    };
+    out = {Uint8(encode(rl) * 255.0f + 0.5f), Uint8(encode(gl) * 255.0f + 0.5f),
+           Uint8(encode(bl) * 255.0f + 0.5f), Uint8(a * 255.0f + 0.5f)};
+    return true;
+}
+
+// Finds the first `,` that is not inside parentheses, which separates the two
+// operands of `color-mix()` even when an operand is itself a function.
+static std::size_t topLevelComma(std::string_view text, std::size_t from) {
+    int depth = 0;
+    for (std::size_t i = from; i < text.size(); ++i) {
+        const char ch = text[i];
+        if (ch == '(') ++depth;
+        else if (ch == ')') --depth;
+        else if (ch == ',' && depth == 0) return i;
+    }
+    return std::string_view::npos;
+}
+
+// `color-mix(in srgb, A p%, B)`. A trailing percentage on an operand is its
+// weight; a missing one splits the remainder. Mixing is a straight sRGB
+// interpolation with premultiplied alpha.
+bool parseColor(std::string_view value, SDL_Color& out);
+
+static bool parseColorMix(std::string_view value, SDL_Color& out) {
+    const std::string text(value);
+    if (text.rfind("color-mix(", 0) != 0) return false;
+    const std::size_t open = text.find('(');
+    const std::size_t firstComma = topLevelComma(text, open + 1);
+    if (firstComma == std::string::npos) return false;
+    // The colour space is `in srgb`; other spaces are not approximated.
+    std::string space = text.substr(open + 1, firstComma - open - 1);
+    for (char& ch : space) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (trim(space) != "in srgb") return false;
+
+    const std::size_t secondComma = topLevelComma(text, firstComma + 1);
+    if (secondComma == std::string::npos) return false;
+    const std::size_t close = text.rfind(')');
+    if (close == std::string::npos) return false;
+
+    auto parseOperand = [](std::string_view piece, SDL_Color& colour, float& weight,
+                           bool& hasWeight) {
+        piece = trim(piece);
+        std::size_t pct = piece.rfind('%');
+        hasWeight = false;
+        weight = 0.0f;
+        if (pct != std::string_view::npos) {
+            std::size_t numStart = pct;
+            while (numStart > 0 && (std::isdigit(static_cast<unsigned char>(piece[numStart - 1])) ||
+                                    piece[numStart - 1] == '.')) {
+                --numStart;
+            }
+            const std::string number(piece.substr(numStart, pct - numStart));
+            char* stop = nullptr;
+            const float parsed = std::strtof(number.c_str(), &stop);
+            if (stop != number.c_str()) {
+                hasWeight = true;
+                weight = parsed / 100.0f;
+                piece = trim(piece.substr(0, numStart));
+            }
+        }
+        return parseColor(piece, colour);
+    };
+
+    SDL_Color c1{}, c2{};
+    float w1 = 0.0f, w2 = 0.0f;
+    bool h1 = false, h2 = false;
+    if (!parseOperand(text.substr(firstComma + 1, secondComma - firstComma - 1), c1, w1, h1)) {
+        return false;
+    }
+    if (!parseOperand(text.substr(secondComma + 1, close - secondComma - 1), c2, w2, h2)) {
+        return false;
+    }
+    // One weight implies the other; neither defaults to an even split.
+    if (!h1 && !h2) { w1 = 0.5f; w2 = 0.5f; }
+    else if (h1 && !h2) { w2 = 1.0f - w1; }
+    else if (!h1 && h2) { w1 = 1.0f - w2; }
+    if (w1 < 0) w1 = 0; if (w1 > 1) w1 = 1;
+    if (w2 < 0) w2 = 0; if (w2 > 1) w2 = 1;
+    const float total = w1 + w2;
+    if (total <= 0.0f) return false;
+    w1 /= total;
+    w2 /= total;
+
+    auto mix = [&](Uint8 a, Uint8 b) {
+        return Uint8(static_cast<float>(a) * w1 + static_cast<float>(b) * w2 + 0.5f);
+    };
+    out = {mix(c1.r, c2.r), mix(c1.g, c2.g), mix(c1.b, c2.b), mix(c1.a, c2.a)};
+    return true;
+}
 
 bool parseNamedColor(std::string_view name, SDL_Color& out) {
     if (name == "transparent") {
