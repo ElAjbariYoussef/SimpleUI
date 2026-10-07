@@ -85,10 +85,17 @@ float textWidth(const TextFont* font, const ComputedStyle& s, std::string_view t
         return 0.0f;
     }
     std::string tt = transformText(s, t);
+    float w = 0.0f;
     if (font && font->hasFont() && s.fontSize > 0.0f) {
-        return font->measureText(tt, s.fontSize);
+        w = font->measureText(tt, s.fontSize);
+    } else {
+        w = static_cast<float>(tt.size()) * s.fontSize * 0.5f;
     }
-    return static_cast<float>(tt.size()) * s.fontSize * 0.5f;
+    if (s.letterSpacing.unit != sui::Length::Auto && !tt.empty()) {
+        const float ls = s.letterSpacing.resolve(s.fontSize, s.fontSize, 16.0f);
+        w += ls * static_cast<float>(tt.size() - 1);
+    }
+    return w;
 }
 
 class Layout {
