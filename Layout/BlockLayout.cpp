@@ -54,14 +54,41 @@ Metrics metricsFor(const TextFont* font, const ComputedStyle& s) {
     return m;
 }
 
+std::string transformText(const ComputedStyle& s, std::string_view t) {
+    if (s.textTransform == ComputedStyle::TransformNone) {
+        return std::string(t);
+    }
+    std::string out;
+    out.resize(t.size());
+    std::size_t j = 0;
+    for (char c : t) {
+        char nc = c;
+        if (s.textTransform == ComputedStyle::TransformUppercase) {
+            nc = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        } else if (s.textTransform == ComputedStyle::TransformLowercase) {
+            nc = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        } else if (s.textTransform == ComputedStyle::TransformCapitalize) {
+            if (j == 0 && std::isalpha(static_cast<unsigned char>(c))) {
+                nc = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            } else {
+                nc = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+        }
+        out[j++] = nc;
+    }
+    out.resize(j);
+    return out;
+}
+
 float textWidth(const TextFont* font, const ComputedStyle& s, std::string_view t) {
     if (t.empty()) {
         return 0.0f;
     }
+    std::string tt = transformText(s, t);
     if (font && font->hasFont() && s.fontSize > 0.0f) {
-        return font->measureText(t, s.fontSize);
+        return font->measureText(tt, s.fontSize);
     }
-    return static_cast<float>(t.size()) * s.fontSize * 0.5f;
+    return static_cast<float>(tt.size()) * s.fontSize * 0.5f;
 }
 
 class Layout {
@@ -1146,7 +1173,8 @@ private:
                 newLine();
             }
             const float space = lineHasContent_ ? metrics_.spaceWidth : 0.0f;
-            ownerEl_.addTextRun({std::string(w), originX_ + penX_ + space,
+            std::string wt = transformText(s, w);
+            ownerEl_.addTextRun({wt, originX_ + penX_ + space,
                                  originY_ + cursorY_, wWidth, metrics_.lineHeight,
                                  metrics_.ascent + ascentDelta, s.fontSize, s.color.r,
                                  s.color.g, s.color.b, s.color.a});
