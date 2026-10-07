@@ -434,6 +434,8 @@ void paintTextShadow(const ComputedStyle::TextShadow& shadow, const Element::Tex
             texture, SDL_FRect{std::floor(run.x + dx + ux * reach),
                                std::floor(run.y + dy + uy * reach), texW, texH},
             nullptr, Color{255, 255, 255, static_cast<Uint8>(weight * 255.0f)});
+
+
         SDL_DestroyTexture(texture);
     }
 }
@@ -556,6 +558,31 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         const float ty = offY + (s.overflowY != ComputedStyle::Visible ? el.scrollTop() : 0.0f);
         const SDL_FRect dst{std::floor(run.x - tx), std::floor(run.y - ty), texW, texH};
         SDL_RenderTexture(sdlRenderer, texture, nullptr, &dst);
+
+        // Text decoration
+        if (s.textDecorationLine != ComputedStyle::DecNone) {
+            const float txd = offX + (s.overflowX != ComputedStyle::Visible ? el.scrollLeft() : 0.0f);
+            const float tyd = offY + (s.overflowY != ComputedStyle::Visible ? el.scrollTop() : 0.0f);
+            const float x0 = std::floor(run.x - txd);
+            const float y0 = std::floor(run.y - tyd);
+            const float w = texW;
+            const float lineThick = std::max(1.0f, run.fontSize * 0.06f);
+            const SDL_Color c = {run.r, run.g, run.b, static_cast<Uint8>(static_cast<float>(run.a) * opacity)};
+            SDL_SetRenderDrawColor(sdlRenderer, c.r, c.g, c.b, c.a);
+            if (s.textDecorationLine == ComputedStyle::DecUnderline) {
+                SDL_FRect r = {x0, y0 + run.baseline, w, lineThick};
+                SDL_RenderFillRect(sdlRenderer, &r);
+            } else if (s.textDecorationLine == ComputedStyle::DecOverline) {
+                SDL_FRect r = {x0, y0 + (run.y - (run.y - (run.baseline - run.fontSize))) ? y0 + run.baseline - run.fontSize : y0, w, lineThick};
+            }
+            if (s.textDecorationLine == ComputedStyle::DecOverline) {
+                SDL_FRect r = {x0, y0 + run.baseline - run.fontSize, w, lineThick};
+                SDL_RenderFillRect(sdlRenderer, &r);
+            } else if (s.textDecorationLine == ComputedStyle::DecLineThrough) {
+                SDL_FRect r = {x0, y0 + run.baseline - run.fontSize * 0.3f, w, lineThick};
+                SDL_RenderFillRect(sdlRenderer, &r);
+            }
+        }
         SDL_DestroyTexture(texture);
     }
 }
