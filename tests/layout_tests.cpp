@@ -412,6 +412,24 @@ void testNestedContainer() {
               "outer height grows to fit the child");
 }
 
+void testTextIndent() {
+    auto document = parseOrNull(
+        "<sui><body><p id=\"a\">alpha beta</p></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("#a { text-indent: 20px }"));
+    layoutRoot(*document, resolver, 400.0f);
+
+    Element* p = document->getElementById("a");
+    check(p != nullptr && !p->textRuns().empty(), "indented paragraph laid out");
+    if (p && !p->textRuns().empty()) {
+        check(p->textRuns()[0].x > p->layoutX() + 19.0f,
+              "text-indent pushes the first text run right");
+    }
+}
+
 void testTextWrappingAndBr() {
     auto document = parseOrNull(
         "<sui><body><p id=\"t\">alpha beta gamma delta epsilon zeta eta theta</p>"
@@ -3018,6 +3036,7 @@ int main() {
     testBlockStacking();
     testNestedContainer();
     testTextWrappingAndBr();
+    testTextIndent();
     testDisplayNoneIsSkipped();
     testInheritance();
     testChildOverridesInherited();

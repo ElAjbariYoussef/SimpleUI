@@ -1021,7 +1021,11 @@ private:
               maxWidth_(maxWidth),
               originX_(originX),
               originY_(originY),
-              spacing_(spacingFor(s.whiteSpace)) {}
+              spacing_(spacingFor(s.whiteSpace)) {
+            if (s.textIndent.unit != sui::Length::Auto) {
+                penX_ = std::max(0.0f, s.textIndent.resolve(s.fontSize, s.fontSize, 16.0f));
+            }
+        }
 
         void text(std::string_view text, const ComputedStyle& s) {
             const Metrics m = metricsFor(owner_.font_, s);
@@ -1202,7 +1206,6 @@ private:
         float originY_ = 0.0f;
         float penX_ = 0.0f;
         float cursorY_ = 0.0f;
-        bool firstLine_ = true;
         float bottom_ = 0.0f;
         float widest_ = 0.0f;
         bool lineHasContent_ = false;
