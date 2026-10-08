@@ -30,6 +30,21 @@
 namespace sui {
 namespace {
 
+// One open group on the paint stack. A composited group renders into `texture`;
+// `previous` is the target that was active before it and gets it back when the
+// group ends. When no surface could be made (zero-size bounds, or the renderer
+// refused the texture), `texture` stays null and the group's members paint
+// straight into whatever target is current instead, with `alpha` folded into
+// each box -- the flat approximation, only as a fallback.
+struct GroupFrame {
+    SDL_Texture* texture = nullptr;
+    SDL_Texture* previous = nullptr;
+    SDL_FRect bounds{};
+    float alpha = 1.0f;
+    float originX = 0.0f;
+    float originY = 0.0f;
+};
+
 // window width/height/state arrive as markup attributes, so parse them leniently.
 int attributeInt(Element& element, std::string_view key, int fallback) {
     const std::string_view raw = element.attribute(key);
@@ -961,26 +976,94 @@ void Application::run() {
                 }
 
                 // Paint in CSS order: back to front, each box clipped to whatever
-                // its ancestors' `overflow` allows, and each stacking context
-                // emitted right after the box that opens it.
-                const std::vector<PaintItem> paintList =
-                    computePaintOrder(*document_->root(), resolver_);
+                // its ancestors' `overflow` allows. A stacking context that carries
+                // an alpha under 1 is rendered into an offscreen surface and blended
+                // back as one unit, so its overlapping members mix first.
+                const std::vector<PaintOp> paintOps =
+                    computePaintOps(*document_->root(), resolver_);
                 SDL_Renderer* sdlRenderer = platform_->renderer();
-                for (const PaintItem& item : paintList) {
-                    SDL_Rect previous;
-                    SDL_GetRenderClipRect(sdlRenderer, &previous);
+                std::vector<GroupFrame> groups;
+                for (const PaintOp& op : paintOps) {
+                    if (op.kind == PaintOp::Kind::BeginGroup) {
+                        const int width = static_cast<int>(std::ceil(op.bounds.w));
+                        const int height = static_cast<int>(std::ceil(op.bounds.h));
+                        GroupFrame frame;
+                        frame.bounds = op.bounds;
+                        frame.alpha = op.alpha;
+                        if (width > 0 && height > 0) {
+                            SDL_PropertiesID props = SDL_CreateProperties();
+                            SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER,
+                                                  SDL_TEXTUREACCESS_TARGET);
+                            SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER,
+                                                  width);
+                            SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER,
+                                                  height);
+                            frame.texture = SDL_CreateTextureWithProperties(sdlRenderer, props);
+                            SDL_DestroyProperties(props);
+                        }
+                        if (frame.texture) {
+                            frame.previous = SDL_GetRenderTarget(sdlRenderer);
+                            frame.originX = op.bounds.x;
+                            frame.originY = op.bounds.y;
+                            SDL_SetTextureBlendMode(frame.texture, SDL_BLENDMODE_BLEND);
+                            SDL_SetRenderTarget(sdlRenderer, frame.texture);
+                            SDL_SetRenderClipRect(sdlRenderer, nullptr);
+                            SDL_SetRenderDrawColor(sdlRenderer, 0, 0, 0, 0);
+                            SDL_RenderClear(sdlRenderer);
+                        }
+                        groups.push_back(frame);
+                        continue;
+                    }
+                    if (op.kind == PaintOp::Kind::EndGroup) {
+                        const GroupFrame frame = groups.back();
+                        groups.pop_back();
+                        if (frame.texture) {
+                            float ox = 0.0f, oy = 0.0f;
+                            for (auto it = groups.rbegin(); it != groups.rend(); ++it) {
+                                if (it->texture) {
+                                    ox = it->originX;
+                                    oy = it->originY;
+                                    break;
+                                }
+                            }
+                            SDL_SetRenderTarget(sdlRenderer, frame.previous);
+                            SDL_SetRenderClipRect(sdlRenderer, nullptr);
+                            SDL_SetTextureAlphaMod(frame.texture, static_cast<Uint8>(
+                                std::lround(frame.alpha * 255.0f)));
+                            const SDL_FRect dst{frame.bounds.x - ox, frame.bounds.y - oy,
+                                                frame.bounds.w, frame.bounds.h};
+                            SDL_RenderTexture(sdlRenderer, frame.texture, nullptr, &dst);
+                            SDL_DestroyTexture(frame.texture);
+                        }
+                        continue;
+                    }
+
+                    const PaintItem& item = op.item;
+                    float ox = 0.0f, oy = 0.0f;
+                    for (auto it = groups.rbegin(); it != groups.rend(); ++it) {
+                        if (it->texture) {
+                            ox = it->originX;
+                            oy = it->originY;
+                            break;
+                        }
+                    }
+                    float groupOpacity = item.opacity;
+                    for (const GroupFrame& group : groups) {
+                        if (!group.texture) {
+                            groupOpacity *= group.alpha;
+                        }
+                    }
                     if (item.clip.w > 0.0f && item.clip.h > 0.0f) {
-                        const SDL_Rect rect{static_cast<int>(std::floor(item.clip.x)),
-                                            static_cast<int>(std::floor(item.clip.y)),
+                        const SDL_Rect rect{static_cast<int>(std::floor(item.clip.x - ox)),
+                                            static_cast<int>(std::floor(item.clip.y - oy)),
                                             static_cast<int>(std::ceil(item.clip.w)),
                                             static_cast<int>(std::ceil(item.clip.h))};
                         SDL_SetRenderClipRect(sdlRenderer, &rect);
                     } else {
                         SDL_SetRenderClipRect(sdlRenderer, nullptr);
                     }
-                    paintBox(*item.el, renderer, sdlRenderer, resolver_, *font_, item.opacity,
-                             *images_, item.dx, item.dy);
-                    SDL_SetRenderClipRect(sdlRenderer, &previous);
+                    paintBox(*item.el, renderer, sdlRenderer, resolver_, *font_, groupOpacity,
+                             *images_, item.dx + ox, item.dy + oy);
                 }
             } else {
                 SDL_FRect panel{40.0f, 40.0f, static_cast<float>(width) - 80.0f,

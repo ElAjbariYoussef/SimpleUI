@@ -4,6 +4,7 @@
 #include "SUI/DOM/Element.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -38,6 +39,10 @@ enum class GroupKind {
 struct PaintEntry {
     PaintItem item;
     bool group = false;
+    // The alpha a composited group blends its offscreen surface back with: the
+    // root's `opacity` times any `filter: opacity()` in its chain. 1 means the
+    // group needs no surface and its box and contents stay in the flat list.
+    float groupAlpha = 1.0f;
     std::vector<PaintEntry> inner;
 };
 
@@ -149,6 +154,88 @@ GroupKind classifyGroup(const ComputedStyle& s) {
     return GroupKind::None;
 }
 
+PaintOp boxOp(const PaintItem& item) {
+    return PaintOp{PaintOp::Kind::Box, item, {}, 1.0f};
+}
+
+SDL_FRect unionRect(const SDL_FRect& a, const SDL_FRect& b) {
+    if (a.w <= 0.0f || a.h <= 0.0f) {
+        return b;
+    }
+    if (b.w <= 0.0f || b.h <= 0.0f) {
+        return a;
+    }
+    const float x = std::min(a.x, b.x);
+    const float y = std::min(a.y, b.y);
+    return {x, y, std::max(a.x + a.w, b.x + b.w) - x, std::max(a.y + a.h, b.y + b.h) - y};
+}
+
+// How far a box's painting can reach beyond its layout box, so an offscreen
+// surface does not cut a shadow or outline short at its edge.
+float paintOutset(const ComputedStyle& s, float rootFontSize) {
+    float amount = 0.0f;
+    for (const ComputedStyle::BoxShadow& shadow : s.boxShadows) {
+        if (shadow.inset) {
+            continue;
+        }
+        const float blur = std::max(0.0f, shadow.blurRadius.resolve(0.0f, s.fontSize, rootFontSize));
+        const float spread = std::max(0.0f, shadow.spread.resolve(0.0f, s.fontSize, rootFontSize));
+        const float offset = std::max(std::fabs(shadow.offsetX.resolve(0.0f, s.fontSize, rootFontSize)),
+                                      std::fabs(shadow.offsetY.resolve(0.0f, s.fontSize, rootFontSize)));
+        amount = std::max(amount, blur + spread + offset);
+    }
+    for (const ComputedStyle::TextShadow& shadow : s.textShadows) {
+        const float blur = std::max(0.0f, shadow.blurRadius.resolve(0.0f, s.fontSize, rootFontSize));
+        const float offset = std::max(std::fabs(shadow.offsetX.resolve(0.0f, s.fontSize, rootFontSize)),
+                                      std::fabs(shadow.offsetY.resolve(0.0f, s.fontSize, rootFontSize)));
+        amount = std::max(amount, blur + offset);
+    }
+    if (s.outline.style != ComputedStyle::BorderStyleNone) {
+        const float width = s.outline.width.resolve(0.0f, s.fontSize, rootFontSize);
+        const float offset = std::max(0.0f, s.outline.offset.resolve(0.0f, s.fontSize, rootFontSize));
+        amount = std::max(amount, width + offset);
+    }
+    return amount;
+}
+
+// Fills in the `bounds` each BeginGroup op carries. The content is gathered
+// from the group's own boxes: the union of what each paints -- its layout box
+// clipped by its ancestor clip, then padded by whatever it draws outside that
+// (shadows, outlines) -- clamped to the group root's own clip, the tightest
+// rect the group's ancestors allow. The group root's box sits immediately after
+// its BeginGroup, so it owns the clip the whole group is confined to.
+void computeGroupBounds(std::vector<PaintOp>& ops, const StyleResolver& resolver) {
+    const float rootFontSize = resolver.rootFontSize();
+    std::vector<std::size_t> open;
+    for (std::size_t i = 0; i < ops.size(); ++i) {
+        if (ops[i].kind == PaintOp::Kind::BeginGroup) {
+            open.push_back(i);
+        } else if (ops[i].kind == PaintOp::Kind::EndGroup) {
+            const std::size_t begin = open.back();
+            open.pop_back();
+            const SDL_FRect clip = ops[begin + 1].item.clip;
+            SDL_FRect bounds{};
+            for (std::size_t j = begin + 1; j < i; ++j) {
+                if (ops[j].kind != PaintOp::Kind::Box) {
+                    continue;
+                }
+                const PaintItem& item = ops[j].item;
+                SDL_FRect painted{item.el->layoutX() - item.dx, item.el->layoutY() - item.dy,
+                                  item.el->layoutWidth(), item.el->layoutHeight()};
+                painted = intersectClip(painted, item.clip);
+                if (painted.w <= 0.0f || painted.h <= 0.0f) {
+                    continue;
+                }
+                const float outset = paintOutset(resolver.resolve(*item.el), rootFontSize);
+                bounds = unionRect(bounds, {painted.x - outset, painted.y - outset,
+                                            painted.w + 2.0f * outset, painted.h + 2.0f * outset});
+            }
+            ops[begin].bounds =
+                bounds.w > 0.0f && bounds.h > 0.0f ? intersectClip(bounds, clip) : SDL_FRect{};
+        }
+    }
+}
+
 // Walks one document into per-context lists. Discovery is depth-first, so `order`
 // stays document order across the whole walk even though each list is sorted on
 // its own.
@@ -162,6 +249,7 @@ struct Collector {
         bool paints = false;
         bool positioned = false;
         GroupKind kind = GroupKind::None;
+        float groupAlpha = 1.0f;
         PaintItem item;
         PaintEnv child;
     };
@@ -175,10 +263,19 @@ struct Collector {
         }
         const ComputedStyle s = resolver.resolve(el);
         const bool drawable = s.display != ComputedStyle::None && s.visible;
+        const float groupAlpha = s.opacity * filterOpacity(s.filter);
+        // An `opacity` under 1 -- or a `filter: opacity()` -- composites its whole
+        // context through an offscreen surface, so its alpha leaves the environment
+        // here and is carried on the BeginGroup op instead; the box and everything
+        // they hold paint at full strength into that surface. A box that never
+        // paints (say `display:none`) still hands its alpha on, as it always did,
+        // since there is no surface for it.
+        const bool composited = drawable && groupAlpha < 1.0f;
+        if (!composited) {
+            box.child.opacity *= groupAlpha;
+        }
         // The group alpha and the translation land on the box as well as on what
         // it contains, so both are folded in before the item is taken.
-        box.child.opacity *= s.opacity;
-        box.child.opacity *= filterOpacity(s.filter);
         transformTranslate(s.transform, box.child.dx, box.child.dy);
         const bool clips = drawable && clipsAnything(s);
         if (clips) {
@@ -195,6 +292,7 @@ struct Collector {
         box.paints = true;
         box.positioned = s.positioned;
         box.kind = classifyGroup(s);
+        box.groupAlpha = composited ? groupAlpha : 1.0f;
         PaintItem& item = box.item;
         item.el = &el;
         item.zIndex = s.positioned ? s.zIndex : 0;
@@ -250,6 +348,7 @@ struct Collector {
             return;
         }
         entry.group = true;
+        entry.groupAlpha = box.groupAlpha;
         // A pseudo-context holds its in-flow content but lets positioned
         // descendants rejoin the list its own box sits in; a real one holds all.
         std::vector<PaintEntry>* childEscape = box.kind == GroupKind::Pseudo ? into : nullptr;
@@ -259,8 +358,10 @@ struct Collector {
 
     // Appends one context's entries in order -- layer, then `z-index`, then
     // document order -- with each group's box immediately followed by everything
-    // the group orders.
-    void emit(std::vector<PaintEntry>& entries, std::vector<PaintItem>& out) {
+    // the group orders. A group carrying an alpha under 1 is bracketed by
+    // BeginGroup/EndGroup operations around its boxes, so the executor can
+    // composite them offscreen; anything else stays a flat sequence.
+    void emit(std::vector<PaintEntry>& entries, std::vector<PaintOp>& out) {
         std::stable_sort(entries.begin(), entries.end(),
                          [](const PaintEntry& a, const PaintEntry& b) {
                              if (a.item.layer != b.item.layer) {
@@ -272,8 +373,13 @@ struct Collector {
                              return a.item.order < b.item.order;
                          });
         for (PaintEntry& entry : entries) {
-            out.push_back(entry.item);
-            if (entry.group) {
+            if (entry.group && entry.groupAlpha < 1.0f) {
+                out.push_back(PaintOp{PaintOp::Kind::BeginGroup, entry.item, {}, entry.groupAlpha});
+                out.push_back(boxOp(entry.item));
+                emit(entry.inner, out);
+                out.push_back(PaintOp{PaintOp::Kind::EndGroup, entry.item, {}, 1.0f});
+            } else {
+                out.push_back(boxOp(entry.item));
                 emit(entry.inner, out);
             }
         }
@@ -290,19 +396,28 @@ bool createsPaintGroup(const ComputedStyle& s) {
     return classifyGroup(s) != GroupKind::None;
 }
 
-std::vector<PaintItem> computePaintOrder(Element& root, const StyleResolver& resolver) {
+std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolver) {
     Collector collector{resolver, 0};
-    std::vector<PaintItem> out;
+    std::vector<PaintOp> out;
     // The document's context opens with the root's own box, then orders everything
     // else around it: a context paints its background before any child's turn.
-    // Nothing escapes above the root, so its children carry no escape list.
+    // Nothing escapes above the root, so its children carry no escape list. A
+    // root that composites (say `opacity` on the whole document) brackets the
+    // whole frame.
     const Collector::BoxState box = collector.resolve(root, PaintEnv{});
+    if (box.paints && box.groupAlpha < 1.0f) {
+        out.push_back(PaintOp{PaintOp::Kind::BeginGroup, box.item, {}, box.groupAlpha});
+    }
     if (box.paints) {
-        out.push_back(box.item);
+        out.push_back(boxOp(box.item));
     }
     std::vector<PaintEntry> entries;
     collector.walkChildren(root, box.child, entries, nullptr);
     collector.emit(entries, out);
+    if (box.paints && box.groupAlpha < 1.0f) {
+        out.push_back(PaintOp{PaintOp::Kind::EndGroup, box.item, {}, 1.0f});
+    }
+    computeGroupBounds(out, resolver);
     return out;
 }
 

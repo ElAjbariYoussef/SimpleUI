@@ -1,6 +1,7 @@
-// Paint order: which box a frame draws on top of which, and how a stacking
-// context keeps its subtree together. No device is needed -- computePaintOrder is
-// a pure walk over a laid-out document -- so this runs in the ordinary pass.
+// Paint order: which box a frame draws on top of which, how a stacking context
+// keeps its subtree together, and where an `opacity` below 1 switches to
+// offscreen compositing. No device is needed -- computePaintOps is a pure walk
+// over a laid-out document -- so this runs in the ordinary test pass.
 
 #include "Core/Application/PaintOrder.h"
 #include "CSS/Parser.h"
@@ -63,9 +64,41 @@ void layoutRoot(Document& document, sui::StyleResolver& resolver) {
     sui::BlockLayout().layout(document.root(), input);
 }
 
+// Flattens the op sequence back into boxes, multiplying each enclosing group's
+// alpha back into the box the way the flat painter used to, so every ordering
+// check reads the same on both sides of the offscreen switch.
+std::vector<PaintItem> flattened(const std::vector<sui::PaintOp>& ops) {
+    std::vector<PaintItem> items;
+    std::vector<float> groupAlpha;
+    for (const sui::PaintOp& op : ops) {
+        if (op.kind == sui::PaintOp::Kind::BeginGroup) {
+            groupAlpha.push_back(op.alpha);
+        } else if (op.kind == sui::PaintOp::Kind::EndGroup) {
+            groupAlpha.pop_back();
+        } else {
+            PaintItem item = op.item;
+            for (float alpha : groupAlpha) {
+                item.opacity *= alpha;
+            }
+            items.push_back(item);
+        }
+    }
+    return items;
+}
+
 std::vector<PaintItem> orderOf(Document& document, sui::StyleResolver& resolver) {
     layoutRoot(document, resolver);
-    return sui::computePaintOrder(*document.root(), resolver);
+    return flattened(sui::computePaintOps(*document.root(), resolver));
+}
+
+// The first BeginGroup op, for tests that assert on the composite sequence.
+std::size_t beginGroupAt(const std::vector<sui::PaintOp>& ops) {
+    for (std::size_t i = 0; i < ops.size(); ++i) {
+        if (ops[i].kind == sui::PaintOp::Kind::BeginGroup) {
+            return i;
+        }
+    }
+    return ops.size();
 }
 
 // Position of `el` in the paint list, or -1 when it does not paint at all.
@@ -89,7 +122,8 @@ const PaintItem* paintOf(const std::vector<PaintItem>& items, Element* el) {
 
 // A plain document keeps document order inside each layer, with negative
 // `z-index` below the in-flow boxes and positive `z-index` above them -- the
-// flat ordering the engine shipped with, still required where no context opens.
+// flat ordering the engine shipped with, still required where no alpha opens a
+// composited group.
 void testPlainOrder() {
     auto document = parseOrNull(R"(<sui><body>
         <div id="a"></div><div id="b"></div>
@@ -134,7 +168,9 @@ void testPositionedGroupsInFlow() {
     }
     sui::StyleResolver resolver;
     resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
-    const auto items = orderOf(*document, resolver);
+    layoutRoot(*document, resolver);
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+    const auto items = flattened(ops);
     Element* w = document->getElementById("w");
     Element* c = document->getElementById("c");
     Element* s = document->getElementById("s");
@@ -146,6 +182,11 @@ void testPositionedGroupsInFlow() {
           "in-flow boxes paint below a positioned box");
     check(paintIndex(items, w) < paintIndex(items, c),
           "a positioned box paints before the content it holds");
+    bool flat = true;
+    for (const sui::PaintOp& op : ops) {
+        flat = flat && op.kind == sui::PaintOp::Kind::Box;
+    }
+    check(flat, "position groups carry no alpha and stay in the flat list");
 }
 
 // A stacking context opened by `opacity` is atomic: the positive `z-index`
@@ -297,6 +338,148 @@ void testEffectsDontCompound() {
     checkNear(ij->opacity, 0.5f, 0.01f, "a child carries the group alpha once");
 }
 
+// An `opacity` under 1 brackets its boxes with offscreen operations: BeginGroup,
+// the group root's own box (painted into its own surface), the content, then
+// EndGroup. The boxes inside carry no alpha -- it rides the BeginGroup op -- and
+// the bounds wrap the whole group.
+void testGroupBecomesOffscreenBlit() {
+    auto document = parseOrNull(R"(<sui><body>
+        <div id="g" style="opacity:0.5;width:100px;height:60px">
+            <div id="c" style="width:40px;height:20px"></div>
+        </div>
+    </body></sui>)");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*document, resolver);
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+    Element* g = document->getElementById("g");
+    Element* c = document->getElementById("c");
+    if (!g || !c) {
+        check(false, "offscreen document parsed");
+        return;
+    }
+    const std::size_t begin = beginGroupAt(ops);
+    const bool sequence =
+        begin != ops.size() && ops.size() == begin + 4 &&
+        ops[begin + 1].kind == sui::PaintOp::Kind::Box && ops[begin + 1].item.el == g &&
+        ops[begin + 2].kind == sui::PaintOp::Kind::Box && ops[begin + 2].item.el == c &&
+        ops[begin + 3].kind == sui::PaintOp::Kind::EndGroup;
+    check(sequence, "an opacity group emits Begin, its box, its content, then End");
+    check(begin != ops.size() && ops[begin].alpha == 0.5f,
+          "the group alpha rides the BeginGroup op");
+    check(begin + 1 < ops.size() && ops[begin + 1].item.opacity == 1.0f &&
+              ops[begin + 2].item.opacity == 1.0f,
+          "boxes paint at full strength inside a composited group");
+    checkNear(ops[begin].bounds.w, 100.0f, 2.0f, "group bounds fit the horizontal extent");
+    checkNear(ops[begin].bounds.h, 60.0f, 2.0f, "group bounds fit the vertical extent");
+}
+
+// Nested alphas composite in nested surfaces: each BeginGroup carries only its
+// own alpha, and flattening the sequence multiplies them back together.
+void testNestedGroupAlphas() {
+    auto document = parseOrNull(R"(<sui><body>
+        <div id="g" style="opacity:0.7">
+            <div id="h" style="opacity:0.3"><div id="i"></div></div>
+        </div>
+    </body></sui>)");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*document, resolver);
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+    const std::size_t begin = beginGroupAt(ops);
+    // Begin(g) Box(g) Begin(h) Box(h) Box(i) End End
+    const bool sequence =
+        begin != ops.size() && ops.size() == begin + 7 &&
+        ops[begin + 2].kind == sui::PaintOp::Kind::BeginGroup &&
+        ops[begin + 5].kind == sui::PaintOp::Kind::EndGroup &&
+        ops[begin + 6].kind == sui::PaintOp::Kind::EndGroup;
+    check(sequence, "nested opacity groups nest their begin/end operations");
+    check(begin + 2 < ops.size() && ops[begin].alpha == 0.7f && ops[begin + 2].alpha == 0.3f,
+          "each nested group carries only its own alpha");
+    const auto items = flattened(ops);
+    Element* g = document->getElementById("g");
+    Element* i = document->getElementById("i");
+    if (!g || !i) {
+        check(false, "nested document parsed");
+        return;
+    }
+    const PaintItem* ig = paintOf(items, g);
+    const PaintItem* ii = paintOf(items, i);
+    check(ig && ii && std::fabs(ig->opacity - 0.7f) < 0.01f,
+          "the outer alpha reaches the group root");
+    check(ii && std::fabs(ii->opacity - 0.21f) < 0.01f,
+          "nested alphas multiply for the deepest box");
+}
+
+// The surface has to hold what a group paints beyond its boxes: an outset
+// shadow sticks out past them, so `bounds` pads the boxes by blur + spread +
+// offset on every side.
+void testGroupBoundsIncludePaint() {
+    auto document = parseOrNull(R"(<sui><body>
+        <div id="g" style="opacity:0.5;width:100px;height:50px;
+            box-shadow:8px 9px 10px #000000"></div>
+    </body></sui>)");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*document, resolver);
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+    Element* g = document->getElementById("g");
+    if (!g) {
+        check(false, "shadow document parsed");
+        return;
+    }
+    const std::size_t begin = beginGroupAt(ops);
+    if (begin == ops.size()) {
+        check(false, "shadow group gets an offscreen operation");
+        return;
+    }
+    const float outset = 10.0f + std::max(8.0f, 9.0f);  // blur + max offset
+    checkNear(ops[begin].bounds.x, g->layoutX() - outset, 1.5f,
+              "bounds start left of the box by the shadow extent");
+    checkNear(ops[begin].bounds.w, g->layoutWidth() + 2.0f * outset, 3.0f,
+              "bounds reach past the shadow's other side");
+    checkNear(ops[begin].bounds.h, g->layoutHeight() + 2.0f * outset, 3.0f,
+              "bounds reach below the shadow");
+}
+
+// A clipping ancestor bounds the surface to what the group is allowed to paint,
+// even when the group's own boxes -- or the shadows they cast -- stick far out
+// past it.
+void testGroupClampedToClip() {
+    auto document = parseOrNull(R"(<sui><body>
+        <div id="outer" style="overflow:hidden;width:60px;height:60px">
+            <div id="g" style="opacity:0.5;width:200px;height:200px;
+                box-shadow:8px 9px 10px #000000"></div>
+        </div>
+    </body></sui>)");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*document, resolver);
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+    const std::size_t begin = beginGroupAt(ops);
+    if (begin == ops.size()) {
+        check(false, "clipped group gets an offscreen operation");
+        return;
+    }
+    const sui::PaintOp& group = ops[begin];
+    check(group.bounds.w <= 60.5f && group.bounds.h <= 60.5f,
+          "group bounds are clamped to the ancestor clip");
+    check(group.bounds.x >= -0.5f && group.bounds.y >= -0.5f,
+          "group bounds start inside the clip");
+}
+
 }  // namespace
 
 int main() {
@@ -306,6 +489,10 @@ int main() {
     testEscapeKeepsZOrder();
     testGroupDetection();
     testEffectsDontCompound();
+    testGroupBecomesOffscreenBlit();
+    testNestedGroupAlphas();
+    testGroupBoundsIncludePaint();
+    testGroupClampedToClip();
     if (failures > 0) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

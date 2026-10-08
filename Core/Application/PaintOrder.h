@@ -1,4 +1,4 @@
-// The list a frame is painted from, in CSS paint order.
+// The operations a frame is painted from, in CSS paint order.
 //
 // In CSS the root stacking context paints in this order: its own background,
 // then negative `z-index`, then every in-flow box, then positioned boxes with
@@ -13,6 +13,14 @@
 // what the flat list used to allow. A `position` with `z-index: auto` opens a
 // group for its in-flow content only: CSS sends its positioned descendants back
 // out to the context around it, and so does this walk.
+//
+// When a group root carries an `opacity` under 1 -- or a `filter: opacity()` --
+// the walk brackets its boxes with BeginGroup/EndGroup ops: the executor
+// renders them into an offscreen surface and blends the surface back at the
+// group's alpha, so overlapping members mix with each other first, the way CSS
+// composites a stacking context. `bounds` is the smallest window rect that
+// holds the whole group -- including shadows and outlines that paint outside
+// its boxes -- clipped to what its ancestors allow.
 #pragma once
 
 #include <SDL3/SDL_rect.h>
@@ -28,7 +36,7 @@ class Element;
 class StyleResolver;
 
 struct PaintItem {
-    Element* el;
+    Element* el = nullptr;
     int layer = 0;
     int zIndex = 0;
     std::size_t order = 0;
@@ -40,10 +48,25 @@ struct PaintItem {
     // its own scroll only shifts what is inside it.
     float dx = 0.0f;
     float dy = 0.0f;
-    // Every ancestor's `opacity` multiplied together. Carried per item rather than
-    // composited through an offscreen buffer, which differs only where two elements
-    // inside the same group overlap.
+    // The alpha to draw the box with. A composited group's alpha is *not* in
+    // here: its members paint at full strength into an offscreen surface and
+    // the group's alpha is applied when that surface is blended back, so normal
+    // documents see this at 1. It stays a multiplier for the alphas that were
+    // never offscreen (a `display:none` ancestor, or a group that could not
+    // allocate a surface).
     float opacity = 1.0f;
+};
+
+// One step of the paint sequence. `Box` draws an element; `BeginGroup` and
+// `EndGroup` bracket the boxes of one stacking context the executor must
+// composite offscreen. For BeginGroup, `bounds` is in window coordinates and
+// `alpha` is the group's opacity to blend the surface back with.
+struct PaintOp {
+    enum class Kind { Box, BeginGroup, EndGroup };
+    Kind kind = Kind::Box;
+    PaintItem item;
+    SDL_FRect bounds{0.0f, 0.0f, 0.0f, 0.0f};
+    float alpha = 1.0f;
 };
 
 // True when `overflow` on this style crops anything, so its boxes are clipped to
@@ -57,9 +80,10 @@ bool clipsAnything(const ComputedStyle& s);
 // in-flow content still belongs with its box.
 bool createsPaintGroup(const ComputedStyle& s);
 
-// The root's paint list in CSS order: back to front, groups emitted right after
-// the box that opens them. Elements that do not paint (hidden, non-visual
-// wrappers) are absent; the walk needs no device or renderer.
-std::vector<PaintItem> computePaintOrder(Element& root, const StyleResolver& resolver);
+// The operations a frame is painted from, back to front. Elements that do not
+// paint (hidden, non-visual wrappers) are absent. The walk needs no device or
+// renderer, so tests can assert on the sequence, the group bounds, and the
+// alphas directly.
+std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolver);
 
 }  // namespace sui
