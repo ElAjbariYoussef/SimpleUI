@@ -684,6 +684,67 @@ void testTransformListOrder() {
     check(tr != nullptr, "the transform order groups are found");
 }
 
+// A `filter: blur()` cannot diffuse a flat box list, so it opens an offscreen
+// group the way an alpha under 1 does, and the radius rides the BeginGroup op
+// for the executor. When the same box also lowers opacity, both land on the
+// one op. A plain box opens no group.
+void testFilterBlurComposites() {
+    auto document = parseOrNull(R"HTML(<sui><body>
+        <div id="blur" style="filter:blur(4px);width:40px;height:20px">
+            <div id="c"></div>
+        </div>
+        <div id="combo" style="opacity:0.5;filter:blur(2px);width:40px;height:20px">
+            <div id="c2"></div>
+        </div>
+        <div id="plain" style="width:40px;height:20px">
+            <div id="c3"></div>
+        </div>
+    </body></sui>)HTML");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*document, resolver);
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+    Element* blur = document->getElementById("blur");
+    Element* combo = document->getElementById("combo");
+    Element* plain = document->getElementById("plain");
+    if (!blur || !combo || !plain) {
+        check(false, "filter blur document parsed");
+        return;
+    }
+    bool sawBlur = false;
+    bool sawCombo = false;
+    for (std::size_t i = 0; i + 4 < ops.size(); ++i) {
+        if (ops[i].kind == sui::PaintOp::Kind::BeginGroup &&
+            ops[i + 1].item.el == blur) {
+            sawBlur = true;
+            check(ops[i].blur > 3.9f && ops[i].blur < 4.1f,
+                  "a blur group carries its radius on the BeginGroup op");
+            checkNear(ops[i].alpha, 1.0f, 0.001f, "a blur alone keeps full alpha");
+            check(!ops[i].transformed, "blur alone opens no affine group");
+        }
+        if (ops[i].kind == sui::PaintOp::Kind::BeginGroup &&
+            ops[i + 1].item.el == combo) {
+            sawCombo = true;
+            checkNear(ops[i].alpha, 0.5f, 0.001f,
+                      "opacity and blur share the same BeginGroup");
+            check(ops[i].blur > 1.9f && ops[i].blur < 2.1f,
+                  "the combined group carries its blur too");
+        }
+    }
+    bool sawPlain = false;
+    for (const sui::PaintOp& op : ops) {
+        if (op.kind == sui::PaintOp::Kind::Box && op.item.el == plain) {
+            sawPlain = true;
+        }
+    }
+    check(sawBlur, "the blur box opens a group");
+    check(sawCombo, "the opacity-plus-blur box opens a group");
+    check(sawPlain, "a plain box is still painted");
+}
+
 }  // namespace
 
 int main() {
@@ -701,6 +762,7 @@ int main() {
     testTransformedTranslateRidesMatrix();
     testTransformOriginOffsetsAxis();
     testTransformListOrder();
+    testFilterBlurComposites();
     if (failures > 0) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

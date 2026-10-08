@@ -50,6 +50,9 @@ struct PaintEntry {
     bool transformed = false;
     float m[6] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
     SDL_FPoint origin{0.0f, 0.0f};
+    // A `filter: blur(x)` radius in px; forces a surface so the executor can
+    // blur the readback.
+    float blur = 0.0f;
     std::vector<PaintEntry> inner;
 };
 
@@ -89,6 +92,32 @@ float filterOpacity(std::string_view filter) {
         at = end + 1;
     }
     return result;
+}
+
+// A `filter: blur(x)` asks for the group's rendered surface to be diffused by
+// x pixels. The painter cannot blur a flat box list, so it does what it can
+// here: mark the box for an offscreen surface (like an opacity under 1 does)
+// and hand the radius to the executor, which reads the surface back, blurs it,
+// and blits the result. Returns 0 when the chain has no blur().
+float filterBlur(std::string_view filter) {
+    float radius = 0.0f;
+    std::size_t at = 0;
+    while ((at = filter.find("blur(", at)) != std::string_view::npos) {
+        at += 5;
+        const std::size_t end = filter.find(')', at);
+        if (end == std::string_view::npos) {
+            break;
+        }
+        const std::string_view number = filter.substr(at, end - at);
+        char* stop = nullptr;
+        const std::string owned(number);
+        const float value = std::strtof(owned.c_str(), &stop);
+        if (stop != owned.c_str()) {
+            radius = std::max(radius, value);
+        }
+        at = end + 1;
+    }
+    return radius;
 }
 
 // A 2D affine map, x' = a*x + c*y + e, y' = b*x + d*y + f. Enough for the
@@ -233,15 +262,17 @@ PaintOp boxOp(const PaintItem& item) {
 
 // The BeginGroup op an entry opens: carries the alpha to blend the surface back
 // with and, when the group root transforms, the affine mapping the surface to
-// the screen about the resolved transform-origin point.
+// the screen about the resolved transform-origin point. `blur` hands the
+// executor a `filter: blur()` radius to apply to the readback.
 PaintOp groupStart(const PaintItem& item, float alpha, bool transformed, const float m[6],
-                   SDL_FPoint origin) {
+                   SDL_FPoint origin, float blur) {
     PaintOp op;
     op.kind = PaintOp::Kind::BeginGroup;
     op.item = item;
     op.alpha = alpha;
     op.transformed = transformed;
     op.origin = origin;
+    op.blur = blur;
     for (int i = 0; i < 6; ++i) {
         op.m[i] = m[i];
     }
@@ -343,6 +374,7 @@ struct Collector {
         bool transformed = false;
         float m[6] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
         SDL_FPoint origin{0.0f, 0.0f};
+        float blur = 0.0f;
         PaintItem item;
         PaintEnv child;
     };
@@ -364,13 +396,17 @@ struct Collector {
         Affine matrix;
         float tx = 0.0f, ty = 0.0f;
         const bool hasMatrix = transformEffects(s.transform, matrix, tx, ty);
+        // A `filter: blur()` has to diffuse the box's rendered surface, which
+        // only an offscreen texture can provide, so it too forces a surface; the
+        // radius rides the BeginGroup op for the executor to apply.
+        const float blur = filterBlur(s.filter);
         // An `opacity` under 1 -- or a `filter: opacity()` -- composites its whole
         // context through an offscreen surface, so its alpha leaves the environment
         // here and is carried on the BeginGroup op instead; the box and everything
         // they hold paint at full strength into that surface. A box that never
         // paints (say `display:none`) still hands its alpha on, as it always did,
         // since there is no surface for it.
-        const bool composited = drawable && (groupAlpha < 1.0f || hasMatrix);
+        const bool composited = drawable && (groupAlpha < 1.0f || hasMatrix || blur > 0.0f);
         if (!composited) {
             box.child.opacity *= groupAlpha;
         }
@@ -399,6 +435,7 @@ struct Collector {
         box.kind = classifyGroup(s);
         box.groupAlpha = composited ? groupAlpha : 1.0f;
         box.transformed = hasMatrix;
+        box.blur = composited ? blur : 0.0f;
         box.m[0] = matrix.a;
         box.m[1] = matrix.b;
         box.m[2] = matrix.c;
@@ -473,6 +510,7 @@ struct Collector {
         entry.groupAlpha = box.groupAlpha;
         entry.transformed = box.transformed;
         entry.origin = box.origin;
+        entry.blur = box.blur;
         entry.m[0] = box.m[0];
         entry.m[1] = box.m[1];
         entry.m[2] = box.m[2];
@@ -503,9 +541,9 @@ struct Collector {
                              return a.item.order < b.item.order;
                          });
         for (PaintEntry& entry : entries) {
-            if (entry.group && (entry.groupAlpha < 1.0f || entry.transformed)) {
+            if (entry.group && (entry.groupAlpha < 1.0f || entry.transformed || entry.blur > 0.0f)) {
                 out.push_back(groupStart(entry.item, entry.groupAlpha, entry.transformed, entry.m,
-                                        entry.origin));
+                                        entry.origin, entry.blur));
                 out.push_back(boxOp(entry.item));
                 emit(entry.inner, out);
                 out.push_back(PaintOp{PaintOp::Kind::EndGroup, entry.item, {}, 1.0f});
@@ -536,8 +574,9 @@ std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolve
     // root that composites (say `opacity` on the whole document) brackets the
     // whole frame.
     const Collector::BoxState box = collector.resolve(root, PaintEnv{});
-    if (box.paints && (box.groupAlpha < 1.0f || box.transformed)) {
-        out.push_back(groupStart(box.item, box.groupAlpha, box.transformed, box.m, box.origin));
+    if (box.paints && (box.groupAlpha < 1.0f || box.transformed || box.blur > 0.0f)) {
+        out.push_back(groupStart(box.item, box.groupAlpha, box.transformed, box.m, box.origin,
+                                box.blur));
     }
     if (box.paints) {
         out.push_back(boxOp(box.item));
@@ -545,7 +584,7 @@ std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolve
     std::vector<PaintEntry> entries;
     collector.walkChildren(root, box.child, entries, nullptr);
     collector.emit(entries, out);
-    if (box.paints && (box.groupAlpha < 1.0f || box.transformed)) {
+    if (box.paints && (box.groupAlpha < 1.0f || box.transformed || box.blur > 0.0f)) {
         out.push_back(PaintOp{PaintOp::Kind::EndGroup, box.item, {}, 1.0f});
     }
     computeGroupBounds(out, resolver);

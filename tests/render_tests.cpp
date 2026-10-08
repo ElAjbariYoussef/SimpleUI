@@ -1,11 +1,14 @@
 // Geometry checks for the renderer that need no device, so the parts a screenshot
 // cannot pin down precisely still have a regression test.
+#include "Rendering/ImageBlur.h"
 #include "Rendering/Renderer.h"
 #include "Rendering/Text.h"
 
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -256,6 +259,48 @@ void testFontSizeIsTheEmSquare() {
               "doubling font-size doubles the line box");
 }
 
+// The CPU box blur `filter: blur()` hands the executor. The kernel averages a
+// 2r+1 window with the border pixels replicating, so these values are exact
+// hand-checkable fractions of 255 across a 5x5 image with an opaque red block
+// in its middle (rows and columns 1..3).
+void testBoxBlur() {
+    auto sample = [](const std::vector<std::uint8_t>& img, int x, int y) {
+        const int w = 5;
+        return std::array<std::uint8_t, 4>{img[4 * (y * w + x)], img[4 * (y * w + x) + 1],
+                                           img[4 * (y * w + x) + 2], img[4 * (y * w + x) + 3]};
+    };
+    std::vector<std::uint8_t> img(5 * 5 * 4, 0);
+    for (int y = 1; y <= 3; ++y) {
+        for (int x = 1; x <= 3; ++x) {
+            img[4 * (y * 5 + x)] = 255;
+            img[4 * (y * 5 + x) + 3] = 255;
+        }
+    }
+    const std::vector<std::uint8_t> sharp = img;
+    sui::blurRGBA(img.data(), 5, 5, 1);
+    check(sample(img, 2, 2) == std::array<std::uint8_t, 4>{255, 0, 0, 255},
+          "the heart of a uniform block is unchanged");
+    check(sample(img, 1, 1) == std::array<std::uint8_t, 4>{113, 0, 0, 113},
+          "a block corner averages 4 of 9 red samples");
+    check(sample(img, 3, 2) == std::array<std::uint8_t, 4>{170, 0, 0, 170},
+          "an edge coats 6 of 9 samples with red");
+    check(sample(img, 4, 4) == std::array<std::uint8_t, 4>{28, 0, 0, 28},
+          "the far transparent corner keeps most of its emptiness");
+
+    // A uniform image blurs to itself, whatever the radius, and a non-positive
+    // radius is a no-op.
+    std::vector<std::uint8_t> flat(4 * 7 * 3, 255);
+    sui::blurRGBA(flat.data(), 7, 3, 40);
+    bool all = true;
+    for (const std::uint8_t v : flat) {
+        all = all && v == 255;
+    }
+    check(all, "a flat image is its own blur");
+    std::vector<std::uint8_t> untouched = sharp;
+    sui::blurRGBA(untouched.data(), 5, 5, 0);
+    check(untouched == sharp, "radius zero leaves pixels alone");
+}
+
 }  // namespace
 
 int main() {
@@ -271,6 +316,7 @@ int main() {
     testMeshNeed();
     testRadialPosition();
     testFontSizeIsTheEmSquare();
+    testBoxBlur();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

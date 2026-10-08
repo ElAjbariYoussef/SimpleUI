@@ -65,6 +65,8 @@ struct PaintItem {
 // surface is mapped to the screen by the affine `m` -- x' = m[0]x + m[2]y + m[4],
 // y' = m[1]x + m[3]y + m[5] -- about `origin`, the resolved `transform-origin`
 // point (a window-coordinate position), instead of being blitted axis-aligned.
+// `blur` is a `filter: blur()` radius in pixels; when a BeginGroup carries one,
+// the executor reads the finished surface back, blurs it, and blits the result.
 struct PaintOp {
     enum class Kind { Box, BeginGroup, EndGroup };
     Kind kind = Kind::Box;
@@ -74,6 +76,7 @@ struct PaintOp {
     bool transformed = false;
     float m[6] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
     SDL_FPoint origin{0.0f, 0.0f};
+    float blur = 0.0f;
 };
 
 // True when `overflow` on this style crops anything, so its boxes are clipped to

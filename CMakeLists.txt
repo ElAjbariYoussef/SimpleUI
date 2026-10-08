@@ -36,6 +36,7 @@ add_library(sui STATIC
     Layout/BlockLayout.cpp
     Core/Application/Background.cpp
     Rendering/ImageCache.cpp
+    Rendering/ImageBlur.cpp
     Rendering/Renderer.cpp
     Rendering/Text.cpp
     Platform/Platform.cpp

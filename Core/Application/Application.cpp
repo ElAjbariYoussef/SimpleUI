@@ -7,6 +7,7 @@
 #include "CSS/PseudoElements.h"
 #include "CSS/StyleResolver.h"
 #include "Layout/BlockLayout.h"
+#include "Rendering/ImageBlur.h"
 #include "Rendering/ImageCache.h"
 #include "Rendering/Renderer.h"
 #include "Rendering/Text.h"
@@ -46,6 +47,9 @@ struct GroupFrame {
     bool transformed = false;
     float m[6] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
     SDL_FPoint origin{};
+    // A `filter: blur()` radius to diffuse the finished surface with before the
+    // blit; 0 leaves it sharp.
+    float blur = 0.0f;
 };
 
 // window width/height/state arrive as markup attributes, so parse them leniently.
@@ -995,6 +999,7 @@ void Application::run() {
                         frame.alpha = op.alpha;
                         frame.transformed = op.transformed;
                         frame.origin = op.origin;
+                        frame.blur = op.blur;
                         frame.m[0] = op.m[0];
                         frame.m[1] = op.m[1];
                         frame.m[2] = op.m[2];
@@ -1029,6 +1034,34 @@ void Application::run() {
                         const GroupFrame frame = groups.back();
                         groups.pop_back();
                         if (frame.texture) {
+                            // A `filter: blur()` diffuses the finished surface:
+                            // read it back while it is still the target, box-blur
+                            // it on the CPU, and blit a texture made from the
+                            // result. A failed readback keeps the sharp surface
+                            // rather than dropping the group.
+                            SDL_Texture* texture = frame.texture;
+                            const int blurRadius =
+                                frame.blur > 0.0f ? std::lround(frame.blur) : 0;
+                            if (blurRadius > 0) {
+                                SDL_Surface* read = SDL_RenderReadPixels(sdlRenderer, nullptr);
+                                if (read) {
+                                    SDL_Surface* conv = SDL_ConvertSurface(
+                                        read, SDL_PIXELFORMAT_ABGR8888);
+                                    SDL_DestroySurface(read);
+                                    if (conv) {
+                                        sui::blurRGBA(static_cast<std::uint8_t*>(conv->pixels),
+                                                      conv->w, conv->h, blurRadius);
+                                        SDL_Texture* blurred =
+                                            SDL_CreateTextureFromSurface(sdlRenderer, conv);
+                                        SDL_DestroySurface(conv);
+                                        if (blurred) {
+                                            SDL_SetTextureBlendMode(blurred, SDL_BLENDMODE_BLEND);
+                                            SDL_DestroyTexture(texture);
+                                            texture = blurred;
+                                        }
+                                    }
+                                }
+                            }
                             float ox = 0.0f, oy = 0.0f;
                             for (auto it = groups.rbegin(); it != groups.rend(); ++it) {
                                 if (it->texture) {
@@ -1039,7 +1072,7 @@ void Application::run() {
                             }
                             SDL_SetRenderTarget(sdlRenderer, frame.previous);
                             SDL_SetRenderClipRect(sdlRenderer, nullptr);
-                            SDL_SetTextureAlphaMod(frame.texture, static_cast<Uint8>(
+                            SDL_SetTextureAlphaMod(texture, static_cast<Uint8>(
                                 std::lround(frame.alpha * 255.0f)));
                             if (frame.transformed) {
                                 // The surface covers the group's pre-transform
@@ -1061,14 +1094,14 @@ void Application::run() {
                                                        q0.y + b * frame.bounds.w};
                                 const SDL_FPoint down{q0.x + c * frame.bounds.h,
                                                       q0.y + d * frame.bounds.h};
-                                SDL_RenderTextureAffine(sdlRenderer, frame.texture, nullptr, &q0,
+                                SDL_RenderTextureAffine(sdlRenderer, texture, nullptr, &q0,
                                                         &right, &down);
                             } else {
                                 const SDL_FRect dst{frame.bounds.x - ox, frame.bounds.y - oy,
                                                     frame.bounds.w, frame.bounds.h};
-                                SDL_RenderTexture(sdlRenderer, frame.texture, nullptr, &dst);
+                                SDL_RenderTexture(sdlRenderer, texture, nullptr, &dst);
                             }
-                            SDL_DestroyTexture(frame.texture);
+                            SDL_DestroyTexture(texture);
                         }
                         continue;
                     }
