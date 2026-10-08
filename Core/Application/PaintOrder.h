@@ -60,13 +60,20 @@ struct PaintItem {
 // One step of the paint sequence. `Box` draws an element; `BeginGroup` and
 // `EndGroup` bracket the boxes of one stacking context the executor must
 // composite offscreen. For BeginGroup, `bounds` is in window coordinates and
-// `alpha` is the group's opacity to blend the surface back with.
+// `alpha` is the group's opacity to blend the surface back with. When the
+// group root carries a scale() or rotate(), `transformed` is set and the
+// surface is mapped to the screen by the affine `m` -- x' = m[0]x + m[2]y,
+// y' = m[1]x + m[3]y -- about `center`, the group root's box centre, instead
+// of being blitted axis-aligned.
 struct PaintOp {
     enum class Kind { Box, BeginGroup, EndGroup };
     Kind kind = Kind::Box;
     PaintItem item;
     SDL_FRect bounds{0.0f, 0.0f, 0.0f, 0.0f};
     float alpha = 1.0f;
+    bool transformed = false;
+    float m[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+    SDL_FPoint center{0.0f, 0.0f};
 };
 
 // True when `overflow` on this style crops anything, so its boxes are clipped to

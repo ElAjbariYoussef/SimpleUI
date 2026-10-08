@@ -4,6 +4,7 @@
 #include "SUI/DOM/Element.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <string>
@@ -43,6 +44,11 @@ struct PaintEntry {
     // root's `opacity` times any `filter: opacity()` in its chain. 1 means the
     // group needs no surface and its box and contents stay in the flat list.
     float groupAlpha = 1.0f;
+    // When the group root carries a scale() or rotate(), the surface is mapped
+    // to the screen by the affine `m[4]` about `center`, the root's box centre.
+    bool transformed = false;
+    float m[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+    SDL_FPoint center{0.0f, 0.0f};
     std::vector<PaintEntry> inner;
 };
 
@@ -84,28 +90,56 @@ float filterOpacity(std::string_view filter) {
     return result;
 }
 
-// Pulls the pixel translation out of a `transform` list. Only `translate()` and
-// its single-axis forms are honoured: they can be folded into the scroll offset
-// the painter already threads through the tree, whereas a scale or rotate would
-// need a real matrix on every draw. A percentage axis is left at zero because it
-// resolves against the box and is the rarer spelling.
-void transformTranslate(std::string_view transform, float& dx, float& dy) {
+// A 2x2 linear map, x' = a*x + c*y, y' = b*x + d*y. Enough for the scale and
+// rotate a CSS `transform` can express; the translation part of the list is
+// handled separately (see transformEffects below).
+struct Matrix2 {
+    float a = 1.0f;
+    float b = 0.0f;
+    float c = 0.0f;
+    float d = 1.0f;
+};
+
+// `outer` carried out after `inner`: the matrix product outer . inner.
+Matrix2 combine(const Matrix2& outer, const Matrix2& inner) {
+    return {outer.a * inner.a + outer.c * inner.b,
+            outer.b * inner.a + outer.d * inner.b,
+            outer.a * inner.c + outer.c * inner.d,
+            outer.b * inner.c + outer.d * inner.d};
+}
+
+// Parses a CSS `transform` list. `translate()` and its single-axis forms keep
+// folding into the offset the painter already threads through the tree -- they
+// are pure pixel shifts -- but `scale()` and `rotate()` need a matrix, which
+// accumulates in `matrix` (CSS multiplies left to right, so the rightmost
+// function reaches a point first). `tx`/`ty` collect the translates. Returns
+// whether a matrix worth carrying landed: false when the list has no
+// scale/rotate, or its product degenerated to the identity (a lone
+// `rotate(0deg)`). A percentage axis in `translate()` is left at zero because
+// it resolves against the box and is the rarer spelling.
+bool transformEffects(std::string_view transform, Matrix2& matrix, float& tx, float& ty) {
+    Matrix2 acc;
+    bool any = false;
+    constexpr float kPi = 3.14159265f;
     std::size_t at = 0;
-    while ((at = transform.find("translate", at)) != std::string_view::npos) {
+    while (at < transform.size()) {
         const std::size_t open = transform.find('(', at);
         if (open == std::string_view::npos) {
-            return;
+            break;
         }
         const std::size_t close = transform.find(')', open);
         if (close == std::string_view::npos) {
-            return;
+            break;
         }
+        std::size_t nameStart = open;
+        while (nameStart > 0 &&
+               (std::isalnum(static_cast<unsigned char>(transform[nameStart - 1])) ||
+                transform[nameStart - 1] == '-')) {
+            --nameStart;
+        }
+        const std::string_view name = transform.substr(nameStart, open - nameStart);
         const std::string_view body = transform.substr(open + 1, close - open - 1);
-        const std::size_t comma = body.find(',');
-        const std::string_view first = body.substr(0, comma);
-        const std::string_view second =
-            comma == std::string_view::npos ? std::string_view() : body.substr(comma + 1);
-        auto px = [](std::string_view piece, float& out) {
+        auto number = [](std::string_view piece, float& out) {
             const std::string owned(piece);
             char* stop = nullptr;
             const float value = std::strtof(owned.c_str(), &stop);
@@ -113,21 +147,47 @@ void transformTranslate(std::string_view transform, float& dx, float& dy) {
                 out = value;
             }
         };
-        const bool xOnly = transform.compare(at, 10, "translateX") == 0;
-        const bool yOnly = transform.compare(at, 10, "translateY") == 0;
-        float tx = 0.0f, ty = 0.0f;
-        px(first, tx);
-        px(second, ty);
-        if (xOnly) {
-            dx += tx;
-        } else if (yOnly) {
-            dy += tx;
-        } else {
-            dx += tx;
-            dy += ty;
+        if (name == "translate" || name == "translateX" || name == "translateY") {
+            const std::size_t comma = body.find(',');
+            const std::string_view first = body.substr(0, comma);
+            const std::string_view second =
+                comma == std::string_view::npos ? std::string_view() : body.substr(comma + 1);
+            float x = 0.0f, y = 0.0f;
+            number(first, x);
+            number(second, y);
+            if (name == "translateY") {
+                ty += x;
+            } else {
+                tx += x;
+                ty += name == "translate" ? y : 0.0f;
+            }
+        } else if (name == "scale") {
+            const std::size_t comma = body.find(',');
+            float sx = 1.0f, sy = 1.0f;
+            number(body.substr(0, comma), sx);
+            if (comma != std::string_view::npos) {
+                number(body.substr(comma + 1), sy);
+            } else {
+                sy = sx;
+            }
+            acc = combine(acc, Matrix2{sx, 0.0f, 0.0f, sy});
+            any = true;
+        } else if (name == "rotate") {
+            float degrees = 0.0f;
+            number(body, degrees);
+            const float rad = degrees * kPi / 180.0f;
+            acc = combine(acc, Matrix2{std::cos(rad), std::sin(rad), -std::sin(rad), std::cos(rad)});
+            any = true;
         }
         at = close + 1;
     }
+    matrix = acc;
+    if (!any) {
+        return false;
+    }
+    constexpr float kEps = 1e-5f;
+    return std::fabs(matrix.a - 1.0f) > kEps || std::fabs(matrix.b) > kEps ||
+           std::fabs(matrix.c) > kEps || std::fabs(matrix.d - 1.0f) > kEps;
 }
 
 // An element's value is "set" when it says something other than the initial
@@ -156,6 +216,23 @@ GroupKind classifyGroup(const ComputedStyle& s) {
 
 PaintOp boxOp(const PaintItem& item) {
     return PaintOp{PaintOp::Kind::Box, item, {}, 1.0f};
+}
+
+// The BeginGroup op an entry opens: carries the alpha to blend the surface back
+// with and, when the group root transforms, the affine mapping the surface to
+// the screen about the root's box centre.
+PaintOp groupStart(const PaintItem& item, float alpha, bool transformed, const float m[4],
+                   SDL_FPoint center) {
+    PaintOp op;
+    op.kind = PaintOp::Kind::BeginGroup;
+    op.item = item;
+    op.alpha = alpha;
+    op.transformed = transformed;
+    op.center = center;
+    for (int i = 0; i < 4; ++i) {
+        op.m[i] = m[i];
+    }
+    return op;
 }
 
 SDL_FRect unionRect(const SDL_FRect& a, const SDL_FRect& b) {
@@ -250,6 +327,9 @@ struct Collector {
         bool positioned = false;
         GroupKind kind = GroupKind::None;
         float groupAlpha = 1.0f;
+        bool transformed = false;
+        float m[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+        SDL_FPoint center{0.0f, 0.0f};
         PaintItem item;
         PaintEnv child;
     };
@@ -264,19 +344,31 @@ struct Collector {
         const ComputedStyle s = resolver.resolve(el);
         const bool drawable = s.display != ComputedStyle::None && s.visible;
         const float groupAlpha = s.opacity * filterOpacity(s.filter);
+        // A scale() or rotate() cannot be folded into offsets the way translate
+        // can, so its context composites offscreen just like an alpha under 1
+        // does, and the whole group is mapped to the screen by the matrix at the
+        // surface blit.
+        Matrix2 matrix;
+        float tx = 0.0f, ty = 0.0f;
+        const bool hasMatrix = transformEffects(s.transform, matrix, tx, ty);
         // An `opacity` under 1 -- or a `filter: opacity()` -- composites its whole
         // context through an offscreen surface, so its alpha leaves the environment
         // here and is carried on the BeginGroup op instead; the box and everything
         // they hold paint at full strength into that surface. A box that never
         // paints (say `display:none`) still hands its alpha on, as it always did,
         // since there is no surface for it.
-        const bool composited = drawable && groupAlpha < 1.0f;
+        const bool composited = drawable && (groupAlpha < 1.0f || hasMatrix);
         if (!composited) {
             box.child.opacity *= groupAlpha;
         }
         // The group alpha and the translation land on the box as well as on what
-        // it contains, so both are folded in before the item is taken.
-        transformTranslate(s.transform, box.child.dx, box.child.dy);
+        // it contains, so both are folded in before the item is taken. A matrix
+        // group keeps its translate out of the fold: it rides on the surface blit
+        // instead, and folding it here would apply it twice over.
+        if (!hasMatrix) {
+            box.child.dx += tx;
+            box.child.dy += ty;
+        }
         const bool clips = drawable && clipsAnything(s);
         if (clips) {
             // `overflow` crops to the padding box, which in CSS includes the padding.
@@ -293,6 +385,11 @@ struct Collector {
         box.positioned = s.positioned;
         box.kind = classifyGroup(s);
         box.groupAlpha = composited ? groupAlpha : 1.0f;
+        box.transformed = hasMatrix;
+        box.m[0] = matrix.a;
+        box.m[1] = matrix.b;
+        box.m[2] = matrix.c;
+        box.m[3] = matrix.d;
         PaintItem& item = box.item;
         item.el = &el;
         item.zIndex = s.positioned ? s.zIndex : 0;
@@ -304,6 +401,8 @@ struct Collector {
         item.dx = box.child.dx;
         item.dy = box.child.dy;
         item.opacity = box.child.opacity;
+        box.center = {item.el->layoutX() - item.dx + item.el->layoutWidth() / 2.0f,
+                      item.el->layoutY() - item.dy + item.el->layoutHeight() / 2.0f};
         if (clips) {
             // What the clip keeps is shifted by this box's own scroll offsets, and
             // only its contents move; the box itself stays where layout put it.
@@ -349,6 +448,12 @@ struct Collector {
         }
         entry.group = true;
         entry.groupAlpha = box.groupAlpha;
+        entry.transformed = box.transformed;
+        entry.center = box.center;
+        entry.m[0] = box.m[0];
+        entry.m[1] = box.m[1];
+        entry.m[2] = box.m[2];
+        entry.m[3] = box.m[3];
         // A pseudo-context holds its in-flow content but lets positioned
         // descendants rejoin the list its own box sits in; a real one holds all.
         std::vector<PaintEntry>* childEscape = box.kind == GroupKind::Pseudo ? into : nullptr;
@@ -373,8 +478,9 @@ struct Collector {
                              return a.item.order < b.item.order;
                          });
         for (PaintEntry& entry : entries) {
-            if (entry.group && entry.groupAlpha < 1.0f) {
-                out.push_back(PaintOp{PaintOp::Kind::BeginGroup, entry.item, {}, entry.groupAlpha});
+            if (entry.group && (entry.groupAlpha < 1.0f || entry.transformed)) {
+                out.push_back(groupStart(entry.item, entry.groupAlpha, entry.transformed, entry.m,
+                                        entry.center));
                 out.push_back(boxOp(entry.item));
                 emit(entry.inner, out);
                 out.push_back(PaintOp{PaintOp::Kind::EndGroup, entry.item, {}, 1.0f});
@@ -405,8 +511,8 @@ std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolve
     // root that composites (say `opacity` on the whole document) brackets the
     // whole frame.
     const Collector::BoxState box = collector.resolve(root, PaintEnv{});
-    if (box.paints && box.groupAlpha < 1.0f) {
-        out.push_back(PaintOp{PaintOp::Kind::BeginGroup, box.item, {}, box.groupAlpha});
+    if (box.paints && (box.groupAlpha < 1.0f || box.transformed)) {
+        out.push_back(groupStart(box.item, box.groupAlpha, box.transformed, box.m, box.center));
     }
     if (box.paints) {
         out.push_back(boxOp(box.item));
@@ -414,7 +520,7 @@ std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolve
     std::vector<PaintEntry> entries;
     collector.walkChildren(root, box.child, entries, nullptr);
     collector.emit(entries, out);
-    if (box.paints && box.groupAlpha < 1.0f) {
+    if (box.paints && (box.groupAlpha < 1.0f || box.transformed)) {
         out.push_back(PaintOp{PaintOp::Kind::EndGroup, box.item, {}, 1.0f});
     }
     computeGroupBounds(out, resolver);

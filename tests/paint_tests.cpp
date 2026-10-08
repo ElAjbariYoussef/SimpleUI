@@ -480,6 +480,115 @@ void testGroupClampedToClip() {
           "group bounds start inside the clip");
 }
 
+// A scale() or rotate() composites the whole context through a surface too, and
+// the affine rides the BeginGroup op -- the executor maps the surface with it --
+// with alpha 1, so the group is bracketed even though no opacity is at play.
+void testScaleAndRotateComposite() {
+    auto document = parseOrNull(R"HTML(<sui><body>
+        <div id="s" style="transform:scale(2);width:100px;height:50px">
+            <div id="c"></div>
+        </div>
+        <div id="r" style="transform:rotate(45deg);width:100px;height:50px">
+            <div id="d"></div>
+        </div>
+    </body></sui>)HTML");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*document, resolver);
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+    Element* s = document->getElementById("s");
+    Element* r = document->getElementById("r");
+    if (!s || !r) {
+        check(false, "transform document parsed");
+        return;
+    }
+    const std::size_t sb = beginGroupAt(ops);
+    std::size_t rb = ops.size();
+    for (std::size_t i = sb + 1; i < ops.size(); ++i) {
+        if (ops[i].kind == sui::PaintOp::Kind::BeginGroup) {
+            rb = i;
+            break;
+        }
+    }
+    const bool sequence =
+        sb != ops.size() && rb != ops.size() && sb + 3 < ops.size() && rb + 3 < ops.size() &&
+        ops[sb + 1].item.el == s && ops[sb + 2].item.el == document->getElementById("c") &&
+        ops[sb + 3].kind == sui::PaintOp::Kind::EndGroup &&
+        ops[rb + 1].item.el == r && ops[rb + 3].kind == sui::PaintOp::Kind::EndGroup;
+    check(sequence, "scale and rotate groups each emit Begin, box, content, then End");
+    // The safe indices keep this test a discriminator even when a bug stops the
+    // groups from compositing: reads land on the first box instead of out of
+    // bounds, and their identity matrix / zero centre still fail the checks.
+    const std::size_t si = sb < ops.size() ? sb : 0;
+    const std::size_t ri = rb < ops.size() ? rb : 0;
+    check(si == sb && ops[si].transformed && ops[si].alpha == 1.0f,
+          "scale composite carries alpha 1 on its transformed BeginGroup");
+    checkNear(ops[si].m[0], 2.0f, 0.01f, "scale(2) lands in the matrix's horizontal axis");
+    checkNear(ops[si].m[3], 2.0f, 0.01f, "scale(2) lands in the matrix's vertical axis");
+    checkNear(ops[si].m[1], 0.0f, 0.01f, "a pure scale skews neither axis");
+    checkNear(ops[si].center.x, 50.0f, 0.5f, "transform origin at the box's horizontal centre");
+    checkNear(ops[si].center.y, 25.0f, 0.5f, "transform origin at the box's vertical centre");
+    checkNear(ops[si].bounds.w, 100.0f, 2.0f, "surface stays pre-transform sized horizontally");
+    checkNear(ops[si].bounds.h, 50.0f, 2.0f, "surface stays pre-transform sized vertically");
+    check(ri == rb && ops[ri].transformed && ops[ri].alpha == 1.0f,
+          "rotate 45deg composites offscreen without alpha");
+    const float c45 = std::cos(3.14159265f / 4.0f);
+    checkNear(ops[ri].m[0], c45, 0.01f, "rotate(45deg) matrix cosine on the x axis");
+    checkNear(ops[ri].m[1], c45, 0.01f, "rotate(45deg) matrix sine on the y axis");
+    checkNear(ops[ri].m[2], -c45, 0.01f, "rotate(45deg) matrix axes reach the other way");
+}
+
+// A matrix group keeps its translate out of the offset fold: the translate rides
+// the surface blit, and folding it into the members as well would move them
+// twice. Members of the scaled group therefore carry no translate, while a
+// translate sitting alone is still folded exactly as before.
+void testTransformedTranslateRidesMatrix() {
+    auto document = parseOrNull(R"HTML(<sui><body>
+        <div id="g" style="transform:scale(2) translateX(10px);width:40px;height:20px">
+            <div id="c" style="width:10px;height:10px"></div>
+        </div>
+        <div id="t" style="transform:translateX(10px)">
+            <div id="k"></div>
+        </div>
+    </body></sui>)HTML");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*document, resolver);
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+    Element* g = document->getElementById("g");
+    Element* c = document->getElementById("c");
+    Element* k = document->getElementById("k");
+    if (!g || !c || !k) {
+        check(false, "mixed transform document parsed");
+        return;
+    }
+    const std::size_t begin = beginGroupAt(ops);
+    check(begin != ops.size() && ops[begin].transformed,
+          "scale plus translate composites as one matrix group");
+    const sui::PaintItem* ic = nullptr;
+    for (const sui::PaintOp& op : ops) {
+        if (op.kind == sui::PaintOp::Kind::Box && op.item.el == c) {
+            ic = &op.item;
+        }
+    }
+    check(ic && std::fabs(ic->dx) < 0.01f,
+          "the translate is not folded into a member of a matrix group");
+    const sui::PaintItem* it = nullptr;
+    for (const sui::PaintOp& op : ops) {
+        if (op.kind == sui::PaintOp::Kind::Box && op.item.el == k) {
+            it = &op.item;
+        }
+    }
+    check(it && std::fabs(it->dx - 10.0f) < 0.01f,
+          "a translate alone still folds into its children");
+}
+
 }  // namespace
 
 int main() {
@@ -493,6 +602,8 @@ int main() {
     testNestedGroupAlphas();
     testGroupBoundsIncludePaint();
     testGroupClampedToClip();
+    testScaleAndRotateComposite();
+    testTransformedTranslateRidesMatrix();
     if (failures > 0) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

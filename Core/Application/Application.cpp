@@ -43,6 +43,9 @@ struct GroupFrame {
     float alpha = 1.0f;
     float originX = 0.0f;
     float originY = 0.0f;
+    bool transformed = false;
+    float m[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+    SDL_FPoint center{};
 };
 
 // window width/height/state arrive as markup attributes, so parse them leniently.
@@ -990,6 +993,12 @@ void Application::run() {
                         GroupFrame frame;
                         frame.bounds = op.bounds;
                         frame.alpha = op.alpha;
+                        frame.transformed = op.transformed;
+                        frame.center = op.center;
+                        frame.m[0] = op.m[0];
+                        frame.m[1] = op.m[1];
+                        frame.m[2] = op.m[2];
+                        frame.m[3] = op.m[3];
                         if (width > 0 && height > 0) {
                             SDL_PropertiesID props = SDL_CreateProperties();
                             SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER,
@@ -1030,9 +1039,32 @@ void Application::run() {
                             SDL_SetRenderClipRect(sdlRenderer, nullptr);
                             SDL_SetTextureAlphaMod(frame.texture, static_cast<Uint8>(
                                 std::lround(frame.alpha * 255.0f)));
-                            const SDL_FRect dst{frame.bounds.x - ox, frame.bounds.y - oy,
-                                                frame.bounds.w, frame.bounds.h};
-                            SDL_RenderTexture(sdlRenderer, frame.texture, nullptr, &dst);
+                            if (frame.transformed) {
+                                // The surface covers the group's pre-transform position;
+                                // the affine maps it to the screen about the group root's
+                                // box centre, all rebased into the current target.
+                                const float bx = frame.bounds.x - ox;
+                                const float by = frame.bounds.y - oy;
+                                const float cx = frame.center.x - ox;
+                                const float cy = frame.center.y - oy;
+                                const float a = frame.m[0], b = frame.m[1];
+                                const float c = frame.m[2], d = frame.m[3];
+                                const SDL_FPoint q0{
+                                    cx + a * (bx - cx) + c * (by - cy),
+                                    cy + b * (bx - cx) + d * (by - cy)};
+                                // The surface's own corners in the target: `right`
+                                // and `down` map the srcrect's far corners.
+                                const SDL_FPoint right{q0.x + a * frame.bounds.w,
+                                                       q0.y + b * frame.bounds.w};
+                                const SDL_FPoint down{q0.x + c * frame.bounds.h,
+                                                      q0.y + d * frame.bounds.h};
+                                SDL_RenderTextureAffine(sdlRenderer, frame.texture, nullptr, &q0,
+                                                        &right, &down);
+                            } else {
+                                const SDL_FRect dst{frame.bounds.x - ox, frame.bounds.y - oy,
+                                                    frame.bounds.w, frame.bounds.h};
+                                SDL_RenderTexture(sdlRenderer, frame.texture, nullptr, &dst);
+                            }
                             SDL_DestroyTexture(frame.texture);
                         }
                         continue;
