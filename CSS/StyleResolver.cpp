@@ -1981,6 +1981,43 @@ bool parsePositionPair(std::string_view value, ComputedStyle::BackgroundPosition
     return true;
 }
 
+// `transform-origin` is one or two box-relative offsets -- a length, a
+// percentage, or a keyword edge (`left`/`center`/`right` for x,
+// `top`/`center`/`bottom` for y). One value leaves the other axis centred, and
+// a lone vertical keyword still belongs to y rather than being pressed into x.
+// Percentages and keywords are kept symbolic and resolved against the border
+// box when the transform is applied. Anything unparsable keeps the 50% 50%
+// default.
+void applyTransformOrigin(std::string_view value, ComputedStyle& s) {
+    const std::vector<std::string_view> parts = splitTokens(value);
+    if (parts.empty() || parts.size() > 2) {
+        return;
+    }
+    const auto axisValue = [](std::string_view token, bool vertical) -> Length {
+        if (token == "left" || (vertical && token == "top")) {
+            return Length{Length::Percent, 0.0f};
+        }
+        if (token == "right" || (vertical && token == "bottom")) {
+            return Length{Length::Percent, 100.0f};
+        }
+        if (isCentre(token) || (!vertical && (token == "top" || token == "bottom"))) {
+            return Length{Length::Percent, 50.0f};
+        }
+        const Length length = parseLength(token);
+        return length.isAuto() ? Length{Length::Percent, 50.0f} : length;
+    };
+    if (parts.size() == 1 && (parts[0] == "top" || parts[0] == "bottom")) {
+        // A lone vertical keyword moves the origin up the box, x staying centred.
+        s.transformOrigin.x = Length{Length::Percent, 50.0f};
+        s.transformOrigin.y = axisValue(parts[0], true);
+    } else {
+        s.transformOrigin.x = axisValue(parts[0], false);
+        s.transformOrigin.y = parts.size() > 1 ? axisValue(parts[1], true)
+                                               : Length{Length::Percent, 50.0f};
+    }
+    s.specified |= ComputedStyle::SpecifiedTransformOrigin;
+}
+
 bool parseRepeatWord(std::string_view token, bool& x, bool& y) {
     if (token == "repeat") {
         x = y = true;
@@ -2592,6 +2629,8 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
     } else if (property == "transform") {
         s.transform = std::string(value);
         s.specified |= ComputedStyle::SpecifiedTransform;
+    } else if (property == "transform-origin") {
+        applyTransformOrigin(value, s);
     } else if (property == "filter") {
         s.filter = std::string(value);
         s.specified |= ComputedStyle::SpecifiedFilter;
@@ -3037,6 +3076,14 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "transform") return style.transform;
     if (property == "filter") return style.filter;
+    if (property == "transform-origin") {
+        std::string result = length(style.transformOrigin.x, "50%");
+        const std::string second = length(style.transformOrigin.y, "50%");
+        if (second != "50%") {
+            result += " " + second;
+        }
+        return result;
+    }
     if (property == "text-align") {
         switch (style.textAlign) {
             case ComputedStyle::Left: return "left";

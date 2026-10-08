@@ -426,6 +426,16 @@ struct ComputedStyle {
     std::string transform;
     std::string filter;
 
+    // Where scale/rotate turn about: two box-relative offsets, in the same
+    // length/percentage terms CSS allows for `transform-origin` (a keyword edge
+    // or a percentage, resolved against the border box when the transform is
+    // applied). Defaults to the box centre, CSS's initial `50% 50%`.
+    struct TransformOrigin {
+        Length x{Length::Percent, 50.0f};
+        Length y{Length::Percent, 50.0f};
+    };
+    TransformOrigin transformOrigin;
+
     // Grid track sizing from `grid-template-columns` / `grid-template-rows`. A
     // track is a fixed length, an `fr` share of the leftover space, or `auto`
     // (content-sized). Kept as a list so several tracks can be described; a
@@ -538,6 +548,7 @@ struct ComputedStyle {
         SpecifiedVerticalAlign = 1u << 12,
         SpecifiedTransform = 1u << 13,
         SpecifiedFilter = 1u << 14,
+        SpecifiedTransformOrigin = 1u << 15,
     };
     std::uint16_t specified = 0;
 };

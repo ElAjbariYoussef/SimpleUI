@@ -44,8 +44,8 @@ struct GroupFrame {
     float originX = 0.0f;
     float originY = 0.0f;
     bool transformed = false;
-    float m[4] = {1.0f, 0.0f, 0.0f, 1.0f};
-    SDL_FPoint center{};
+    float m[6] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+    SDL_FPoint origin{};
 };
 
 // window width/height/state arrive as markup attributes, so parse them leniently.
@@ -994,11 +994,13 @@ void Application::run() {
                         frame.bounds = op.bounds;
                         frame.alpha = op.alpha;
                         frame.transformed = op.transformed;
-                        frame.center = op.center;
+                        frame.origin = op.origin;
                         frame.m[0] = op.m[0];
                         frame.m[1] = op.m[1];
                         frame.m[2] = op.m[2];
                         frame.m[3] = op.m[3];
+                        frame.m[4] = op.m[4];
+                        frame.m[5] = op.m[5];
                         if (width > 0 && height > 0) {
                             SDL_PropertiesID props = SDL_CreateProperties();
                             SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER,
@@ -1040,20 +1042,21 @@ void Application::run() {
                             SDL_SetTextureAlphaMod(frame.texture, static_cast<Uint8>(
                                 std::lround(frame.alpha * 255.0f)));
                             if (frame.transformed) {
-                                // The surface covers the group's pre-transform position;
-                                // the affine maps it to the screen about the group root's
-                                // box centre, all rebased into the current target.
+                                // The surface covers the group's pre-transform
+                                // position; the affine maps it to the screen about
+                                // the resolved transform-origin point, all rebased
+                                // into the current target. `right` and `down` map
+                                // the srcrect's far corners.
                                 const float bx = frame.bounds.x - ox;
                                 const float by = frame.bounds.y - oy;
-                                const float cx = frame.center.x - ox;
-                                const float cy = frame.center.y - oy;
+                                const float ox2 = frame.origin.x - ox;
+                                const float oy2 = frame.origin.y - oy;
                                 const float a = frame.m[0], b = frame.m[1];
                                 const float c = frame.m[2], d = frame.m[3];
+                                const float e = frame.m[4], f = frame.m[5];
                                 const SDL_FPoint q0{
-                                    cx + a * (bx - cx) + c * (by - cy),
-                                    cy + b * (bx - cx) + d * (by - cy)};
-                                // The surface's own corners in the target: `right`
-                                // and `down` map the srcrect's far corners.
+                                    ox2 + a * (bx - ox2) + c * (by - oy2) + e,
+                                    oy2 + b * (bx - ox2) + d * (by - oy2) + f};
                                 const SDL_FPoint right{q0.x + a * frame.bounds.w,
                                                        q0.y + b * frame.bounds.w};
                                 const SDL_FPoint down{q0.x + c * frame.bounds.h,

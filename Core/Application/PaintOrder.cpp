@@ -45,10 +45,11 @@ struct PaintEntry {
     // group needs no surface and its box and contents stay in the flat list.
     float groupAlpha = 1.0f;
     // When the group root carries a scale() or rotate(), the surface is mapped
-    // to the screen by the affine `m[4]` about `center`, the root's box centre.
+    // to the screen by the affine `m[6]` about the resolved transform-origin
+    // point `origin` (in window coordinates).
     bool transformed = false;
-    float m[4] = {1.0f, 0.0f, 0.0f, 1.0f};
-    SDL_FPoint center{0.0f, 0.0f};
+    float m[6] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+    SDL_FPoint origin{0.0f, 0.0f};
     std::vector<PaintEntry> inner;
 };
 
@@ -90,35 +91,41 @@ float filterOpacity(std::string_view filter) {
     return result;
 }
 
-// A 2x2 linear map, x' = a*x + c*y, y' = b*x + d*y. Enough for the scale and
-// rotate a CSS `transform` can express; the translation part of the list is
-// handled separately (see transformEffects below).
-struct Matrix2 {
+// A 2D affine map, x' = a*x + c*y + e, y' = b*x + d*y + f. Enough for the
+// translate/scale/rotate a CSS `transform` can express; the translation part
+// lives in e/f so list ordering stays exact (a translate written before a
+// rotate rotates the shifted box about the origin, one written after rotates
+// first).
+struct Affine {
     float a = 1.0f;
     float b = 0.0f;
     float c = 0.0f;
     float d = 1.0f;
+    float e = 0.0f;
+    float f = 0.0f;
 };
 
 // `outer` carried out after `inner`: the matrix product outer . inner.
-Matrix2 combine(const Matrix2& outer, const Matrix2& inner) {
+Affine combine(const Affine& outer, const Affine& inner) {
     return {outer.a * inner.a + outer.c * inner.b,
             outer.b * inner.a + outer.d * inner.b,
             outer.a * inner.c + outer.c * inner.d,
-            outer.b * inner.c + outer.d * inner.d};
+            outer.b * inner.c + outer.d * inner.d,
+            outer.a * inner.e + outer.c * inner.f + outer.e,
+            outer.b * inner.e + outer.d * inner.f + outer.f};
 }
 
-// Parses a CSS `transform` list. `translate()` and its single-axis forms keep
-// folding into the offset the painter already threads through the tree -- they
-// are pure pixel shifts -- but `scale()` and `rotate()` need a matrix, which
-// accumulates in `matrix` (CSS multiplies left to right, so the rightmost
-// function reaches a point first). `tx`/`ty` collect the translates. Returns
-// whether a matrix worth carrying landed: false when the list has no
+// Parses a CSS `transform` list. `translate()` and its single-axis forms can
+// keep folding into the offset the painter already threads through the tree
+// (handed back in `tx`/`ty`), while every function -- including the translate
+// -- accumulates into `affine` in CSS order (multiplied left to right, so the
+// rightmost function reaches a point first) for groups that need a surface.
+// Returns whether a matrix worth carrying landed: false when the list has no
 // scale/rotate, or its product degenerated to the identity (a lone
 // `rotate(0deg)`). A percentage axis in `translate()` is left at zero because
 // it resolves against the box and is the rarer spelling.
-bool transformEffects(std::string_view transform, Matrix2& matrix, float& tx, float& ty) {
-    Matrix2 acc;
+bool transformEffects(std::string_view transform, Affine& affine, float& tx, float& ty) {
+    Affine acc;
     bool any = false;
     constexpr float kPi = 3.14159265f;
     std::size_t at = 0;
@@ -156,11 +163,14 @@ bool transformEffects(std::string_view transform, Matrix2& matrix, float& tx, fl
             number(first, x);
             number(second, y);
             if (name == "translateY") {
-                ty += x;
-            } else {
-                tx += x;
-                ty += name == "translate" ? y : 0.0f;
+                y = x;
+                x = 0.0f;
+            } else if (name == "translateX") {
+                y = 0.0f;
             }
+            tx += x;
+            ty += y;
+            acc = combine(acc, Affine{1.0f, 0.0f, 0.0f, 1.0f, x, y});
         } else if (name == "scale") {
             const std::size_t comma = body.find(',');
             float sx = 1.0f, sy = 1.0f;
@@ -170,24 +180,27 @@ bool transformEffects(std::string_view transform, Matrix2& matrix, float& tx, fl
             } else {
                 sy = sx;
             }
-            acc = combine(acc, Matrix2{sx, 0.0f, 0.0f, sy});
+            acc = combine(acc, Affine{sx, 0.0f, 0.0f, sy, 0.0f, 0.0f});
             any = true;
         } else if (name == "rotate") {
             float degrees = 0.0f;
             number(body, degrees);
             const float rad = degrees * kPi / 180.0f;
-            acc = combine(acc, Matrix2{std::cos(rad), std::sin(rad), -std::sin(rad), std::cos(rad)});
+            acc = combine(acc,
+                          Affine{std::cos(rad), std::sin(rad), -std::sin(rad), std::cos(rad), 0.0f,
+                                 0.0f});
             any = true;
         }
         at = close + 1;
     }
-    matrix = acc;
+    affine = acc;
     if (!any) {
         return false;
     }
     constexpr float kEps = 1e-5f;
-    return std::fabs(matrix.a - 1.0f) > kEps || std::fabs(matrix.b) > kEps ||
-           std::fabs(matrix.c) > kEps || std::fabs(matrix.d - 1.0f) > kEps;
+    return std::fabs(affine.a - 1.0f) > kEps || std::fabs(affine.b) > kEps ||
+           std::fabs(affine.c) > kEps || std::fabs(affine.d - 1.0f) > kEps ||
+           std::fabs(affine.e) > kEps || std::fabs(affine.f) > kEps;
 }
 
 // An element's value is "set" when it says something other than the initial
@@ -220,16 +233,16 @@ PaintOp boxOp(const PaintItem& item) {
 
 // The BeginGroup op an entry opens: carries the alpha to blend the surface back
 // with and, when the group root transforms, the affine mapping the surface to
-// the screen about the root's box centre.
-PaintOp groupStart(const PaintItem& item, float alpha, bool transformed, const float m[4],
-                   SDL_FPoint center) {
+// the screen about the resolved transform-origin point.
+PaintOp groupStart(const PaintItem& item, float alpha, bool transformed, const float m[6],
+                   SDL_FPoint origin) {
     PaintOp op;
     op.kind = PaintOp::Kind::BeginGroup;
     op.item = item;
     op.alpha = alpha;
     op.transformed = transformed;
-    op.center = center;
-    for (int i = 0; i < 4; ++i) {
+    op.origin = origin;
+    for (int i = 0; i < 6; ++i) {
         op.m[i] = m[i];
     }
     return op;
@@ -328,8 +341,8 @@ struct Collector {
         GroupKind kind = GroupKind::None;
         float groupAlpha = 1.0f;
         bool transformed = false;
-        float m[4] = {1.0f, 0.0f, 0.0f, 1.0f};
-        SDL_FPoint center{0.0f, 0.0f};
+        float m[6] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+        SDL_FPoint origin{0.0f, 0.0f};
         PaintItem item;
         PaintEnv child;
     };
@@ -348,7 +361,7 @@ struct Collector {
         // can, so its context composites offscreen just like an alpha under 1
         // does, and the whole group is mapped to the screen by the matrix at the
         // surface blit.
-        Matrix2 matrix;
+        Affine matrix;
         float tx = 0.0f, ty = 0.0f;
         const bool hasMatrix = transformEffects(s.transform, matrix, tx, ty);
         // An `opacity` under 1 -- or a `filter: opacity()` -- composites its whole
@@ -363,8 +376,8 @@ struct Collector {
         }
         // The group alpha and the translation land on the box as well as on what
         // it contains, so both are folded in before the item is taken. A matrix
-        // group keeps its translate out of the fold: it rides on the surface blit
-        // instead, and folding it here would apply it twice over.
+        // group leaves its translate in the matrix instead -- folded twice, it
+        // would move the group twice over.
         if (!hasMatrix) {
             box.child.dx += tx;
             box.child.dy += ty;
@@ -390,6 +403,8 @@ struct Collector {
         box.m[1] = matrix.b;
         box.m[2] = matrix.c;
         box.m[3] = matrix.d;
+        box.m[4] = matrix.e;
+        box.m[5] = matrix.f;
         PaintItem& item = box.item;
         item.el = &el;
         item.zIndex = s.positioned ? s.zIndex : 0;
@@ -401,8 +416,16 @@ struct Collector {
         item.dx = box.child.dx;
         item.dy = box.child.dy;
         item.opacity = box.child.opacity;
-        box.center = {item.el->layoutX() - item.dx + item.el->layoutWidth() / 2.0f,
-                      item.el->layoutY() - item.dy + item.el->layoutHeight() / 2.0f};
+        // The point the transform turns about: the resolved transform-origin,
+        // measured from the box's own top-left (which scroll offsets have already
+        // moved out of `dx`/`dy`).
+        const float rootFontSize = resolver.rootFontSize();
+        const float originX = s.transformOrigin.x.resolve(el.layoutWidth(), s.fontSize,
+                                                          rootFontSize);
+        const float originY = s.transformOrigin.y.resolve(el.layoutHeight(), s.fontSize,
+                                                          rootFontSize);
+        box.origin = {item.el->layoutX() - item.dx + originX,
+                      item.el->layoutY() - item.dy + originY};
         if (clips) {
             // What the clip keeps is shifted by this box's own scroll offsets, and
             // only its contents move; the box itself stays where layout put it.
@@ -449,11 +472,13 @@ struct Collector {
         entry.group = true;
         entry.groupAlpha = box.groupAlpha;
         entry.transformed = box.transformed;
-        entry.center = box.center;
+        entry.origin = box.origin;
         entry.m[0] = box.m[0];
         entry.m[1] = box.m[1];
         entry.m[2] = box.m[2];
         entry.m[3] = box.m[3];
+        entry.m[4] = box.m[4];
+        entry.m[5] = box.m[5];
         // A pseudo-context holds its in-flow content but lets positioned
         // descendants rejoin the list its own box sits in; a real one holds all.
         std::vector<PaintEntry>* childEscape = box.kind == GroupKind::Pseudo ? into : nullptr;
@@ -480,7 +505,7 @@ struct Collector {
         for (PaintEntry& entry : entries) {
             if (entry.group && (entry.groupAlpha < 1.0f || entry.transformed)) {
                 out.push_back(groupStart(entry.item, entry.groupAlpha, entry.transformed, entry.m,
-                                        entry.center));
+                                        entry.origin));
                 out.push_back(boxOp(entry.item));
                 emit(entry.inner, out);
                 out.push_back(PaintOp{PaintOp::Kind::EndGroup, entry.item, {}, 1.0f});
@@ -512,7 +537,7 @@ std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolve
     // whole frame.
     const Collector::BoxState box = collector.resolve(root, PaintEnv{});
     if (box.paints && (box.groupAlpha < 1.0f || box.transformed)) {
-        out.push_back(groupStart(box.item, box.groupAlpha, box.transformed, box.m, box.center));
+        out.push_back(groupStart(box.item, box.groupAlpha, box.transformed, box.m, box.origin));
     }
     if (box.paints) {
         out.push_back(boxOp(box.item));

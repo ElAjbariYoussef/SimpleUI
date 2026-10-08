@@ -529,8 +529,8 @@ void testScaleAndRotateComposite() {
     checkNear(ops[si].m[0], 2.0f, 0.01f, "scale(2) lands in the matrix's horizontal axis");
     checkNear(ops[si].m[3], 2.0f, 0.01f, "scale(2) lands in the matrix's vertical axis");
     checkNear(ops[si].m[1], 0.0f, 0.01f, "a pure scale skews neither axis");
-    checkNear(ops[si].center.x, 50.0f, 0.5f, "transform origin at the box's horizontal centre");
-    checkNear(ops[si].center.y, 25.0f, 0.5f, "transform origin at the box's vertical centre");
+    checkNear(ops[si].origin.x, 50.0f, 0.5f, "transform origin at the box's horizontal centre");
+    checkNear(ops[si].origin.y, 25.0f, 0.5f, "transform origin at the box's vertical centre");
     checkNear(ops[si].bounds.w, 100.0f, 2.0f, "surface stays pre-transform sized horizontally");
     checkNear(ops[si].bounds.h, 50.0f, 2.0f, "surface stays pre-transform sized vertically");
     check(ri == rb && ops[ri].transformed && ops[ri].alpha == 1.0f,
@@ -571,6 +571,8 @@ void testTransformedTranslateRidesMatrix() {
     const std::size_t begin = beginGroupAt(ops);
     check(begin != ops.size() && ops[begin].transformed,
           "scale plus translate composites as one matrix group");
+    checkNear(ops[begin].m[4], 20.0f, 0.01f,
+              "the translate rides inside the matrix, scaled with the group");
     const sui::PaintItem* ic = nullptr;
     for (const sui::PaintOp& op : ops) {
         if (op.kind == sui::PaintOp::Kind::Box && op.item.el == c) {
@@ -589,6 +591,99 @@ void testTransformedTranslateRidesMatrix() {
           "a translate alone still folds into its children");
 }
 
+// `transform-origin` moves the point the matrix turns about: a scaled box grows
+// out of a corner or an edge instead of its centre. Percentages resolve against
+// the border box, keyword edges too, and a single value leaves the other axis
+// centred.
+void testTransformOriginOffsetsAxis() {
+    auto document = parseOrNull(R"HTML(<sui><body>
+        <div id="corner" style="transform:scale(2);transform-origin:0 0;width:100px;height:50px">
+            <div id="c1"></div>
+        </div>
+        <div id="edge" style="transform:scale(2);transform-origin:right bottom;width:100px;height:50px">
+            <div id="c2"></div>
+        </div>
+        <div id="lean" style="transform:scale(2);transform-origin:25px 30px;width:100px;height:50px">
+            <div id="c3"></div>
+        </div>
+    </body></sui>)HTML");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*document, resolver);
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+    Element* corner = document->getElementById("corner");
+    Element* edge = document->getElementById("edge");
+    Element* lean = document->getElementById("lean");
+    if (!corner || !edge || !lean) {
+        check(false, "transform-origin document parsed");
+        return;
+    }
+    // The three groups walk in document order: corner, then edge, then lean, at
+    // flow positions (0,0), (0,50) and (0,100).
+    std::vector<std::size_t> groups;
+    for (std::size_t i = 0; i < ops.size(); ++i) {
+        if (ops[i].kind == sui::PaintOp::Kind::BeginGroup) {
+            groups.push_back(i);
+        }
+    }
+    check(groups.size() == 3u, "each transform box composites its own group");
+    if (groups.size() != 3u) {
+        return;
+    }
+    checkNear(ops[groups[0]].origin.x, 0.0f, 0.5f, "transform-origin:0 0 puts the pivot at the corner");
+    checkNear(ops[groups[0]].origin.y, 0.0f, 0.5f, "transform-origin:0 0 vertically at the top");
+    checkNear(ops[groups[1]].origin.x, 100.0f, 0.5f, "keyword right resolves to the far edge in x");
+    checkNear(ops[groups[1]].origin.y, 100.0f, 0.5f, "keyword bottom counts down the box then the flow");
+    checkNear(ops[groups[2]].origin.x, 25.0f, 0.5f, "a pixel x is kept as a pixel");
+    checkNear(ops[groups[2]].origin.y, 130.0f, 0.5f, "a pixel y lands on the explicitly named spot");
+}
+
+// The transform list applies left to right, rightmost first -- CSS multiplied
+// order -- and the translate rides inside the matrix either way. `translateX
+// then rotate` turns the shifted result, so its e is the 10 and f is zero; the
+// same pair the other way rotates first, so the 10 lands in f instead. Both
+// differ from dropping the translate entirely, which the old folding did.
+void testTransformListOrder() {
+    auto document = parseOrNull(R"HTML(<sui><body>
+        <div id="tr" style="transform:translateX(10px) rotate(90deg);width:40px;height:20px">
+            <div id="c1"></div>
+        </div>
+        <div id="rt" style="transform:rotate(90deg) translateX(10px);width:40px;height:20px">
+            <div id="c2"></div>
+        </div>
+    </body></sui>)HTML");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*document, resolver);
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+    Element* tr = document->getElementById("tr");
+    Element* rt = document->getElementById("rt");
+    if (!tr || !rt) {
+        check(false, "transform order document parsed");
+        return;
+    }
+    for (std::size_t i = 0; i + 4 < ops.size(); ++i) {
+        if (ops[i].kind == sui::PaintOp::Kind::BeginGroup && ops[i + 1].item.el == tr) {
+            check(ops[i].transformed, "translate-then-rotate composites");
+            checkNear(ops[i].m[4], 10.0f, 0.01f,
+                      "translate written first lands in the matrix's e");
+            checkNear(ops[i].m[5], 0.0f, 0.01f, "translate written first leaves f empty");
+        }
+        if (ops[i].kind == sui::PaintOp::Kind::BeginGroup && ops[i + 1].item.el == rt) {
+            checkNear(ops[i].m[4], 0.0f, 0.01f, "rotate first keeps e empty");
+            checkNear(ops[i].m[5], 10.0f, 0.01f,
+                      "rotate first bends the translate into f");
+        }
+    }
+    check(tr != nullptr, "the transform order groups are found");
+}
+
 }  // namespace
 
 int main() {
@@ -604,6 +699,8 @@ int main() {
     testGroupClampedToClip();
     testScaleAndRotateComposite();
     testTransformedTranslateRidesMatrix();
+    testTransformOriginOffsetsAxis();
+    testTransformListOrder();
     if (failures > 0) {
         std::printf("%d check(s) failed\n", failures);
         return 1;
