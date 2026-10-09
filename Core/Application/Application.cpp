@@ -7,6 +7,7 @@
 #include "CSS/PseudoElements.h"
 #include "CSS/StyleResolver.h"
 #include "Layout/BlockLayout.h"
+#include "Rendering/ColorMatrix.h"
 #include "Rendering/ImageBlur.h"
 #include "Rendering/ImageCache.h"
 #include "Rendering/Renderer.h"
@@ -50,6 +51,12 @@ struct GroupFrame {
     // A `filter: blur()` radius to diffuse the finished surface with before the
     // blit; 0 leaves it sharp.
     float blur = 0.0f;
+    // A `filter:` colour-shift chain: when `shift` is set, the affine
+    // `filter[12]` is applied to the finished surface's readback before the
+    // blit (blur and shift share that readback, as the two commute).
+    bool shift = false;
+    float filter[12] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                        0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
 };
 
 // window width/height/state arrive as markup attributes, so parse them leniently.
@@ -1000,6 +1007,10 @@ void Application::run() {
                         frame.transformed = op.transformed;
                         frame.origin = op.origin;
                         frame.blur = op.blur;
+                        frame.shift = op.shift;
+                        for (int i = 0; i < 12; ++i) {
+                            frame.filter[i] = op.filter[i];
+                        }
                         frame.m[0] = op.m[0];
                         frame.m[1] = op.m[1];
                         frame.m[2] = op.m[2];
@@ -1034,23 +1045,31 @@ void Application::run() {
                         const GroupFrame frame = groups.back();
                         groups.pop_back();
                         if (frame.texture) {
-                            // A `filter: blur()` diffuses the finished surface:
-                            // read it back while it is still the target, box-blur
-                            // it on the CPU, and blit a texture made from the
-                            // result. A failed readback keeps the sharp surface
-                            // rather than dropping the group.
+                            // A `filter: blur()` or a colour-shift chain
+                            // reworks the finished surface: read it back while
+                            // it is still the target, shift and blur it on the
+                            // CPU, and blit a texture made from the result. A
+                            // failed readback keeps the sharp surface rather
+                            // than dropping the group.
                             SDL_Texture* texture = frame.texture;
                             const int blurRadius =
                                 frame.blur > 0.0f ? std::lround(frame.blur) : 0;
-                            if (blurRadius > 0) {
+                            if (frame.shift || blurRadius > 0) {
                                 SDL_Surface* read = SDL_RenderReadPixels(sdlRenderer, nullptr);
                                 if (read) {
                                     SDL_Surface* conv = SDL_ConvertSurface(
                                         read, SDL_PIXELFORMAT_ABGR8888);
                                     SDL_DestroySurface(read);
                                     if (conv) {
-                                        sui::blurRGBA(static_cast<std::uint8_t*>(conv->pixels),
-                                                      conv->w, conv->h, blurRadius);
+                                        std::uint8_t* pixels =
+                                            static_cast<std::uint8_t*>(conv->pixels);
+                                        if (frame.shift) {
+                                            sui::applyColorMatrix(pixels, conv->w, conv->h,
+                                                                  frame.filter);
+                                        }
+                                        if (blurRadius > 0) {
+                                            sui::blurRGBA(pixels, conv->w, conv->h, blurRadius);
+                                        }
                                         SDL_Texture* blurred =
                                             SDL_CreateTextureFromSurface(sdlRenderer, conv);
                                         SDL_DestroySurface(conv);

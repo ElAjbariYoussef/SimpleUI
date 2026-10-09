@@ -67,6 +67,10 @@ struct PaintItem {
 // point (a window-coordinate position), instead of being blitted axis-aligned.
 // `blur` is a `filter: blur()` radius in pixels; when a BeginGroup carries one,
 // the executor reads the finished surface back, blurs it, and blits the result.
+// `shift` is a `filter:` colour-shift chain (brightness/contrast/saturate/
+// grayscale/sepia/invert/hue-rotate): the executor applies the composed affine
+// `filter[12]` to the same readback. An affine colour map commutes with the box
+// blur, so the two filters share one readback whatever the chain's order.
 struct PaintOp {
     enum class Kind { Box, BeginGroup, EndGroup };
     Kind kind = Kind::Box;
@@ -77,6 +81,9 @@ struct PaintOp {
     float m[6] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
     SDL_FPoint origin{0.0f, 0.0f};
     float blur = 0.0f;
+    bool shift = false;
+    float filter[12] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                        0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
 };
 
 // True when `overflow` on this style crops anything, so its boxes are clipped to

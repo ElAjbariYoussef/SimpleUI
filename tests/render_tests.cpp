@@ -1,5 +1,6 @@
 // Geometry checks for the renderer that need no device, so the parts a screenshot
 // cannot pin down precisely still have a regression test.
+#include "Rendering/ColorMatrix.h"
 #include "Rendering/ImageBlur.h"
 #include "Rendering/Renderer.h"
 #include "Rendering/Text.h"
@@ -301,6 +302,82 @@ void testBoxBlur() {
     check(untouched == sharp, "radius zero leaves pixels alone");
 }
 
+// The CPU affine colour matrix the `filter:` shift chain hands the executor.
+// `filterColorMatrix` composes the chain into one matrix; `applyColorMatrix`
+// maps each pixel through it, rounding to the nearest byte and clipping.
+void testColorMatrix() {
+    auto apply = [](const float m[12], std::uint8_t r, std::uint8_t g, std::uint8_t b,
+                    std::uint8_t a) {
+        std::vector<std::uint8_t> img{r, g, b, a};
+        sui::applyColorMatrix(img.data(), 1, 1, m);
+        return std::array<std::uint8_t, 4>{img[0], img[1], img[2], img[3]};
+    };
+    auto expect = [](std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t a) {
+        return std::array<std::uint8_t, 4>{r, g, b, a};
+    };
+    float m[12];
+
+    sui::filterColorMatrix("brightness(0.5)", m);
+    check(apply(m, 255, 0, 0, 255) == expect(128, 0, 0, 255),
+          "brightness(0.5) halves red and rounds half up");
+    check(apply(m, 10, 20, 30, 200) == expect(5, 10, 15, 200),
+          "brightness scales only the colour channels");
+
+    sui::filterColorMatrix("grayscale(1)", m);
+    check(apply(m, 255, 0, 0, 255) == expect(54, 54, 54, 255),
+          "grayscale(1) collapses red to its luma (0.2126)");
+
+    sui::filterColorMatrix("sepia(1)", m);
+    check(apply(m, 255, 0, 0, 255) == expect(100, 89, 69, 255),
+          "sepia(1) tones pure red through the spec's rows");
+
+    sui::filterColorMatrix("invert(1)", m);
+    check(apply(m, 255, 0, 0, 255) == expect(0, 255, 255, 255),
+          "invert(1) flips every channel");
+
+    sui::filterColorMatrix("contrast(2)", m);
+    check(apply(m, 100, 100, 100, 255) == expect(72, 72, 72, 255),
+          "contrast(2) pulls below the 128 pivot toward black");
+
+    sui::filterColorMatrix("saturate(0)", m);
+    check(apply(m, 255, 0, 0, 255) == expect(54, 54, 54, 255),
+          "saturate(0) desaturates red to the spec's luma row");
+
+    sui::filterColorMatrix("hue-rotate(0)", m);
+    check(apply(m, 123, 45, 67, 255) == expect(123, 45, 67, 255),
+          "hue-rotate(0) is the identity");
+
+    // A chain composes left to right: brightness first, then contrast. The
+    // combined map is diagonal 2 with a -384 offset, so 64 lands at 2·64-384.
+    sui::filterColorMatrix("brightness(0.5) contrast(4)", m);
+    checkNear(m[0], 2.0f, 0.001f, "brightness-then-contrast multiplies the scales");
+    checkNear(m[3], -384.0f, 0.001f, "the farther function keeps its offset");
+    check(apply(m, 64, 64, 64, 255) == expect(0, 0, 0, 255),
+          "the composed map clips 2·64-384 to black");
+    sui::filterColorMatrix("contrast(4) brightness(0.5)", m);
+    checkNear(m[3], -192.0f, 0.001f, "reversing the chain reorders the offsets");
+
+    // A filter with no shift function, or with one carrying a unit suffix the
+    // parser may see, must still read as identity with no shift flagged.
+    auto isIdentity = [](const float n[12]) {
+        if (n[0] != 1.0f || n[5] != 1.0f || n[10] != 1.0f) {
+            return false;
+        }
+        for (int i = 0; i < 12; ++i) {
+            if (i != 0 && i != 5 && i != 10 && n[i] != 0.0f) {
+                return false;
+            }
+        }
+        return true;
+    };
+    check(!sui::filterColorMatrix("opacity(0.5)", m) && isIdentity(m),
+          "opacity() is not a shift and stays identity");
+    check(!sui::filterColorMatrix("blur(6px)", m) && isIdentity(m),
+          "blur() is not a shift and stays identity");
+    check(!sui::filterColorMatrix("", m) && isIdentity(m),
+          "an empty filter chain stays identity");
+}
+
 }  // namespace
 
 int main() {
@@ -317,6 +394,7 @@ int main() {
     testRadialPosition();
     testFontSizeIsTheEmSquare();
     testBoxBlur();
+    testColorMatrix();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

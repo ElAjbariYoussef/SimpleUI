@@ -745,6 +745,69 @@ void testFilterBlurComposites() {
     check(sawPlain, "a plain box is still painted");
 }
 
+// A `filter:` colour-shift chain has to hit the rendered surface, so it forces
+// an offscreen group like blur does, and the composed matrix rides the
+// BeginGroup op. The op's values are the exact spec matrices, so the assertion
+// pins both the parse and the ordering.
+void testFilterShiftComposites() {
+    auto document = parseOrNull(R"HTML(<sui><body>
+        <div id="bright" style="filter:brightness(0.5);width:40px;height:20px">
+            <div id="c"></div>
+        </div>
+        <div id="invert" style="filter:invert(1) contrast(2);width:40px;height:20px">
+            <div id="c2"></div>
+        </div>
+        <div id="plain" style="width:40px;height:20px">
+            <div id="c3"></div>
+        </div>
+    </body></sui>)HTML");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*document, resolver);
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+    Element* bright = document->getElementById("bright");
+    Element* invert = document->getElementById("invert");
+    Element* plain = document->getElementById("plain");
+    if (!bright || !invert || !plain) {
+        check(false, "filter shift document parsed");
+        return;
+    }
+    bool sawBright = false;
+    bool sawInvert = false;
+    for (std::size_t i = 0; i + 4 < ops.size(); ++i) {
+        if (ops[i].kind == sui::PaintOp::Kind::BeginGroup &&
+            ops[i + 1].item.el == bright) {
+            sawBright = true;
+            check(ops[i].shift, "the brightened box carries a shift");
+            checkNear(ops[i].filter[0], 0.5f, 0.001f, "brightness scales the red row");
+            checkNear(ops[i].filter[5], 0.5f, 0.001f, "brightness scales the green row");
+            checkNear(ops[i].filter[3], 0.0f, 0.001f, "a pure brightness has no offset");
+            checkNear(ops[i].alpha, 1.0f, 0.001f, "a shift alone keeps full alpha");
+            check(ops[i].blur < 0.001f, "a pure shift group carries no blur");
+        }
+        if (ops[i].kind == sui::PaintOp::Kind::BeginGroup &&
+            ops[i + 1].item.el == invert) {
+            sawInvert = true;
+            // invert(1) then contrast(2): -2 per diagonal, offset 2·255-128 = 382.
+            check(ops[i].shift, "the invert-contrast box carries a shift");
+            checkNear(ops[i].filter[0], -2.0f, 0.001f, "the chain multiplies to -2");
+            checkNear(ops[i].filter[3], 382.0f, 0.001f, "the chain's offsets compose");
+        }
+    }
+    bool sawPlain = false;
+    for (const sui::PaintOp& op : ops) {
+        if (op.kind == sui::PaintOp::Kind::Box && op.item.el == plain) {
+            sawPlain = true;
+        }
+    }
+    check(sawBright, "the brightness box opens a group");
+    check(sawInvert, "the invert-contrast box opens a group");
+    check(sawPlain, "a plain box is still painted");
+}
+
 }  // namespace
 
 int main() {
@@ -763,6 +826,7 @@ int main() {
     testTransformOriginOffsetsAxis();
     testTransformListOrder();
     testFilterBlurComposites();
+    testFilterShiftComposites();
     if (failures > 0) {
         std::printf("%d check(s) failed\n", failures);
         return 1;
