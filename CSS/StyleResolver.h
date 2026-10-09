@@ -158,4 +158,10 @@ private:
 bool selectorMatches(const SimpleSelector& selector, const Element& element,
                      const PseudoState* state = nullptr);
 
+// Parses a CSS `<color>` token -- hex, named, rgb()/rgba(), hsl(), oklch(),
+// color-mix() -- into an sRGB color. Returns false for anything else. Used by
+// the resolver for colour properties and by the `filter:` parser for
+// `drop-shadow()`'s colour argument.
+bool parseColor(std::string_view value, SDL_Color& out);
+
 }  // namespace sui

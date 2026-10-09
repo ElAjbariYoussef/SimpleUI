@@ -59,6 +59,9 @@ struct PaintEntry {
     bool shift = false;
     float filter[12] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
                         0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+    // A `filter: drop-shadow()` silhouette to blit under the content; forces a
+    // surface so the executor can trace the group's own shape.
+    DropShadowFilter dropShadow{};
     std::vector<PaintEntry> inner;
 };
 
@@ -124,6 +127,105 @@ float filterBlur(std::string_view filter) {
         at = end + 1;
     }
     return radius;
+}
+
+// The `)` that closes the `(` just after `open`, letting a `drop-shadow()`'s
+// color argument -- rgba(), hsl(), color-mix() and friends -- keep its own
+// nested parentheses inside the body.
+std::size_t closingParen(std::string_view text, std::size_t open) {
+    int depth = 0;
+    for (std::size_t i = open; i < text.size(); ++i) {
+        if (text[i] == '(') {
+            ++depth;
+        } else if (text[i] == ')' && --depth == 0) {
+            return i;
+        }
+    }
+    return std::string_view::npos;
+}
+
+// A `filter: drop-shadow(x y blur color)` shadows the group's own silhouette --
+// its alpha shape, not its box -- so the group still needs an offscreen
+// surface. The executor colours the readback with `color`, softens it by
+// `blur` px, and blits a shadow texture offset by (x, y) under the content; the
+// shadow may spill past the group's bounds, so it is not confined the way blur
+// is. The offset and blur are parsed as bare numbers (em is flattened to px,
+// like the other filter lengths); a missing color stays opaque near-black.
+// Returns present=false unless both offsets parse; only the first
+// drop-shadow() in the chain is honoured.
+DropShadowFilter filterDropShadow(std::string_view filter) {
+    DropShadowFilter shadow;
+    std::size_t at = 0;
+    while ((at = filter.find("drop-shadow(", at)) != std::string_view::npos) {
+        const std::size_t close = closingParen(filter, at + 11);
+        if (close == std::string_view::npos) {
+            break;
+        }
+        const std::string_view body = filter.substr(at + 12, close - at - 12);
+        at = close + 1;
+        if (shadow.present) {
+            continue;
+        }
+        // Split the body on whitespace that is not inside parentheses, so a
+        // functional color (rgba()/color-mix()) stays one token.
+        std::vector<std::string_view> tokens;
+        std::size_t begin = 0;
+        int depth = 0;
+        for (std::size_t i = 0; i <= body.size(); ++i) {
+            const bool end = i == body.size();
+            const char ch = end ? ' ' : body[i];
+            if (!end) {
+                if (ch == '(') {
+                    ++depth;
+                } else if (ch == ')') {
+                    --depth;
+                }
+            }
+            if (end || (std::isspace(static_cast<unsigned char>(ch)) && depth == 0)) {
+                if (i > begin) {
+                    tokens.push_back(body.substr(begin, i - begin));
+                }
+                begin = i + 1;
+            }
+        }
+        auto asLength = [](std::string_view token, float& value) {
+            if (token.empty() || token.find('(') != std::string_view::npos) {
+                return false;
+            }
+            const std::string owned(token);
+            char* stop = nullptr;
+            const float parsed = std::strtof(owned.c_str(), &stop);
+            if (stop == owned.c_str()) {
+                return false;
+            }
+            value = parsed;
+            return true;
+        };
+        if (tokens.size() < 2) {
+            continue;
+        }
+        float dx = 0.0f, dy = 0.0f;
+        if (!asLength(tokens[0], dx) || !asLength(tokens[1], dy)) {
+            continue;
+        }
+        shadow.dx = dx;
+        shadow.dy = dy;
+        bool blurSet = false;
+        for (std::size_t i = 2; i < tokens.size(); ++i) {
+            float value = 0.0f;
+            if (!blurSet && asLength(tokens[i], value)) {
+                shadow.blur = std::max(0.0f, value);
+                blurSet = true;
+            } else {
+                SDL_Color color;
+                if (parseColor(tokens[i], color)) {
+                    shadow.color = color;
+                }
+            }
+        }
+        shadow.present = true;
+    }
+    return shadow;
 }
 
 // A 2D affine map, x' = a*x + c*y + e, y' = b*x + d*y + f. Enough for the
@@ -270,9 +372,11 @@ PaintOp boxOp(const PaintItem& item) {
 // with and, when the group root transforms, the affine mapping the surface to
 // the screen about the resolved transform-origin point. `blur` hands the
 // executor a `filter: blur()` radius to apply to the readback; `shift` hands it
-// a composed colour-shift matrix when the filter chain has one.
+// a composed colour-shift matrix when the filter chain has one; `dropShadow`
+// hands it a `filter: drop-shadow()` silhouette to blit under the content.
 PaintOp groupStart(const PaintItem& item, float alpha, bool transformed, const float m[6],
-                   SDL_FPoint origin, float blur, bool shift, const float filter[12]) {
+                   SDL_FPoint origin, float blur, bool shift, const float filter[12],
+                   const DropShadowFilter& dropShadow) {
     PaintOp op;
     op.kind = PaintOp::Kind::BeginGroup;
     op.item = item;
@@ -281,6 +385,7 @@ PaintOp groupStart(const PaintItem& item, float alpha, bool transformed, const f
     op.origin = origin;
     op.blur = blur;
     op.shift = shift;
+    op.dropShadow = dropShadow;
     for (int i = 0; i < 6; ++i) {
         op.m[i] = m[i];
     }
@@ -389,6 +494,7 @@ struct Collector {
         bool shift = false;
         float filter[12] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
                             0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+        DropShadowFilter dropShadow{};
         PaintItem item;
         PaintEnv child;
     };
@@ -419,6 +525,10 @@ struct Collector {
         // BeginGroup op as one composed affine matrix.
         const bool hasShift = filterColorMatrix(s.filter, box.filter);
         box.shift = hasShift;
+        // A `filter: drop-shadow()` traces the group's own silhouette, which
+        // only a surface can capture, so it forces one too; the shadow's
+        // offset, blur and colour ride the BeginGroup op for the executor.
+        const DropShadowFilter dropShadow = filterDropShadow(s.filter);
         // An `opacity` under 1 -- or a `filter: opacity()` -- composites its whole
         // context through an offscreen surface, so its alpha leaves the environment
         // here and is carried on the BeginGroup op instead; the box and everything
@@ -426,7 +536,7 @@ struct Collector {
         // paints (say `display:none`) still hands its alpha on, as it always did,
         // since there is no surface for it.
         const bool composited = drawable && (groupAlpha < 1.0f || hasMatrix || blur > 0.0f ||
-                                             hasShift);
+                                             hasShift || dropShadow.present);
         if (!composited) {
             box.child.opacity *= groupAlpha;
         }
@@ -456,6 +566,7 @@ struct Collector {
         box.groupAlpha = composited ? groupAlpha : 1.0f;
         box.transformed = hasMatrix;
         box.blur = composited ? blur : 0.0f;
+        box.dropShadow = composited ? dropShadow : DropShadowFilter{};
         box.m[0] = matrix.a;
         box.m[1] = matrix.b;
         box.m[2] = matrix.c;
@@ -532,6 +643,7 @@ struct Collector {
         entry.origin = box.origin;
         entry.blur = box.blur;
         entry.shift = box.shift;
+        entry.dropShadow = box.dropShadow;
         for (int i = 0; i < 12; ++i) {
             entry.filter[i] = box.filter[i];
         }
@@ -567,9 +679,10 @@ struct Collector {
         for (PaintEntry& entry : entries) {
             if (entry.group &&
                 (entry.groupAlpha < 1.0f || entry.transformed || entry.blur > 0.0f ||
-                 entry.shift)) {
+                 entry.shift || entry.dropShadow.present)) {
                 out.push_back(groupStart(entry.item, entry.groupAlpha, entry.transformed, entry.m,
-                                        entry.origin, entry.blur, entry.shift, entry.filter));
+                                        entry.origin, entry.blur, entry.shift, entry.filter,
+                                        entry.dropShadow));
                 out.push_back(boxOp(entry.item));
                 emit(entry.inner, out);
                 out.push_back(PaintOp{PaintOp::Kind::EndGroup, entry.item, {}, 1.0f});
@@ -601,9 +714,9 @@ std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolve
     // whole frame.
     const Collector::BoxState box = collector.resolve(root, PaintEnv{});
     if (box.paints && (box.groupAlpha < 1.0f || box.transformed || box.blur > 0.0f ||
-                       box.shift)) {
+                       box.shift || box.dropShadow.present)) {
         out.push_back(groupStart(box.item, box.groupAlpha, box.transformed, box.m, box.origin,
-                                box.blur, box.shift, box.filter));
+                                box.blur, box.shift, box.filter, box.dropShadow));
     }
     if (box.paints) {
         out.push_back(boxOp(box.item));
@@ -612,7 +725,7 @@ std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolve
     collector.walkChildren(root, box.child, entries, nullptr);
     collector.emit(entries, out);
     if (box.paints && (box.groupAlpha < 1.0f || box.transformed || box.blur > 0.0f ||
-                       box.shift)) {
+                       box.shift || box.dropShadow.present)) {
         out.push_back(PaintOp{PaintOp::Kind::EndGroup, box.item, {}, 1.0f});
     }
     computeGroupBounds(out, resolver);

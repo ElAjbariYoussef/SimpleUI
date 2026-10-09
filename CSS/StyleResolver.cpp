@@ -896,8 +896,6 @@ static std::size_t topLevelComma(std::string_view text, std::size_t from) {
 // `color-mix(in srgb, A p%, B)`. A trailing percentage on an operand is its
 // weight; a missing one splits the remainder. Mixing is a straight sRGB
 // interpolation with premultiplied alpha.
-bool parseColor(std::string_view value, SDL_Color& out);
-
 static bool parseColorMix(std::string_view value, SDL_Color& out) {
     const std::string text(value);
     if (text.rfind("color-mix(", 0) != 0) return false;
@@ -990,12 +988,16 @@ bool parseNamedColor(std::string_view name, SDL_Color& out) {
     return true;
 }
 
+}  // namespace
+
 // Every property that takes a colour goes through here rather than through the hex
 // parser directly, because `red` is at least as common as `#ff0000` and a property
 // that silently ignored it would look like a bug in the stylesheet.
 bool parseColor(std::string_view value, SDL_Color& out) {
     return parseHexColor(value, out) || parseNamedColor(value, out) || parseHsl(value, out) || parseOklch(value, out) || parseColorMix(value, out);
 }
+
+namespace {
 
 // Splits on whitespace and parses each piece as a length, so `margin: 5px 10%`
 // keeps both units rather than flattening them to pixels. The splitter brackets

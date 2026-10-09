@@ -57,6 +57,9 @@ struct GroupFrame {
     bool shift = false;
     float filter[12] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
                         0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+    // A `filter: drop-shadow()`: a recoloured, blurred silhouette of the
+    // readback, blitted offset under the content.
+    DropShadowFilter dropShadow{};
 };
 
 // window width/height/state arrive as markup attributes, so parse them leniently.
@@ -1008,6 +1011,7 @@ void Application::run() {
                         frame.origin = op.origin;
                         frame.blur = op.blur;
                         frame.shift = op.shift;
+                        frame.dropShadow = op.dropShadow;
                         for (int i = 0; i < 12; ++i) {
                             frame.filter[i] = op.filter[i];
                         }
@@ -1045,16 +1049,18 @@ void Application::run() {
                         const GroupFrame frame = groups.back();
                         groups.pop_back();
                         if (frame.texture) {
-                            // A `filter: blur()` or a colour-shift chain
-                            // reworks the finished surface: read it back while
-                            // it is still the target, shift and blur it on the
-                            // CPU, and blit a texture made from the result. A
-                            // failed readback keeps the sharp surface rather
-                            // than dropping the group.
+                            // A `filter: blur()`, a colour-shift chain, or a
+                            // drop-shadow reworks the finished surface: read it
+                            // back while it is still the target, shift and blur
+                            // it, and for a drop-shadow build a recoloured,
+                            // blurred silhouette to blit under it. A failed
+                            // readback keeps the sharp surface rather than
+                            // dropping the group.
                             SDL_Texture* texture = frame.texture;
+                            SDL_Texture* shadow = nullptr;
                             const int blurRadius =
                                 frame.blur > 0.0f ? std::lround(frame.blur) : 0;
-                            if (frame.shift || blurRadius > 0) {
+                            if (frame.shift || blurRadius > 0 || frame.dropShadow.present) {
                                 SDL_Surface* read = SDL_RenderReadPixels(sdlRenderer, nullptr);
                                 if (read) {
                                     SDL_Surface* conv = SDL_ConvertSurface(
@@ -1069,6 +1075,42 @@ void Application::run() {
                                         }
                                         if (blurRadius > 0) {
                                             sui::blurRGBA(pixels, conv->w, conv->h, blurRadius);
+                                        }
+                                        if (frame.dropShadow.present) {
+                                            // The silhouette: the content's own
+                                            // shape recoloured with the shadow
+                                            // colour -- alpha scaled by the
+                                            // shadow's own alpha -- then softened
+                                            // by its blur radius.
+                                            SDL_Surface* silhouette =
+                                                SDL_DuplicateSurface(conv);
+                                            if (silhouette) {
+                                                std::uint8_t* silPixels =
+                                                    static_cast<std::uint8_t*>(silhouette->pixels);
+                                                const int bytes = 4 * silhouette->w * silhouette->h;
+                                                const DropShadowFilter& ds = frame.dropShadow;
+                                                for (int i = 0; i < bytes; i += 4) {
+                                                    silPixels[i] = ds.color.r;
+                                                    silPixels[i + 1] = ds.color.g;
+                                                    silPixels[i + 2] = ds.color.b;
+                                                    silPixels[i + 3] = static_cast<Uint8>(
+                                                        (silPixels[i + 3] * ds.color.a) / 255);
+                                                }
+                                                const int shadowBlur = ds.blur > 0.0f
+                                                    ? std::lround(ds.blur)
+                                                    : 0;
+                                                if (shadowBlur > 0) {
+                                                    sui::blurRGBA(silPixels, silhouette->w,
+                                                                  silhouette->h, shadowBlur);
+                                                }
+                                                shadow = SDL_CreateTextureFromSurface(
+                                                    sdlRenderer, silhouette);
+                                                SDL_DestroySurface(silhouette);
+                                                if (shadow) {
+                                                    SDL_SetTextureBlendMode(shadow,
+                                                                            SDL_BLENDMODE_BLEND);
+                                                }
+                                            }
                                         }
                                         SDL_Texture* blurred =
                                             SDL_CreateTextureFromSurface(sdlRenderer, conv);
@@ -1093,6 +1135,10 @@ void Application::run() {
                             SDL_SetRenderClipRect(sdlRenderer, nullptr);
                             SDL_SetTextureAlphaMod(texture, static_cast<Uint8>(
                                 std::lround(frame.alpha * 255.0f)));
+                            if (shadow) {
+                                SDL_SetTextureAlphaMod(shadow, static_cast<Uint8>(
+                                    std::lround(frame.alpha * 255.0f)));
+                            }
                             if (frame.transformed) {
                                 // The surface covers the group's pre-transform
                                 // position; the affine maps it to the screen about
@@ -1113,12 +1159,36 @@ void Application::run() {
                                                        q0.y + b * frame.bounds.w};
                                 const SDL_FPoint down{q0.x + c * frame.bounds.h,
                                                       q0.y + d * frame.bounds.h};
+                                if (shadow) {
+                                    // The shadow rides the same affine, reached
+                                    // by shifting the pre-transform top-left by
+                                    // the drop-shadow's own offset first.
+                                    const float sx = a * frame.dropShadow.dx +
+                                                     c * frame.dropShadow.dy;
+                                    const float sy = b * frame.dropShadow.dx +
+                                                     d * frame.dropShadow.dy;
+                                    const SDL_FPoint sq0{q0.x + sx, q0.y + sy};
+                                    const SDL_FPoint sright{right.x + sx, right.y + sy};
+                                    const SDL_FPoint sdown{down.x + sx, down.y + sy};
+                                    SDL_RenderTextureAffine(sdlRenderer, shadow, nullptr, &sq0,
+                                                            &sright, &sdown);
+                                }
                                 SDL_RenderTextureAffine(sdlRenderer, texture, nullptr, &q0,
                                                         &right, &down);
                             } else {
+                                if (shadow) {
+                                    const SDL_FRect shadowDst{
+                                        frame.bounds.x - ox + frame.dropShadow.dx,
+                                        frame.bounds.y - oy + frame.dropShadow.dy,
+                                        frame.bounds.w, frame.bounds.h};
+                                    SDL_RenderTexture(sdlRenderer, shadow, nullptr, &shadowDst);
+                                }
                                 const SDL_FRect dst{frame.bounds.x - ox, frame.bounds.y - oy,
                                                     frame.bounds.w, frame.bounds.h};
                                 SDL_RenderTexture(sdlRenderer, texture, nullptr, &dst);
+                            }
+                            if (shadow) {
+                                SDL_DestroyTexture(shadow);
                             }
                             SDL_DestroyTexture(texture);
                         }

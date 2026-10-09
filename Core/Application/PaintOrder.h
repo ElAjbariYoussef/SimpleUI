@@ -23,6 +23,7 @@
 // its boxes -- clipped to what its ancestors allow.
 #pragma once
 
+#include <SDL3/SDL_pixels.h>
 #include <SDL3/SDL_rect.h>
 
 #include <cstddef>
@@ -57,6 +58,19 @@ struct PaintItem {
     float opacity = 1.0f;
 };
 
+// A parsed `filter: drop-shadow(x y blur color)`. The shadow follows the
+// group's own alpha silhouette (not its box): the executor colours the
+// readback's shape with `color`, softens it by `blur` pixels, and blits it
+// offset by (x, y) under the content. Offsets and blur are in px; a missing
+// color defaults to an opaque near-black.
+struct DropShadowFilter {
+    float dx = 0.0f;
+    float dy = 0.0f;
+    float blur = 0.0f;
+    SDL_Color color{0, 0, 0, 255};
+    bool present = false;
+};
+
 // One step of the paint sequence. `Box` draws an element; `BeginGroup` and
 // `EndGroup` bracket the boxes of one stacking context the executor must
 // composite offscreen. For BeginGroup, `bounds` is in window coordinates and
@@ -71,6 +85,9 @@ struct PaintItem {
 // grayscale/sepia/invert/hue-rotate): the executor applies the composed affine
 // `filter[12]` to the same readback. An affine colour map commutes with the box
 // blur, so the two filters share one readback whatever the chain's order.
+// `dropShadow`, when present, adds a `filter: drop-shadow()`: the readback is
+// duplicated, recoloured and blurred into a shadow texture that is blitted
+// first, offset by `dx`/`dy`, before the (sharp) content texture.
 struct PaintOp {
     enum class Kind { Box, BeginGroup, EndGroup };
     Kind kind = Kind::Box;
@@ -84,6 +101,7 @@ struct PaintOp {
     bool shift = false;
     float filter[12] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
                         0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+    DropShadowFilter dropShadow{};
 };
 
 // True when `overflow` on this style crops anything, so its boxes are clipped to

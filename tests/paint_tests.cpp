@@ -808,6 +808,80 @@ void testFilterShiftComposites() {
     check(sawPlain, "a plain box is still painted");
 }
 
+// A `filter: drop-shadow()` has to trace the group's own silhouette, so it
+// forces an offscreen group like the other filters, and the shadow's offset,
+// blur and colour all ride the BeginGroup op.
+void testFilterDropShadowComposites() {
+    auto document = parseOrNull(R"HTML(<sui><body>
+        <div id="shadow" style="filter:drop-shadow(4px 6px 8px #00000080);width:40px;height:20px">
+            <div id="c"></div>
+        </div>
+        <div id="goneg" style="filter:drop-shadow(-2px 3px 0px red);width:40px;height:20px">
+            <div id="c2"></div>
+        </div>
+        <div id="combo" style="filter:drop-shadow(2px 2px 2px #000) brightness(0.5);width:40px;height:20px">
+            <div id="c3"></div>
+        </div>
+        <div id="plain" style="width:40px;height:20px">
+            <div id="c4"></div>
+        </div>
+    </body></sui>)HTML");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*document, resolver);
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+    Element* shadow = document->getElementById("shadow");
+    Element* goneg = document->getElementById("goneg");
+    Element* combo = document->getElementById("combo");
+    Element* plain = document->getElementById("plain");
+    if (!shadow || !goneg || !combo || !plain) {
+        check(false, "filter drop-shadow document parsed");
+        return;
+    }
+    bool sawShadow = false;
+    bool sawNeg = false;
+    bool sawCombo = false;
+    for (std::size_t i = 0; i + 4 < ops.size(); ++i) {
+        if (ops[i].kind == sui::PaintOp::Kind::BeginGroup &&
+            ops[i + 1].item.el == shadow) {
+            sawShadow = true;
+            check(ops[i].dropShadow.present, "the drop-shadow box carries a shadow");
+            checkNear(ops[i].dropShadow.dx, 4.0f, 0.001f, "the shadow's x offset rides the op");
+            checkNear(ops[i].dropShadow.dy, 6.0f, 0.001f, "the shadow's y offset rides the op");
+            checkNear(ops[i].dropShadow.blur, 8.0f, 0.001f, "the shadow's blur rides the op");
+            checkNear(ops[i].dropShadow.color.a, 128.0f, 0.5f,
+                      "the shadow's hex alpha is kept");
+        }
+        if (ops[i].kind == sui::PaintOp::Kind::BeginGroup &&
+            ops[i + 1].item.el == goneg) {
+            sawNeg = true;
+            checkNear(ops[i].dropShadow.dx, -2.0f, 0.001f, "a negative shadow offset parses");
+            checkNear(ops[i].dropShadow.dy, 3.0f, 0.001f, "the y offset stays positive");
+            checkNear(ops[i].dropShadow.color.r, 255.0f, 0.5f, "the named colour is parsed");
+            checkNear(ops[i].dropShadow.color.a, 255.0f, 0.5f, "a named colour is opaque");
+        }
+        if (ops[i].kind == sui::PaintOp::Kind::BeginGroup &&
+            ops[i + 1].item.el == combo) {
+            sawCombo = true;
+            check(ops[i].dropShadow.present && ops[i].shift,
+                  "drop-shadow and a colour shift share one group");
+        }
+    }
+    bool sawPlain = false;
+    for (const sui::PaintOp& op : ops) {
+        if (op.kind == sui::PaintOp::Kind::Box && op.item.el == plain) {
+            sawPlain = true;
+        }
+    }
+    check(sawShadow, "the drop-shadow box opens a group");
+    check(sawNeg, "the negative-offset drop-shadow box opens a group");
+    check(sawCombo, "the drop-shadow-plus-shift box opens a group");
+    check(sawPlain, "a plain box is still painted");
+}
+
 }  // namespace
 
 int main() {
@@ -827,6 +901,7 @@ int main() {
     testTransformListOrder();
     testFilterBlurComposites();
     testFilterShiftComposites();
+    testFilterDropShadowComposites();
     if (failures > 0) {
         std::printf("%d check(s) failed\n", failures);
         return 1;
