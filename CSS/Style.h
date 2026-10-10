@@ -590,6 +590,20 @@ struct ComputedStyle {
     // Visibility
     bool visible = true;
 
+    // CSS counters, keyed by name. `counterReset` sets the counter to `value` on
+    // the element that declares it; `counterIncrement` adds `value` to it.
+    struct CounterOp {
+        std::string name;
+        int value = 0;
+    };
+    std::vector<CounterOp> counterReset;
+    std::vector<CounterOp> counterIncrement;
+
+    // List marker position: whether the bullet/number sits outside (default) or
+    // inside the element's content box.
+    enum ListStylePosition : std::uint8_t { LSPOutside, LSPInside };
+    ListStylePosition listStylePosition = LSPOutside;
+
     // Pointer events: when true (from `pointer-events: none`), the element does not
     // intercept pointer events during hit testing.
     bool pointerEventsNone = false;
@@ -663,6 +677,7 @@ struct ComputedStyle {
         SpecifiedTextDecorationColor = 1u << 17,
         SpecifiedPointerEvents = 1u << 18,
         SpecifiedCursor = 1u << 19,
+        SpecifiedListStylePosition = 1u << 20,
     };
     std::uint32_t specified = 0;
 };
@@ -860,6 +875,9 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     if (!(style.specified & ComputedStyle::SpecifiedListStyleType)) {
         style.listStyleType = parent.listStyleType;
     }
+    if (!(style.specified & ComputedStyle::SpecifiedListStylePosition)) {
+        style.listStylePosition = parent.listStylePosition;
+    }
     if (!(style.specified & ComputedStyle::SpecifiedTextDecorationColor)) {
         style.textDecorationColor = parent.textDecorationColor;
         style.hasTextDecorationColor = parent.hasTextDecorationColor;
@@ -869,6 +887,9 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     }
     if (!(style.specified & ComputedStyle::SpecifiedCursor)) {
         style.cursor = parent.cursor;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedListStylePosition)) {
+        style.listStylePosition = parent.listStylePosition;
     }
     // `transform` and `filter` are not inherited in CSS: they describe the box
     // they are declared on. The paint walk already carries a translated or

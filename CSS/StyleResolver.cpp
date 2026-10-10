@@ -3160,8 +3160,15 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         } else if (value.find("disc") != std::string_view::npos) {
             s.listStyleType = ComputedStyle::LSTDisc;
         }
-    } else if (property == "list-style-position" || property == "list-style-image") {
-        // Accepted; outside-position markers and image markers are not yet rendered.
+        if (value.find("inside") != std::string_view::npos) {
+            s.listStylePosition = ComputedStyle::LSPInside;
+            s.specified |= ComputedStyle::SpecifiedListStylePosition;
+        } else if (value.find("outside") != std::string_view::npos) {
+            s.listStylePosition = ComputedStyle::LSPOutside;
+            s.specified |= ComputedStyle::SpecifiedListStylePosition;
+        }
+    } else if (property == "list-style-image") {
+        // Accepted; image markers are not yet rendered.
     } else if (property == "pointer-events") {
         std::string_view val = trim(value);
         if (val == "none") {
@@ -3170,6 +3177,15 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         } else if (val == "auto" || val == "initial") {
             s.pointerEventsNone = false;
             s.specified |= ComputedStyle::SpecifiedPointerEvents;
+        }
+    } else if (property == "list-style-position") {
+        std::string_view val = trim(value);
+        if (val == "inside") {
+            s.listStylePosition = ComputedStyle::LSPInside;
+            s.specified |= ComputedStyle::SpecifiedListStylePosition;
+        } else if (val == "outside") {
+            s.listStylePosition = ComputedStyle::LSPOutside;
+            s.specified |= ComputedStyle::SpecifiedListStylePosition;
         }
     } else if (property == "cursor") {
         // `cursor` is a comma-separated fallback list: any number of `url()`
@@ -3810,11 +3826,17 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         }
         return "disc";
     }
+    if (property == "list-style-position") {
+        return style.listStylePosition == ComputedStyle::LSPInside ? "inside" : "outside";
+    }
     if (property == "pointer-events") {
         return style.pointerEventsNone ? "none" : "auto";
     }
     if (property == "cursor") {
         return std::string(cursorName(style.cursor));
+    }
+    if (property == "list-style-position") {
+        return style.listStylePosition == ComputedStyle::LSPInside ? "inside" : "outside";
     }
     if (property == "text-overflow") {
         return style.textOverflow == ComputedStyle::TextOverflowEllipsis ? "ellipsis" : "clip";
@@ -4084,7 +4106,8 @@ namespace {
 // engine does not have, so they are left out and handled like any other unknown
 // value. These two the engine can answer exactly.
 bool isCssWideKeyword(std::string_view value) {
-    return value == "inherit" || value == "unset";
+    return value == "inherit" || value == "unset" || value == "initial" ||
+           value == "revert";
 }
 
 // The properties `unset` inherits when no other value applies. Mirrors the set
@@ -4095,26 +4118,33 @@ bool isInheritable(std::string_view property) {
            property == "line-height" || property == "text-align" ||
            property == "list-style-type" || property == "list-style" ||
            property == "text-decoration-color" || property == "pointer-events" ||
-           property == "cursor";
+           property == "cursor" || property == "list-style-position";
 }
 
 // `inherit` and `unset` are the two CSS-wide keywords the engine can answer
 // exactly: the first always takes the parent's value, the second takes it for an
 // inheritable property and is otherwise left to the property's own initial value,
 // which is what a default-constructed `ComputedStyle` already holds.
-void applyCssWideKeyword(ComputedStyle& style, const Declaration& decl,
-                         const ComputedStyle& parent) {
+void applyCssWideKeyword(ComputedStyle& style, Element* element,
+                          const Declaration& decl, const ComputedStyle& parent) {
     const std::string_view value = trim(decl.value);
     const bool take =
-        value == "inherit" || (value == "unset" && isInheritable(decl.property));
+        value == "inherit" || (value == "unset" && isInheritable(decl.property)) ||
+        value == "initial" || value == "revert";
     if (!take) {
         return;
     }
-    // propertyValue round-trips the parent's value through the same parser, so
-    // this needs no second copy of the property table.
+    ComputedStyle source;
+    if (value == "revert") {
+        source = element ? defaultStyleFor(element->tag()) : ComputedStyle();
+    } else if (value == "initial") {
+        source = ComputedStyle();
+    } else {
+        source = parent;
+    }
     applyDeclaration(style,
                      Declaration{decl.property,
-                                 StyleResolver::propertyValue(parent, decl.property),
+                                 StyleResolver::propertyValue(source, decl.property),
                                  decl.important},
                      0.0f);
 }
@@ -4191,7 +4221,7 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
             return;  // settled by collectCustom, above
         }
         if (isCssWideKeyword(decl.value)) {
-            applyCssWideKeyword(style, decl, parent);
+            applyCssWideKeyword(style, &element, decl, parent);
             return;
         }
         if (containsVars(decl.value)) {
