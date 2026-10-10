@@ -415,9 +415,8 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
              el.contentHeight()}};
         paintBackground(s, boxes, s.fontSize, rootFontSize, opacity, renderer, images, radii);
 
-        // An <img> or <video> paints its decoded source into the content box. The source keeps
-        // its aspect ratio and is scaled down to fit, which is the common case for a
-        // photo or video poster dropped into a fixed box.
+        // An <img> or <video> paints its decoded source into the content box, honoring
+        // the `object-fit` property (contain / cover / fill / none / scale-down).
         if (el.tag() == "img" || el.tag() == "video") {
             std::string_view src = el.attribute("src");
             if (el.tag() == "video") {
@@ -433,12 +432,50 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                     const SDL_FRect content{el.contentX() - offX, el.contentY() - offY,
                                             el.contentWidth(), el.contentHeight()};
                     if (iw > 0.0f && ih > 0.0f && content.w > 0.0f && content.h > 0.0f) {
-                        const float scale = std::min(content.w / iw, content.h / ih);
-                        const float dw = iw * scale;
-                        const float dh = ih * scale;
-                        const SDL_FRect dst{content.x + (content.w - dw) * 0.5f,
-                                            content.y + (content.h - dh) * 0.5f, dw, dh};
-                        renderer.drawTexture(tex, dst, nullptr,
+                        SDL_FRect dst{};
+                        SDL_FRect* src_clip = nullptr;
+                        SDL_FRect clip_rect{};
+                        const ComputedStyle::ObjectFit fit = s.objectFit;
+                        if (fit == ComputedStyle::ObjFill) {
+                            // Stretch to fill; ignore aspect ratio.
+                            dst = content;
+                        } else if (fit == ComputedStyle::ObjCover) {
+                            // Scale up/down to cover the whole box, then crop.
+                            const float scale = std::max(content.w / iw, content.h / ih);
+                            const float dw = iw * scale;
+                            const float dh = ih * scale;
+                            dst = {content.x + (content.w - dw) * 0.5f,
+                                   content.y + (content.h - dh) * 0.5f, dw, dh};
+                        } else if (fit == ComputedStyle::ObjNone) {
+                            // Intrinsic size, centred; may overflow or be smaller than box.
+                            dst = {content.x + (content.w - iw) * 0.5f,
+                                   content.y + (content.h - ih) * 0.5f, iw, ih};
+                        } else {
+                            // ObjContain or ObjScaleDown: aspect-fit (scale down only for
+                            // scale-down).
+                            float scale = std::min(content.w / iw, content.h / ih);
+                            if (fit == ComputedStyle::ObjScaleDown) {
+                                scale = std::min(scale, 1.0f);
+                            }
+                            const float dw = iw * scale;
+                            const float dh = ih * scale;
+                            dst = {content.x + (content.w - dw) * 0.5f,
+                                   content.y + (content.h - dh) * 0.5f, dw, dh};
+                        }
+                        // For cover and none the destination may overflow; clip to content box.
+                        if (fit == ComputedStyle::ObjCover || fit == ComputedStyle::ObjNone) {
+                            // Compute what portion of the *texture* maps to the clipped rect.
+                            const float tx0 = (content.x - dst.x) / dst.w * iw;
+                            const float ty0 = (content.y - dst.y) / dst.h * ih;
+                            const float tw  = content.w / dst.w * iw;
+                            const float th  = content.h / dst.h * ih;
+                            clip_rect = {std::max(0.0f, tx0), std::max(0.0f, ty0),
+                                         std::min(iw - std::max(0.0f, tx0), tw),
+                                         std::min(ih - std::max(0.0f, ty0), th)};
+                            src_clip = &clip_rect;
+                            dst = content;
+                        }
+                        renderer.drawTexture(tex, dst, src_clip,
                                              Color{255, 255, 255,
                                                    static_cast<Uint8>(opacity * 255.0f)});
                     }
@@ -539,6 +576,45 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
 
     if (!font.hasFont()) {
         return;
+    }
+
+    // List marker: draw bullet or ordinal to the left of <li> box
+    if (el.tag() == "li" && s.listStyleType != ComputedStyle::LSTNone) {
+        int ordinal = 1;
+        if (s.listStyleType == ComputedStyle::LSTDecimal) {
+            if (const Element* par = el.parent()) {
+                for (const auto& sib : par->children()) {
+                    if (!sib || sib.get() == &el) break;
+                    if (!sib->isTextNode() && sib->tag() == "li") ++ordinal;
+                }
+            }
+        }
+        std::string marker;
+        if (s.listStyleType == ComputedStyle::LSTDecimal) {
+            marker = std::to_string(ordinal) + ".";
+        } else if (s.listStyleType == ComputedStyle::LSTCircle) {
+            marker = "\xE2\x97\x8B";  // U+25CB ○
+        } else if (s.listStyleType == ComputedStyle::LSTSquare) {
+            marker = "\xE2\x96\xAA";  // U+25AA ▪
+        } else {
+            marker = "\xE2\x80\xA2";  // U+2022 •
+        }
+
+        const SDL_Color markerColor{
+            s.color.r, s.color.g, s.color.b,
+            static_cast<Uint8>(static_cast<float>(s.color.a) * opacity)};
+        SDL_Texture* markerTex = font.renderText(sdlRenderer, marker, s.fontSize,
+                                                 markerColor, s.fontBold,
+                                                 s.fontStyle != ComputedStyle::FontNormal);
+        if (markerTex) {
+            float mTexW = 0.0f, mTexH = 0.0f;
+            SDL_GetTextureSize(markerTex, &mTexW, &mTexH);
+            const float markerX = box.x - mTexW - 8.0f;
+            const float markerY = box.y;
+            const SDL_FRect dst{std::floor(markerX), std::floor(markerY), mTexW, mTexH};
+            SDL_RenderTexture(sdlRenderer, markerTex, nullptr, &dst);
+            SDL_DestroyTexture(markerTex);
+        }
     }
 
     auto measurePrefix = [&](std::size_t bytePos, const Element::TextRun& run) -> float {

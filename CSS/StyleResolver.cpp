@@ -2989,6 +2989,63 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         for (const std::string& part : splitCommaList(decl.value)) {
             s.animationPaused.push_back(part == "paused");
         }
+    } else if (property == "object-fit") {
+        if (value == "cover") {
+            s.objectFit = ComputedStyle::ObjCover;
+        } else if (value == "fill") {
+            s.objectFit = ComputedStyle::ObjFill;
+        } else if (value == "none") {
+            s.objectFit = ComputedStyle::ObjNone;
+        } else if (value == "scale-down") {
+            s.objectFit = ComputedStyle::ObjScaleDown;
+        } else {
+            s.objectFit = ComputedStyle::ObjContain;
+        }
+    } else if (property == "object-position") {
+        // Accepted; position-within-box alignment is not yet applied by the paint engine.
+    } else if (property == "list-style-type") {
+        s.specified |= ComputedStyle::SpecifiedListStyleType;
+        if (value == "none") {
+            s.listStyleType = ComputedStyle::LSTNone;
+        } else if (value == "circle") {
+            s.listStyleType = ComputedStyle::LSTCircle;
+        } else if (value == "square") {
+            s.listStyleType = ComputedStyle::LSTSquare;
+        } else if (value == "decimal") {
+            s.listStyleType = ComputedStyle::LSTDecimal;
+        } else {
+            s.listStyleType = ComputedStyle::LSTDisc;
+        }
+    } else if (property == "list-style") {
+        s.specified |= ComputedStyle::SpecifiedListStyleType;
+        // Shorthand: type || position || image. Only the type keyword is stored.
+        if (value == "none") {
+            s.listStyleType = ComputedStyle::LSTNone;
+        } else if (value.find("circle") != std::string_view::npos) {
+            s.listStyleType = ComputedStyle::LSTCircle;
+        } else if (value.find("square") != std::string_view::npos) {
+            s.listStyleType = ComputedStyle::LSTSquare;
+        } else if (value.find("decimal") != std::string_view::npos) {
+            s.listStyleType = ComputedStyle::LSTDecimal;
+        } else if (value.find("disc") != std::string_view::npos) {
+            s.listStyleType = ComputedStyle::LSTDisc;
+        }
+    } else if (property == "list-style-position" || property == "list-style-image") {
+        // Accepted; outside-position markers and image markers are not yet rendered.
+    } else if (property == "pointer-events") {
+        // Accepted without storage: a full pointer-events:none skip is a later pass.
+    } else if (property == "resize" || property == "appearance" ||
+               property == "-webkit-appearance") {
+        // Accepted; these control browser chrome that this engine does not draw.
+    } else if (property == "will-change" || property == "contain" ||
+               property == "isolation") {
+        // Performance / compositing hints: accepted and ignored.
+    } else if (property == "tab-size" || property == "hyphens" ||
+               property == "word-break" || property == "overflow-wrap" ||
+               property == "text-overflow") {
+        // Text shaping hints that the layout engine does not yet implement.
+    } else if (property == "user-select" || property == "-webkit-user-select") {
+        // Selection control: accepted; non-editable elements already ignore selection.
     } else {
         warnUnknownProperty(property);
     }
@@ -3488,6 +3545,26 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         property == "animation-fill-mode" || property == "animation-play-state") {
         return serializeAnimation(property, style);
     }
+    if (property == "object-fit") {
+        switch (style.objectFit) {
+            case ComputedStyle::ObjCover: return "cover";
+            case ComputedStyle::ObjFill: return "fill";
+            case ComputedStyle::ObjNone: return "none";
+            case ComputedStyle::ObjScaleDown: return "scale-down";
+            case ComputedStyle::ObjContain: return "contain";
+        }
+        return "contain";
+    }
+    if (property == "list-style-type") {
+        switch (style.listStyleType) {
+            case ComputedStyle::LSTCircle: return "circle";
+            case ComputedStyle::LSTSquare: return "square";
+            case ComputedStyle::LSTDecimal: return "decimal";
+            case ComputedStyle::LSTNone: return "none";
+            case ComputedStyle::LSTDisc: return "disc";
+        }
+        return "disc";
+    }
     return {};
 }
 
@@ -3752,7 +3829,8 @@ bool isCssWideKeyword(std::string_view value) {
 bool isInheritable(std::string_view property) {
     return property == "color" || property == "font-size" ||
            property == "font-family" || property == "font-weight" ||
-           property == "line-height" || property == "text-align";
+           property == "line-height" || property == "text-align" ||
+           property == "list-style-type" || property == "list-style";
 }
 
 // `inherit` and `unset` are the two CSS-wide keywords the engine can answer

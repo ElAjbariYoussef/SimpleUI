@@ -512,6 +512,84 @@ void testMediaElementsLayout() {
           "<audio> defaults to 300x32 dimensions");
 }
 
+void testObjectFitAndListStyle() {
+    auto doc = parseOrNull(
+        "<sui><body>"
+        "<img id=\"i1\" style=\"object-fit: cover;\"/>"
+        "<img id=\"i2\" style=\"object-fit: fill;\"/>"
+        "<img id=\"i3\" style=\"object-fit: none;\"/>"
+        "<img id=\"i4\" style=\"object-fit: scale-down;\"/>"
+        "<img id=\"i5\"/>"
+        "<ul id=\"ul1\">"
+        "  <li id=\"li1\">Item 1</li>"
+        "  <li id=\"li2\" style=\"list-style-type: square;\">Item 2</li>"
+        "  <li id=\"li3\" style=\"list-style: circle;\">Item 3</li>"
+        "  <li id=\"li4\" style=\"list-style: none;\">Item 4</li>"
+        "</ul>"
+        "<ol id=\"ol1\">"
+        "  <li id=\"oli1\">1</li>"
+        "  <li id=\"oli2\">2</li>"
+        "</ol>"
+        "<ul id=\"ul2\" style=\"list-style: square;\">"
+        "  <li id=\"ul2_li1\">A</li>"
+        "</ul>"
+        "</body></sui>");
+    if (!doc) return;
+    sui::StyleResolver res;
+    res.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*doc, res, 800.0f);
+
+    Element* i1 = doc->getElementById("i1");
+    Element* i2 = doc->getElementById("i2");
+    Element* i3 = doc->getElementById("i3");
+    Element* i4 = doc->getElementById("i4");
+    Element* i5 = doc->getElementById("i5");
+
+    auto s1 = res.resolve(*i1);
+    auto s2 = res.resolve(*i2);
+    auto s3 = res.resolve(*i3);
+    auto s4 = res.resolve(*i4);
+    auto s5 = res.resolve(*i5);
+
+    check(s1.objectFit == sui::ComputedStyle::ObjCover, "object-fit: cover parses");
+    check(s2.objectFit == sui::ComputedStyle::ObjFill, "object-fit: fill parses");
+    check(s3.objectFit == sui::ComputedStyle::ObjNone, "object-fit: none parses");
+    check(s4.objectFit == sui::ComputedStyle::ObjScaleDown, "object-fit: scale-down parses");
+    check(s5.objectFit == sui::ComputedStyle::ObjContain, "object-fit default is contain");
+
+    check(sui::StyleResolver::propertyValue(s1, "object-fit") == "cover", "object-fit serializes to cover");
+    check(sui::StyleResolver::propertyValue(s2, "object-fit") == "fill", "object-fit serializes to fill");
+
+    Element* ul1 = doc->getElementById("ul1");
+    Element* li1 = doc->getElementById("li1");
+    Element* li2 = doc->getElementById("li2");
+    Element* li3 = doc->getElementById("li3");
+    Element* li4 = doc->getElementById("li4");
+
+    auto sUl1 = res.resolve(*ul1);
+    auto sLi1 = res.resolve(*li1);
+    auto sLi2 = res.resolve(*li2);
+    auto sLi3 = res.resolve(*li3);
+    auto sLi4 = res.resolve(*li4);
+
+    check(sUl1.listStyleType == sui::ComputedStyle::LSTDisc, "<ul> defaults to list-style-type: disc");
+    check(sLi1.listStyleType == sui::ComputedStyle::LSTDisc, "<li> inherits list-style-type: disc from <ul>");
+    check(sLi2.listStyleType == sui::ComputedStyle::LSTSquare, "<li> overrides list-style-type to square");
+    check(sLi3.listStyleType == sui::ComputedStyle::LSTCircle, "<li> shorthand list-style sets circle");
+    check(sLi4.listStyleType == sui::ComputedStyle::LSTNone, "<li> shorthand list-style: none sets LSTNone");
+
+    Element* ol1 = doc->getElementById("ol1");
+    Element* oli1 = doc->getElementById("oli1");
+    auto sOl1 = res.resolve(*ol1);
+    auto sOli1 = res.resolve(*oli1);
+    check(sOl1.listStyleType == sui::ComputedStyle::LSTDecimal, "<ol> defaults to list-style-type: decimal");
+    check(sOli1.listStyleType == sui::ComputedStyle::LSTDecimal, "<li> inside <ol> inherits list-style-type: decimal");
+
+    Element* ul2_li1 = doc->getElementById("ul2_li1");
+    auto sUl2_li1 = res.resolve(*ul2_li1);
+    check(sUl2_li1.listStyleType == sui::ComputedStyle::LSTSquare, "<li> inherits list-style: square from <ul style=\"list-style: square\">");
+}
+
 void testGridAlignment() {
     // Track distribution: two 50px columns in a 300px box leave 200px, which
     // `justify-content: center` splits into 100px of leading space.
@@ -3742,6 +3820,7 @@ int main() {
     testVerticalAlignTopBottom();
     testVerticalAlignTextTopBottomInline();
     testMediaElementsLayout();
+    testObjectFitAndListStyle();
     testGridAlignment();
     testInputValue();
     testInputPasswordLayout();

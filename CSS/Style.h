@@ -547,13 +547,25 @@ struct ComputedStyle {
     // pseudo-element is not generated at all.
     std::string content;
 
+    // How a replaced element (img, video) fits its content box. `Contain` is the
+    // historical default (aspect-fit down to fit); `Cover` aspect-fills, cropping
+    // to cover the whole box; `Fill` stretches without keeping the aspect ratio;
+    // `None` keeps the image at its intrinsic size; `ScaleDown` is `min(none, contain)`.
+    enum ObjectFit : std::uint8_t { ObjContain, ObjCover, ObjFill, ObjNone, ObjScaleDown };
+    ObjectFit objectFit = ObjContain;
+
+    // List bullet / counter style. `Disc` (•) for unordered, `Decimal` for ordered.
+    // Only the first marker position (outside the box) is rendered for now.
+    enum ListStyleType : std::uint8_t { LSTDisc, LSTCircle, LSTSquare, LSTDecimal, LSTNone };
+    ListStyleType listStyleType = LSTDisc;
+
     // Visibility
     bool visible = true;
 
     // Which inheritable properties the user-agent style set on its own. Anything
     // not flagged here flows down from the parent. Author rules and inline
     // styles apply after inheritance, so they always win.
-    enum Specified : std::uint16_t {
+    enum Specified : std::uint32_t {
         SpecifiedColor = 1u << 0,
         SpecifiedFontSize = 1u << 1,
         SpecifiedFontFamily = 1u << 2,
@@ -570,8 +582,9 @@ struct ComputedStyle {
         SpecifiedTransform = 1u << 13,
         SpecifiedFilter = 1u << 14,
         SpecifiedTransformOrigin = 1u << 15,
+        SpecifiedListStyleType = 1u << 16,
     };
-    std::uint16_t specified = 0;
+    std::uint32_t specified = 0;
 };
 
 // The box-model lengths of a style after percentages and font-relative units have
@@ -689,6 +702,9 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     }
     if (!(style.specified & ComputedStyle::SpecifiedVerticalAlign)) {
         style.verticalAlign = parent.verticalAlign;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedListStyleType)) {
+        style.listStyleType = parent.listStyleType;
     }
     // `transform` and `filter` are not inherited in CSS: they describe the box
     // they are declared on. The paint walk already carries a translated or

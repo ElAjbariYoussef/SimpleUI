@@ -8,7 +8,7 @@ using Style = ComputedStyle;
 // Mirrors a browser user-agent stylesheet: sizes, weights, and margins come
 // from the UA, everything else is inherited. Inheritable values that are set
 // here are flagged so StyleResolver::inheritInto leaves them alone.
-ComputedStyle block(std::uint16_t specified = 0) {
+ComputedStyle block(std::uint32_t specified = 0) {
     Style s;
     s.display = Style::Block;
     s.specified = specified;
@@ -134,10 +134,19 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
         return s;
     }
 
-    if (tag == "ul" || tag == "ol") {
-        Style s = block();
+    if (tag == "ul") {
+        Style s = block(Style::SpecifiedListStyleType);
         s.margin = {8.0f, 0.0f, 8.0f, 0.0f};
         s.padding = {0.0f, 0.0f, 0.0f, 32.0f};
+        s.listStyleType = Style::LSTDisc;
+        return s;
+    }
+
+    if (tag == "ol") {
+        Style s = block(Style::SpecifiedListStyleType);
+        s.margin = {8.0f, 0.0f, 8.0f, 0.0f};
+        s.padding = {0.0f, 0.0f, 0.0f, 32.0f};
+        s.listStyleType = Style::LSTDecimal;
         return s;
     }
 
