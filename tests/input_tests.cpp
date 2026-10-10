@@ -216,6 +216,28 @@ int main() {
         }
     }
 
+    // IME composition events report text being edited, start, and length.
+    SDL_Event editEv{};
+    editEv.type = SDL_EVENT_TEXT_EDITING;
+    editEv.edit.text = const_cast<char*>("nihon");
+    editEv.edit.start = 2;
+    editEv.edit.length = 5;
+    SDL_PushEvent(&editEv);
+    platform->pumpEvents();
+    {
+        const auto& events = platform->inputEvents();
+        ++checks;
+        const bool editOk = events.size() == 1 &&
+                            events.front().kind == sui::InputKind::TextEdit &&
+                            events.front().text == "nihon" &&
+                            events.front().editStart == 2 &&
+                            events.front().editLength == 5;
+        if (!editOk) {
+            ++failures;
+            std::printf("FAIL text editing event reports composition text and ranges\n");
+        }
+    }
+
     // Test Application dispatch for input fields (editing, readonly, disabled, password, button, backspace).
     {
         sui::Application app;
@@ -395,6 +417,31 @@ int main() {
             check(txt && txt->value() == "ad", "delete key deletes selected text");
             check(!app.hasSelection(), "delete key clears selection");
             check(app.caretPosition() == 1, "caret is at 1 after delete");
+
+            // IME composition on focused input
+            sui::InputEvent imeEdit(sui::InputKind::TextEdit, 0, 0, 0, 0, 0, 0, "nihon", 3, 5);
+            app.dispatch(imeEdit);
+            check(app.hasComposition(), "app has composition after TextEdit");
+            check(app.compositionText() == "nihon", "composition text matches");
+            check(app.compositionCursor() == 3, "composition cursor matches");
+
+            // Committing IME via TextInput
+            app.dispatch(sui::InputEvent(sui::InputKind::TextInput, 0, 0, 0, 0, 0, 0, "\xE6\x97\xA5\xE6\x9C\xAC"));
+            check(!app.hasComposition(), "TextInput clears composition");
+            check(app.compositionText().empty(), "composition text empty after commit");
+            check(txt && txt->value() == "a\xE6\x97\xA5\xE6\x9C\xAC""d", "committed text inserted into input");
+
+            // TextEdit on readonly input does not set composition
+            appDoc.setFocused(ro);
+            app.dispatch(sui::InputEvent(sui::InputKind::TextEdit, 0, 0, 0, 0, 0, 0, "test", 0, 4));
+            check(!app.hasComposition(), "TextEdit on readonly input does not set composition");
+
+            // PointerDown clears composition
+            appDoc.setFocused(txt);
+            app.dispatch(imeEdit);
+            check(app.hasComposition(), "composition restored on txt");
+            app.dispatch(sui::InputEvent(sui::InputKind::PointerDown, 0.0f, 0.0f, 1));
+            check(!app.hasComposition(), "PointerDown clears composition");
         }
     }
 

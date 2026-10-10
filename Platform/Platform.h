@@ -23,7 +23,8 @@ enum class InputKind : std::uint8_t {
     Wheel,
     KeyDown,
     KeyUp,
-    TextInput
+    TextInput,
+    TextEdit
 };
 
 struct InputEvent {
@@ -37,11 +38,14 @@ struct InputEvent {
     // the UTF-8 produced by a key press, which is what a text field inserts.
     int key = 0;
     std::string text;
+    int editStart = 0;
+    int editLength = 0;
 
     InputEvent() = default;
     InputEvent(InputKind k, float px = 0.0f, float py = 0.0f, int b = 0, float ddx = 0.0f,
-               float ddy = 0.0f, int kk = 0, std::string t = {})
-        : kind(k), x(px), y(py), button(b), dx(ddx), dy(ddy), key(kk), text(std::move(t)) {}
+               float ddy = 0.0f, int kk = 0, std::string t = {}, int start = 0, int len = 0)
+        : kind(k), x(px), y(py), button(b), dx(ddx), dy(ddy), key(kk), text(std::move(t)),
+          editStart(start), editLength(len) {}
 };
 
 struct WindowConfig {

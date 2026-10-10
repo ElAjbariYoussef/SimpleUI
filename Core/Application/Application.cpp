@@ -163,6 +163,8 @@ const char* attributeForEvent(InputKind kind) {
             return "onkeyup";
         case InputKind::TextInput:
             return "oninput";
+        case InputKind::TextEdit:
+            return nullptr;
     }
     return nullptr;
 }
@@ -386,7 +388,8 @@ void paintTextShadow(const ComputedStyle::TextShadow& shadow, const Element::Tex
 void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
               const StyleResolver& resolver, const TextFont& font, float opacity,
               ImageCache& images, float offX, float offY, int caretBytePos = -1,
-              int selStart = -1, int selEnd = -1) {
+              bool showCaret = false, int selStart = -1, int selEnd = -1,
+              const char* compositionText = nullptr, int compCursor = 0) {
     const ComputedStyle s = resolver.resolve(el);
     const SDL_FRect box{el.layoutX() - offX, el.layoutY() - offY, el.layoutWidth(),
                         el.layoutHeight()};
@@ -637,10 +640,38 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
             caretY = std::floor(run.y - ty);
             caretH = run.height > 0.0f ? run.height : (run.fontSize * 1.2f);
         }
-        const SDL_FRect caretRect{caretX, caretY, 1.5f, caretH};
-        const sui::Color caretCol = multiplyAlpha(toColor(s.color), opacity);
-        SDL_SetRenderDrawColor(sdlRenderer, caretCol.r, caretCol.g, caretCol.b, caretCol.a);
-        SDL_RenderFillRect(sdlRenderer, &caretRect);
+        if (compositionText && *compositionText && font.hasFont()) {
+            SDL_Texture* compTex = font.renderText(
+                sdlRenderer, compositionText, s.fontSize,
+                SDL_Color{s.color.r, s.color.g, s.color.b,
+                          static_cast<Uint8>(static_cast<float>(s.color.a) * opacity)});
+            if (compTex) {
+                float cw = 0.0f, ch = 0.0f;
+                SDL_GetTextureSize(compTex, &cw, &ch);
+                const SDL_FRect compDst{caretX, caretY, cw, ch};
+                SDL_RenderTexture(sdlRenderer, compTex, nullptr, &compDst);
+                SDL_DestroyTexture(compTex);
+
+                // Underline composition text
+                const SDL_FRect compLine{caretX, caretY + caretH - 1.5f, cw, 1.5f};
+                const sui::Color caretCol = multiplyAlpha(toColor(s.color), opacity);
+                SDL_SetRenderDrawColor(sdlRenderer, caretCol.r, caretCol.g, caretCol.b, caretCol.a);
+                SDL_RenderFillRect(sdlRenderer, &compLine);
+
+                // Advance caret within composition
+                if (compCursor >= 0) {
+                    std::string_view compView(compositionText);
+                    std::size_t cLen = std::min(static_cast<std::size_t>(compCursor), compView.size());
+                    caretX += font.measureText(compView.substr(0, cLen), s.fontSize);
+                }
+            }
+        }
+        if (showCaret) {
+            const SDL_FRect caretRect{caretX, caretY, 1.5f, caretH};
+            const sui::Color caretCol = multiplyAlpha(toColor(s.color), opacity);
+            SDL_SetRenderDrawColor(sdlRenderer, caretCol.r, caretCol.g, caretCol.b, caretCol.a);
+            SDL_RenderFillRect(sdlRenderer, &caretRect);
+        }
     }
 }
 
@@ -798,7 +829,8 @@ void Application::dispatch(const InputEvent& event) {
     }
 
     const bool keyboard = event.kind == InputKind::KeyDown ||
-                          event.kind == InputKind::KeyUp || event.kind == InputKind::TextInput;
+                          event.kind == InputKind::KeyUp || event.kind == InputKind::TextInput ||
+                          event.kind == InputKind::TextEdit;
     // A key event has no coordinates and belongs to whatever holds focus; a pointer
     // event belongs to whatever is under it in paint order (topmost).
     Element* target = nullptr;
@@ -870,6 +902,8 @@ void Application::dispatch(const InputEvent& event) {
             return;
         case InputKind::PointerDown:
             resolver_.setActive(target);
+            compositionText_.clear();
+            compositionCursor_ = 0;
             // Clicking anywhere, including on nothing, moves focus. Disabled elements
             // cannot take focus.
             if (target && !target->hasAttribute("disabled")) {
@@ -930,6 +964,8 @@ void Application::dispatch(const InputEvent& event) {
                 lastFocused_ = nullptr;
                 caretBytePos_ = 0;
                 selectionAnchor_ = 0;
+                compositionText_.clear();
+                compositionCursor_ = 0;
             }
             break;
         case InputKind::PointerUp:
@@ -974,6 +1010,7 @@ void Application::dispatch(const InputEvent& event) {
             }
             break;
         case InputKind::TextInput:
+        case InputKind::TextEdit:
             break;
     }
 
@@ -1000,6 +1037,8 @@ void Application::dispatch(const InputEvent& event) {
                 lastFocused_ = target;
                 caretBytePos_ = value.size();
                 selectionAnchor_ = caretBytePos_;
+                compositionText_.clear();
+                compositionCursor_ = 0;
                 caretBlinkStart_ = SDL_GetTicks();
             }
             if (caretBytePos_ > value.size()) {
@@ -1020,7 +1059,13 @@ void Application::dispatch(const InputEvent& event) {
             const bool isShift = shiftDown_ || ((SDL_GetModState() & SDL_KMOD_SHIFT) != 0);
             const bool isCtrl = ctrlDown_ || ((SDL_GetModState() & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) != 0);
 
-            if (event.kind == InputKind::KeyDown) {
+            if (event.kind == InputKind::TextEdit) {
+                if (!readOnly) {
+                    compositionText_ = event.text;
+                    compositionCursor_ = event.editStart;
+                    caretBlinkStart_ = SDL_GetTicks();
+                }
+            } else if (event.kind == InputKind::KeyDown) {
                 caretBlinkStart_ = SDL_GetTicks();
                 if (isCtrl && (event.key == kA || event.key == 'A')) {
                     selectionAnchor_ = 0;
@@ -1116,18 +1161,22 @@ void Application::dispatch(const InputEvent& event) {
                         }
                     }
                 }
-            } else if (!readOnly && event.kind == InputKind::TextInput && !event.text.empty()) {
-                caretBlinkStart_ = SDL_GetTicks();
-                if (selectionAnchor_ != caretBytePos_) {
-                    const std::size_t sStart = std::min(selectionAnchor_, caretBytePos_);
-                    const std::size_t sEnd = std::max(selectionAnchor_, caretBytePos_);
-                    value.erase(sStart, sEnd - sStart);
-                    caretBytePos_ = sStart;
+            } else if (!readOnly && event.kind == InputKind::TextInput) {
+                compositionText_.clear();
+                compositionCursor_ = 0;
+                if (!event.text.empty()) {
+                    caretBlinkStart_ = SDL_GetTicks();
+                    if (selectionAnchor_ != caretBytePos_) {
+                        const std::size_t sStart = std::min(selectionAnchor_, caretBytePos_);
+                        const std::size_t sEnd = std::max(selectionAnchor_, caretBytePos_);
+                        value.erase(sStart, sEnd - sStart);
+                        caretBytePos_ = sStart;
+                    }
+                    value.insert(caretBytePos_, event.text);
+                    caretBytePos_ += event.text.size();
+                    selectionAnchor_ = caretBytePos_;
+                    target->setValue(std::move(value));
                 }
-                value.insert(caretBytePos_, event.text);
-                caretBytePos_ += event.text.size();
-                selectionAnchor_ = caretBytePos_;
-                target->setValue(std::move(value));
             }
         }
     }
@@ -1593,19 +1642,25 @@ void Application::run() {
                         SDL_SetRenderClipRect(sdlRenderer, nullptr);
                     }
                     int caretPos = -1;
+                    bool showCaret = false;
                     int selStart = -1, selEnd = -1;
+                    const char* compText = nullptr;
+                    int compCursor = 0;
                     if (document_ && document_->focused() == item.el) {
-                        const bool caretVisible = ((ticks - caretBlinkStart_) / 500) % 2 == 0;
-                        if (caretVisible) {
-                            caretPos = static_cast<int>(caretBytePos_);
-                        }
+                        caretPos = static_cast<int>(caretBytePos_);
+                        showCaret = ((ticks - caretBlinkStart_) / 500) % 2 == 0;
                         if (selectionAnchor_ != caretBytePos_) {
                             selStart = static_cast<int>(std::min(selectionAnchor_, caretBytePos_));
                             selEnd = static_cast<int>(std::max(selectionAnchor_, caretBytePos_));
                         }
+                        if (!compositionText_.empty()) {
+                            compText = compositionText_.c_str();
+                            compCursor = compositionCursor_;
+                        }
                     }
                     paintBox(*item.el, renderer, sdlRenderer, resolver_, *font_, groupOpacity,
-                             *images_, item.dx + ox, item.dy + oy, caretPos, selStart, selEnd);
+                             *images_, item.dx + ox, item.dy + oy, caretPos, showCaret, selStart, selEnd,
+                             compText, compCursor);
                 }
             } else {
                 SDL_FRect panel{40.0f, 40.0f, static_cast<float>(width) - 80.0f,
@@ -1665,6 +1720,8 @@ void Application::shutdown() {
     lastFocused_ = nullptr;
     caretBytePos_ = 0;
     selectionAnchor_ = 0;
+    compositionText_.clear();
+    compositionCursor_ = 0;
     shiftDown_ = false;
     ctrlDown_ = false;
     images_.reset();

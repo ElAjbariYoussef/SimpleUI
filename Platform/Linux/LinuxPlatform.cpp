@@ -202,6 +202,16 @@ bool LinuxPlatform::pumpEvents() {
                 input_.push_back(std::move(ev));
                 break;
             }
+            case SDL_EVENT_TEXT_EDITING: {
+                InputEvent ev{InputKind::TextEdit};
+                if (event.edit.text) {
+                    ev.text = event.edit.text;
+                }
+                ev.editStart = event.edit.start;
+                ev.editLength = event.edit.length;
+                input_.push_back(std::move(ev));
+                break;
+            }
             default:
                 break;
         }

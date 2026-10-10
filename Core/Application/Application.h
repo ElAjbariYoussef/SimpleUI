@@ -55,6 +55,11 @@ public:
     void selectAll() noexcept;
     void clearSelection() noexcept { selectionAnchor_ = caretBytePos_; }
 
+    const std::string& compositionText() const noexcept { return compositionText_; }
+    int compositionCursor() const noexcept { return compositionCursor_; }
+    bool hasComposition() const noexcept { return !compositionText_.empty(); }
+    void clearComposition() noexcept { compositionText_.clear(); }
+
 private:
     static WindowConfig windowConfigFrom(Document& document);
 
@@ -106,6 +111,8 @@ private:
     std::uint64_t caretBlinkStart_ = 0;
     bool shiftDown_ = false;
     bool ctrlDown_ = false;
+    std::string compositionText_;
+    int compositionCursor_ = 0;
 };
 
 }  // namespace sui
