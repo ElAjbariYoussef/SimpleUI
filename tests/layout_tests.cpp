@@ -461,6 +461,34 @@ void testVerticalAlignTopBottom() {
     }
 }
 
+void testVerticalAlignTextTopBottomInline() {
+    auto docTT = parseOrNull("<sui><body><p id=\"p\">big<span id=\"s\" style=\"font-size:10px;vertical-align:text-top\">small</span></p></body></sui>");
+    if (docTT) {
+        sui::StyleResolver res;
+        res.setRules(sui::CSSParser::parse("body{margin:0} #p{margin:0;font-size:20px}"));
+        layoutRoot(*docTT, res, 400.0f);
+        Element* p = docTT->getElementById("p");
+        check(p != nullptr && p->textRuns().size() == 2, "text runs created for text-top span");
+        if (p && p->textRuns().size() == 2) {
+            check(p->textRuns()[1].y < p->textRuns()[0].y,
+                  "vertical-align:text-top on inline text raises smaller font run");
+        }
+    }
+
+    auto docTB = parseOrNull("<sui><body><p id=\"p\">big<span id=\"s\" style=\"font-size:10px;vertical-align:text-bottom\">small</span></p></body></sui>");
+    if (docTB) {
+        sui::StyleResolver res;
+        res.setRules(sui::CSSParser::parse("body{margin:0} #p{margin:0;font-size:20px}"));
+        layoutRoot(*docTB, res, 400.0f);
+        Element* p = docTB->getElementById("p");
+        check(p != nullptr && p->textRuns().size() == 2, "text runs created for text-bottom span");
+        if (p && p->textRuns().size() == 2) {
+            check(p->textRuns()[1].y > p->textRuns()[0].y,
+                  "vertical-align:text-bottom on inline text lowers smaller font run");
+        }
+    }
+}
+
 void testGridAlignment() {
     // Track distribution: two 50px columns in a 300px box leave 200px, which
     // `justify-content: center` splits into 100px of leading space.
@@ -3689,6 +3717,7 @@ int main() {
     testSyntheticEmphasis();
     testVerticalAlign();
     testVerticalAlignTopBottom();
+    testVerticalAlignTextTopBottomInline();
     testGridAlignment();
     testInputValue();
     testInputPasswordLayout();

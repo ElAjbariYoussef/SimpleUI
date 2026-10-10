@@ -85,11 +85,24 @@ std::string transformText(const ComputedStyle& s, std::string_view t) {
 // and `middle` centres it on half the x-height. `top`/`bottom` are handled where
 // the line box is known (see `Flow::atomic`); for text, whose run already spans
 // the line height, they land where the default does.
-float verticalAlignShift(const ComputedStyle& s) {
+float verticalAlignShift(const ComputedStyle& s, const Metrics* parent = nullptr,
+                         const Metrics* child = nullptr) {
     switch (s.verticalAlign) {
         case ComputedStyle::VAlignSub: return s.fontSize * 0.16f;
         case ComputedStyle::VAlignSuper: return -s.fontSize * 0.33f;
         case ComputedStyle::VAlignMiddle: return -s.fontSize * 0.25f;
+        case ComputedStyle::VAlignTextTop:
+        case ComputedStyle::VAlignTop:
+            if (parent && child) {
+                return child->ascent - parent->ascent;
+            }
+            return 0.0f;
+        case ComputedStyle::VAlignTextBottom:
+        case ComputedStyle::VAlignBottom:
+            if (parent && child) {
+                return parent->lineHeight - child->lineHeight;
+            }
+            return 0.0f;
         default: return 0.0f;
     }
 }
@@ -1565,7 +1578,7 @@ private:
             // the container's height.
             const float ascentDelta = std::min(0.0f, m.ascent - metrics_.ascent);
             if (!spacing_.keepsNewlines) {
-                words(text, s, ascentDelta);
+                words(text, s, m, ascentDelta);
                 return;
             }
             // A newline in the text ends the line instead of collapsing to a space.
@@ -1575,9 +1588,9 @@ private:
                 const std::size_t end = nl == std::string_view::npos ? text.size() : nl;
                 if (end > start) {
                     if (spacing_.keepsWhitespace) {
-                        word(text.substr(start, end - start), s, ascentDelta);
+                        word(text.substr(start, end - start), s, m, ascentDelta);
                     } else {
-                        words(text.substr(start, end - start), s, ascentDelta);
+                        words(text.substr(start, end - start), s, m, ascentDelta);
                     }
                 }
                 if (nl == std::string_view::npos) {
@@ -1736,7 +1749,7 @@ private:
 
         // Splits at whitespace, collapsing runs of spaces into the single space
         // word() inserts between runs.
-        void words(std::string_view text, const ComputedStyle& s, float ascentDelta) {
+        void words(std::string_view text, const ComputedStyle& s, const Metrics& m, float ascentDelta) {
             std::size_t i = 0;
             while (i < text.size()) {
                 while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) {
@@ -1749,11 +1762,11 @@ private:
                 if (i == start) {
                     break;
                 }
-                word(text.substr(start, i - start), s, ascentDelta);
+                word(text.substr(start, i - start), s, m, ascentDelta);
             }
         }
 
-        void word(std::string_view w, const ComputedStyle& s, float ascentDelta) {
+        void word(std::string_view w, const ComputedStyle& s, const Metrics& m, float ascentDelta) {
             const float wWidth = textWidth(owner_.font_, s, w);
             if (spacing_.wraps && lineHasContent_ &&
                 penX_ + metrics_.spaceWidth + wWidth > maxWidth_) {
@@ -1765,7 +1778,7 @@ private:
             }
             std::string wt = transformText(s, w);
             ownerEl_.addTextRun({wt, originX_ + penX_ + space,
-                                 originY_ + cursorY_ + verticalAlignShift(s), wWidth,
+                                 originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), wWidth,
                                  metrics_.lineHeight, metrics_.ascent + ascentDelta,
                                  s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
                                  s.fontBold, s.fontStyle != ComputedStyle::FontNormal});
