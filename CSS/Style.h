@@ -545,6 +545,10 @@ struct ComputedStyle {
     enum WhiteSpace : std::uint8_t { WrapText, WrapNone, WrapPre, WrapPreWrap };
     WhiteSpace whiteSpace = WrapText;
 
+    // How overflow text is rendered when clipped: `Clip` (default) or `Ellipsis`.
+    enum TextOverflow : std::uint8_t { TextOverflowClip, TextOverflowEllipsis };
+    TextOverflow textOverflow = TextOverflowClip;
+
     // The text a generated `::before` or `::after` puts in the box. Empty means the
     // pseudo-element is not generated at all, unless hasContent is true.
     std::string content;

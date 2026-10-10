@@ -183,6 +183,7 @@ public:
         bool italic = false;
     };
     const std::vector<TextRun>& textRuns() const noexcept { return textRuns_; }
+    std::vector<TextRun>& textRuns() noexcept { return textRuns_; }
     void addTextRun(TextRun run) { textRuns_.push_back(std::move(run)); }
     void clearTextRuns() { textRuns_.clear(); }
 

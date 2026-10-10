@@ -3850,7 +3850,79 @@ void testScroll() {
     check(overflowReadback == "auto visible", "the overflow pair reads back per axis");
 }
 
+void testTextOverflowEllipsis() {
+    // 1. Property parsing & serialization
+    {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("div { text-overflow: ellipsis; } p { text-overflow: clip; }"));
+        auto doc = parseOrNull("<sui><body><div id=\"d\"></div><p id=\"p\"></p></body></sui>");
+        if (doc) {
+            const sui::ComputedStyle sd = resolver.resolve(*doc->getElementById("d"));
+            check(sd.textOverflow == sui::ComputedStyle::TextOverflowEllipsis,
+                  "text-overflow: ellipsis parses into ComputedStyle");
+            check(sui::StyleResolver::propertyValue(sd, "text-overflow") == "ellipsis",
+                  "text-overflow: ellipsis serializes in propertyValue");
+
+            const sui::ComputedStyle sp = resolver.resolve(*doc->getElementById("p"));
+            check(sp.textOverflow == sui::ComputedStyle::TextOverflowClip,
+                  "text-overflow: clip parses into ComputedStyle");
+            check(sui::StyleResolver::propertyValue(sp, "text-overflow") == "clip",
+                  "text-overflow: clip serializes in propertyValue");
+        }
+    }
+
+    // 2. Single-line overflow truncation with ellipsis
+    {
+        auto doc = parseOrNull(
+            "<sui><body>"
+            "<div id=\"ell\" style=\"width:60px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis\">"
+            "LongTextThatOverflowsTheBox"
+            "</div>"
+            "<div id=\"short\" style=\"width:200px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis\">"
+            "Short"
+            "</div>"
+            "<div id=\"clip\" style=\"width:60px;overflow:hidden;white-space:nowrap;text-overflow:clip\">"
+            "LongTextThatOverflowsTheBox"
+            "</div>"
+            "</body></sui>");
+        if (doc) {
+            sui::StyleResolver resolver;
+            resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+            layoutRoot(*doc, resolver, 400.0f);
+
+            Element* ell = doc->getElementById("ell");
+            check(ell != nullptr && !ell->textRuns().empty(), "ell box has text runs");
+            if (ell && !ell->textRuns().empty()) {
+                const auto& lastRun = ell->textRuns().back();
+                const std::string kEllipsis = "\xE2\x80\xA6";
+                check(lastRun.text.size() >= kEllipsis.size() &&
+                      lastRun.text.compare(lastRun.text.size() - kEllipsis.size(), kEllipsis.size(), kEllipsis) == 0,
+                      "overflowing text in text-overflow:ellipsis ends with ellipsis glyph");
+                check(lastRun.x + lastRun.width <= ell->layoutX() + ell->layoutWidth() + 1.0f,
+                      "ellipsis text run fits within maxWidth");
+            }
+
+            Element* sh = doc->getElementById("short");
+            check(sh != nullptr && !sh->textRuns().empty(), "short box has text runs");
+            if (sh && !sh->textRuns().empty()) {
+                const auto& run = sh->textRuns().front();
+                check(run.text.find("\xE2\x80\xA6") == std::string::npos,
+                      "non-overflowing text does not get ellipsis appended");
+            }
+
+            Element* cl = doc->getElementById("clip");
+            check(cl != nullptr && !cl->textRuns().empty(), "clip box has text runs");
+            if (cl && !cl->textRuns().empty()) {
+                const auto& run = cl->textRuns().front();
+                check(run.text.find("\xE2\x80\xA6") == std::string::npos,
+                      "text-overflow:clip does not append ellipsis");
+            }
+        }
+    }
+}
+
 int main() {
+    testTextOverflowEllipsis();
     testEasingAndTimingFunctions();
     testTransitionDeclarations();
     testTransitions();

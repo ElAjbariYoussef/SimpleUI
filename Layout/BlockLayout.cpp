@@ -1567,6 +1567,7 @@ private:
               originX_(originX),
               originY_(originY),
               spacing_(spacingFor(s.whiteSpace)) {
+            lineRunStartIndex_ = owner_el.textRuns().size();
             if (s.textIndent.unit != sui::Length::Auto) {
                 penX_ = std::max(0.0f, s.textIndent.resolve(s.fontSize, s.fontSize, 16.0f));
             }
@@ -1710,6 +1711,8 @@ private:
             cursorY_ += metrics_.lineHeight;
             penX_ = 0.0f;
             lineHasContent_ = false;
+            ellipsisAdded_ = false;
+            lineRunStartIndex_ = ownerEl_.textRuns().size();
         }
 
         void finish() {}
@@ -1766,7 +1769,16 @@ private:
             }
         }
 
+        bool isEllipsisActive() const {
+            return style_.textOverflow == ComputedStyle::TextOverflowEllipsis &&
+                   (style_.overflowX != ComputedStyle::Visible || style_.overflowY != ComputedStyle::Visible) &&
+                   maxWidth_ < kUnbounded;
+        }
+
         void word(std::string_view w, const ComputedStyle& s, const Metrics& m, float ascentDelta) {
+            if (ellipsisAdded_) {
+                return;
+            }
             const float wWidth = textWidth(owner_.font_, s, w);
             if (spacing_.wraps && lineHasContent_ &&
                 penX_ + metrics_.spaceWidth + wWidth > maxWidth_) {
@@ -1776,6 +1788,92 @@ private:
             if (lineHasContent_ && s.wordSpacing.unit != sui::Length::Auto) {
                 space += s.wordSpacing.resolve(s.fontSize, s.fontSize, 16.0f);
             }
+
+            if (isEllipsisActive() && penX_ + space + wWidth > maxWidth_) {
+                // The current word overflows the container line box and text-overflow: ellipsis is active.
+                const std::string kEllipsis = "\xE2\x80\xA6";
+                const float ellWidth = textWidth(owner_.font_, s, kEllipsis);
+                const float availForWord = maxWidth_ - (penX_ + space) - ellWidth;
+
+                if (availForWord > 0.0f) {
+                    std::string prefix;
+                    std::size_t idx = 0;
+                    while (idx < w.size()) {
+                        std::size_t next = idx + 1;
+                        while (next < w.size() && (static_cast<unsigned char>(w[next]) & 0xC0) == 0x80) {
+                            ++next;
+                        }
+                        std::string cand = prefix + std::string(w.substr(idx, next - idx));
+                        if (textWidth(owner_.font_, s, cand) > availForWord) {
+                            break;
+                        }
+                        prefix = std::move(cand);
+                        idx = next;
+                    }
+                    if (!prefix.empty()) {
+                        std::string result = transformText(s, prefix) + kEllipsis;
+                        const float rWidth = textWidth(owner_.font_, s, result);
+                        ownerEl_.addTextRun({result, originX_ + penX_ + space,
+                                             originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), rWidth,
+                                             metrics_.lineHeight, metrics_.ascent + ascentDelta,
+                                             s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
+                                             s.fontBold, s.fontStyle != ComputedStyle::FontNormal});
+                        penX_ += space + rWidth;
+                        lineHasContent_ = true;
+                        widest_ = std::max(widest_, penX_);
+                        ellipsisAdded_ = true;
+                        return;
+                    }
+                }
+
+                if (maxWidth_ - (penX_ + space) >= ellWidth) {
+                    ownerEl_.addTextRun({kEllipsis, originX_ + penX_ + space,
+                                         originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), ellWidth,
+                                         metrics_.lineHeight, metrics_.ascent + ascentDelta,
+                                         s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
+                                         s.fontBold, s.fontStyle != ComputedStyle::FontNormal});
+                    penX_ += space + ellWidth;
+                    lineHasContent_ = true;
+                    widest_ = std::max(widest_, penX_);
+                    ellipsisAdded_ = true;
+                    return;
+                }
+
+                auto& runs = ownerEl_.textRuns();
+                while (runs.size() > lineRunStartIndex_) {
+                    const float avail = (originX_ + maxWidth_) - runs.back().x;
+                    if (avail >= ellWidth) {
+                        std::string& rText = runs.back().text;
+                        while (!rText.empty() && textWidth(owner_.font_, s, rText) > avail - ellWidth) {
+                            std::size_t last = rText.size() - 1;
+                            while (last > 0 && (static_cast<unsigned char>(rText[last]) & 0xC0) == 0x80) {
+                                --last;
+                            }
+                            rText.erase(last);
+                        }
+                        rText += kEllipsis;
+                        runs.back().width = textWidth(owner_.font_, s, rText);
+                        penX_ = (runs.back().x - originX_) + runs.back().width;
+                        lineHasContent_ = true;
+                        widest_ = std::max(widest_, penX_);
+                        ellipsisAdded_ = true;
+                        return;
+                    }
+                    runs.pop_back();
+                }
+
+                ownerEl_.addTextRun({kEllipsis, originX_,
+                                     originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), ellWidth,
+                                     metrics_.lineHeight, metrics_.ascent + ascentDelta,
+                                     s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
+                                     s.fontBold, s.fontStyle != ComputedStyle::FontNormal});
+                penX_ = ellWidth;
+                lineHasContent_ = true;
+                widest_ = std::max(widest_, penX_);
+                ellipsisAdded_ = true;
+                return;
+            }
+
             std::string wt = transformText(s, w);
             ownerEl_.addTextRun({wt, originX_ + penX_ + space,
                                  originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), wWidth,
@@ -1799,6 +1897,8 @@ private:
         float bottom_ = 0.0f;
         float widest_ = 0.0f;
         bool lineHasContent_ = false;
+        bool ellipsisAdded_ = false;
+        std::size_t lineRunStartIndex_ = 0;
         Spacing spacing_ = spacingFor(ComputedStyle::WrapText);
     };
 

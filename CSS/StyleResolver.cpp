@@ -3096,9 +3096,15 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
                property == "isolation") {
         // Performance / compositing hints: accepted and ignored.
     } else if (property == "tab-size" || property == "hyphens" ||
-               property == "word-break" || property == "overflow-wrap" ||
-               property == "text-overflow") {
+               property == "word-break" || property == "overflow-wrap") {
         // Text shaping hints that the layout engine does not yet implement.
+    } else if (property == "text-overflow") {
+        std::string_view val = trim(value);
+        if (val == "ellipsis") {
+            s.textOverflow = ComputedStyle::TextOverflowEllipsis;
+        } else if (val == "clip") {
+            s.textOverflow = ComputedStyle::TextOverflowClip;
+        }
     } else if (property == "user-select" || property == "-webkit-user-select") {
         // Selection control: accepted; non-editable elements already ignore selection.
     } else {
@@ -3626,6 +3632,9 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "pointer-events") {
         return style.pointerEventsNone ? "none" : "auto";
+    }
+    if (property == "text-overflow") {
+        return style.textOverflow == ComputedStyle::TextOverflowEllipsis ? "ellipsis" : "clip";
     }
     return {};
 }
