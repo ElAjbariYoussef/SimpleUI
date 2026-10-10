@@ -3105,6 +3105,31 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         } else if (val == "clip") {
             s.textOverflow = ComputedStyle::TextOverflowClip;
         }
+    } else if (property == "aspect-ratio") {
+        std::string_view val = trim(value);
+        if (val == "auto" || val == "initial" || val == "unset") {
+            s.aspectRatioW = 0.0f;
+            s.aspectRatioH = 0.0f;
+        } else {
+            if (val.rfind("auto", 0) == 0) {
+                val = trim(val.substr(4));
+            }
+            const std::size_t slash = val.find('/');
+            if (slash != std::string_view::npos) {
+                const float w = parseNumber(val.substr(0, slash));
+                const float h = parseNumber(val.substr(slash + 1));
+                if (w > 0.0f && h > 0.0f) {
+                    s.aspectRatioW = w;
+                    s.aspectRatioH = h;
+                }
+            } else {
+                const float r = parseNumber(val);
+                if (r > 0.0f) {
+                    s.aspectRatioW = r;
+                    s.aspectRatioH = 1.0f;
+                }
+            }
+        }
     } else if (property == "user-select" || property == "-webkit-user-select") {
         // Selection control: accepted; non-editable elements already ignore selection.
     } else {
@@ -3635,6 +3660,15 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "text-overflow") {
         return style.textOverflow == ComputedStyle::TextOverflowEllipsis ? "ellipsis" : "clip";
+    }
+    if (property == "aspect-ratio") {
+        if (style.aspectRatioW <= 0.0f || style.aspectRatioH <= 0.0f) {
+            return "auto";
+        }
+        if (style.aspectRatioH == 1.0f) {
+            return unitless(style.aspectRatioW);
+        }
+        return unitless(style.aspectRatioW) + " / " + unitless(style.aspectRatioH);
     }
     return {};
 }

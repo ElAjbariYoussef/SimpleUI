@@ -223,6 +223,14 @@ public:
 
         if (box.height > 0.0f) {
             contentHeight = box.height;
+        } else if (s.aspectRatio() > 0.0f && contentWidth > 0.0f && s.height.isAuto()) {
+            contentHeight = contentWidth / s.aspectRatio();
+        }
+        if (box.maxHeight > 0.0f) {
+            contentHeight = std::min(contentHeight, box.maxHeight);
+        }
+        if (box.minHeight > 0.0f) {
+            contentHeight = std::max(contentHeight, box.minHeight);
         }
         contentWidth = applyMinMax(contentWidth, box);
 

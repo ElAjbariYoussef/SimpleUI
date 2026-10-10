@@ -3921,7 +3921,77 @@ void testTextOverflowEllipsis() {
     }
 }
 
+void testAspectRatio() {
+    // 1. Parsing & serialization
+    {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("div { aspect-ratio: 16 / 9; } p { aspect-ratio: 2; } span { aspect-ratio: auto; }"));
+        auto doc = parseOrNull("<sui><body><div id=\"d\"></div><p id=\"p\"></p><span id=\"s\"></span></body></sui>");
+        if (doc) {
+            const sui::ComputedStyle sd = resolver.resolve(*doc->getElementById("d"));
+            checkNear(sd.aspectRatio(), 16.0f / 9.0f, 0.001f, "aspect-ratio: 16 / 9 computes ratio");
+            check(sui::StyleResolver::propertyValue(sd, "aspect-ratio") == "16 / 9",
+                  "aspect-ratio: 16 / 9 serializes in propertyValue");
+
+            const sui::ComputedStyle sp = resolver.resolve(*doc->getElementById("p"));
+            checkNear(sp.aspectRatio(), 2.0f, 0.001f, "aspect-ratio: 2 computes ratio");
+            check(sui::StyleResolver::propertyValue(sp, "aspect-ratio") == "2",
+                  "aspect-ratio: 2 serializes in propertyValue");
+
+            const sui::ComputedStyle ss = resolver.resolve(*doc->getElementById("s"));
+            checkNear(ss.aspectRatio(), 0.0f, 0.001f, "aspect-ratio: auto computes 0");
+            check(sui::StyleResolver::propertyValue(ss, "aspect-ratio") == "auto",
+                  "aspect-ratio: auto serializes in propertyValue");
+        }
+    }
+
+    // 2. Box sizing with aspect-ratio
+    {
+        auto doc = parseOrNull(
+            "<sui><body>"
+            "<div id=\"w200\" style=\"width:200px;aspect-ratio:2/1\"></div>"
+            "<div id=\"h150\" style=\"height:150px;aspect-ratio:1/3\"></div>"
+            "<div id=\"block-ar\" style=\"width:400px;aspect-ratio:4/1\"></div>"
+            "<div id=\"clamped\" style=\"width:200px;aspect-ratio:1/1;max-height:80px\"></div>"
+            "</body></sui>");
+        if (doc) {
+            sui::StyleResolver resolver;
+            resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+            layoutRoot(*doc, resolver, 400.0f);
+
+            Element* w200 = doc->getElementById("w200");
+            check(w200 != nullptr, "w200 found");
+            if (w200) {
+                checkNear(w200->layoutWidth(), 200.0f, 0.01f, "w200 width is 200px");
+                checkNear(w200->layoutHeight(), 100.0f, 0.01f, "w200 height computed from 2/1 aspect ratio");
+            }
+
+            Element* h150 = doc->getElementById("h150");
+            check(h150 != nullptr, "h150 found");
+            if (h150) {
+                checkNear(h150->layoutHeight(), 150.0f, 0.01f, "h150 height is 150px");
+                checkNear(h150->layoutWidth(), 50.0f, 0.01f, "h150 width computed from 1/3 aspect ratio");
+            }
+
+            Element* blockAr = doc->getElementById("block-ar");
+            check(blockAr != nullptr, "block-ar found");
+            if (blockAr) {
+                checkNear(blockAr->layoutWidth(), 400.0f, 0.01f, "block-ar width is 400px");
+                checkNear(blockAr->layoutHeight(), 100.0f, 0.01f, "block-ar height computed from 4/1 aspect ratio");
+            }
+
+            Element* clamped = doc->getElementById("clamped");
+            check(clamped != nullptr, "clamped found");
+            if (clamped) {
+                checkNear(clamped->layoutWidth(), 200.0f, 0.01f, "clamped width is 200px");
+                checkNear(clamped->layoutHeight(), 80.0f, 0.01f, "clamped height is clamped by max-height 80px");
+            }
+        }
+    }
+}
+
 int main() {
+    testAspectRatio();
     testTextOverflowEllipsis();
     testEasingAndTimingFunctions();
     testTransitionDeclarations();

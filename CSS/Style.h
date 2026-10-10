@@ -549,6 +549,13 @@ struct ComputedStyle {
     enum TextOverflow : std::uint8_t { TextOverflowClip, TextOverflowEllipsis };
     TextOverflow textOverflow = TextOverflowClip;
 
+    // Preferred aspect ratio (aspectRatioW / aspectRatioH). 0 means `auto` (not set).
+    float aspectRatioW = 0.0f;
+    float aspectRatioH = 0.0f;
+    float aspectRatio() const noexcept {
+        return aspectRatioH > 0.0f ? aspectRatioW / aspectRatioH : 0.0f;
+    }
+
     // The text a generated `::before` or `::after` puts in the box. Empty means the
     // pseudo-element is not generated at all, unless hasContent is true.
     std::string content;
@@ -671,6 +678,14 @@ inline UsedBox resolveBox(const ComputedStyle& style, float containingWidth,
         // what is left over.
         box.width = box.width > 0.0f ? std::max(0.0f, box.width - chromeW) : 0.0f;
         box.height = box.height > 0.0f ? std::max(0.0f, box.height - chromeH) : 0.0f;
+    }
+    const float ar = style.aspectRatio();
+    if (ar > 0.0f) {
+        if (box.width > 0.0f && style.height.isAuto()) {
+            box.height = box.width / ar;
+        } else if (box.height > 0.0f && style.width.isAuto()) {
+            box.width = box.height * ar;
+        }
     }
     return box;
 }
