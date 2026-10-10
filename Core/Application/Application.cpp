@@ -385,7 +385,7 @@ void paintTextShadow(const ComputedStyle::TextShadow& shadow, const Element::Tex
 
 void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
               const StyleResolver& resolver, const TextFont& font, float opacity,
-              ImageCache& images, float offX, float offY) {
+              ImageCache& images, float offX, float offY, int caretBytePos = -1) {
     const ComputedStyle s = resolver.resolve(el);
     const SDL_FRect box{el.layoutX() - offX, el.layoutY() - offY, el.layoutWidth(),
                         el.layoutHeight()};
@@ -550,6 +550,77 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
             SDL_RenderFillRect(sdlRenderer, &rule);
         }
         SDL_DestroyTexture(texture);
+    }
+
+    if (caretBytePos >= 0 && el.tag() == "input" && !el.hasAttribute("disabled")) {
+        float caretX = 0.0f;
+        float caretY = 0.0f;
+        float caretH = s.fontSize > 0.0f ? s.fontSize * 1.2f : 16.0f;
+        if (el.textRuns().empty()) {
+            caretX = std::floor(el.contentX() - offX);
+            caretY = std::floor(el.contentY() - offY);
+            if (el.contentHeight() > caretH) {
+                caretY += std::floor((el.contentHeight() - caretH) * 0.5f);
+            }
+        } else {
+            const auto& run = el.textRuns().front();
+            const float tx = offX + (s.overflowX != ComputedStyle::Visible ? el.scrollLeft() : 0.0f);
+            const float ty = offY + (s.overflowY != ComputedStyle::Visible ? el.scrollTop() : 0.0f);
+
+            float prefixW = 0.0f;
+            const std::string val = el.value();
+            const bool isPassword = el.attribute("type") == "password";
+
+            if (isPassword) {
+                std::size_t cp = 0;
+                for (std::size_t i = 0; i < static_cast<std::size_t>(caretBytePos) && i < val.size(); ++i) {
+                    if ((static_cast<unsigned char>(val[i]) & 0xC0) != 0x80) {
+                        ++cp;
+                    }
+                }
+                std::string bullets;
+                bullets.reserve(cp * 3);
+                for (std::size_t k = 0; k < cp; ++k) {
+                    bullets += "\xE2\x80\xA2";
+                }
+                if (font.hasFont() && run.fontSize > 0.0f) {
+                    prefixW = font.measureText(bullets, run.fontSize);
+                } else {
+                    prefixW = static_cast<float>(cp) * run.fontSize * 0.5f;
+                }
+            } else {
+                std::size_t prefixLen = std::min(static_cast<std::size_t>(caretBytePos), run.text.size());
+                while (prefixLen < run.text.size() &&
+                       (static_cast<unsigned char>(run.text[prefixLen]) & 0xC0) == 0x80) {
+                    ++prefixLen;
+                }
+                std::string_view prefix = std::string_view(run.text).substr(0, prefixLen);
+                if (font.hasFont() && run.fontSize > 0.0f) {
+                    prefixW = font.measureText(prefix, run.fontSize);
+                } else {
+                    std::size_t cp = 0;
+                    for (unsigned char c : prefix) {
+                        if ((c & 0xC0) != 0x80) ++cp;
+                    }
+                    prefixW = static_cast<float>(cp) * run.fontSize * 0.5f;
+                }
+                if (s.letterSpacing.unit != sui::Length::Auto && !prefix.empty()) {
+                    std::size_t prefixGlyphs = 0;
+                    for (unsigned char c : prefix) {
+                        if ((c & 0xC0) != 0x80) ++prefixGlyphs;
+                    }
+                    const float ls = s.letterSpacing.resolve(s.fontSize, s.fontSize, 16.0f);
+                    prefixW += ls * static_cast<float>(prefixGlyphs);
+                }
+            }
+            caretX = std::floor(run.x - tx + prefixW);
+            caretY = std::floor(run.y - ty);
+            caretH = run.height > 0.0f ? run.height : (run.fontSize * 1.2f);
+        }
+        const SDL_FRect caretRect{caretX, caretY, 1.5f, caretH};
+        const sui::Color caretCol = multiplyAlpha(toColor(s.color), opacity);
+        SDL_SetRenderDrawColor(sdlRenderer, caretCol.r, caretCol.g, caretCol.b, caretCol.a);
+        SDL_RenderFillRect(sdlRenderer, &caretRect);
     }
 }
 
@@ -730,12 +801,61 @@ void Application::dispatch(const InputEvent& event) {
             resolver_.setActive(target);
             // Clicking anywhere, including on nothing, moves focus. Disabled elements
             // cannot take focus.
-            if (!target || !target->hasAttribute("disabled")) {
+            if (target && !target->hasAttribute("disabled")) {
                 document_->setFocused(target);
                 resolver_.setFocused(target);
+                lastFocused_ = target;
+                if (target->tag() == "input") {
+                    caretBlinkStart_ = SDL_GetTicks();
+                    caretBytePos_ = target->value().size();
+                    if (!target->textRuns().empty() && font_ && font_->hasFont()) {
+                        const auto& run = target->textRuns().front();
+                        const ComputedStyle cs = resolver_.resolve(*target);
+                        const float tx = (cs.overflowX != ComputedStyle::Visible ? target->scrollLeft() : 0.0f);
+                        const float localX = event.x - (run.x - tx);
+                        if (localX <= 0.0f) {
+                            caretBytePos_ = 0;
+                        } else if (localX >= run.width) {
+                            caretBytePos_ = target->value().size();
+                        } else {
+                            const std::string val = target->value();
+                            const bool isPassword = target->attribute("type") == "password";
+                            std::size_t bestByte = 0;
+                            float bestDist = std::abs(localX);
+                            std::size_t cp = 0;
+                            for (std::size_t b = 0; b <= val.size(); ) {
+                                float w = 0.0f;
+                                if (isPassword) {
+                                    std::string bullets;
+                                    bullets.reserve(cp * 3);
+                                    for (std::size_t k = 0; k < cp; ++k) bullets += "\xE2\x80\xA2";
+                                    w = font_->measureText(bullets, run.fontSize);
+                                } else {
+                                    w = font_->measureText(val.substr(0, b), run.fontSize);
+                                }
+                                float dist = std::abs(localX - w);
+                                if (dist < bestDist) {
+                                    bestDist = dist;
+                                    bestByte = b;
+                                }
+                                if (b == val.size()) break;
+                                ++b;
+                                while (b < val.size() && (static_cast<unsigned char>(val[b]) & 0xC0) == 0x80) {
+                                    ++b;
+                                }
+                                ++cp;
+                            }
+                            caretBytePos_ = bestByte;
+                        }
+                    }
+                } else {
+                    caretBytePos_ = 0;
+                }
             } else {
                 document_->setFocused(nullptr);
                 resolver_.setFocused(nullptr);
+                lastFocused_ = nullptr;
+                caretBytePos_ = 0;
             }
             break;
         case InputKind::PointerUp:
@@ -775,25 +895,80 @@ void Application::dispatch(const InputEvent& event) {
     // do not edit their value on text input.
     if (target && target->tag() == "input") {
         constexpr int kBackspace = 0x08;
+        constexpr int kDelete = 0x7F;
+        constexpr int kHome = 0x4000004A;
+        constexpr int kEnd = 0x4000004D;
+        constexpr int kRight = 0x4000004F;
+        constexpr int kLeft = 0x40000050;
         const bool readOnly = target->hasAttribute("readonly") || target->hasAttribute("disabled");
         const std::string_view type = target->attribute("type");
         const bool isTextual = (type.empty() || type == "text" || type == "password" ||
                                 type == "search" || type == "email" || type == "url" ||
                                 type == "tel" || type == "number");
-        if (!readOnly && isTextual) {
-            if (event.kind == InputKind::TextInput && !event.text.empty()) {
-                target->setValue(target->value() + event.text);
-            } else if (event.kind == InputKind::KeyDown && event.key == kBackspace) {
-                std::string value = target->value();
-                if (!value.empty()) {
-                    while (!value.empty() && (static_cast<unsigned char>(value.back()) & 0xC0) == 0x80) {
-                        value.pop_back();
+        if (isTextual) {
+            std::string value = target->value();
+            if (target != lastFocused_) {
+                lastFocused_ = target;
+                caretBytePos_ = value.size();
+                caretBlinkStart_ = SDL_GetTicks();
+            }
+            if (caretBytePos_ > value.size()) {
+                caretBytePos_ = value.size();
+            }
+            while (caretBytePos_ > 0 && caretBytePos_ < value.size() &&
+                   (static_cast<unsigned char>(value[caretBytePos_]) & 0xC0) == 0x80) {
+                --caretBytePos_;
+            }
+
+            if (event.kind == InputKind::KeyDown) {
+                caretBlinkStart_ = SDL_GetTicks();
+                if (event.key == kLeft) {
+                    if (caretBytePos_ > 0) {
+                        --caretBytePos_;
+                        while (caretBytePos_ > 0 &&
+                               (static_cast<unsigned char>(value[caretBytePos_]) & 0xC0) == 0x80) {
+                            --caretBytePos_;
+                        }
                     }
-                    if (!value.empty()) {
-                        value.pop_back();
+                } else if (event.key == kRight) {
+                    if (caretBytePos_ < value.size()) {
+                        ++caretBytePos_;
+                        while (caretBytePos_ < value.size() &&
+                               (static_cast<unsigned char>(value[caretBytePos_]) & 0xC0) == 0x80) {
+                            ++caretBytePos_;
+                        }
                     }
-                    target->setValue(std::move(value));
+                } else if (event.key == kHome) {
+                    caretBytePos_ = 0;
+                } else if (event.key == kEnd) {
+                    caretBytePos_ = value.size();
+                } else if (!readOnly && event.key == kBackspace) {
+                    if (caretBytePos_ > 0) {
+                        std::size_t prev = caretBytePos_ - 1;
+                        while (prev > 0 &&
+                               (static_cast<unsigned char>(value[prev]) & 0xC0) == 0x80) {
+                            --prev;
+                        }
+                        value.erase(prev, caretBytePos_ - prev);
+                        caretBytePos_ = prev;
+                        target->setValue(std::move(value));
+                    }
+                } else if (!readOnly && event.key == kDelete) {
+                    if (caretBytePos_ < value.size()) {
+                        std::size_t next = caretBytePos_ + 1;
+                        while (next < value.size() &&
+                               (static_cast<unsigned char>(value[next]) & 0xC0) == 0x80) {
+                            ++next;
+                        }
+                        value.erase(caretBytePos_, next - caretBytePos_);
+                        target->setValue(std::move(value));
+                    }
                 }
+            } else if (!readOnly && event.kind == InputKind::TextInput && !event.text.empty()) {
+                caretBlinkStart_ = SDL_GetTicks();
+                value.insert(caretBytePos_, event.text);
+                caretBytePos_ += event.text.size();
+                target->setValue(std::move(value));
             }
         }
     }
@@ -957,6 +1132,15 @@ void Application::run() {
         // so an animated page repaints without any script.
         const bool timerFired = sui::script::pumpTimers();
         const bool animating = resolver_.hasRunningAnimations();
+        const bool inputFocused = document_ && document_->focused() &&
+                                  document_->focused()->tag() == "input";
+        const Uint64 ticks = SDL_GetTicks();
+        const bool caretBlinkPhase = inputFocused && (((ticks - caretBlinkStart_) / 500) % 2 == 0);
+        static bool lastCaretBlinkPhase = false;
+        const bool caretPhaseChanged = inputFocused && (caretBlinkPhase != lastCaretBlinkPhase);
+        if (caretPhaseChanged) {
+            lastCaretBlinkPhase = caretBlinkPhase;
+        }
 
         // An idle page repaints nothing. DOM mutations, stylesheet changes,
         // explicit script invalidation, resizes, and unhandled input are the
@@ -966,7 +1150,7 @@ void Application::run() {
         // it, so a skipped frame would swallow the click it carried.
         const bool stale =
             !frameDrawn_ || width != stamp_.width || height != stamp_.height ||
-            timerFired || animating || !platform_->inputEvents().empty() || !scriptedClicks.empty() ||
+            timerFired || animating || caretPhaseChanged || !platform_->inputEvents().empty() || !scriptedClicks.empty() ||
             !scriptedMoves.empty() || !scriptedWheels.empty() ||
             (document_ && document_->mutationCount() != stamp_.mutations) ||
             resolver_.generation() != stamp_.rules || scriptContext_.generation != stamp_.script;
@@ -1249,8 +1433,15 @@ void Application::run() {
                     } else {
                         SDL_SetRenderClipRect(sdlRenderer, nullptr);
                     }
+                    int caretPos = -1;
+                    if (document_ && document_->focused() == item.el) {
+                        const bool caretVisible = ((ticks - caretBlinkStart_) / 500) % 2 == 0;
+                        if (caretVisible) {
+                            caretPos = static_cast<int>(caretBytePos_);
+                        }
+                    }
                     paintBox(*item.el, renderer, sdlRenderer, resolver_, *font_, groupOpacity,
-                             *images_, item.dx + ox, item.dy + oy);
+                             *images_, item.dx + ox, item.dy + oy, caretPos);
                 }
             } else {
                 SDL_FRect panel{40.0f, 40.0f, static_cast<float>(width) - 80.0f,
@@ -1307,6 +1498,8 @@ void Application::shutdown() {
         platform_.reset();
     }
     // Before the resources, since the cache borrows them.
+    lastFocused_ = nullptr;
+    caretBytePos_ = 0;
     images_.reset();
     font_.reset();
     document_.reset();

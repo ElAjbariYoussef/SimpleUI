@@ -272,6 +272,67 @@ int main() {
             check(txt && txt->value() == "abc\xE2\x80\xA2", "multibyte utf8 appended to input");
             app.dispatch(backspaceEv);
             check(txt && txt->value() == "abc", "backspace deletes full multibyte utf8 codepoint");
+
+            // 6. Caret navigation and positioned insertion:
+            // Value is "abc", length is 3, caret is at 3.
+            check(app.caretPosition() == 3, "caret starts at end of text field");
+            sui::InputEvent leftEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x40000050);
+            sui::InputEvent rightEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x4000004F);
+            sui::InputEvent homeEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x4000004A);
+            sui::InputEvent endEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x4000004D);
+            sui::InputEvent deleteEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x7F);
+
+            // Move left to position 2 (between 'b' and 'c')
+            app.dispatch(leftEv);
+            check(app.caretPosition() == 2, "left arrow moves caret left by 1");
+            app.dispatch(sui::InputEvent(sui::InputKind::TextInput, 0, 0, 0, 0, 0, 0, "X"));
+            check(txt && txt->value() == "abXc", "text input inserts at caret position");
+            check(app.caretPosition() == 3, "caret advances by inserted length");
+
+            // Move left back to position 2 (before 'X') and press Delete
+            app.dispatch(leftEv);
+            check(app.caretPosition() == 2, "left arrow moves back to position 2");
+            app.dispatch(deleteEv);
+            check(txt && txt->value() == "abc", "delete key removes character after caret");
+            check(app.caretPosition() == 2, "delete key preserves caret position");
+
+            // Home key jumps to 0
+            app.dispatch(homeEv);
+            check(app.caretPosition() == 0, "home key moves caret to position 0");
+            app.dispatch(backspaceEv);
+            check(txt && txt->value() == "abc", "backspace at start does nothing");
+            check(app.caretPosition() == 0, "caret remains at 0 after no-op backspace");
+
+            // Insert at beginning
+            app.dispatch(sui::InputEvent(sui::InputKind::TextInput, 0, 0, 0, 0, 0, 0, "Z"));
+            check(txt && txt->value() == "Zabc", "insert at position 0 prepends text");
+            check(app.caretPosition() == 1, "caret is at 1 after prepending");
+
+            // End key jumps to end
+            app.dispatch(endEv);
+            check(app.caretPosition() == 4, "end key moves caret to end of text");
+            app.dispatch(deleteEv);
+            check(txt && txt->value() == "Zabc", "delete key at end does nothing");
+            check(app.caretPosition() == 4, "caret remains at end after no-op delete");
+
+            // Right arrow at end stays at end
+            app.dispatch(rightEv);
+            check(app.caretPosition() == 4, "right arrow at end clamps to end");
+
+            // 7. Multi-byte UTF-8 caret navigation:
+            // Reset value to "a•b" ("a\xE2\x80\xA2" "b" -> 1 byte + 3 bytes + 1 byte = 5 bytes)
+            txt->setValue("a\xE2\x80\xA2" "b");
+            app.setCaretPosition(5); // at end
+            app.dispatch(leftEv); // skips 'b' (1 byte) -> at 4
+            check(app.caretPosition() == 4, "left arrow skips single byte to byte 4");
+            app.dispatch(leftEv); // skips '•' (3 bytes) -> at 1
+            check(app.caretPosition() == 1, "left arrow skips entire 3-byte utf8 codepoint to byte 1");
+            app.dispatch(rightEv); // skips '•' forward -> at 4
+            check(app.caretPosition() == 4, "right arrow skips entire 3-byte utf8 codepoint to byte 4");
+            app.dispatch(leftEv); // back to 1
+            app.dispatch(deleteEv); // deletes '•'
+            check(txt && txt->value() == "ab", "delete key removes entire 3-byte utf8 codepoint");
+            check(app.caretPosition() == 1, "caret remains at byte 1 after delete");
         }
     }
 

@@ -17,6 +17,7 @@
 namespace sui {
 
 class Document;
+class Element;
 class TextFont;
 
 class Application {
@@ -37,6 +38,9 @@ public:
 
     // Routes one input event through the DOM, updating input fields or firing handlers.
     void dispatch(const InputEvent& event);
+
+    std::size_t caretPosition() const noexcept { return caretBytePos_; }
+    void setCaretPosition(std::size_t pos) noexcept { caretBytePos_ = pos; }
 
 private:
     static WindowConfig windowConfigFrom(Document& document);
@@ -77,6 +81,15 @@ private:
     // be checked rather than assumed.
     std::uint32_t framesPumped_ = 0;
     std::uint32_t framesDrawn_ = 0;
+
+    // Caret state for focused text inputs. `caretBytePos_` is a byte offset
+    // into the focused field's `value`; it is always kept on a UTF-8 codepoint
+    // boundary. `caretBlinkStart_` is the SDL tick (ms) at which the blink
+    // cycle was last reset; the caret is visible while
+    // (SDL_GetTicks() - caretBlinkStart_) / 500 is even.
+    Element* lastFocused_ = nullptr;
+    std::size_t caretBytePos_ = 0;
+    std::uint64_t caretBlinkStart_ = 0;
 };
 
 }  // namespace sui
