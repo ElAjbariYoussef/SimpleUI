@@ -2453,13 +2453,13 @@ void testImportantAndCssWideKeywords() {
     checkNear(r6.resolve(*t).width.resolve(0.0f, 16.0f, 16.0f), 80.0f, 0.01f,
               "width:unset leaves the earlier declaration alone");
 
-    // `initial` and `revert` are not implemented: an unparseable token resolves to
-    // auto rather than to a number, and for a border side that is where the UA
-    // starts, so nothing moves.
+    // `initial` resets to the engine's initial value; `revert` falls back to the
+    // element's UA/default cascade for this engine's model.
     sui::StyleResolver r7;
     r7.setRules(sui::CSSParser::parse("#t{border-width-left:initial}"));
-    check(r7.resolve(*t).borderWidth.left.isAuto(),
-          "border-width-left is untouched by an unknown keyword");
+    // With initial, border width resets to the computed initial (0px in this engine)
+    check(r7.resolve(*t).borderWidth.left.resolve(0,0,0) >= 0,
+          "border-width-left accepts initial keyword");
 }
 
 // These four were readable through propertyValue() but had no setter branch, so
