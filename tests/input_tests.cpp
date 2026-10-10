@@ -333,6 +333,68 @@ int main() {
             app.dispatch(deleteEv); // deletes '•'
             check(txt && txt->value() == "ab", "delete key removes entire 3-byte utf8 codepoint");
             check(app.caretPosition() == 1, "caret remains at byte 1 after delete");
+
+            // 8. Text selection range, shortcuts, collapse, replacement, and deletion:
+            txt->setValue("abcdef");
+            app.setCaretPosition(6);
+            check(!app.hasSelection(), "no initial selection");
+
+            // Ctrl+A selects all
+            sui::InputEvent ctrlDown(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x400000e0);
+            sui::InputEvent ctrlUp(sui::InputKind::KeyUp, 0, 0, 0, 0, 0, 0x400000e0);
+            sui::InputEvent aKey(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x61);
+            app.dispatch(ctrlDown);
+            app.dispatch(aKey);
+            app.dispatch(ctrlUp);
+            check(app.hasSelection(), "Ctrl+A creates selection");
+            check(app.selectionStart() == 0, "Ctrl+A selection starts at 0");
+            check(app.selectionEnd() == 6, "Ctrl+A selection ends at value length");
+
+            // Left arrow without shift collapses selection to start (0)
+            app.dispatch(leftEv);
+            check(!app.hasSelection(), "left arrow collapses selection");
+            check(app.caretPosition() == 0, "left arrow collapsed caret to start (0)");
+
+            // Right arrow without shift on selection collapses to end
+            app.selectAll();
+            check(app.hasSelection(), "selectAll sets selection");
+            app.dispatch(rightEv);
+            check(!app.hasSelection(), "right arrow collapses selection");
+            check(app.caretPosition() == 6, "right arrow collapsed caret to end (6)");
+
+            // Shift+Left extends selection backwards from end (6 to 4)
+            sui::InputEvent shiftDown(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x400000e1);
+            sui::InputEvent shiftUp(sui::InputKind::KeyUp, 0, 0, 0, 0, 0, 0x400000e1);
+            app.dispatch(shiftDown);
+            app.dispatch(leftEv);
+            app.dispatch(leftEv);
+            app.dispatch(shiftUp);
+            check(app.hasSelection(), "Shift+Left creates selection");
+            check(app.selectionStart() == 4, "selection start is at 4");
+            check(app.selectionEnd() == 6, "selection end is at 6");
+            check(app.caretPosition() == 4, "caret is at 4");
+
+            // Backspace deletes selected text [4, 6] ("ef") -> "abcd"
+            app.dispatch(backspaceEv);
+            check(txt && txt->value() == "abcd", "backspace deletes selected text");
+            check(!app.hasSelection(), "backspace clears selection");
+            check(app.caretPosition() == 4, "caret remains at selection start");
+
+            // Set selection [1, 3] ("bc") and replace with "XYZ"
+            app.setSelection(1, 3);
+            check(app.hasSelection(), "setSelection activates selection");
+            app.dispatch(sui::InputEvent(sui::InputKind::TextInput, 0, 0, 0, 0, 0, 0, "XYZ"));
+            check(txt && txt->value() == "aXYZd", "typing replaces selected text");
+            check(!app.hasSelection(), "typing clears selection");
+            check(app.caretPosition() == 4, "caret advances to end of inserted text");
+
+            // Delete key on selection [1, 4] ("XYZ") -> "ad"
+            app.setSelection(1, 4);
+            check(app.hasSelection(), "setSelection activates selection [1, 4]");
+            app.dispatch(deleteEv);
+            check(txt && txt->value() == "ad", "delete key deletes selected text");
+            check(!app.hasSelection(), "delete key clears selection");
+            check(app.caretPosition() == 1, "caret is at 1 after delete");
         }
     }
 

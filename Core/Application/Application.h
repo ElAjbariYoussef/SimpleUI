@@ -40,7 +40,20 @@ public:
     void dispatch(const InputEvent& event);
 
     std::size_t caretPosition() const noexcept { return caretBytePos_; }
-    void setCaretPosition(std::size_t pos) noexcept { caretBytePos_ = pos; }
+    void setCaretPosition(std::size_t pos) noexcept {
+        caretBytePos_ = pos;
+        selectionAnchor_ = pos;
+    }
+
+    std::size_t selectionStart() const noexcept { return std::min(selectionAnchor_, caretBytePos_); }
+    std::size_t selectionEnd() const noexcept { return std::max(selectionAnchor_, caretBytePos_); }
+    bool hasSelection() const noexcept { return selectionAnchor_ != caretBytePos_; }
+    void setSelection(std::size_t start, std::size_t end) noexcept {
+        selectionAnchor_ = start;
+        caretBytePos_ = end;
+    }
+    void selectAll() noexcept;
+    void clearSelection() noexcept { selectionAnchor_ = caretBytePos_; }
 
 private:
     static WindowConfig windowConfigFrom(Document& document);
@@ -89,7 +102,10 @@ private:
     // (SDL_GetTicks() - caretBlinkStart_) / 500 is even.
     Element* lastFocused_ = nullptr;
     std::size_t caretBytePos_ = 0;
+    std::size_t selectionAnchor_ = 0;
     std::uint64_t caretBlinkStart_ = 0;
+    bool shiftDown_ = false;
+    bool ctrlDown_ = false;
 };
 
 }  // namespace sui

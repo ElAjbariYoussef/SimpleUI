@@ -385,7 +385,8 @@ void paintTextShadow(const ComputedStyle::TextShadow& shadow, const Element::Tex
 
 void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
               const StyleResolver& resolver, const TextFont& font, float opacity,
-              ImageCache& images, float offX, float offY, int caretBytePos = -1) {
+              ImageCache& images, float offX, float offY, int caretBytePos = -1,
+              int selStart = -1, int selEnd = -1) {
     const ComputedStyle s = resolver.resolve(el);
     const SDL_FRect box{el.layoutX() - offX, el.layoutY() - offY, el.layoutWidth(),
                         el.layoutHeight()};
@@ -494,6 +495,71 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
     if (!font.hasFont()) {
         return;
     }
+
+    auto measurePrefix = [&](std::size_t bytePos, const Element::TextRun& run) -> float {
+        float prefixW = 0.0f;
+        const std::string val = el.value();
+        const bool isPassword = el.attribute("type") == "password";
+        if (isPassword) {
+            std::size_t cp = 0;
+            for (std::size_t i = 0; i < bytePos && i < val.size(); ++i) {
+                if ((static_cast<unsigned char>(val[i]) & 0xC0) != 0x80) {
+                    ++cp;
+                }
+            }
+            std::string bullets;
+            bullets.reserve(cp * 3);
+            for (std::size_t k = 0; k < cp; ++k) {
+                bullets += "\xE2\x80\xA2";
+            }
+            if (font.hasFont() && run.fontSize > 0.0f) {
+                prefixW = font.measureText(bullets, run.fontSize);
+            } else {
+                prefixW = static_cast<float>(cp) * run.fontSize * 0.5f;
+            }
+        } else {
+            std::size_t prefixLen = std::min(bytePos, run.text.size());
+            while (prefixLen < run.text.size() &&
+                   (static_cast<unsigned char>(run.text[prefixLen]) & 0xC0) == 0x80) {
+                ++prefixLen;
+            }
+            std::string_view prefix = std::string_view(run.text).substr(0, prefixLen);
+            if (font.hasFont() && run.fontSize > 0.0f) {
+                prefixW = font.measureText(prefix, run.fontSize);
+            } else {
+                std::size_t cp = 0;
+                for (unsigned char c : prefix) {
+                    if ((c & 0xC0) != 0x80) ++cp;
+                }
+                prefixW = static_cast<float>(cp) * run.fontSize * 0.5f;
+            }
+            if (s.letterSpacing.unit != sui::Length::Auto && !prefix.empty()) {
+                std::size_t prefixGlyphs = 0;
+                for (unsigned char c : prefix) {
+                    if ((c & 0xC0) != 0x80) ++prefixGlyphs;
+                }
+                const float ls = s.letterSpacing.resolve(s.fontSize, s.fontSize, 16.0f);
+                prefixW += ls * static_cast<float>(prefixGlyphs);
+            }
+        }
+        return prefixW;
+    };
+
+    // Draw selection highlight for focused text input before drawing glyphs
+    if (selStart >= 0 && selEnd > selStart && el.tag() == "input" && !el.textRuns().empty()) {
+        const auto& run = el.textRuns().front();
+        const float tx = offX + (s.overflowX != ComputedStyle::Visible ? el.scrollLeft() : 0.0f);
+        const float ty = offY + (s.overflowY != ComputedStyle::Visible ? el.scrollTop() : 0.0f);
+        const float startW = measurePrefix(static_cast<std::size_t>(selStart), run);
+        const float endW = measurePrefix(static_cast<std::size_t>(selEnd), run);
+        const float selH = run.height > 0.0f ? run.height : (run.fontSize * 1.2f);
+        const SDL_FRect selRect{std::floor(run.x - tx + startW), std::floor(run.y - ty),
+                                std::max(1.0f, endW - startW), selH};
+        SDL_SetRenderDrawColor(sdlRenderer, 51, 144, 255,
+                               static_cast<Uint8>(128.0f * opacity));
+        SDL_RenderFillRect(sdlRenderer, &selRect);
+    }
+
     // A text shadow is the run drawn again, offset and blurred, before the run
     // itself. Both carry the group's opacity.
     for (const auto& run : el.textRuns()) {
@@ -566,53 +632,7 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
             const auto& run = el.textRuns().front();
             const float tx = offX + (s.overflowX != ComputedStyle::Visible ? el.scrollLeft() : 0.0f);
             const float ty = offY + (s.overflowY != ComputedStyle::Visible ? el.scrollTop() : 0.0f);
-
-            float prefixW = 0.0f;
-            const std::string val = el.value();
-            const bool isPassword = el.attribute("type") == "password";
-
-            if (isPassword) {
-                std::size_t cp = 0;
-                for (std::size_t i = 0; i < static_cast<std::size_t>(caretBytePos) && i < val.size(); ++i) {
-                    if ((static_cast<unsigned char>(val[i]) & 0xC0) != 0x80) {
-                        ++cp;
-                    }
-                }
-                std::string bullets;
-                bullets.reserve(cp * 3);
-                for (std::size_t k = 0; k < cp; ++k) {
-                    bullets += "\xE2\x80\xA2";
-                }
-                if (font.hasFont() && run.fontSize > 0.0f) {
-                    prefixW = font.measureText(bullets, run.fontSize);
-                } else {
-                    prefixW = static_cast<float>(cp) * run.fontSize * 0.5f;
-                }
-            } else {
-                std::size_t prefixLen = std::min(static_cast<std::size_t>(caretBytePos), run.text.size());
-                while (prefixLen < run.text.size() &&
-                       (static_cast<unsigned char>(run.text[prefixLen]) & 0xC0) == 0x80) {
-                    ++prefixLen;
-                }
-                std::string_view prefix = std::string_view(run.text).substr(0, prefixLen);
-                if (font.hasFont() && run.fontSize > 0.0f) {
-                    prefixW = font.measureText(prefix, run.fontSize);
-                } else {
-                    std::size_t cp = 0;
-                    for (unsigned char c : prefix) {
-                        if ((c & 0xC0) != 0x80) ++cp;
-                    }
-                    prefixW = static_cast<float>(cp) * run.fontSize * 0.5f;
-                }
-                if (s.letterSpacing.unit != sui::Length::Auto && !prefix.empty()) {
-                    std::size_t prefixGlyphs = 0;
-                    for (unsigned char c : prefix) {
-                        if ((c & 0xC0) != 0x80) ++prefixGlyphs;
-                    }
-                    const float ls = s.letterSpacing.resolve(s.fontSize, s.fontSize, 16.0f);
-                    prefixW += ls * static_cast<float>(prefixGlyphs);
-                }
-            }
+            const float prefixW = measurePrefix(static_cast<std::size_t>(caretBytePos), run);
             caretX = std::floor(run.x - tx + prefixW);
             caretY = std::floor(run.y - ty);
             caretH = run.height > 0.0f ? run.height : (run.fontSize * 1.2f);
@@ -648,6 +668,13 @@ Application::Application() = default;
 
 Application::~Application() {
     shutdown();
+}
+
+void Application::selectAll() noexcept {
+    if (document_ && document_->focused() && document_->focused()->tag() == "input") {
+        selectionAnchor_ = 0;
+        caretBytePos_ = document_->focused()->value().size();
+    }
 }
 
 Document& Application::document() const {
@@ -795,6 +822,50 @@ void Application::dispatch(const InputEvent& event) {
             // field is zero for a plain hover, which is what separates the two.
             if (event.button != 0) {
                 resolver_.setActive(target);
+                // Mouse drag updates selection on a focused text input
+                Element* focused = document_ ? document_->focused() : nullptr;
+                if (focused && focused->tag() == "input" && !focused->hasAttribute("disabled") &&
+                    !focused->textRuns().empty() && font_ && font_->hasFont()) {
+                    const auto& run = focused->textRuns().front();
+                    const ComputedStyle cs = resolver_.resolve(*focused);
+                    const float tx = (cs.overflowX != ComputedStyle::Visible ? focused->scrollLeft() : 0.0f);
+                    const float localX = event.x - (run.x - tx);
+                    if (localX <= 0.0f) {
+                        caretBytePos_ = 0;
+                    } else if (localX >= run.width) {
+                        caretBytePos_ = focused->value().size();
+                    } else {
+                        const std::string val = focused->value();
+                        const bool isPassword = focused->attribute("type") == "password";
+                        std::size_t bestByte = 0;
+                        float bestDist = std::abs(localX);
+                        std::size_t cp = 0;
+                        for (std::size_t b = 0; b <= val.size(); ) {
+                            float w = 0.0f;
+                            if (isPassword) {
+                                std::string bullets;
+                                bullets.reserve(cp * 3);
+                                for (std::size_t k = 0; k < cp; ++k) bullets += "\xE2\x80\xA2";
+                                w = font_->measureText(bullets, run.fontSize);
+                            } else {
+                                w = font_->measureText(val.substr(0, b), run.fontSize);
+                            }
+                            float dist = std::abs(localX - w);
+                            if (dist < bestDist) {
+                                bestDist = dist;
+                                bestByte = b;
+                            }
+                            if (b == val.size()) break;
+                            ++b;
+                            while (b < val.size() && (static_cast<unsigned char>(val[b]) & 0xC0) == 0x80) {
+                                ++b;
+                            }
+                            ++cp;
+                        }
+                        caretBytePos_ = bestByte;
+                    }
+                    caretBlinkStart_ = SDL_GetTicks();
+                }
             }
             return;
         case InputKind::PointerDown:
@@ -848,14 +919,17 @@ void Application::dispatch(const InputEvent& event) {
                             caretBytePos_ = bestByte;
                         }
                     }
+                    selectionAnchor_ = caretBytePos_;
                 } else {
                     caretBytePos_ = 0;
+                    selectionAnchor_ = 0;
                 }
             } else {
                 document_->setFocused(nullptr);
                 resolver_.setFocused(nullptr);
                 lastFocused_ = nullptr;
                 caretBytePos_ = 0;
+                selectionAnchor_ = 0;
             }
             break;
         case InputKind::PointerUp:
@@ -884,7 +958,21 @@ void Application::dispatch(const InputEvent& event) {
             return;
         }
         case InputKind::KeyDown:
+            if (event.key == 0x400000e1 || event.key == 0x400000e5) {
+                shiftDown_ = true;
+            } else if (event.key == 0x400000e0 || event.key == 0x400000e4 ||
+                       event.key == 0x400000e3 || event.key == 0x400000e7) {
+                ctrlDown_ = true;
+            }
+            break;
         case InputKind::KeyUp:
+            if (event.key == 0x400000e1 || event.key == 0x400000e5) {
+                shiftDown_ = false;
+            } else if (event.key == 0x400000e0 || event.key == 0x400000e4 ||
+                       event.key == 0x400000e3 || event.key == 0x400000e7) {
+                ctrlDown_ = false;
+            }
+            break;
         case InputKind::TextInput:
             break;
     }
@@ -900,6 +988,7 @@ void Application::dispatch(const InputEvent& event) {
         constexpr int kEnd = 0x4000004D;
         constexpr int kRight = 0x4000004F;
         constexpr int kLeft = 0x40000050;
+        constexpr int kA = 0x61;
         const bool readOnly = target->hasAttribute("readonly") || target->hasAttribute("disabled");
         const std::string_view type = target->attribute("type");
         const bool isTextual = (type.empty() || type == "text" || type == "password" ||
@@ -910,64 +999,134 @@ void Application::dispatch(const InputEvent& event) {
             if (target != lastFocused_) {
                 lastFocused_ = target;
                 caretBytePos_ = value.size();
+                selectionAnchor_ = caretBytePos_;
                 caretBlinkStart_ = SDL_GetTicks();
             }
             if (caretBytePos_ > value.size()) {
                 caretBytePos_ = value.size();
             }
+            if (selectionAnchor_ > value.size()) {
+                selectionAnchor_ = value.size();
+            }
             while (caretBytePos_ > 0 && caretBytePos_ < value.size() &&
                    (static_cast<unsigned char>(value[caretBytePos_]) & 0xC0) == 0x80) {
                 --caretBytePos_;
             }
+            while (selectionAnchor_ > 0 && selectionAnchor_ < value.size() &&
+                   (static_cast<unsigned char>(value[selectionAnchor_]) & 0xC0) == 0x80) {
+                --selectionAnchor_;
+            }
+
+            const bool isShift = shiftDown_ || ((SDL_GetModState() & SDL_KMOD_SHIFT) != 0);
+            const bool isCtrl = ctrlDown_ || ((SDL_GetModState() & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) != 0);
 
             if (event.kind == InputKind::KeyDown) {
                 caretBlinkStart_ = SDL_GetTicks();
-                if (event.key == kLeft) {
-                    if (caretBytePos_ > 0) {
-                        --caretBytePos_;
-                        while (caretBytePos_ > 0 &&
-                               (static_cast<unsigned char>(value[caretBytePos_]) & 0xC0) == 0x80) {
+                if (isCtrl && (event.key == kA || event.key == 'A')) {
+                    selectionAnchor_ = 0;
+                    caretBytePos_ = value.size();
+                } else if (event.key == kLeft) {
+                    if (isShift) {
+                        if (caretBytePos_ > 0) {
                             --caretBytePos_;
+                            while (caretBytePos_ > 0 &&
+                                   (static_cast<unsigned char>(value[caretBytePos_]) & 0xC0) == 0x80) {
+                                --caretBytePos_;
+                            }
+                        }
+                    } else {
+                        if (selectionAnchor_ != caretBytePos_) {
+                            caretBytePos_ = std::min(selectionAnchor_, caretBytePos_);
+                            selectionAnchor_ = caretBytePos_;
+                        } else {
+                            if (caretBytePos_ > 0) {
+                                --caretBytePos_;
+                                while (caretBytePos_ > 0 &&
+                                       (static_cast<unsigned char>(value[caretBytePos_]) & 0xC0) == 0x80) {
+                                    --caretBytePos_;
+                                }
+                            }
+                            selectionAnchor_ = caretBytePos_;
                         }
                     }
                 } else if (event.key == kRight) {
-                    if (caretBytePos_ < value.size()) {
-                        ++caretBytePos_;
-                        while (caretBytePos_ < value.size() &&
-                               (static_cast<unsigned char>(value[caretBytePos_]) & 0xC0) == 0x80) {
+                    if (isShift) {
+                        if (caretBytePos_ < value.size()) {
                             ++caretBytePos_;
+                            while (caretBytePos_ < value.size() &&
+                                   (static_cast<unsigned char>(value[caretBytePos_]) & 0xC0) == 0x80) {
+                                ++caretBytePos_;
+                            }
+                        }
+                    } else {
+                        if (selectionAnchor_ != caretBytePos_) {
+                            caretBytePos_ = std::max(selectionAnchor_, caretBytePos_);
+                            selectionAnchor_ = caretBytePos_;
+                        } else {
+                            if (caretBytePos_ < value.size()) {
+                                ++caretBytePos_;
+                                while (caretBytePos_ < value.size() &&
+                                       (static_cast<unsigned char>(value[caretBytePos_]) & 0xC0) == 0x80) {
+                                    ++caretBytePos_;
+                                }
+                            }
+                            selectionAnchor_ = caretBytePos_;
                         }
                     }
                 } else if (event.key == kHome) {
                     caretBytePos_ = 0;
+                    if (!isShift) {
+                        selectionAnchor_ = 0;
+                    }
                 } else if (event.key == kEnd) {
                     caretBytePos_ = value.size();
-                } else if (!readOnly && event.key == kBackspace) {
-                    if (caretBytePos_ > 0) {
-                        std::size_t prev = caretBytePos_ - 1;
-                        while (prev > 0 &&
-                               (static_cast<unsigned char>(value[prev]) & 0xC0) == 0x80) {
-                            --prev;
-                        }
-                        value.erase(prev, caretBytePos_ - prev);
-                        caretBytePos_ = prev;
-                        target->setValue(std::move(value));
+                    if (!isShift) {
+                        selectionAnchor_ = value.size();
                     }
-                } else if (!readOnly && event.key == kDelete) {
-                    if (caretBytePos_ < value.size()) {
-                        std::size_t next = caretBytePos_ + 1;
-                        while (next < value.size() &&
-                               (static_cast<unsigned char>(value[next]) & 0xC0) == 0x80) {
-                            ++next;
-                        }
-                        value.erase(caretBytePos_, next - caretBytePos_);
+                } else if (!readOnly && (event.key == kBackspace || event.key == kDelete)) {
+                    if (selectionAnchor_ != caretBytePos_) {
+                        const std::size_t sStart = std::min(selectionAnchor_, caretBytePos_);
+                        const std::size_t sEnd = std::max(selectionAnchor_, caretBytePos_);
+                        value.erase(sStart, sEnd - sStart);
+                        caretBytePos_ = sStart;
+                        selectionAnchor_ = sStart;
                         target->setValue(std::move(value));
+                    } else if (event.key == kBackspace) {
+                        if (caretBytePos_ > 0) {
+                            std::size_t prev = caretBytePos_ - 1;
+                            while (prev > 0 &&
+                                   (static_cast<unsigned char>(value[prev]) & 0xC0) == 0x80) {
+                                --prev;
+                            }
+                            value.erase(prev, caretBytePos_ - prev);
+                            caretBytePos_ = prev;
+                            selectionAnchor_ = prev;
+                            target->setValue(std::move(value));
+                        }
+                    } else if (event.key == kDelete) {
+                        if (caretBytePos_ < value.size()) {
+                            std::size_t next = caretBytePos_ + 1;
+                            while (next < value.size() &&
+                                   (static_cast<unsigned char>(value[next]) & 0xC0) == 0x80) {
+                                ++next;
+                            }
+                            value.erase(caretBytePos_, next - caretBytePos_);
+                            selectionAnchor_ = caretBytePos_;
+                            target->setValue(std::move(value));
+                        }
                     }
                 }
             } else if (!readOnly && event.kind == InputKind::TextInput && !event.text.empty()) {
                 caretBlinkStart_ = SDL_GetTicks();
+                if (selectionAnchor_ != caretBytePos_) {
+                    const std::size_t sStart = std::min(selectionAnchor_, caretBytePos_);
+                    const std::size_t sEnd = std::max(selectionAnchor_, caretBytePos_);
+                    value.erase(sStart, sEnd - sStart);
+                    caretBytePos_ = sStart;
+                }
                 value.insert(caretBytePos_, event.text);
                 caretBytePos_ += event.text.size();
+                selectionAnchor_ = caretBytePos_;
                 target->setValue(std::move(value));
             }
         }
@@ -1434,14 +1593,19 @@ void Application::run() {
                         SDL_SetRenderClipRect(sdlRenderer, nullptr);
                     }
                     int caretPos = -1;
+                    int selStart = -1, selEnd = -1;
                     if (document_ && document_->focused() == item.el) {
                         const bool caretVisible = ((ticks - caretBlinkStart_) / 500) % 2 == 0;
                         if (caretVisible) {
                             caretPos = static_cast<int>(caretBytePos_);
                         }
+                        if (selectionAnchor_ != caretBytePos_) {
+                            selStart = static_cast<int>(std::min(selectionAnchor_, caretBytePos_));
+                            selEnd = static_cast<int>(std::max(selectionAnchor_, caretBytePos_));
+                        }
                     }
                     paintBox(*item.el, renderer, sdlRenderer, resolver_, *font_, groupOpacity,
-                             *images_, item.dx + ox, item.dy + oy, caretPos);
+                             *images_, item.dx + ox, item.dy + oy, caretPos, selStart, selEnd);
                 }
             } else {
                 SDL_FRect panel{40.0f, 40.0f, static_cast<float>(width) - 80.0f,
@@ -1500,6 +1664,9 @@ void Application::shutdown() {
     // Before the resources, since the cache borrows them.
     lastFocused_ = nullptr;
     caretBytePos_ = 0;
+    selectionAnchor_ = 0;
+    shiftDown_ = false;
+    ctrlDown_ = false;
     images_.reset();
     font_.reset();
     document_.reset();
