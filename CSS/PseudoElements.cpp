@@ -36,12 +36,28 @@ void addBox(Element& element, const StyleResolver& resolver, const char* tag,
     // the rule that matched, and every other declaration is inherited from the
     // element the box hangs off.
     Element* box = element.children()[index].get();
-    const std::string content = resolver.resolve(*box).content;
-    if (content.empty()) {
+    const ComputedStyle s = resolver.resolve(*box);
+    if (!s.hasContent) {
         element.removeChild(index);
         return;
     }
-    box->appendChild(Element::createText(content, document));
+    std::string text;
+    const std::string& raw = s.content;
+    std::size_t i = 0;
+    while (i < raw.size()) {
+        if (raw[i] == '\x01') {
+            const std::size_t end = raw.find('\x02', i + 1);
+            if (end != std::string::npos) {
+                const std::string attrName = raw.substr(i + 1, end - (i + 1));
+                text.append(element.attribute(attrName));
+                i = end + 1;
+                continue;
+            }
+        }
+        text.push_back(raw[i]);
+        ++i;
+    }
+    box->appendChild(Element::createText(text, document));
 }
 
 void build(Element& element, const StyleResolver& resolver) {

@@ -407,6 +407,8 @@ struct ComputedStyle {
     FontStyle fontStyle = FontNormal;
     enum TextDecorationLine : std::uint8_t { DecNone, DecUnderline, DecOverline, DecLineThrough };
     TextDecorationLine textDecorationLine = DecNone;
+    SDL_Color textDecorationColor{0, 0, 0, 0};
+    bool hasTextDecorationColor = false;
     Length letterSpacing;
     Length wordSpacing;
     Length textIndent;
@@ -544,8 +546,9 @@ struct ComputedStyle {
     WhiteSpace whiteSpace = WrapText;
 
     // The text a generated `::before` or `::after` puts in the box. Empty means the
-    // pseudo-element is not generated at all.
+    // pseudo-element is not generated at all, unless hasContent is true.
     std::string content;
+    bool hasContent = false;
 
     // How a replaced element (img, video) fits its content box. `Contain` is the
     // historical default (aspect-fit down to fit); `Cover` aspect-fills, cropping
@@ -583,6 +586,7 @@ struct ComputedStyle {
         SpecifiedFilter = 1u << 14,
         SpecifiedTransformOrigin = 1u << 15,
         SpecifiedListStyleType = 1u << 16,
+        SpecifiedTextDecorationColor = 1u << 17,
     };
     std::uint32_t specified = 0;
 };
@@ -705,6 +709,10 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     }
     if (!(style.specified & ComputedStyle::SpecifiedListStyleType)) {
         style.listStyleType = parent.listStyleType;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedTextDecorationColor)) {
+        style.textDecorationColor = parent.textDecorationColor;
+        style.hasTextDecorationColor = parent.hasTextDecorationColor;
     }
     // `transform` and `filter` are not inherited in CSS: they describe the box
     // they are declared on. The paint walk already carries a translated or

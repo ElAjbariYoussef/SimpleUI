@@ -590,6 +590,46 @@ void testObjectFitAndListStyle() {
     check(sUl2_li1.listStyleType == sui::ComputedStyle::LSTSquare, "<li> inherits list-style: square from <ul style=\"list-style: square\">");
 }
 
+void testTextDecorationColor() {
+    auto doc = parseOrNull(
+        "<sui><body>"
+        "<div id=\"d1\" style=\"text-decoration: underline red;\">Underlined red</div>"
+        "<div id=\"d2\" style=\"text-decoration-line: line-through; text-decoration-color: #00ff00;\">Line through green</div>"
+        "<div id=\"d3\" style=\"color: #0000ff; text-decoration: overline;\">"
+        "  <span id=\"s3\">Inherited decoration</span>"
+        "</div>"
+        "</body></sui>");
+    if (!doc) return;
+    sui::StyleResolver res;
+    layoutRoot(*doc, res, 800.0f);
+
+    Element* d1 = doc->getElementById("d1");
+    Element* d2 = doc->getElementById("d2");
+    Element* d3 = doc->getElementById("d3");
+    Element* s3 = doc->getElementById("s3");
+
+    auto sD1 = res.resolve(*d1);
+    auto sD2 = res.resolve(*d2);
+    auto sD3 = res.resolve(*d3);
+    auto sS3 = res.resolve(*s3);
+
+    check(sD1.textDecorationLine == sui::ComputedStyle::DecUnderline, "text-decoration shorthand sets underline");
+    check(sD1.hasTextDecorationColor, "text-decoration shorthand sets color flag");
+    check(sD1.textDecorationColor.r == 255 && sD1.textDecorationColor.g == 0 && sD1.textDecorationColor.b == 0,
+          "text-decoration shorthand sets red color");
+
+    check(sD2.textDecorationLine == sui::ComputedStyle::DecLineThrough, "text-decoration-line sets line-through");
+    check(sD2.hasTextDecorationColor, "text-decoration-color sets flag");
+    check(sD2.textDecorationColor.r == 0 && sD2.textDecorationColor.g == 255 && sD2.textDecorationColor.b == 0,
+          "text-decoration-color sets green");
+    check(sui::StyleResolver::propertyValue(sD2, "text-decoration-color") == "#00ff00",
+          "text-decoration-color serializes to #00ff00");
+
+    check(!sD3.hasTextDecorationColor, "text-decoration without color leaves flag unset");
+    check(sui::StyleResolver::propertyValue(sD3, "text-decoration-color") == "#0000ff",
+          "unset text-decoration-color falls back to element color");
+}
+
 void testGridAlignment() {
     // Track distribution: two 50px columns in a 300px box leave 200px, which
     // `justify-content: center` splits into 100px of leading space.
@@ -2680,6 +2720,22 @@ void testPseudoElements() {
     check(card->children().size() == 3, "regenerating does not duplicate the boxes");
     check(card->children()[0]->textContent() == "A", "regenerating still puts ::before first");
     check(card->children()[1]->id() == "kid", "regenerating keeps the real content in order");
+
+    // Empty quotes content: "" generates an empty pseudo-element box
+    sui::StyleResolver emptyContent;
+    emptyContent.setRules(sui::CSSParser::parse("#card::before { content: \"\" }"));
+    sui::generatePseudoElements(*document, emptyContent);
+    check(card->children().size() == 2, "content: \"\" generates a pseudo-element box");
+    check(card->children()[0]->tag() == "::before", "the generated box is ::before");
+    check(card->children()[0]->textContent() == "", "the generated box has empty content");
+
+    // content: attr(title) resolves attribute from originating element
+    card->setAttribute("title", "HelloCard");
+    sui::StyleResolver attrContent;
+    attrContent.setRules(sui::CSSParser::parse("#card::before { content: \"Prefix: \" attr(title) }"));
+    sui::generatePseudoElements(*document, attrContent);
+    check(card->children().size() == 2, "content with attr() generates a pseudo-element box");
+    check(card->children()[0]->textContent() == "Prefix: HelloCard", "content: attr(title) resolves attribute");
 }
 
 }  // namespace
@@ -3821,6 +3877,7 @@ int main() {
     testVerticalAlignTextTopBottomInline();
     testMediaElementsLayout();
     testObjectFitAndListStyle();
+    testTextDecorationColor();
     testGridAlignment();
     testInputValue();
     testInputPasswordLayout();

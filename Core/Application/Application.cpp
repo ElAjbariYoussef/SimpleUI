@@ -723,7 +723,12 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
             const float y0 = std::floor(run.y - tyd);
             const float w = texW;
             const float lineThick = std::max(1.0f, run.fontSize * 0.06f);
-            const SDL_Color c = {run.r, run.g, run.b, static_cast<Uint8>(static_cast<float>(run.a) * opacity)};
+            const SDL_Color decCol = s.hasTextDecorationColor
+                                         ? s.textDecorationColor
+                                         : SDL_Color{run.r, run.g, run.b, run.a};
+            const SDL_Color c = {
+                decCol.r, decCol.g, decCol.b,
+                static_cast<Uint8>(static_cast<float>(decCol.a) * opacity)};
             SDL_SetRenderDrawColor(sdlRenderer, c.r, c.g, c.b, c.a);
             // Each decoration is one rule at its own offset from the baseline:
             // under it, over the ascender, or through roughly the middle.

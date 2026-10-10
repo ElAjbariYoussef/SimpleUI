@@ -1056,28 +1056,56 @@ const char* alignName(ComputedStyle::FlexAlign v) {
     }
 }
 
+struct ContentResult {
+    bool hasContent = false;
+    std::string text;
+};
+
 // `content: "x"` and `content: "a" "b"` concatenate their string arguments.
-// `none` and `normal` mean "no generated box", which an empty result expresses.
-std::string parseContent(std::string_view v) {
-    std::string out;
+// `content: attr(foo)` resolves against the originating element's attribute.
+// `none` and `normal` mean "no generated box".
+ContentResult parseContent(std::string_view v) {
+    std::string_view trimmed = trim(v);
+    if (trimmed == "none" || trimmed == "normal" || trimmed.empty()) {
+        return {false, {}};
+    }
+    ContentResult res;
+    res.hasContent = true;
     std::size_t i = 0;
     while (i < v.size()) {
+        while (i < v.size() && std::isspace(static_cast<unsigned char>(v[i]))) {
+            ++i;
+        }
+        if (i >= v.size()) break;
         const char quote = v[i];
-        if (quote != '"' && quote != '\'') {
+        if (quote == '"' || quote == '\'') {
             ++i;
-            continue;
-        }
-        ++i;
-        const std::size_t start = i;
-        while (i < v.size() && v[i] != quote) {
+            const std::size_t start = i;
+            while (i < v.size() && v[i] != quote) {
+                ++i;
+            }
+            res.text.append(v.substr(start, i - start));
+            if (i < v.size()) {
+                ++i;  // the closing quote
+            }
+        } else if (v.substr(i, 5) == "attr(") {
+            i += 5;
+            while (i < v.size() && std::isspace(static_cast<unsigned char>(v[i]))) ++i;
+            const std::size_t start = i;
+            while (i < v.size() && v[i] != ')' && !std::isspace(static_cast<unsigned char>(v[i]))) {
+                ++i;
+            }
+            const std::string_view attrName = v.substr(start, i - start);
+            while (i < v.size() && v[i] != ')') ++i;
+            if (i < v.size() && v[i] == ')') ++i;
+            res.text.push_back('\x01');
+            res.text.append(attrName);
+            res.text.push_back('\x02');
+        } else {
             ++i;
-        }
-        out.append(v.substr(start, i - start));
-        if (i < v.size()) {
-            ++i;  // the closing quote
         }
     }
-    return out;
+    return res;
 }
 
 ComputedStyle::Overflow parseOverflow(std::string_view v) {
@@ -2712,7 +2740,9 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         // Only `order` above zero changes anything this engine does, and it is
         // applied at layout time, so nothing is stored here yet.
     } else if (property == "content") {
-        s.content = parseContent(value);
+        const auto parsed = parseContent(value);
+        s.hasContent = parsed.hasContent;
+        s.content = parsed.text;
     } else if (property == "position") {
         if (value == "relative") {
             s.position = ComputedStyle::Relative;
@@ -2820,18 +2850,36 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.textDecorationLine = ComputedStyle::DecNone;
         }
         s.specified |= ComputedStyle::SpecifiedTextDecorationLine;
+    } else if (property == "text-decoration-color") {
+        if (parseColor(value, s.textDecorationColor)) {
+            s.hasTextDecorationColor = true;
+            s.specified |= ComputedStyle::SpecifiedTextDecorationColor;
+        }
     } else if (property == "text-decoration") {
-        // simple support: only the line value
+        // shorthand: line || color
         if (value.find("underline") != std::string_view::npos) {
             s.textDecorationLine = ComputedStyle::DecUnderline;
         } else if (value.find("line-through") != std::string_view::npos) {
             s.textDecorationLine = ComputedStyle::DecLineThrough;
         } else if (value.find("overline") != std::string_view::npos) {
             s.textDecorationLine = ComputedStyle::DecOverline;
-        } else {
+        } else if (value.find("none") != std::string_view::npos) {
             s.textDecorationLine = ComputedStyle::DecNone;
         }
         s.specified |= ComputedStyle::SpecifiedTextDecorationLine;
+        for (std::string_view token : splitTopLevelSpaces(value)) {
+            if (token != "underline" && token != "line-through" &&
+                token != "overline" && token != "none" &&
+                token != "solid" && token != "dashed" && token != "dotted" &&
+                token != "double" && token != "wavy") {
+                SDL_Color c;
+                if (parseColor(token, c)) {
+                    s.textDecorationColor = c;
+                    s.hasTextDecorationColor = true;
+                    s.specified |= ComputedStyle::SpecifiedTextDecorationColor;
+                }
+            }
+        }
     } else if (property == "letter-spacing") {
         s.letterSpacing = parseLength(value);
         s.specified |= ComputedStyle::SpecifiedLetterSpacing;
@@ -3404,6 +3452,10 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         }
         return "none";
     }
+    if (property == "text-decoration-color") {
+        return style.hasTextDecorationColor ? color(style.textDecorationColor)
+                                            : color(style.color);
+    }
     if (property == "letter-spacing") return length(style.letterSpacing, "normal");
     if (property == "word-spacing") return length(style.wordSpacing, "normal");
     if (property == "text-indent") return length(style.textIndent, "0px");
@@ -3830,7 +3882,8 @@ bool isInheritable(std::string_view property) {
     return property == "color" || property == "font-size" ||
            property == "font-family" || property == "font-weight" ||
            property == "line-height" || property == "text-align" ||
-           property == "list-style-type" || property == "list-style";
+           property == "list-style-type" || property == "list-style" ||
+           property == "text-decoration-color";
 }
 
 // `inherit` and `unset` are the two CSS-wide keywords the engine can answer
