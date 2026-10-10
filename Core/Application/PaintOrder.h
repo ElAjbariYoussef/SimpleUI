@@ -121,4 +121,9 @@ bool createsPaintGroup(const ComputedStyle& s);
 // alphas directly.
 std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolver);
 
+// Hit-test the paint ops in paint order (topmost first): walk from end to start
+// and return the first Box element whose painted region contains the point
+// (x,y) in window coordinates, respecting current transform and clip.
+Element* hitTestPaintOrder(const std::vector<PaintOp>& ops, float x, float y);
+
 }  // namespace sui

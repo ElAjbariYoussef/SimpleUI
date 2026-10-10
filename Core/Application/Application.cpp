@@ -695,10 +695,14 @@ void Application::dispatch(const InputEvent& event) {
     const bool keyboard = event.kind == InputKind::KeyDown ||
                           event.kind == InputKind::KeyUp || event.kind == InputKind::TextInput;
     // A key event has no coordinates and belongs to whatever holds focus; a pointer
-    // event belongs to whatever is under it.
-    Element* target = keyboard ? document_->focused()
-                               : hitTest(*document_->root(), event.x, event.y, resolver_, 0.0f,
-                                         0.0f);
+    // event belongs to whatever is under it in paint order (topmost).
+    Element* target = nullptr;
+    if (keyboard) {
+        target = document_->focused();
+    } else {
+        const auto ops = computePaintOps(*document_->root(), resolver_);
+        target = hitTestPaintOrder(ops, event.x, event.y);
+    }
 
     // Interactive state is set first and unconditionally. A move that changes what
     // is under the pointer has to clear `:hover` even when it lands on nothing, and

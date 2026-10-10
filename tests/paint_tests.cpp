@@ -882,6 +882,39 @@ void testFilterDropShadowComposites() {
     check(sawPlain, "a plain box is still painted");
 }
 
+void testHitTestPaintOrder() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"container\" style=\"position:relative;width:200px;height:200px\">"
+        "<div id=\"under\" style=\"position:absolute;left:10px;top:10px;width:100px;height:100px;z-index:1\"></div>"
+        "<div id=\"over\" style=\"position:absolute;left:10px;top:10px;width:100px;height:100px;z-index:10\"></div>"
+        "</div>"
+        "<div id=\"clipper\" style=\"overflow:hidden;width:50px;height:50px;position:relative\">"
+        "<div id=\"clipped\" style=\"position:absolute;left:60px;top:10px;width:50px;height:50px\"></div>"
+        "</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*document, resolver);
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+
+    Element* over = document->getElementById("over");
+    Element* under = document->getElementById("under");
+    Element* clipped = document->getElementById("clipped");
+
+    Element* hit = sui::hitTestPaintOrder(ops, 50.0f, 50.0f);
+    check(hit == over, "topmost element with higher z-index wins paint-order hit test");
+
+    Element* hitClipped = sui::hitTestPaintOrder(ops, 70.0f, 20.0f);
+    check(hitClipped != clipped, "element outside ancestor clip is not hit");
+
+    Element* hitMiss = sui::hitTestPaintOrder(ops, 500.0f, 500.0f);
+    check(hitMiss == nullptr, "out of bounds hit returns null");
+}
+
 }  // namespace
 
 int main() {
@@ -902,6 +935,7 @@ int main() {
     testFilterBlurComposites();
     testFilterShiftComposites();
     testFilterDropShadowComposites();
+    testHitTestPaintOrder();
     if (failures > 0) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

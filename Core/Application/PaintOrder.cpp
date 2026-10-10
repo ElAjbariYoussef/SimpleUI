@@ -13,6 +13,24 @@
 
 namespace sui {
 namespace {
+struct HitAffine {
+    float a = 1.0f, b = 0.0f, c = 0.0f, d = 1.0f, e = 0.0f, f = 0.0f;
+};
+inline HitAffine hitIdentity() { return HitAffine{1,0,0,1,0,0}; }
+inline HitAffine hitCompose(const HitAffine& o, const HitAffine& i) {
+    return HitAffine{o.a*i.a+o.c*i.b, o.b*i.a+o.d*i.b, o.a*i.c+o.c*i.d, o.b*i.c+o.d*i.d, o.a*i.e+o.c*i.f+o.e, o.b*i.e+o.d*i.f+o.f};
+}
+struct HitCtx {
+    SDL_FRect clip{0,0,0,0};
+    HitAffine transform{1,0,0,1,0,0};
+};
+inline HitCtx hitBase() { return HitCtx{{0,0,0,0},{1,0,0,1,0,0}}; }
+inline bool hitPointIn(const SDL_FRect& r,float x,float y){ if(r.w<=0||r.h<=0)return true; return x>=r.x&&x<r.x+r.w&&y>=r.y&&y<r.y+r.h; }
+inline bool hitToLocal(const HitAffine& m,float x,float y,float* lx,float* ly){ float det=m.a*m.d-m.b*m.c; if(std::fabs(det)<1e-18f)return false; float dx=x-m.e,dy=y-m.f; *lx=(m.d*dx-m.c*dy)/det; *ly=(-m.b*dx+m.a*dy)/det; return true; }
+inline bool hitBox(const HitCtx& ctx,const PaintItem& item,float x,float y){ if(!hitPointIn(item.clip,x,y))return false; float lx,ly; if(!hitToLocal(ctx.transform,x,y,&lx,&ly))return false; float bx=item.el->layoutX()-item.dx,by=item.el->layoutY()-item.dy,bw=item.el->layoutWidth(),bh=item.el->layoutHeight(); if(lx<bx||lx>=bx+bw||ly<by||ly>=by+bh)return false; return true; }
+} // namespace
+
+namespace {
 
 // The environment a subtree paints under: the tightest clip its clipping
 // ancestors impose, the scroll and translation offsets that move it on screen,
@@ -730,6 +748,32 @@ std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolve
     }
     computeGroupBounds(out, resolver);
     return out;
+}
+
+Element* hitTestPaintOrder(const std::vector<PaintOp>& ops, float x, float y) {
+    if (ops.empty()) return nullptr;
+    std::vector<HitCtx> ctx(ops.size());
+    std::vector<HitCtx> stack;
+    stack.push_back(hitBase());
+    for (size_t i = 0; i < ops.size(); ++i) {
+        ctx[i] = stack.back();
+        const auto& op = ops[i];
+        if (op.kind == PaintOp::Kind::BeginGroup) {
+            HitAffine g{op.m[0],op.m[1],op.m[2],op.m[3],op.m[4],op.m[5]};
+            HitCtx inner = stack.back();
+            inner.transform = hitCompose(stack.back().transform, g);
+            stack.push_back(inner);
+        } else if (op.kind == PaintOp::Kind::EndGroup) {
+            if (stack.size() > 1) stack.pop_back(); else stack.back() = hitBase();
+        }
+    }
+    for (int i = (int)ops.size()-1; i>=0; --i) {
+        const auto& op = ops[i];
+        if (op.kind == PaintOp::Kind::Box && hitBox(ctx[i], op.item, x, y)) {
+            return op.item.el;
+        }
+    }
+    return nullptr;
 }
 
 }  // namespace sui
