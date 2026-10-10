@@ -164,9 +164,23 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
         return s;
     }
 
-    // Media and replaced elements keep their author-specified size.
-    if (tag == "img" || tag == "video" || tag == "canvas" || tag == "svg" ||
-        tag == "iframe" || tag == "picture" || tag == "audio" ||
+    // Media and replaced elements keep their author-specified size, or HTML standard defaults.
+    if (tag == "video" || tag == "canvas") {
+        Style s;
+        s.display = Style::InlineBlock;
+        s.width = {Length::Px, 300.0f};
+        s.height = {Length::Px, 150.0f};
+        return s;
+    }
+    if (tag == "audio") {
+        Style s;
+        s.display = Style::InlineBlock;
+        s.width = {Length::Px, 300.0f};
+        s.height = {Length::Px, 32.0f};
+        return s;
+    }
+    if (tag == "img" || tag == "svg" ||
+        tag == "iframe" || tag == "picture" ||
         tag == "source" || tag == "track") {
         Style s;
         s.display = Style::InlineBlock;

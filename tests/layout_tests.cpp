@@ -489,6 +489,29 @@ void testVerticalAlignTextTopBottomInline() {
     }
 }
 
+void testMediaElementsLayout() {
+    auto doc = parseOrNull(
+        "<sui><body>"
+        "<video id=\"v\" poster=\"test.png\"></video>"
+        "<canvas id=\"c\"></canvas>"
+        "<audio id=\"a\" controls></audio>"
+        "</body></sui>");
+    if (!doc) return;
+    sui::StyleResolver res;
+    res.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*doc, res, 800.0f);
+
+    Element* v = doc->getElementById("v");
+    Element* c = doc->getElementById("c");
+    Element* a = doc->getElementById("a");
+    check(v != nullptr && v->layoutWidth() == 300.0f && v->layoutHeight() == 150.0f,
+          "<video> defaults to 300x150 dimensions");
+    check(c != nullptr && c->layoutWidth() == 300.0f && c->layoutHeight() == 150.0f,
+          "<canvas> defaults to 300x150 dimensions");
+    check(a != nullptr && a->layoutWidth() == 300.0f && a->layoutHeight() == 32.0f,
+          "<audio> defaults to 300x32 dimensions");
+}
+
 void testGridAlignment() {
     // Track distribution: two 50px columns in a 300px box leave 200px, which
     // `justify-content: center` splits into 100px of leading space.
@@ -3718,6 +3741,7 @@ int main() {
     testVerticalAlign();
     testVerticalAlignTopBottom();
     testVerticalAlignTextTopBottomInline();
+    testMediaElementsLayout();
     testGridAlignment();
     testInputValue();
     testInputPasswordLayout();

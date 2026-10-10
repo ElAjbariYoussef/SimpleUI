@@ -415,11 +415,17 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
              el.contentHeight()}};
         paintBackground(s, boxes, s.fontSize, rootFontSize, opacity, renderer, images, radii);
 
-        // An <img> paints its decoded source into the content box. The source keeps
+        // An <img> or <video> paints its decoded source into the content box. The source keeps
         // its aspect ratio and is scaled down to fit, which is the common case for a
-        // photo dropped into a fixed box.
-        if (el.tag() == "img") {
-            const std::string_view src = el.attribute("src");
+        // photo or video poster dropped into a fixed box.
+        if (el.tag() == "img" || el.tag() == "video") {
+            std::string_view src = el.attribute("src");
+            if (el.tag() == "video") {
+                const std::string_view poster = el.attribute("poster");
+                if (!poster.empty()) {
+                    src = poster;
+                }
+            }
             if (!src.empty()) {
                 if (SDL_Texture* tex = images.texture(sdlRenderer, src)) {
                     float iw = 0.0f, ih = 0.0f;
@@ -436,6 +442,42 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                                              Color{255, 255, 255,
                                                    static_cast<Uint8>(opacity * 255.0f)});
                     }
+                }
+            }
+        }
+
+        // Render audio or video controls bar
+        if (el.tag() == "audio" || (el.tag() == "video" && el.hasAttribute("controls"))) {
+            const SDL_FRect content{el.contentX() - offX, el.contentY() - offY,
+                                    el.contentWidth(), el.contentHeight()};
+            if (content.w > 0.0f && content.h > 0.0f) {
+                float barH = el.tag() == "audio" ? content.h : std::min(32.0f, content.h * 0.25f);
+                float barY = el.tag() == "audio" ? content.y : (content.y + content.h - barH);
+                const SDL_FRect barRect{content.x, barY, content.w, barH};
+                const sui::Color barBg = multiplyAlpha(sui::Color{39, 39, 42, 220}, opacity);
+                SDL_SetRenderDrawColor(sdlRenderer, barBg.r, barBg.g, barBg.b, barBg.a);
+                SDL_RenderFillRect(sdlRenderer, &barRect);
+
+                float iconSize = std::min(12.0f, barH * 0.5f);
+                float iconX = content.x + 8.0f;
+                float iconY = barY + (barH - iconSize) * 0.5f;
+                const sui::Color iconCol = multiplyAlpha(sui::Color{244, 244, 245, 255}, opacity);
+                const SDL_FPoint tri[4] = {
+                    {iconX, iconY},
+                    {iconX + iconSize, iconY + iconSize * 0.5f},
+                    {iconX, iconY + iconSize},
+                    {iconX, iconY}
+                };
+                SDL_SetRenderDrawColor(sdlRenderer, iconCol.r, iconCol.g, iconCol.b, iconCol.a);
+                SDL_RenderLines(sdlRenderer, tri, 4);
+
+                float trackX = iconX + iconSize + 8.0f;
+                float trackW = std::max(0.0f, content.x + content.w - 12.0f - trackX);
+                if (trackW > 0.0f) {
+                    const SDL_FRect track{trackX, barY + (barH - 4.0f) * 0.5f, trackW, 4.0f};
+                    const sui::Color trackCol = multiplyAlpha(sui::Color{82, 82, 91, 200}, opacity);
+                    SDL_SetRenderDrawColor(sdlRenderer, trackCol.r, trackCol.g, trackCol.b, trackCol.a);
+                    SDL_RenderFillRect(sdlRenderer, &track);
                 }
             }
         }
