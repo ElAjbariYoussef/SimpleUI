@@ -474,6 +474,20 @@ struct ComputedStyle {
     int gridColumnSpan = 1;
     int gridRowSpan = 1;
 
+    // Grid auto track sizing and auto flow
+    GridTrack gridAutoRows;
+    GridTrack gridAutoColumns;
+    bool hasGridAutoRows = false;
+    bool hasGridAutoColumns = false;
+
+    enum GridAutoFlow : std::uint8_t {
+        AutoFlowRow,
+        AutoFlowColumn,
+        AutoFlowRowDense,
+        AutoFlowColumnDense
+    };
+    GridAutoFlow gridAutoFlow = AutoFlowRow;
+
     // Named grid areas from `grid-template-areas`. Each area is a 1-based line rectangle.
     struct GridAreaRect {
         int rowStart = 0;

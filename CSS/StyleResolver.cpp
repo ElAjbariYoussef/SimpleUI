@@ -2416,6 +2416,29 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         s.gridRowsAutoFill = false;
         s.gridRowsAutoFit = false;
         s.gridRows = parseGridTrackList(value, &s.gridRowsAutoFill, &s.gridRowsAutoFit);
+    } else if (property == "grid-auto-rows") {
+        ComputedStyle::GridTrack t;
+        if (parseGridTrack(trim(value), t)) {
+            s.gridAutoRows = t;
+            s.hasGridAutoRows = true;
+        }
+    } else if (property == "grid-auto-columns") {
+        ComputedStyle::GridTrack t;
+        if (parseGridTrack(trim(value), t)) {
+            s.gridAutoColumns = t;
+            s.hasGridAutoColumns = true;
+        }
+    } else if (property == "grid-auto-flow") {
+        const std::string_view val = trim(value);
+        if (val == "column" || val == "column nowrap") {
+            s.gridAutoFlow = ComputedStyle::AutoFlowColumn;
+        } else if (val == "row dense" || val == "dense") {
+            s.gridAutoFlow = ComputedStyle::AutoFlowRowDense;
+        } else if (val == "column dense") {
+            s.gridAutoFlow = ComputedStyle::AutoFlowColumnDense;
+        } else {
+            s.gridAutoFlow = ComputedStyle::AutoFlowRow;
+        }
     } else if (property == "grid-template-areas") {
         s.gridTemplateAreas.clear();
         s.gridTemplateAreasColumns = 0;
@@ -3509,6 +3532,32 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
                    std::to_string(std::max(1, style.gridColumnEnd));
         }
         return "auto";
+    }
+    if (property == "grid-auto-rows") {
+        if (!style.hasGridAutoRows) return "auto";
+        const auto& track = style.gridAutoRows;
+        std::string max;
+        if (track.isAuto) max = "auto";
+        else if (track.isFr) max = unitless(track.fr) + "fr";
+        else max = length(track.size, "0px");
+        return track.hasMin ? ("minmax(" + length(track.minSize, "0px") + ", " + max + ")") : max;
+    }
+    if (property == "grid-auto-columns") {
+        if (!style.hasGridAutoColumns) return "auto";
+        const auto& track = style.gridAutoColumns;
+        std::string max;
+        if (track.isAuto) max = "auto";
+        else if (track.isFr) max = unitless(track.fr) + "fr";
+        else max = length(track.size, "0px");
+        return track.hasMin ? ("minmax(" + length(track.minSize, "0px") + ", " + max + ")") : max;
+    }
+    if (property == "grid-auto-flow") {
+        switch (style.gridAutoFlow) {
+            case ComputedStyle::AutoFlowColumn: return "column";
+            case ComputedStyle::AutoFlowRowDense: return "row dense";
+            case ComputedStyle::AutoFlowColumnDense: return "column dense";
+            default: return "row";
+        }
     }
     if (property == "color") return color(style.color);
     if (property == "background-color") return color(style.backgroundColor);

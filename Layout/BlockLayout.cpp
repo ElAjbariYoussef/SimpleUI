@@ -1093,7 +1093,7 @@ private:
             }
             columns = std::move(expanded);
         }
-        const std::size_t columnCount = columns.size();
+        std::size_t columnCount = columns.size();
 
         // Placement. Items with explicit `grid-column` / `grid-row` start lines are
         // pinned first; the remaining items are auto-placed in row-major order,
@@ -1140,9 +1140,17 @@ private:
         }
 
         std::vector<std::vector<bool>> occupied;
+        // Ensure rows 0..row exist and every row is wide enough for `columns`.
+        // Column-flow auto-placement can widen the grid after rows already exist,
+        // so existing rows are grown to match rather than left short.
         auto claimRows = [&occupied](std::size_t row, std::size_t columns) {
             while (occupied.size() <= row) {
                 occupied.push_back(std::vector<bool>(columns, false));
+            }
+            for (std::vector<bool>& r : occupied) {
+                if (r.size() < columns) {
+                    r.resize(columns, false);
+                }
             }
         };
 
@@ -1236,6 +1244,14 @@ private:
 
         // Pass 2 – auto-place remaining items (no explicit placement on either axis,
         // or explicit column only, deferred row resolution).
+        const bool isColumnFlow = (s.gridAutoFlow == ComputedStyle::AutoFlowColumn ||
+                                   s.gridAutoFlow == ComputedStyle::AutoFlowColumnDense);
+        const bool isDense = (s.gridAutoFlow == ComputedStyle::AutoFlowRowDense ||
+                              s.gridAutoFlow == ComputedStyle::AutoFlowColumnDense);
+        const std::size_t maxRows = std::max<std::size_t>(
+            1, !s.gridRows.empty() ? s.gridRows.size()
+                                   : (s.gridTemplateAreasRows > 0 ? s.gridTemplateAreasRows : 1));
+
         std::size_t nextRow = 0;
         std::size_t nextCol = 0;
         for (std::size_t i = 0; i < children.size(); ++i) {
@@ -1244,50 +1260,98 @@ private:
             }
             const std::size_t csz = static_cast<std::size_t>(cSpan[i]);
             const std::size_t rsz = static_cast<std::size_t>(rSpan[i]);
-            // Start the search from the item's pinned column (if any) or the cursor.
-            std::size_t r = nextRow;
-            std::size_t c = hasExplicitCol[i] ? itemCol[i] : nextCol;
-            while (true) {
-                if (c + csz > columnCount || (hasExplicitCol[i] && c != itemCol[i])) {
-                    c = hasExplicitCol[i] ? itemCol[i] : 0;
-                    ++r;
-                    continue;
-                }
-                claimRows(r + rsz - 1, columnCount);
-                bool free = true;
-                for (std::size_t rr = r; rr < r + rsz && free; ++rr) {
-                    for (std::size_t cc = c; cc < c + csz && free; ++cc) {
-                        free = !occupied[rr][cc];
+
+            if (isColumnFlow) {
+                std::size_t c = isDense ? 0 : nextCol;
+                std::size_t r = hasExplicitRow[i] ? itemRow[i] : (isDense ? 0 : nextRow);
+                while (true) {
+                    if (r + rsz > maxRows || (hasExplicitRow[i] && r != itemRow[i])) {
+                        r = hasExplicitRow[i] ? itemRow[i] : 0;
+                        ++c;
+                        continue;
+                    }
+                    while (columns.size() < c + csz) {
+                        columns.push_back(s.hasGridAutoColumns ? s.gridAutoColumns
+                                                              : ComputedStyle::GridTrack{Length{}, 0.0f, false, true, false, Length{}});
+                    }
+                    claimRows(r + rsz - 1, columns.size());
+                    bool free = true;
+                    for (std::size_t rr = r; rr < r + rsz && free; ++rr) {
+                        for (std::size_t cc = c; cc < c + csz && free; ++cc) {
+                            free = !occupied[rr][cc];
+                        }
+                    }
+                    if (free) {
+                        break;
+                    }
+                    if (hasExplicitRow[i]) {
+                        ++c;
+                    } else {
+                        ++r;
                     }
                 }
-                if (free) {
-                    break;
-                }
-                if (hasExplicitCol[i]) {
-                    ++r;
-                } else {
-                    ++c;
-                }
-            }
-            claimRows(r + rsz - 1, columnCount);
-            for (std::size_t rr = r; rr < r + rsz; ++rr) {
-                for (std::size_t cc = c; cc < c + csz; ++cc) {
-                    if (cc < columnCount) {
+                claimRows(r + rsz - 1, columns.size());
+                for (std::size_t rr = r; rr < r + rsz; ++rr) {
+                    for (std::size_t cc = c; cc < c + csz; ++cc) {
                         occupied[rr][cc] = true;
                     }
                 }
-            }
-            itemCol[i] = c;
-            itemRow[i] = r;
-            if (!hasExplicitCol[i]) {
-                nextCol = c + csz;
-                nextRow = r;
-                if (nextCol >= columnCount) {
-                    nextCol = 0;
-                    nextRow = r + 1;
+                itemCol[i] = c;
+                itemRow[i] = r;
+                if (!hasExplicitRow[i] && !isDense) {
+                    nextRow = r + rsz;
+                    nextCol = c;
+                    if (nextRow >= maxRows) {
+                        nextRow = 0;
+                        nextCol = c + 1;
+                    }
+                }
+            } else {
+                std::size_t r = isDense ? 0 : nextRow;
+                std::size_t c = hasExplicitCol[i] ? itemCol[i] : (isDense ? 0 : nextCol);
+                while (true) {
+                    if (c + csz > columns.size() || (hasExplicitCol[i] && c != itemCol[i])) {
+                        c = hasExplicitCol[i] ? itemCol[i] : 0;
+                        ++r;
+                        continue;
+                    }
+                    claimRows(r + rsz - 1, columns.size());
+                    bool free = true;
+                    for (std::size_t rr = r; rr < r + rsz && free; ++rr) {
+                        for (std::size_t cc = c; cc < c + csz && free; ++cc) {
+                            free = !occupied[rr][cc];
+                        }
+                    }
+                    if (free) {
+                        break;
+                    }
+                    if (hasExplicitCol[i]) {
+                        ++r;
+                    } else {
+                        ++c;
+                    }
+                }
+                claimRows(r + rsz - 1, columns.size());
+                for (std::size_t rr = r; rr < r + rsz; ++rr) {
+                    for (std::size_t cc = c; cc < c + csz; ++cc) {
+                        if (cc < columns.size()) {
+                            occupied[rr][cc] = true;
+                        }
+                    }
+                }
+                itemCol[i] = c;
+                itemRow[i] = r;
+                if (!hasExplicitCol[i] && !isDense) {
+                    nextCol = c + csz;
+                    nextRow = r;
+                    if (nextCol >= columns.size()) {
+                        nextCol = 0;
+                        nextRow = r + 1;
+                    }
                 }
             }
         }
+        columnCount = columns.size();
         std::size_t rowCount = 0;
         for (std::size_t i = 0; i < children.size(); ++i) {
             rowCount = std::max(rowCount, itemRow[i] + static_cast<std::size_t>(rSpan[i]));
@@ -1425,13 +1489,17 @@ private:
             const ComputedStyle::FlexAlign vAlign =
                 sized.alignSelf != ComputedStyle::AlignStretch ? sized.alignSelf
                                                                : s.alignItems;
-            if (vAlign == ComputedStyle::AlignStretch && rSpan[i] == 1 &&
-                row < s.gridRows.size()) {
-                const ComputedStyle::GridTrack& rowTrack = s.gridRows[row];
-                if (!rowTrack.isAuto && !rowTrack.isFr) {
+            if (vAlign == ComputedStyle::AlignStretch && rSpan[i] == 1) {
+                const ComputedStyle::GridTrack* rowTrack = nullptr;
+                if (row < s.gridRows.size()) {
+                    rowTrack = &s.gridRows[row];
+                } else if (s.hasGridAutoRows) {
+                    rowTrack = &s.gridAutoRows;
+                }
+                if (rowTrack && !rowTrack->isAuto && !rowTrack->isFr) {
                     const float trackHeight =
-                        std::max(0.0f, rowTrack.size.resolve(0.0f, s.fontSize,
-                                                             resolver_.rootFontSize()));
+                        std::max(0.0f, rowTrack->size.resolve(0.0f, s.fontSize,
+                                                              resolver_.rootFontSize()));
                     const float chrome = usedBox(sized, w).verticalChrome();
                     sized.height = Length(std::max(0.0f, trackHeight - chrome));
                 }
@@ -1450,15 +1518,18 @@ private:
             maxRight = std::max(maxRight, itemX[i] + children[i]->layoutWidth());
         }
 
-        // `grid-template-rows` overrides a content row with its own track; an
-        // absent list leaves every row at its tallest item.
-        if (!s.gridRows.empty()) {
-            for (std::size_t r = 0; r < rowCount && r < s.gridRows.size(); ++r) {
-                const ComputedStyle::GridTrack& track = s.gridRows[r];
-                if (!track.isAuto && !track.isFr) {
-                    rowHeights[r] = std::max(0.0f, track.size.resolve(0.0f, s.fontSize,
-                                                                     resolver_.rootFontSize()));
-                }
+        // `grid-template-rows` and `grid-auto-rows` override content rows with tracks;
+        // absent entries leave rows at their tallest items.
+        for (std::size_t r = 0; r < rowCount; ++r) {
+            const ComputedStyle::GridTrack* track = nullptr;
+            if (r < s.gridRows.size()) {
+                track = &s.gridRows[r];
+            } else if (s.hasGridAutoRows) {
+                track = &s.gridAutoRows;
+            }
+            if (track && !track->isAuto && !track->isFr) {
+                rowHeights[r] = std::max(0.0f, track->size.resolve(0.0f, s.fontSize,
+                                                                   resolver_.rootFontSize()));
             }
         }
         float rowSum = 0.0f;

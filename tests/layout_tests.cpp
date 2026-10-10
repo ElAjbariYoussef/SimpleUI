@@ -4049,8 +4049,162 @@ void testLogicalPropertiesAndInsets() {
     checkNear(sins3.bottom.value, 80.0f, 0.01f, "inset-block-end maps to bottom");
 }
 
+// grid-auto-rows / grid-auto-columns / grid-auto-flow: implicit track sizing and
+// non-row-major auto placement.
+void testGridAutoTracks() {
+    // grid-auto-rows gives every implicit row a fixed height and stretches the item
+    // that lands in it.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\">"
+            "<i id=\"a\"></i><i id=\"b\"></i><i id=\"c\"></i>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;grid-template-columns:100px;"
+            "grid-auto-rows:40px;width:100px}"));
+        layoutRoot(*document, resolver, 200.0f);
+
+        Element* g = document->getElementById("g");
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        checkNear(a ? a->layoutY() : -1.0f, 0.0f, 0.5f,
+                  "grid-auto-rows puts the first implicit row at y=0");
+        checkNear(b ? b->layoutY() : -1.0f, 40.0f, 0.5f,
+                  "grid-auto-rows puts the second implicit row at y=40");
+        checkNear(c ? c->layoutY() : -1.0f, 80.0f, 0.5f,
+                  "grid-auto-rows puts the third implicit row at y=80");
+        checkNear(a ? a->layoutHeight() : -1.0f, 40.0f, 0.5f,
+                  "an item stretches to its grid-auto-rows track");
+        if (g) {
+            const ComputedStyle s = resolver.resolve(*g);
+            check(sui::StyleResolver::propertyValue(s, "grid-auto-rows") == "40px",
+                  "grid-auto-rows serialises back");
+            check(sui::StyleResolver::propertyValue(s, "grid-auto-flow") == "row",
+                  "the default grid-auto-flow serialises as 'row'");
+        }
+    }
+
+    // minmax() in grid-auto-rows serialises back through the min/max pair.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\"><i></i></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;grid-template-columns:50px;"
+            "grid-auto-rows:minmax(20px, 40px);width:50px}"));
+        layoutRoot(*document, resolver, 100.0f);
+        Element* g = document->getElementById("g");
+        if (g) {
+            const ComputedStyle s = resolver.resolve(*g);
+            check(sui::StyleResolver::propertyValue(s, "grid-auto-rows") ==
+                      "minmax(20px, 40px)",
+                  "grid-auto-rows:minmax() serialises back");
+        }
+    }
+
+    // grid-auto-flow:column fills each column top-to-bottom first, and
+    // grid-auto-columns sizes the implicit columns it creates.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\">"
+            "<i id=\"a\"></i><i id=\"b\"></i><i id=\"c\"></i>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;grid-template-columns:50px;"
+            "grid-template-rows:30px;grid-auto-flow:column;"
+            "grid-auto-columns:50px;width:150px}"));
+        layoutRoot(*document, resolver, 300.0f);
+
+        Element* g = document->getElementById("g");
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        // One explicit row, so each item starts a new implicit 50px column.
+        checkNear(a ? a->layoutX() : -1.0f, 0.0f, 0.5f,
+                  "grid-auto-flow:column starts the first item at x=0");
+        checkNear(b ? b->layoutX() : -1.0f, 50.0f, 0.5f,
+                  "the second item wraps to a grid-auto-columns track at x=50");
+        checkNear(c ? c->layoutX() : -1.0f, 100.0f, 0.5f,
+                  "the third item wraps to x=100");
+        checkNear(a ? a->layoutY() : -1.0f, 0.0f, 0.5f,
+                  "column-flow items share the first row");
+        checkNear(b ? b->layoutWidth() : -1.0f, 50.0f, 0.5f,
+                  "an implicit column is 50px wide");
+        if (g) {
+            const ComputedStyle s = resolver.resolve(*g);
+            check(sui::StyleResolver::propertyValue(s, "grid-auto-flow") == "column",
+                  "grid-auto-flow:column serialises back");
+            check(sui::StyleResolver::propertyValue(s, "grid-auto-columns") == "50px",
+                  "grid-auto-columns serialises back");
+        }
+    }
+
+    // grid-auto-flow:column with two explicit rows snakes down the rows before it
+    // opens the next column.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\">"
+            "<i id=\"a\"></i><i id=\"b\"></i><i id=\"c\"></i><i id=\"d\"></i>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;grid-template-rows:repeat(2,20px);"
+            "grid-template-columns:repeat(2,50px);grid-auto-flow:column;width:100px}"));
+        layoutRoot(*document, resolver, 200.0f);
+
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        Element* d = document->getElementById("d");
+        checkNear(a ? a->layoutY() : -1.0f, 0.0f, 0.5f, "column-flow item 1 sits in row 1");
+        checkNear(b ? b->layoutY() : -1.0f, 20.0f, 0.5f, "column-flow item 2 sits in row 2");
+        checkNear(c ? c->layoutY() : -1.0f, 0.0f, 0.5f,
+                  "column-flow item 3 starts the next column");
+        checkNear(c ? c->layoutX() : -1.0f, 50.0f, 0.5f, "column-flow item 3 is at x=50");
+        checkNear(d ? d->layoutY() : -1.0f, 20.0f, 0.5f,
+                  "column-flow item 4 sits in row 2 of the second column");
+        checkNear(d ? d->layoutX() : -1.0f, 50.0f, 0.5f, "column-flow item 4 is at x=50");
+    }
+
+    // Dense round-trips through propertyValue().
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\"><i></i></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;grid-template-columns:50px;"
+            "grid-auto-flow:row dense;width:50px}"));
+        layoutRoot(*document, resolver, 100.0f);
+        Element* g = document->getElementById("g");
+        if (g) {
+            const ComputedStyle s = resolver.resolve(*g);
+            check(sui::StyleResolver::propertyValue(s, "grid-auto-flow") == "row dense",
+                  "grid-auto-flow:row dense serialises back");
+        }
+    }
+}
+
 int main() {
     testLogicalPropertiesAndInsets();
+    testGridAutoTracks();
     testAspectRatio();
     testTextOverflowEllipsis();
     testEasingAndTimingFunctions();
