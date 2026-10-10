@@ -915,6 +915,52 @@ void testHitTestPaintOrder() {
     check(hitMiss == nullptr, "out of bounds hit returns null");
 }
 
+void testExtendedTransformFunctions() {
+    auto document = parseOrNull(R"HTML(<sui><body>
+        <div id="sx" style="transform:scaleX(2);width:100px;height:50px"></div>
+        <div id="sy" style="transform:scaleY(3);width:100px;height:50px"></div>
+        <div id="skewx" style="transform:skewX(45deg);width:100px;height:50px"></div>
+        <div id="mat" style="transform:matrix(1, 0, 0, 1, 30, 40);width:100px;height:50px"></div>
+        <div id="rotturn" style="transform:rotate(0.25turn);width:100px;height:50px"></div>
+    </body></sui>)HTML");
+    if (!document) return;
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*document, resolver);
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+
+    Element* sx = document->getElementById("sx");
+    Element* sy = document->getElementById("sy");
+    Element* skewx = document->getElementById("skewx");
+    Element* mat = document->getElementById("mat");
+    Element* rotturn = document->getElementById("rotturn");
+
+    for (std::size_t i = 0; i + 1 < ops.size(); ++i) {
+        if (ops[i].kind == sui::PaintOp::Kind::BeginGroup) {
+            Element* el = ops[i + 1].item.el;
+            if (el == sx) {
+                check(ops[i].transformed, "scaleX composites");
+                checkNear(ops[i].m[0], 2.0f, 0.01f, "scaleX sets m0 to 2");
+                checkNear(ops[i].m[3], 1.0f, 0.01f, "scaleX leaves m3 at 1");
+            } else if (el == sy) {
+                check(ops[i].transformed, "scaleY composites");
+                checkNear(ops[i].m[0], 1.0f, 0.01f, "scaleY leaves m0 at 1");
+                checkNear(ops[i].m[3], 3.0f, 0.01f, "scaleY sets m3 to 3");
+            } else if (el == skewx) {
+                check(ops[i].transformed, "skewX composites");
+                checkNear(ops[i].m[2], 1.0f, 0.01f, "skewX(45deg) sets tan(45deg)=1 in m2");
+            } else if (el == mat) {
+                check(ops[i].transformed, "matrix composites");
+                checkNear(ops[i].m[4], 30.0f, 0.01f, "matrix sets tx=30 in m4");
+                checkNear(ops[i].m[5], 40.0f, 0.01f, "matrix sets ty=40 in m5");
+            } else if (el == rotturn) {
+                check(ops[i].transformed, "rotate with turn units composites");
+                checkNear(ops[i].m[1], 1.0f, 0.01f, "0.25turn (90deg) sets sin(90)=1 in m1");
+            }
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -936,6 +982,7 @@ int main() {
     testFilterShiftComposites();
     testFilterDropShadowComposites();
     testHitTestPaintOrder();
+    testExtendedTransformFunctions();
     if (failures > 0) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

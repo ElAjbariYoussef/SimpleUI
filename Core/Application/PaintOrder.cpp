@@ -279,7 +279,8 @@ Affine combine(const Affine& outer, const Affine& inner) {
 // scale/rotate, or its product degenerated to the identity (a lone
 // `rotate(0deg)`). A percentage axis in `translate()` is left at zero because
 // it resolves against the box and is the rarer spelling.
-bool transformEffects(std::string_view transform, Affine& affine, float& tx, float& ty) {
+bool transformEffects(std::string_view transform, Affine& affine, float& tx, float& ty,
+                      float boxW = 0.0f, float boxH = 0.0f) {
     Affine acc;
     bool any = false;
     constexpr float kPi = 3.14159265f;
@@ -309,14 +310,38 @@ bool transformEffects(std::string_view transform, Affine& affine, float& tx, flo
                 out = value;
             }
         };
+        auto numberOrPercent = [](std::string_view piece, float ref, float& out) {
+            const std::string owned(piece);
+            char* stop = nullptr;
+            const float value = std::strtof(owned.c_str(), &stop);
+            if (stop != owned.c_str()) {
+                if (stop[0] == '%') {
+                    out = value * 0.01f * ref;
+                } else {
+                    out = value;
+                }
+            }
+        };
+        auto angleToRad = [&](std::string_view piece) -> float {
+            const std::string owned(piece);
+            char* stop = nullptr;
+            const float value = std::strtof(owned.c_str(), &stop);
+            if (stop == owned.c_str()) return 0.0f;
+            while (*stop && std::isspace(static_cast<unsigned char>(*stop))) ++stop;
+            const std::string_view unit(stop);
+            if (unit.find("rad") != std::string_view::npos) return value;
+            if (unit.find("turn") != std::string_view::npos) return value * 2.0f * kPi;
+            if (unit.find("grad") != std::string_view::npos) return value * kPi / 200.0f;
+            return value * kPi / 180.0f;
+        };
         if (name == "translate" || name == "translateX" || name == "translateY") {
             const std::size_t comma = body.find(',');
             const std::string_view first = body.substr(0, comma);
             const std::string_view second =
                 comma == std::string_view::npos ? std::string_view() : body.substr(comma + 1);
             float x = 0.0f, y = 0.0f;
-            number(first, x);
-            number(second, y);
+            numberOrPercent(first, boxW, x);
+            numberOrPercent(second, boxH, y);
             if (name == "translateY") {
                 y = x;
                 x = 0.0f;
@@ -326,25 +351,64 @@ bool transformEffects(std::string_view transform, Affine& affine, float& tx, flo
             tx += x;
             ty += y;
             acc = combine(acc, Affine{1.0f, 0.0f, 0.0f, 1.0f, x, y});
-        } else if (name == "scale") {
-            const std::size_t comma = body.find(',');
+        } else if (name == "scale" || name == "scaleX" || name == "scaleY") {
             float sx = 1.0f, sy = 1.0f;
-            number(body.substr(0, comma), sx);
-            if (comma != std::string_view::npos) {
-                number(body.substr(comma + 1), sy);
+            if (name == "scaleX") {
+                number(body, sx);
+            } else if (name == "scaleY") {
+                number(body, sy);
             } else {
-                sy = sx;
+                const std::size_t comma = body.find(',');
+                number(body.substr(0, comma), sx);
+                if (comma != std::string_view::npos) {
+                    number(body.substr(comma + 1), sy);
+                } else {
+                    sy = sx;
+                }
             }
             acc = combine(acc, Affine{sx, 0.0f, 0.0f, sy, 0.0f, 0.0f});
             any = true;
         } else if (name == "rotate") {
-            float degrees = 0.0f;
-            number(body, degrees);
-            const float rad = degrees * kPi / 180.0f;
+            const float rad = angleToRad(body);
             acc = combine(acc,
                           Affine{std::cos(rad), std::sin(rad), -std::sin(rad), std::cos(rad), 0.0f,
                                  0.0f});
             any = true;
+        } else if (name == "skew" || name == "skewX" || name == "skewY") {
+            float ax = 0.0f, ay = 0.0f;
+            if (name == "skewX") {
+                ax = angleToRad(body);
+            } else if (name == "skewY") {
+                ay = angleToRad(body);
+            } else {
+                const std::size_t comma = body.find(',');
+                ax = angleToRad(body.substr(0, comma));
+                if (comma != std::string_view::npos) {
+                    ay = angleToRad(body.substr(comma + 1));
+                }
+            }
+            acc = combine(acc, Affine{1.0f, std::tan(ay), std::tan(ax), 1.0f, 0.0f, 0.0f});
+            any = true;
+        } else if (name == "matrix") {
+            std::vector<std::string_view> parts;
+            std::size_t pstart = 0;
+            for (std::size_t pi = 0; pi <= body.size(); ++pi) {
+                if (pi == body.size() || body[pi] == ',') {
+                    parts.push_back(body.substr(pstart, pi - pstart));
+                    pstart = pi + 1;
+                }
+            }
+            if (parts.size() == 6) {
+                float a = 1.0f, b = 0.0f, c = 0.0f, d = 1.0f, e = 0.0f, f = 0.0f;
+                number(parts[0], a);
+                number(parts[1], b);
+                number(parts[2], c);
+                number(parts[3], d);
+                numberOrPercent(parts[4], boxW, e);
+                numberOrPercent(parts[5], boxH, f);
+                acc = combine(acc, Affine{a, b, c, d, e, f});
+                any = true;
+            }
         }
         at = close + 1;
     }
@@ -533,7 +597,8 @@ struct Collector {
         // surface blit.
         Affine matrix;
         float tx = 0.0f, ty = 0.0f;
-        const bool hasMatrix = transformEffects(s.transform, matrix, tx, ty);
+        const bool hasMatrix = transformEffects(s.transform, matrix, tx, ty,
+                                                el.layoutWidth(), el.layoutHeight());
         // A `filter: blur()` has to diffuse the box's rendered surface, which
         // only an offscreen texture can provide, so it too forces a surface; the
         // radius rides the BeginGroup op for the executor to apply.
