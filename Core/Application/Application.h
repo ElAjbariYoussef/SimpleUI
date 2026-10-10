@@ -33,16 +33,16 @@ public:
     void shutdown();
 
     Document& document() const;
+    void setDocument(std::unique_ptr<Document> document);
+
+    // Routes one input event through the DOM, updating input fields or firing handlers.
+    void dispatch(const InputEvent& event);
 
 private:
     static WindowConfig windowConfigFrom(Document& document);
 
     // Runs every <script> in `phase`, reporting hrefs that were never compiled in.
     void runScripts(bool afterBody);
-
-    // Routes one pointer event through the DOM, firing handlers on the target
-    // and then on each ancestor.
-    void dispatch(const InputEvent& event);
 
     std::unique_ptr<Resources> resources_;
     std::unique_ptr<Platform> platform_;

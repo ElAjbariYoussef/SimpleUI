@@ -3,6 +3,10 @@
 // and a motion that is dropped outright leaves `:hover` silently dead, with no other
 // test failing. Events are pushed onto SDL's own queue so the real pump runs.
 #include "Platform/Platform.h"
+#include "Core/Application/Application.h"
+#include "SUI/DOM/Document.h"
+#include "SUI/DOM/Element.h"
+#include "SUI/Markup/Parser.h"
 
 #include <SDL3/SDL.h>
 
@@ -209,6 +213,65 @@ int main() {
         if (!textOk) {
             ++failures;
             std::printf("FAIL typed text reports the committed characters\n");
+        }
+    }
+
+    // Test Application dispatch for input fields (editing, readonly, disabled, password, button, backspace).
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<input id=\"txt\" value=\"abc\"/>"
+            "<input id=\"ro\" value=\"abc\" readonly/>"
+            "<input id=\"dis\" value=\"abc\" disabled/>"
+            "<input id=\"btn\" type=\"button\" value=\"click\"/>"
+            "</body></sui>", err);
+        check(doc != nullptr, "test document parsed");
+        if (doc) {
+            sui::Element* txt = doc->getElementById("txt");
+            sui::Element* ro = doc->getElementById("ro");
+            sui::Element* dis = doc->getElementById("dis");
+            sui::Element* btn = doc->getElementById("btn");
+
+            app.setDocument(std::move(doc));
+            sui::Document& appDoc = app.document();
+
+            // 1. Text input on normal text input:
+            appDoc.setFocused(txt);
+            app.dispatch(sui::InputEvent(sui::InputKind::TextInput, 0, 0, 0, 0, 0, 0, "d"));
+            check(txt && txt->value() == "abcd", "text input appends text to editable field");
+
+            // Backspace deletes last character:
+            sui::InputEvent backspaceEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x08);
+            app.dispatch(backspaceEv);
+            check(txt && txt->value() == "abc", "backspace deletes character from editable field");
+
+            // 2. Readonly input rejects text input and backspace:
+            appDoc.setFocused(ro);
+            app.dispatch(sui::InputEvent(sui::InputKind::TextInput, 0, 0, 0, 0, 0, 0, "x"));
+            check(ro && ro->value() == "abc", "readonly input ignores text input");
+            app.dispatch(backspaceEv);
+            check(ro && ro->value() == "abc", "readonly input ignores backspace");
+
+            // 3. Disabled input rejects text input and backspace:
+            appDoc.setFocused(dis);
+            app.dispatch(sui::InputEvent(sui::InputKind::TextInput, 0, 0, 0, 0, 0, 0, "x"));
+            check(dis && dis->value() == "abc", "disabled input ignores text input");
+            app.dispatch(backspaceEv);
+            check(dis && dis->value() == "abc", "disabled input ignores backspace");
+
+            // 4. Non-textual input (button) rejects text input:
+            appDoc.setFocused(btn);
+            app.dispatch(sui::InputEvent(sui::InputKind::TextInput, 0, 0, 0, 0, 0, 0, "x"));
+            check(btn && btn->value() == "click", "button input ignores text input");
+
+            // 5. UTF-8 multi-byte backspace:
+            appDoc.setFocused(txt);
+            app.dispatch(sui::InputEvent(sui::InputKind::TextInput, 0, 0, 0, 0, 0, 0, "\xE2\x80\xA2"));
+            check(txt && txt->value() == "abc\xE2\x80\xA2", "multibyte utf8 appended to input");
+            app.dispatch(backspaceEv);
+            check(txt && txt->value() == "abc", "backspace deletes full multibyte utf8 codepoint");
         }
     }
 

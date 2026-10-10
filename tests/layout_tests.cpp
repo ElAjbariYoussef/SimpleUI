@@ -841,6 +841,38 @@ void testGridLinePlacement() {
     }
 }
 
+void testInputPasswordLayout() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"c\">"
+        "<input id=\"p\" type=\"password\" value=\"secret\"/>"
+        "<input id=\"t\" type=\"text\" value=\"secret\"/>"
+        "</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0;font-size:16px}"));
+    layoutRoot(*document, resolver, 500.0f);
+
+    Element* p = document->getElementById("p");
+    Element* t = document->getElementById("t");
+    Element* c = document->getElementById("c");
+    check(p != nullptr && t != nullptr, "input elements found");
+    if (!p || !t) {
+        return;
+    }
+    check(p->value() == "secret", "password element value preserves plain text");
+    check(t->value() == "secret", "text element value preserves plain text");
+
+    check(!p->textRuns().empty() &&
+          p->textRuns()[0].text == "\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2",
+          "password input text run is masked with bullets");
+    check(!t->textRuns().empty() && t->textRuns()[0].text == "secret",
+          "plain input text run has raw text");
+}
+
 void testPropertyParsing() {
     auto document = parseOrNull("<sui><body><div>x</div></body></sui>");
     if (!document) {
@@ -3576,6 +3608,7 @@ int main() {
     testVerticalAlignTopBottom();
     testGridAlignment();
     testInputValue();
+    testInputPasswordLayout();
     testGridMinmax();
     testGridAutoFill();
     testGridStretch();

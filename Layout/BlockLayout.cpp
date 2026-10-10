@@ -100,14 +100,20 @@ float textWidth(const TextFont* font, const ComputedStyle& s, std::string_view t
     }
     std::string tt = transformText(s, t);
     float w = 0.0f;
+    std::size_t glyphCount = 0;
+    for (unsigned char c : tt) {
+        if ((c & 0xC0) != 0x80) {
+            ++glyphCount;
+        }
+    }
     if (font && font->hasFont() && s.fontSize > 0.0f) {
         w = font->measureText(tt, s.fontSize);
     } else {
-        w = static_cast<float>(tt.size()) * s.fontSize * 0.5f;
+        w = static_cast<float>(glyphCount) * s.fontSize * 0.5f;
     }
-    if (s.letterSpacing.unit != sui::Length::Auto && !tt.empty()) {
+    if (s.letterSpacing.unit != sui::Length::Auto && glyphCount > 0) {
         const float ls = s.letterSpacing.resolve(s.fontSize, s.fontSize, 16.0f);
-        w += ls * static_cast<float>(tt.size() - 1);
+        w += ls * static_cast<float>(glyphCount - 1);
     }
     // A synthetic italic leans the glyph tops to the right, so the run claims the
     // extra width rather than letting the last letter overlap what follows.
@@ -1534,10 +1540,26 @@ private:
         void inlineBox(Element& el, const ComputedStyle& container) {
             // A text field draws its current value where a normal element would draw
             // its children, so its text takes part in the same line context.
+            // Password fields mask the value with bullet characters.
             if (el.tag() == "input") {
                 const std::string value = el.value();
                 if (!value.empty()) {
-                    text(value, container);
+                    if (el.attribute("type") == "password") {
+                        std::size_t chars = 0;
+                        for (unsigned char c : value) {
+                            if ((c & 0xC0) != 0x80) {
+                                ++chars;
+                            }
+                        }
+                        std::string masked;
+                        masked.reserve(chars * 3);
+                        for (std::size_t k = 0; k < chars; ++k) {
+                            masked += "\xE2\x80\xA2";  // Unicode bullet U+2022 (•)
+                        }
+                        text(masked, container);
+                    } else {
+                        text(value, container);
+                    }
                 }
                 return;
             }

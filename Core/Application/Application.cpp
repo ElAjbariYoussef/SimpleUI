@@ -583,6 +583,13 @@ Document& Application::document() const {
     return *document_;
 }
 
+void Application::setDocument(std::unique_ptr<Document> document) {
+    document_ = std::move(document);
+    scriptContext_.document = document_.get();
+    scriptContext_.styles = &resolver_;
+    script::setContext(&scriptContext_);
+}
+
 WindowConfig Application::windowConfigFrom(Document& document) {
     WindowConfig config;
 
@@ -721,9 +728,15 @@ void Application::dispatch(const InputEvent& event) {
             return;
         case InputKind::PointerDown:
             resolver_.setActive(target);
-            // Clicking anywhere, including on nothing, moves focus.
-            document_->setFocused(target);
-            resolver_.setFocused(target);
+            // Clicking anywhere, including on nothing, moves focus. Disabled elements
+            // cannot take focus.
+            if (!target || !target->hasAttribute("disabled")) {
+                document_->setFocused(target);
+                resolver_.setFocused(target);
+            } else {
+                document_->setFocused(nullptr);
+                resolver_.setFocused(nullptr);
+            }
             break;
         case InputKind::PointerUp:
             resolver_.setActive(nullptr);
@@ -758,16 +771,29 @@ void Application::dispatch(const InputEvent& event) {
 
     // A focused text field edits its `value` before any handler sees the event, so
     // an `oninput` handler reads the text the field now holds.
+    // Readonly and disabled fields reject edits. Non-textual types (e.g. button, submit)
+    // do not edit their value on text input.
     if (target && target->tag() == "input") {
-        // SDL's backspace keycode; Application.cpp keeps SDL out of its includes.
         constexpr int kBackspace = 0x08;
-        if (event.kind == InputKind::TextInput && !event.text.empty()) {
-            target->setValue(target->value() + event.text);
-        } else if (event.kind == InputKind::KeyDown && event.key == kBackspace) {
-            std::string value = target->value();
-            if (!value.empty()) {
-                value.pop_back();
-                target->setValue(std::move(value));
+        const bool readOnly = target->hasAttribute("readonly") || target->hasAttribute("disabled");
+        const std::string_view type = target->attribute("type");
+        const bool isTextual = (type.empty() || type == "text" || type == "password" ||
+                                type == "search" || type == "email" || type == "url" ||
+                                type == "tel" || type == "number");
+        if (!readOnly && isTextual) {
+            if (event.kind == InputKind::TextInput && !event.text.empty()) {
+                target->setValue(target->value() + event.text);
+            } else if (event.kind == InputKind::KeyDown && event.key == kBackspace) {
+                std::string value = target->value();
+                if (!value.empty()) {
+                    while (!value.empty() && (static_cast<unsigned char>(value.back()) & 0xC0) == 0x80) {
+                        value.pop_back();
+                    }
+                    if (!value.empty()) {
+                        value.pop_back();
+                    }
+                    target->setValue(std::move(value));
+                }
             }
         }
     }
