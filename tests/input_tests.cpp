@@ -4,6 +4,7 @@
 // test failing. Events are pushed onto SDL's own queue so the real pump runs.
 #include "Platform/Platform.h"
 #include "Core/Application/Application.h"
+#include "Layout/BlockLayout.h"
 #include "SUI/DOM/Document.h"
 #include "SUI/DOM/Element.h"
 #include "SUI/Markup/Parser.h"
@@ -442,6 +443,46 @@ int main() {
             check(app.hasComposition(), "composition restored on txt");
             app.dispatch(sui::InputEvent(sui::InputKind::PointerDown, 0.0f, 0.0f, 1));
             check(!app.hasComposition(), "PointerDown clears composition");
+        }
+    }
+
+    // `cursor` is resolved from the hovered element and handed to the platform.
+    // The decision is observable without a window through Application::activeCursor.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<div id=\"hit\" style=\"cursor:pointer;width:100px;height:40px\"></div>"
+            "<div id=\"miss\" style=\"width:100px;height:40px\"></div>"
+            "</body></sui>", err);
+        check(doc != nullptr, "cursor test document parsed");
+        if (doc) {
+            sui::Element* hit = doc->getElementById("hit");
+            sui::Element* miss = doc->getElementById("miss");
+            app.setDocument(std::move(doc));
+
+            // Paint ops read element geometry, so the document needs a layout pass
+            // before a move can land on anything.
+            sui::StyleResolver layoutResolver;
+            sui::LayoutInput input;
+            input.resolver = &layoutResolver;
+            input.viewportWidth = 400.0f;
+            input.viewportHeight = 300.0f;
+            sui::BlockLayout().layout(app.document().root(), input);
+
+            check(app.activeCursor() == sui::ComputedStyle::CursorAuto,
+                  "the default cursor is active before any pointer event");
+
+            app.dispatch(sui::InputEvent(sui::InputKind::PointerMove,
+                                         hit->layoutX() + 5.0f, hit->layoutY() + 5.0f, 0));
+            check(app.activeCursor() == sui::ComputedStyle::CursorPointer,
+                  "moving over a cursor:pointer element selects the pointer shape");
+
+            app.dispatch(sui::InputEvent(sui::InputKind::PointerMove,
+                                         miss->layoutX() + 5.0f, miss->layoutY() + 5.0f, 0));
+            check(app.activeCursor() == sui::ComputedStyle::CursorAuto,
+                  "moving off it returns to the default shape");
         }
     }
 

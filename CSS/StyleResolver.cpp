@@ -2385,6 +2385,9 @@ void noteCustomUsage(Rule& rule) {
 }
 
 
+// The CSS cursor keyword set lives in CSS/Style.h so the application layer can
+// reuse the same enum-to-keyword mapping when it hands the shape to the platform.
+
 void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontSize) {
     const std::string& property = decl.property;
     const std::string_view value = trim(decl.value);
@@ -3168,6 +3171,37 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.pointerEventsNone = false;
             s.specified |= ComputedStyle::SpecifiedPointerEvents;
         }
+    } else if (property == "cursor") {
+        // `cursor` is a comma-separated fallback list: any number of `url()`
+        // entries (which this engine cannot load) may precede the keyword that is
+        // actually used. The last recognised keyword wins, so `url(x.png), pointer`
+        // resolves to the pointer. A list with no keyword is invalid and dropped.
+        ComputedStyle::Cursor chosen = s.cursor;
+        bool matched = false;
+        std::size_t i = 0;
+        while (i < value.size()) {
+            while (i < value.size() &&
+                   (value[i] == ',' || std::isspace(static_cast<unsigned char>(value[i])))) {
+                ++i;
+            }
+            if (i >= value.size()) {
+                break;
+            }
+            const std::size_t start = i;
+            while (i < value.size() && value[i] != ',' &&
+                   !std::isspace(static_cast<unsigned char>(value[i]))) {
+                ++i;
+            }
+            ComputedStyle::Cursor parsed = ComputedStyle::CursorAuto;
+            if (cursorKeyword(value.substr(start, i - start), parsed)) {
+                chosen = parsed;
+                matched = true;
+            }
+        }
+        if (matched) {
+            s.cursor = chosen;
+            s.specified |= ComputedStyle::SpecifiedCursor;
+        }
     } else if (property == "resize" || property == "appearance" ||
                property == "-webkit-appearance") {
         // Accepted; these control browser chrome that this engine does not draw.
@@ -3779,6 +3813,9 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "pointer-events") {
         return style.pointerEventsNone ? "none" : "auto";
     }
+    if (property == "cursor") {
+        return std::string(cursorName(style.cursor));
+    }
     if (property == "text-overflow") {
         return style.textOverflow == ComputedStyle::TextOverflowEllipsis ? "ellipsis" : "clip";
     }
@@ -4057,7 +4094,8 @@ bool isInheritable(std::string_view property) {
            property == "font-family" || property == "font-weight" ||
            property == "line-height" || property == "text-align" ||
            property == "list-style-type" || property == "list-style" ||
-           property == "text-decoration-color" || property == "pointer-events";
+           property == "text-decoration-color" || property == "pointer-events" ||
+           property == "cursor";
 }
 
 // `inherit` and `unset` are the two CSS-wide keywords the engine can answer

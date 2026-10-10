@@ -11,6 +11,7 @@
 
 struct SDL_Window;
 struct SDL_Renderer;
+struct SDL_Cursor;
 
 namespace sui {
 
@@ -91,6 +92,12 @@ public:
 
     // Drains the event queue; returns false once the app should quit.
     virtual bool pumpEvents() = 0;
+
+    // Sets the pointer shape shown while it is over the window. `name` is a CSS
+    // cursor keyword ("pointer", "text", "col-resize", ...). A platform folds the
+    // values its toolkit has no cursor for onto the nearest one it does; "none"
+    // hides the pointer outright.
+    virtual void setCursor(std::string_view name) = 0;
 
     // Pointer events collected by the last pumpEvents(), in arrival order.
     virtual const std::vector<InputEvent>& inputEvents() const = 0;

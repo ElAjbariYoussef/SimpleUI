@@ -1445,7 +1445,7 @@ void testUnknownPropertyIsReported() {
     auto document = parseOrNull("<sui><body><div id=\"x\">x</div></body></sui>");
     if (document) {
         sui::StyleResolver resolver;
-        resolver.setRules(sui::CSSParser::parse("div { cursor: pointer; width: 10px }"));
+        resolver.setRules(sui::CSSParser::parse("div { border-image: none; width: 10px }"));
         resolver.resolve(*document->getElementById("x"));
         resolvedLog = capturedLog;
         const std::size_t afterFirst = capturedLog.size();
@@ -1466,7 +1466,7 @@ void testUnknownPropertyIsReported() {
         }
         return false;
     };
-    check(mentions("cursor"), "an unsupported property is logged by name");
+    check(mentions("border-image"), "an unsupported property is logged by name");
     check(!mentions("width"), "a supported property is not reported");
 
     // A different unsupported property is its own report; dedupe is per name.
@@ -1480,6 +1480,59 @@ void testUnknownPropertyIsReported() {
 
     SDL_SetLogOutputFunction(previous, previousUserdata);
     SDL_SetLogPriority(SDL_LOG_CATEGORY_APPLICATION, previousPriority);
+}
+
+// `cursor` changes the pointer shape, not the box: layout ignores it, but the
+// application reads it on every hover. The interesting parts are the fallback
+// list grammar, the inheritance, and the keyword round-trip.
+void testCursorProperty() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<a id=\"lnk\" href=\"#\">home</a>"
+        "<div id=\"box\"><span id=\"kid\">k</span>"
+        "<span id=\"autokid\">a</span></div>"
+        "<div id=\"none\">n</div>"
+        "<div id=\"url\">u</div>"
+        "<div id=\"bogus\">b</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(R"(
+        #box { cursor: pointer }
+        #autokid { cursor: auto }
+        #none { cursor: none }
+        #url { cursor: url(hand.png), text }
+        #bogus { cursor: nonsense }
+    )"));
+
+    auto cursorOf = [&](const char* id) {
+        return resolver.resolve(*document->getElementById(id)).cursor;
+    };
+    auto valueOf = [&](const char* id) {
+        return sui::StyleResolver::propertyValue(
+            resolver.resolve(*document->getElementById(id)), "cursor");
+    };
+
+    check(cursorOf("box") == sui::ComputedStyle::CursorPointer,
+          "cursor: pointer resolves to the pointer shape");
+    check(cursorOf("kid") == sui::ComputedStyle::CursorPointer,
+          "cursor inherits into an unstyled descendant");
+    check(cursorOf("autokid") == sui::ComputedStyle::CursorAuto,
+          "an explicit cursor: auto overrides the inherited shape");
+    check(cursorOf("lnk") == sui::ComputedStyle::CursorPointer,
+          "a link gets the pointer shape from the UA");
+    check(cursorOf("none") == sui::ComputedStyle::CursorNone,
+          "cursor: none is kept as its own value");
+    check(cursorOf("url") == sui::ComputedStyle::CursorText,
+          "a url() fallback list resolves to its trailing keyword");
+    check(cursorOf("bogus") == sui::ComputedStyle::CursorAuto,
+          "an unrecognised cursor value is dropped");
+
+    check(valueOf("box") == "pointer", "cursor: pointer round-trips");
+    check(valueOf("none") == "none", "cursor: none round-trips");
+    check(valueOf("url") == "text", "the keyword chosen from a fallback list round-trips");
 }
 
 void testLengthUnits() {
@@ -4454,6 +4507,7 @@ int main() {
     testDefaultStyles();
     testPhrasingTagsStayInline();
     testUnknownPropertyIsReported();
+    testCursorProperty();
     testCommentsInsideDeclarationBlocks();
     testUnitsEndToEnd();
     testFlexRowBasics();

@@ -26,6 +26,58 @@ int heldButton(Uint32 state) {
     return 0;
 }
 
+// SDL's system-cursor set mirrors the CSS keywords almost one-to-one. Only the
+// values SDL has no shape for are folded; everything else maps straight across.
+SDL_SystemCursor systemCursorFor(std::string_view name) {
+    struct Entry {
+        std::string_view name;
+        SDL_SystemCursor id;
+    };
+    static constexpr Entry table[] = {
+        {"default", SDL_SYSTEM_CURSOR_DEFAULT},
+        {"text", SDL_SYSTEM_CURSOR_TEXT},
+        {"wait", SDL_SYSTEM_CURSOR_WAIT},
+        {"crosshair", SDL_SYSTEM_CURSOR_CROSSHAIR},
+        {"progress", SDL_SYSTEM_CURSOR_PROGRESS},
+        {"nwse-resize", SDL_SYSTEM_CURSOR_NWSE_RESIZE},
+        {"nesw-resize", SDL_SYSTEM_CURSOR_NESW_RESIZE},
+        {"ew-resize", SDL_SYSTEM_CURSOR_EW_RESIZE},
+        {"ns-resize", SDL_SYSTEM_CURSOR_NS_RESIZE},
+        {"move", SDL_SYSTEM_CURSOR_MOVE},
+        {"all-scroll", SDL_SYSTEM_CURSOR_ALL_SCROLL},
+        {"not-allowed", SDL_SYSTEM_CURSOR_NOT_ALLOWED},
+        {"pointer", SDL_SYSTEM_CURSOR_POINTER},
+        {"no-drop", SDL_SYSTEM_CURSOR_NO_DROP},
+        {"n-resize", SDL_SYSTEM_CURSOR_N_RESIZE},
+        {"s-resize", SDL_SYSTEM_CURSOR_S_RESIZE},
+        {"e-resize", SDL_SYSTEM_CURSOR_E_RESIZE},
+        {"w-resize", SDL_SYSTEM_CURSOR_W_RESIZE},
+        {"ne-resize", SDL_SYSTEM_CURSOR_NE_RESIZE},
+        {"nw-resize", SDL_SYSTEM_CURSOR_NW_RESIZE},
+        {"se-resize", SDL_SYSTEM_CURSOR_SE_RESIZE},
+        {"sw-resize", SDL_SYSTEM_CURSOR_SW_RESIZE},
+        {"context-menu", SDL_SYSTEM_CURSOR_CONTEXT_MENU},
+        {"help", SDL_SYSTEM_CURSOR_HELP},
+        {"cell", SDL_SYSTEM_CURSOR_CELL},
+        {"vertical-text", SDL_SYSTEM_CURSOR_VERTICAL_TEXT},
+        {"alias", SDL_SYSTEM_CURSOR_ALIAS},
+        {"copy", SDL_SYSTEM_CURSOR_COPY},
+        {"col-resize", SDL_SYSTEM_CURSOR_COL_RESIZE},
+        {"row-resize", SDL_SYSTEM_CURSOR_ROW_RESIZE},
+        {"grab", SDL_SYSTEM_CURSOR_GRAB},
+        {"grabbing", SDL_SYSTEM_CURSOR_GRABBING},
+        {"zoom-in", SDL_SYSTEM_CURSOR_ZOOM_IN},
+        {"zoom-out", SDL_SYSTEM_CURSOR_ZOOM_OUT},
+    };
+    for (const auto& entry : table) {
+        if (name == entry.name) {
+            return entry.id;
+        }
+    }
+    // "auto", an unknown keyword, an empty name: the platform's own arrow.
+    return SDL_SYSTEM_CURSOR_DEFAULT;
+}
+
 }  // namespace
 
 bool LinuxPlatform::initialize(const WindowConfig& config, std::string& error) {
@@ -88,6 +140,13 @@ bool LinuxPlatform::initialize(const WindowConfig& config, std::string& error) {
 }
 
 void LinuxPlatform::shutdown() {
+    for (SDL_Cursor* cursor : cursors_) {
+        if (cursor) {
+            SDL_DestroyCursor(cursor);
+        }
+    }
+    cursors_.clear();
+    cursorName_.clear();
     if (renderer_) {
         SDL_DestroyRenderer(renderer_);
         renderer_ = nullptr;
@@ -218,6 +277,34 @@ bool LinuxPlatform::pumpEvents() {
     }
 
     return running_;
+}
+
+void LinuxPlatform::setCursor(std::string_view name) {
+    if (name == cursorName_) {
+        return;
+    }
+    cursorName_ = std::string(name);
+
+    // `cursor: none` has no shape in SDL's system set; hide the pointer instead.
+    if (name == "none") {
+        SDL_HideCursor();
+        return;
+    }
+    SDL_ShowCursor();
+
+    const SDL_SystemCursor id = systemCursorFor(name);
+    const std::size_t index = static_cast<std::size_t>(id);
+    if (index >= cursors_.size()) {
+        cursors_.resize(index + 1, nullptr);
+    }
+    if (!cursors_[index]) {
+        cursors_[index] = SDL_CreateSystemCursor(id);
+    }
+    // A null result means the toolkit could not build that shape (a headless video
+    // driver, say); leaving the previous cursor in place is better than clearing it.
+    if (cursors_[index]) {
+        SDL_SetCursor(cursors_[index]);
+    }
 }
 
 }  // namespace sui

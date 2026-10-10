@@ -64,8 +64,11 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
     if (tag == "a") {
         Style s;
         s.display = Style::Inline;
-        s.specified = Style::SpecifiedColor;
+        s.specified = Style::SpecifiedColor | Style::SpecifiedCursor;
         s.color = {96, 165, 250, 255};
+        // A link is the one element whose role is unambiguous from the tag, so the
+        // UA gives it the pointer shape the way a browser does.
+        s.cursor = Style::CursorPointer;
         return s;
     }
 

@@ -60,8 +60,16 @@ public:
     bool hasComposition() const noexcept { return !compositionText_.empty(); }
     void clearComposition() noexcept { compositionText_.clear(); }
 
+    // The pointer shape the hovered element last asked for, after inheritance.
+    // Exposed so the platform-independent decision can be checked without a window.
+    ComputedStyle::Cursor activeCursor() const noexcept { return activeCursor_; }
+
 private:
     static WindowConfig windowConfigFrom(Document& document);
+
+    // Resolves `target`'s `cursor` and, when it changed, hands the keyword to the
+    // platform. Called on every pointer move, so an unchanged hover is a no-op.
+    void updateCursor(Element* target);
 
     // Runs every <script> in `phase`, reporting hrefs that were never compiled in.
     void runScripts(bool afterBody);
@@ -113,6 +121,10 @@ private:
     bool ctrlDown_ = false;
     std::string compositionText_;
     int compositionCursor_ = 0;
+
+    // The cursor keyword currently in effect, re-derived from the hovered element
+    // whenever the pointer moves.
+    ComputedStyle::Cursor activeCursor_ = ComputedStyle::CursorAuto;
 };
 
 }  // namespace sui

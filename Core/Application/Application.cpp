@@ -946,6 +946,22 @@ void Application::runScripts(bool afterBody) {
     }
 }
 
+void Application::updateCursor(Element* target) {
+    ComputedStyle::Cursor cursor = ComputedStyle::CursorAuto;
+    if (target) {
+        cursor = resolver_.resolve(*target).cursor;
+    }
+    if (cursor == activeCursor_) {
+        return;
+    }
+    activeCursor_ = cursor;
+    // No window yet (headless, or a unit test that only set a document): the
+    // decision is still observable through activeCursor(), which is the point.
+    if (platform_) {
+        platform_->setCursor(cursorName(cursor));
+    }
+}
+
 void Application::dispatch(const InputEvent& event) {
     if (!document_ || !document_->root()) {
         return;
@@ -972,6 +988,10 @@ void Application::dispatch(const InputEvent& event) {
     switch (event.kind) {
         case InputKind::PointerMove:
             resolver_.setHovered(target);
+            // The pointer shape follows whatever is under it. Resolved here, after
+            // the hover state is set, so a `:hover` rule that changes `cursor` is
+            // honoured on the same move that entered it.
+            updateCursor(target);
             // A drag keeps the active element under the cursor, so `:active` follows
             // the pointer instead of sticking to wherever the press landed. The button
             // field is zero for a plain hover, which is what separates the two.

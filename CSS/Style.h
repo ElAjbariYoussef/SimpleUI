@@ -594,6 +594,51 @@ struct ComputedStyle {
     // intercept pointer events during hit testing.
     bool pointerEventsNone = false;
 
+    // The pointer shape asked for while this element is hovered (`cursor`). The full
+    // CSS keyword set is parsed; the platform layer maps each value onto the nearest
+    // SDL system cursor. `CursorAuto` means no preference, so the platform default
+    // stays in place. Cursor inherits, so an unstyled descendant over a link keeps
+    // the link's pointer shape.
+    enum Cursor : std::uint8_t {
+        CursorAuto,
+        CursorDefault,
+        CursorNone,
+        CursorContextMenu,
+        CursorHelp,
+        CursorPointer,
+        CursorProgress,
+        CursorWait,
+        CursorCell,
+        CursorCrosshair,
+        CursorText,
+        CursorVerticalText,
+        CursorAlias,
+        CursorCopy,
+        CursorMove,
+        CursorNoDrop,
+        CursorNotAllowed,
+        CursorGrab,
+        CursorGrabbing,
+        CursorAllScroll,
+        CursorColResize,
+        CursorRowResize,
+        CursorEResize,
+        CursorNResize,
+        CursorNeResize,
+        CursorNwResize,
+        CursorSResize,
+        CursorSeResize,
+        CursorSwResize,
+        CursorWResize,
+        CursorEwResize,
+        CursorNsResize,
+        CursorNeswResize,
+        CursorNwseResize,
+        CursorZoomIn,
+        CursorZoomOut
+    };
+    Cursor cursor = CursorAuto;
+
     // Which inheritable properties the user-agent style set on its own. Anything
     // not flagged here flows down from the parent. Author rules and inline
     // styles apply after inheritance, so they always win.
@@ -617,9 +662,76 @@ struct ComputedStyle {
         SpecifiedListStyleType = 1u << 16,
         SpecifiedTextDecorationColor = 1u << 17,
         SpecifiedPointerEvents = 1u << 18,
+        SpecifiedCursor = 1u << 19,
     };
     std::uint32_t specified = 0;
 };
+
+// The CSS cursor keyword set, as one name/value table so the parser and the
+// serializer cannot disagree about a spelling. Lives here rather than in the
+// resolver because the application layer needs the same enum-to-keyword mapping
+// when it hands the shape to the platform.
+struct CursorKeyword {
+    std::string_view name;
+    ComputedStyle::Cursor value;
+};
+inline constexpr CursorKeyword kCursorKeywords[] = {
+    {"auto", ComputedStyle::CursorAuto},
+    {"default", ComputedStyle::CursorDefault},
+    {"none", ComputedStyle::CursorNone},
+    {"context-menu", ComputedStyle::CursorContextMenu},
+    {"help", ComputedStyle::CursorHelp},
+    {"pointer", ComputedStyle::CursorPointer},
+    {"progress", ComputedStyle::CursorProgress},
+    {"wait", ComputedStyle::CursorWait},
+    {"cell", ComputedStyle::CursorCell},
+    {"crosshair", ComputedStyle::CursorCrosshair},
+    {"text", ComputedStyle::CursorText},
+    {"vertical-text", ComputedStyle::CursorVerticalText},
+    {"alias", ComputedStyle::CursorAlias},
+    {"copy", ComputedStyle::CursorCopy},
+    {"move", ComputedStyle::CursorMove},
+    {"no-drop", ComputedStyle::CursorNoDrop},
+    {"not-allowed", ComputedStyle::CursorNotAllowed},
+    {"grab", ComputedStyle::CursorGrab},
+    {"grabbing", ComputedStyle::CursorGrabbing},
+    {"all-scroll", ComputedStyle::CursorAllScroll},
+    {"col-resize", ComputedStyle::CursorColResize},
+    {"row-resize", ComputedStyle::CursorRowResize},
+    {"e-resize", ComputedStyle::CursorEResize},
+    {"n-resize", ComputedStyle::CursorNResize},
+    {"ne-resize", ComputedStyle::CursorNeResize},
+    {"nw-resize", ComputedStyle::CursorNwResize},
+    {"s-resize", ComputedStyle::CursorSResize},
+    {"se-resize", ComputedStyle::CursorSeResize},
+    {"sw-resize", ComputedStyle::CursorSwResize},
+    {"w-resize", ComputedStyle::CursorWResize},
+    {"ew-resize", ComputedStyle::CursorEwResize},
+    {"ns-resize", ComputedStyle::CursorNsResize},
+    {"nesw-resize", ComputedStyle::CursorNeswResize},
+    {"nwse-resize", ComputedStyle::CursorNwseResize},
+    {"zoom-in", ComputedStyle::CursorZoomIn},
+    {"zoom-out", ComputedStyle::CursorZoomOut},
+};
+
+inline bool cursorKeyword(std::string_view word, ComputedStyle::Cursor& out) {
+    for (const auto& entry : kCursorKeywords) {
+        if (word == entry.name) {
+            out = entry.value;
+            return true;
+        }
+    }
+    return false;
+}
+
+inline std::string_view cursorName(ComputedStyle::Cursor value) {
+    for (const auto& entry : kCursorKeywords) {
+        if (value == entry.value) {
+            return entry.name;
+        }
+    }
+    return "auto";
+}
 
 // The box-model lengths of a style after percentages and font-relative units have
 // been resolved against a containing block. Layout measures with these instead of
@@ -754,6 +866,9 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     }
     if (!(style.specified & ComputedStyle::SpecifiedPointerEvents)) {
         style.pointerEventsNone = parent.pointerEventsNone;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedCursor)) {
+        style.cursor = parent.cursor;
     }
     // `transform` and `filter` are not inherited in CSS: they describe the box
     // they are declared on. The paint walk already carries a translated or

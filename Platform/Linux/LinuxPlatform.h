@@ -21,6 +21,8 @@ public:
     bool pumpEvents() override;
     const std::vector<InputEvent>& inputEvents() const override { return input_; }
 
+    void setCursor(std::string_view name) override;
+
 private:
     // Framebuffer pixels per window point, which is 1 everywhere except a display
     // with a scale factor.
@@ -30,6 +32,12 @@ private:
     SDL_Renderer* renderer_ = nullptr;
     bool running_ = true;
     std::vector<InputEvent> input_;
+    // One lazily created cursor per SDL system-cursor id, indexed by that id, so a
+    // hover that flips between two shapes does not create a cursor per motion.
+    std::vector<SDL_Cursor*> cursors_;
+    // The keyword already in effect, kept so an unchanged hover does not re-issue
+    // SDL_SetCursor on every motion event.
+    std::string cursorName_;
 };
 
 }  // namespace sui
