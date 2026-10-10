@@ -124,7 +124,7 @@ Element* hitTest(Element& el, float x, float y, const StyleResolver& resolver, f
     if (el.isVisual()) {
         const ComputedStyle s = resolver.resolve(el);
         const bool drawn = s.display != ComputedStyle::None && s.visible;
-        if (drawn && el.layoutWidth() > 0.0f && el.layoutHeight() > 0.0f &&
+        if (drawn && !s.pointerEventsNone && el.layoutWidth() > 0.0f && el.layoutHeight() > 0.0f &&
             x + offX >= el.layoutX() && x + offX < el.layoutX() + el.layoutWidth() &&
             y + offY >= el.layoutY() && y + offY < el.layoutY() + el.layoutHeight()) {
             found = &el;

@@ -565,6 +565,10 @@ struct ComputedStyle {
     // Visibility
     bool visible = true;
 
+    // Pointer events: when true (from `pointer-events: none`), the element does not
+    // intercept pointer events during hit testing.
+    bool pointerEventsNone = false;
+
     // Which inheritable properties the user-agent style set on its own. Anything
     // not flagged here flows down from the parent. Author rules and inline
     // styles apply after inheritance, so they always win.
@@ -587,6 +591,7 @@ struct ComputedStyle {
         SpecifiedTransformOrigin = 1u << 15,
         SpecifiedListStyleType = 1u << 16,
         SpecifiedTextDecorationColor = 1u << 17,
+        SpecifiedPointerEvents = 1u << 18,
     };
     std::uint32_t specified = 0;
 };
@@ -713,6 +718,9 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     if (!(style.specified & ComputedStyle::SpecifiedTextDecorationColor)) {
         style.textDecorationColor = parent.textDecorationColor;
         style.hasTextDecorationColor = parent.hasTextDecorationColor;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedPointerEvents)) {
+        style.pointerEventsNone = parent.pointerEventsNone;
     }
     // `transform` and `filter` are not inherited in CSS: they describe the box
     // they are declared on. The paint walk already carries a translated or

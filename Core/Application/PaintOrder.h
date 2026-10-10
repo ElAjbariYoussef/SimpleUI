@@ -56,6 +56,7 @@ struct PaintItem {
     // never offscreen (a `display:none` ancestor, or a group that could not
     // allocate a surface).
     float opacity = 1.0f;
+    bool pointerEventsNone = false;
 };
 
 // A parsed `filter: drop-shadow(x y blur color)`. The shadow follows the

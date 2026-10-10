@@ -961,6 +961,55 @@ void testExtendedTransformFunctions() {
     }
 }
 
+void testPointerEventsNone() {
+    auto document = parseOrNull(R"HTML(<sui><body>
+        <div id="target" style="position:absolute;left:0;top:0;width:100px;height:100px"></div>
+        <div id="overlay" style="position:absolute;left:0;top:0;width:100px;height:100px;pointer-events:none">
+            <div id="child-auto" style="position:absolute;left:10px;top:10px;width:30px;height:30px;pointer-events:auto"></div>
+            <div id="child-inherited" style="position:absolute;left:50px;top:50px;width:30px;height:30px"></div>
+        </div>
+    </body></sui>)HTML");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*document, resolver);
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+
+    Element* target = document->getElementById("target");
+    Element* overlay = document->getElementById("overlay");
+    Element* childAuto = document->getElementById("child-auto");
+    Element* childInherited = document->getElementById("child-inherited");
+
+    check(overlay != nullptr && target != nullptr && childAuto != nullptr && childInherited != nullptr,
+          "all elements found for pointer-events test");
+
+    const sui::ComputedStyle overlayStyle = resolver.resolve(*overlay);
+    check(overlayStyle.pointerEventsNone, "overlay computed style has pointerEventsNone true");
+    check(sui::StyleResolver::propertyValue(overlayStyle, "pointer-events") == "none",
+          "propertyValue reports 'none' for pointer-events: none");
+
+    const sui::ComputedStyle childInheritedStyle = resolver.resolve(*childInherited);
+    check(childInheritedStyle.pointerEventsNone, "child inherits pointerEventsNone from overlay");
+
+    const sui::ComputedStyle childAutoStyle = resolver.resolve(*childAuto);
+    check(!childAutoStyle.pointerEventsNone, "child with pointer-events:auto overrides inheritance");
+
+    // Hit test over childAuto: childAuto has pointer-events:auto so it is hit
+    Element* hitChild = sui::hitTestPaintOrder(ops, 15.0f, 15.0f);
+    check(hitChild == childAuto, "child with pointer-events:auto intercepts hit test");
+
+    // Hit test over childInherited: childInherited has pointer-events:none, overlay has pointer-events:none,
+    // so hit passes through to underlying target!
+    Element* hitPassInherited = sui::hitTestPaintOrder(ops, 55.0f, 55.0f);
+    check(hitPassInherited == target, "hit test passes through inherited pointer-events:none to target");
+
+    // Hit test over overlay but outside children: overlay has pointer-events:none, so hit passes through to target
+    Element* hitPassOverlay = sui::hitTestPaintOrder(ops, 5.0f, 5.0f);
+    check(hitPassOverlay == target, "hit test passes through pointer-events:none overlay to target");
+}
+
 }  // namespace
 
 int main() {
@@ -983,6 +1032,7 @@ int main() {
     testFilterDropShadowComposites();
     testHitTestPaintOrder();
     testExtendedTransformFunctions();
+    testPointerEventsNone();
     if (failures > 0) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

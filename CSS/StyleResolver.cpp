@@ -3081,7 +3081,14 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
     } else if (property == "list-style-position" || property == "list-style-image") {
         // Accepted; outside-position markers and image markers are not yet rendered.
     } else if (property == "pointer-events") {
-        // Accepted without storage: a full pointer-events:none skip is a later pass.
+        std::string_view val = trim(value);
+        if (val == "none") {
+            s.pointerEventsNone = true;
+            s.specified |= ComputedStyle::SpecifiedPointerEvents;
+        } else if (val == "auto" || val == "initial") {
+            s.pointerEventsNone = false;
+            s.specified |= ComputedStyle::SpecifiedPointerEvents;
+        }
     } else if (property == "resize" || property == "appearance" ||
                property == "-webkit-appearance") {
         // Accepted; these control browser chrome that this engine does not draw.
@@ -3617,6 +3624,9 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         }
         return "disc";
     }
+    if (property == "pointer-events") {
+        return style.pointerEventsNone ? "none" : "auto";
+    }
     return {};
 }
 
@@ -3883,7 +3893,7 @@ bool isInheritable(std::string_view property) {
            property == "font-family" || property == "font-weight" ||
            property == "line-height" || property == "text-align" ||
            property == "list-style-type" || property == "list-style" ||
-           property == "text-decoration-color";
+           property == "text-decoration-color" || property == "pointer-events";
 }
 
 // `inherit` and `unset` are the two CSS-wide keywords the engine can answer

@@ -667,6 +667,7 @@ struct Collector {
         item.dx = box.child.dx;
         item.dy = box.child.dy;
         item.opacity = box.child.opacity;
+        item.pointerEventsNone = s.pointerEventsNone;
         // The point the transform turns about: the resolved transform-origin,
         // measured from the box's own top-left (which scroll offsets have already
         // moved out of `dx`/`dy`).
@@ -834,7 +835,7 @@ Element* hitTestPaintOrder(const std::vector<PaintOp>& ops, float x, float y) {
     }
     for (int i = (int)ops.size()-1; i>=0; --i) {
         const auto& op = ops[i];
-        if (op.kind == PaintOp::Kind::Box && hitBox(ctx[i], op.item, x, y)) {
+        if (op.kind == PaintOp::Kind::Box && !op.item.pointerEventsNone && hitBox(ctx[i], op.item, x, y)) {
             return op.item.el;
         }
     }
