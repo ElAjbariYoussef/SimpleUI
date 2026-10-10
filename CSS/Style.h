@@ -459,8 +459,16 @@ struct ComputedStyle {
     bool gridColumnsAutoFit = false;
     bool gridRowsAutoFill = false;
     bool gridRowsAutoFit = false;
-    // `grid-column` / `grid-row` span in cells. Line numbers and `grid-area` names
-    // are not modelled; only the `span` counts (and numeric `a / b` ranges) are read.
+    // `grid-column` / `grid-row` explicit line placement and span.
+    // `gridColumnStart` / `gridRowStart` are 1-based CSS line numbers; 0 means auto
+    // (the item is placed by the auto-placement algorithm). `gridColumnEnd` /
+    // `gridRowEnd` are similarly 1-based end lines; 0 means auto. When both start and
+    // end are given the span is `end - start`; when only start is given the existing
+    // `gridColumnSpan` / `gridRowSpan` counts extend from it.
+    int gridColumnStart = 0;
+    int gridColumnEnd   = 0;
+    int gridRowStart    = 0;
+    int gridRowEnd      = 0;
     int gridColumnSpan = 1;
     int gridRowSpan = 1;
 

@@ -716,6 +716,131 @@ void testGridSpans() {
     }
 }
 
+void testGridLinePlacement() {
+    // `grid-column: 2 / 4` on a 4-column grid: item starts in column 2 (0-based
+    // index 1) and spans 2 columns, so it occupies columns 2-3 (x = 100, w = 200).
+    // The first auto-placed item should land in column 1 (x = 0), and the third
+    // auto-placed item should appear after the pinned one in column 4 (x = 300).
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\">"
+            "<i id=\"a\"></i>"
+            "<i id=\"b\" style=\"grid-column:2/4\"></i>"
+            "<i id=\"c\"></i>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;grid-template-columns:repeat(4,100px);"
+            "width:400px} #g i{height:10px}"));
+        layoutRoot(*document, resolver, 500.0f);
+
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        check(a && std::fabs(a->layoutX() - 0.0f) < 0.5f,
+              "first auto item lands in column 1");
+        check(b && std::fabs(b->layoutX() - 100.0f) < 0.5f,
+              "explicit grid-column:2/4 pins item to column 2");
+        check(b && std::fabs(b->layoutWidth() - 200.0f) < 0.5f,
+              "explicit grid-column:2/4 spans two tracks");
+        check(c && std::fabs(c->layoutX() - 300.0f) < 0.5f,
+              "auto item after pinned item fills remaining column");
+        if (b) {
+            const ComputedStyle s = resolver.resolve(*b);
+            check(sui::StyleResolver::propertyValue(s, "grid-column") == "2 / 4",
+                  "grid-column:2/4 serialises back with start and end lines");
+            check(sui::StyleResolver::propertyValue(s, "grid-column-start") == "2",
+                  "grid-column-start serialises as '2'");
+            check(sui::StyleResolver::propertyValue(s, "grid-column-end") == "4",
+                  "grid-column-end serialises as '4'");
+        }
+    }
+
+    // `grid-column: 3` (bare line number): item starts at column 3, spans 1.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\">"
+            "<i id=\"a\"></i>"
+            "<i id=\"b\" style=\"grid-column:3\"></i>"
+            "<i id=\"c\"></i>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;grid-template-columns:repeat(4,100px);"
+            "width:400px} #g i{height:10px}"));
+        layoutRoot(*document, resolver, 500.0f);
+
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        check(a && std::fabs(a->layoutX() - 0.0f) < 0.5f,
+              "first auto item in column 1 before pinned column-3 item");
+        check(b && std::fabs(b->layoutX() - 200.0f) < 0.5f,
+              "bare line number grid-column:3 pins to column 3 (x=200)");
+        check(c && std::fabs(c->layoutX() - 100.0f) < 0.5f,
+              "auto item fills the free cell in column 2");
+    }
+
+    // `grid-row: 2` (explicit row start): item is pinned to the second row.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\">"
+            "<i id=\"a\" style=\"grid-row:2;height:20px\"></i>"
+            "<i id=\"b\" style=\"height:10px\"></i>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;grid-template-columns:100px 100px;"
+            "grid-template-rows:10px 20px;width:200px}"));
+        layoutRoot(*document, resolver, 300.0f);
+
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        // `b` should fill row 1 col 1; `a` is forced to row 2.
+        check(b && std::fabs(b->layoutY() - 0.0f) < 0.5f,
+              "auto item fills first row when peer is pinned to row 2");
+        check(a && std::fabs(a->layoutY() - 10.0f) < 0.5f,
+              "grid-row:2 pins item to second row (y=10)");
+        if (a) {
+            const ComputedStyle s = resolver.resolve(*a);
+            check(sui::StyleResolver::propertyValue(s, "grid-row-start") == "2",
+                  "grid-row-start serialises as '2'");
+        }
+    }
+
+    // Longhands: grid-column-start + grid-column-end produce the same result as
+    // the shorthand.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\">"
+            "<i id=\"b\" style=\"grid-column-start:2;grid-column-end:4\"></i>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;grid-template-columns:repeat(4,50px);"
+            "width:200px} #g i{height:10px}"));
+        layoutRoot(*document, resolver, 300.0f);
+
+        Element* b = document->getElementById("b");
+        check(b && std::fabs(b->layoutX() - 50.0f) < 0.5f,
+              "grid-column-start:2 longhand pins item to column 2");
+        check(b && std::fabs(b->layoutWidth() - 100.0f) < 0.5f,
+              "grid-column-start:2 grid-column-end:4 span = 2 tracks");
+    }
+}
+
 void testPropertyParsing() {
     auto document = parseOrNull("<sui><body><div>x</div></body></sui>");
     if (!document) {
@@ -3455,6 +3580,7 @@ int main() {
     testGridAutoFill();
     testGridStretch();
     testGridSpans();
+    testGridLinePlacement();
     testBlockStacking();
     testNestedContainer();
     testTextWrappingAndBr();

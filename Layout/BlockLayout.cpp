@@ -1060,37 +1060,137 @@ private:
         }
         const std::size_t columnCount = columns.size();
 
-        // Auto-placement. Items fill the rows in order, each claiming a
-        // cSpan x rSpan block of cells; the cursor never moves backwards, so a
-        // spanning item that does not fit in the remaining columns drops to the
-        // next row. With every span one this reproduces plain row-major order.
+        // Placement. Items with explicit `grid-column` / `grid-row` start lines are
+        // pinned first; the remaining items are auto-placed in row-major order,
+        // honouring the occupied cells the pinned items claim. A 1-based CSS line
+        // number n maps to 0-based column/row index n-1.
         std::vector<int> cSpan(children.size(), 1);
         std::vector<int> rSpan(children.size(), 1);
         std::vector<std::size_t> itemCol(children.size(), 0);
         std::vector<std::size_t> itemRow(children.size(), 0);
         std::vector<float> naturalWidth(children.size(), 0.0f);
+        // hasExplicitCol[i] / hasExplicitRow[i]: true when the item was pinned.
+        std::vector<bool> hasExplicitCol(children.size(), false);
+        std::vector<bool> hasExplicitRow(children.size(), false);
+
         for (std::size_t i = 0; i < children.size(); ++i) {
             const ComputedStyle cs = resolver_.resolve(*children[i]);
-            cSpan[i] = std::min<int>(columnCount, std::max(1, cs.gridColumnSpan));
-            rSpan[i] = std::max(1, cs.gridRowSpan);
+            int colSpan = cs.gridColumnSpan;
+            if (cs.gridColumnStart > 0 && cs.gridColumnEnd > cs.gridColumnStart) {
+                colSpan = cs.gridColumnEnd - cs.gridColumnStart;
+            }
+            cSpan[i] = std::min<int>(columnCount, std::max(1, colSpan));
+
+            int rowSpan = cs.gridRowSpan;
+            if (cs.gridRowStart > 0 && cs.gridRowEnd > cs.gridRowStart) {
+                rowSpan = cs.gridRowEnd - cs.gridRowStart;
+            }
+            rSpan[i] = std::max(1, rowSpan);
             naturalWidth[i] = measureNatural(*children[i], cs, true);
         }
+
         std::vector<std::vector<bool>> occupied;
         auto claimRows = [&occupied](std::size_t row, std::size_t columns) {
             while (occupied.size() <= row) {
                 occupied.push_back(std::vector<bool>(columns, false));
             }
         };
+
+        // Pass 1 – pin items that have an explicit column start and/or row start.
+        for (std::size_t i = 0; i < children.size(); ++i) {
+            const ComputedStyle cs = resolver_.resolve(*children[i]);
+            const bool hasCol = cs.gridColumnStart > 0;
+            const bool hasRow = cs.gridRowStart > 0;
+            if (!hasCol && !hasRow) {
+                continue;
+            }
+            // 1-based CSS line → 0-based index, clamped to [0, columnCount-1].
+            const std::size_t c =
+                hasCol
+                    ? std::min(columnCount - 1,
+                               static_cast<std::size_t>(
+                                   std::max(1, cs.gridColumnStart) - 1))
+                    : 0;  // will be resolved in pass 2 for column-auto / row-pinned
+            const std::size_t r =
+                hasRow
+                    ? static_cast<std::size_t>(std::max(1, cs.gridRowStart) - 1)
+                    : 0;  // row-auto: deferred to pass 2
+            if (hasCol) {
+                itemCol[i] = c;
+                hasExplicitCol[i] = true;
+            }
+            if (hasRow) {
+                itemRow[i] = r;
+                hasExplicitRow[i] = true;
+            }
+            // If both axes are explicit, mark the cells occupied now.
+            if (hasCol && hasRow) {
+                const std::size_t csz = static_cast<std::size_t>(cSpan[i]);
+                const std::size_t rsz = static_cast<std::size_t>(rSpan[i]);
+                claimRows(r + rsz - 1, columnCount);
+                for (std::size_t rr = r; rr < r + rsz; ++rr) {
+                    for (std::size_t cc = c; cc < c + csz; ++cc) {
+                        if (cc < columnCount) {
+                            occupied[rr][cc] = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Pass 1b – resolve column-auto / row-explicit items: find the first free
+        // column in the pinned row, then mark those cells.
+        for (std::size_t i = 0; i < children.size(); ++i) {
+            if (!hasExplicitRow[i] || hasExplicitCol[i]) {
+                continue;
+            }
+            const std::size_t r = itemRow[i];
+            const std::size_t csz = static_cast<std::size_t>(cSpan[i]);
+            const std::size_t rsz = static_cast<std::size_t>(rSpan[i]);
+            claimRows(r + rsz - 1, columnCount);
+            std::size_t c = 0;
+            while (c + csz <= columnCount) {
+                bool free = true;
+                for (std::size_t rr = r; rr < r + rsz && free; ++rr) {
+                    for (std::size_t cc = c; cc < c + csz && free; ++cc) {
+                        free = !occupied[rr][cc];
+                    }
+                }
+                if (free) {
+                    break;
+                }
+                ++c;
+            }
+            if (c + csz > columnCount) {
+                c = 0;
+            }
+            itemCol[i] = c;
+            hasExplicitCol[i] = true;
+            for (std::size_t rr = r; rr < r + rsz; ++rr) {
+                for (std::size_t cc = c; cc < c + csz; ++cc) {
+                    if (cc < columnCount) {
+                        occupied[rr][cc] = true;
+                    }
+                }
+            }
+        }
+
+        // Pass 2 – auto-place remaining items (no explicit placement on either axis,
+        // or explicit column only, deferred row resolution).
         std::size_t nextRow = 0;
         std::size_t nextCol = 0;
         for (std::size_t i = 0; i < children.size(); ++i) {
+            if (hasExplicitCol[i] && hasExplicitRow[i]) {
+                continue;  // fully pinned in pass 1
+            }
             const std::size_t csz = static_cast<std::size_t>(cSpan[i]);
             const std::size_t rsz = static_cast<std::size_t>(rSpan[i]);
+            // Start the search from the item's pinned column (if any) or the cursor.
             std::size_t r = nextRow;
-            std::size_t c = nextCol;
+            std::size_t c = hasExplicitCol[i] ? itemCol[i] : nextCol;
             while (true) {
-                if (c + csz > columnCount) {
-                    c = 0;
+                if (c + csz > columnCount || (hasExplicitCol[i] && c != itemCol[i])) {
+                    c = hasExplicitCol[i] ? itemCol[i] : 0;
                     ++r;
                     continue;
                 }
@@ -1104,21 +1204,29 @@ private:
                 if (free) {
                     break;
                 }
-                ++c;
+                if (hasExplicitCol[i]) {
+                    ++r;
+                } else {
+                    ++c;
+                }
             }
             claimRows(r + rsz - 1, columnCount);
             for (std::size_t rr = r; rr < r + rsz; ++rr) {
                 for (std::size_t cc = c; cc < c + csz; ++cc) {
-                    occupied[rr][cc] = true;
+                    if (cc < columnCount) {
+                        occupied[rr][cc] = true;
+                    }
                 }
             }
             itemCol[i] = c;
             itemRow[i] = r;
-            nextCol = c + csz;
-            nextRow = r;
-            if (nextCol >= columnCount) {
-                nextCol = 0;
-                nextRow = r + 1;
+            if (!hasExplicitCol[i]) {
+                nextCol = c + csz;
+                nextRow = r;
+                if (nextCol >= columnCount) {
+                    nextCol = 0;
+                    nextRow = r + 1;
+                }
             }
         }
         std::size_t rowCount = 0;

@@ -1326,6 +1326,31 @@ int parseGridSpan(std::string_view value) {
     return 1;
 }
 
+// Parses one half of a `grid-column` / `grid-row` shorthand (or a longhand value)
+// into a line number and a span count. A `span <n>` keyword sets only the span
+// (leaves lineOut = 0). A bare integer sets only the line (leaves spanOut at its
+// default of 1). `auto` leaves both at their defaults.
+void parseGridLinePart(std::string_view part, int& lineOut, int& spanOut) {
+    part = trim(part);
+    if (part == "auto" || part.empty()) {
+        return;
+    }
+    const bool spanWord = part.size() > 4 && part.substr(0, 4) == "span";
+    const std::string_view numText = spanWord ? trim(part.substr(4)) : part;
+    if (!numText.empty()) {
+        const std::string text(numText);
+        char* stop = nullptr;
+        const int num = static_cast<int>(std::strtol(text.c_str(), &stop, 10));
+        if (stop != text.c_str() && num != 0) {
+            if (spanWord) {
+                spanOut = std::max(1, num);
+            } else {
+                lineOut = num;
+            }
+        }
+    }
+}
+
 // `flex` is a shorthand over grow, shrink and basis, where the one-value form
 // `flex: 1` means `1 1 0%` and anything numeric other than 0 sets shrink to 0.
 void applyFlexShorthand(ComputedStyle& s, std::string_view value, float rootFontSize) {
@@ -2252,24 +2277,123 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         s.gridRowsAutoFit = false;
         s.gridRows = parseGridTrackList(value, &s.gridRowsAutoFill, &s.gridRowsAutoFit);
     } else if (property == "grid-column") {
-        s.gridColumnSpan = parseGridSpan(value);
+        // `grid-column: <start> / <end>` or `grid-column: span <n>`.
+        // Parse both halves so an explicit start line is captured.
+        s.gridColumnStart = 0;
+        s.gridColumnEnd   = 0;
+        s.gridColumnSpan  = 1;
+        const std::size_t slash = value.find('/');
+        if (slash != std::string_view::npos) {
+            const std::string_view startPart = value.substr(0, slash);
+            const std::string_view endPart   = value.substr(slash + 1);
+            int spanFromStart = 1;
+            parseGridLinePart(startPart, s.gridColumnStart, spanFromStart);
+            int spanFromEnd = 1;
+            parseGridLinePart(endPart,   s.gridColumnEnd,   spanFromEnd);
+            // Derive the canonical span.
+            if (s.gridColumnStart > 0 && s.gridColumnEnd > 0 &&
+                s.gridColumnEnd > s.gridColumnStart) {
+                s.gridColumnSpan = s.gridColumnEnd - s.gridColumnStart;
+            } else if (s.gridColumnStart > 0 && s.gridColumnEnd == 0) {
+                s.gridColumnSpan = spanFromEnd;  // `2 / span 3` -> span 3 from line 2
+            } else if (s.gridColumnStart == 0 && s.gridColumnEnd > 0) {
+                s.gridColumnSpan = spanFromStart; // `span 2 / 4` -> span 2 ending at 4
+            } else {
+                s.gridColumnSpan = parseGridSpan(value);
+            }
+        } else {
+            // Single value: may be a bare line number or `span n`.
+            parseGridLinePart(value, s.gridColumnStart, s.gridColumnSpan);
+        }
+    } else if (property == "grid-column-start") {
+        int span = 1;
+        parseGridLinePart(value, s.gridColumnStart, span);
+        if (s.gridColumnStart == 0) {
+            s.gridColumnSpan = span;  // `span n` form: store in span, clear start
+        } else if (s.gridColumnEnd > s.gridColumnStart) {
+            s.gridColumnSpan = s.gridColumnEnd - s.gridColumnStart;
+        }
+    } else if (property == "grid-column-end") {
+        int span = 1;
+        parseGridLinePart(value, s.gridColumnEnd, span);
+        if (s.gridColumnEnd > 0 && s.gridColumnStart > 0 && s.gridColumnEnd > s.gridColumnStart) {
+            s.gridColumnSpan = s.gridColumnEnd - s.gridColumnStart;
+        }
     } else if (property == "grid-row") {
-        s.gridRowSpan = parseGridSpan(value);
+        // Same logic as grid-column, mirrored for rows.
+        s.gridRowStart = 0;
+        s.gridRowEnd   = 0;
+        s.gridRowSpan  = 1;
+        const std::size_t slash = value.find('/');
+        if (slash != std::string_view::npos) {
+            const std::string_view startPart = value.substr(0, slash);
+            const std::string_view endPart   = value.substr(slash + 1);
+            int spanFromStart = 1;
+            parseGridLinePart(startPart, s.gridRowStart, spanFromStart);
+            int spanFromEnd = 1;
+            parseGridLinePart(endPart,   s.gridRowEnd,   spanFromEnd);
+            if (s.gridRowStart > 0 && s.gridRowEnd > 0 &&
+                s.gridRowEnd > s.gridRowStart) {
+                s.gridRowSpan = s.gridRowEnd - s.gridRowStart;
+            } else if (s.gridRowStart > 0 && s.gridRowEnd == 0) {
+                s.gridRowSpan = spanFromEnd;
+            } else if (s.gridRowStart == 0 && s.gridRowEnd > 0) {
+                s.gridRowSpan = spanFromStart;
+            } else {
+                s.gridRowSpan = parseGridSpan(value);
+            }
+        } else {
+            parseGridLinePart(value, s.gridRowStart, s.gridRowSpan);
+        }
+    } else if (property == "grid-row-start") {
+        int span = 1;
+        parseGridLinePart(value, s.gridRowStart, span);
+        if (s.gridRowStart == 0) {
+            s.gridRowSpan = span;
+        } else if (s.gridRowEnd > s.gridRowStart) {
+            s.gridRowSpan = s.gridRowEnd - s.gridRowStart;
+        }
+    } else if (property == "grid-row-end") {
+        int span = 1;
+        parseGridLinePart(value, s.gridRowEnd, span);
+        if (s.gridRowEnd > 0 && s.gridRowStart > 0 && s.gridRowEnd > s.gridRowStart) {
+            s.gridRowSpan = s.gridRowEnd - s.gridRowStart;
+        }
     } else if (property == "grid-area") {
-        // row-start / col-start / row-end / col-end; each end may be `span <n>` or a
-        // line number. Only the row and column spans are read.
+        // row-start / col-start / row-end / col-end; each part may be `span <n>` or a
+        // line number.
+        s.gridColumnStart = 0; s.gridColumnEnd = 0; s.gridColumnSpan = 1;
+        s.gridRowStart    = 0; s.gridRowEnd    = 0; s.gridRowSpan    = 1;
         const std::vector<std::string_view> parts = splitOnSlashes(value);
         if (parts.size() >= 4) {
-            const std::string rowRange =
-                std::string(parts[0]) + "/" + std::string(parts[2]);
-            const std::string colRange =
-                std::string(parts[1]) + "/" + std::string(parts[3]);
-            s.gridRowSpan = parseGridSpan(rowRange);
-            s.gridColumnSpan = parseGridSpan(colRange);
+            // row-start
+            int rsSpan = 1;
+            parseGridLinePart(parts[0], s.gridRowStart, rsSpan);
+            // col-start
+            int csSpan = 1;
+            parseGridLinePart(parts[1], s.gridColumnStart, csSpan);
+            // row-end
+            int reSpan = 1;
+            parseGridLinePart(parts[2], s.gridRowEnd, reSpan);
+            // col-end
+            int ceSpan = 1;
+            parseGridLinePart(parts[3], s.gridColumnEnd, ceSpan);
+            // Derive spans from lines when both are explicit.
+            if (s.gridRowStart > 0 && s.gridRowEnd > s.gridRowStart) {
+                s.gridRowSpan = s.gridRowEnd - s.gridRowStart;
+            } else {
+                s.gridRowSpan = (s.gridRowStart > 0) ? reSpan : rsSpan;
+            }
+            if (s.gridColumnStart > 0 && s.gridColumnEnd > s.gridColumnStart) {
+                s.gridColumnSpan = s.gridColumnEnd - s.gridColumnStart;
+            } else {
+                s.gridColumnSpan = (s.gridColumnStart > 0) ? ceSpan : csSpan;
+            }
         } else if (parts.size() == 1) {
-            const int span = parseGridSpan(value);
-            s.gridRowSpan = span;
-            s.gridColumnSpan = span;
+            // Single ident / number: treat as row-start and leave placement to auto.
+            parseGridLinePart(value, s.gridRowStart, s.gridRowSpan);
+            s.gridColumnStart = s.gridRowStart;
+            s.gridColumnSpan  = s.gridRowSpan;
         }
     } else if (property == "width") {
         s.width = parseLength(value);
@@ -3011,11 +3135,45 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         }
         return out;
     }
-    if (property == "grid-column" && style.gridColumnSpan > 1) {
-        return "span " + std::to_string(style.gridColumnSpan);
+    if (property == "grid-column") {
+        if (style.gridColumnStart > 0 && style.gridColumnEnd > 0) {
+            return std::to_string(style.gridColumnStart) + " / " +
+                   std::to_string(style.gridColumnEnd);
+        }
+        if (style.gridColumnStart > 0) {
+            return std::to_string(style.gridColumnStart) + " / span " +
+                   std::to_string(style.gridColumnSpan);
+        }
+        if (style.gridColumnSpan > 1) {
+            return "span " + std::to_string(style.gridColumnSpan);
+        }
+        return "auto";
     }
-    if (property == "grid-row" && style.gridRowSpan > 1) {
-        return "span " + std::to_string(style.gridRowSpan);
+    if (property == "grid-column-start") {
+        return style.gridColumnStart > 0 ? std::to_string(style.gridColumnStart) : "auto";
+    }
+    if (property == "grid-column-end") {
+        return style.gridColumnEnd > 0 ? std::to_string(style.gridColumnEnd) : "auto";
+    }
+    if (property == "grid-row") {
+        if (style.gridRowStart > 0 && style.gridRowEnd > 0) {
+            return std::to_string(style.gridRowStart) + " / " +
+                   std::to_string(style.gridRowEnd);
+        }
+        if (style.gridRowStart > 0) {
+            return std::to_string(style.gridRowStart) + " / span " +
+                   std::to_string(style.gridRowSpan);
+        }
+        if (style.gridRowSpan > 1) {
+            return "span " + std::to_string(style.gridRowSpan);
+        }
+        return "auto";
+    }
+    if (property == "grid-row-start") {
+        return style.gridRowStart > 0 ? std::to_string(style.gridRowStart) : "auto";
+    }
+    if (property == "grid-row-end") {
+        return style.gridRowEnd > 0 ? std::to_string(style.gridRowEnd) : "auto";
     }
     if (property == "color") return color(style.color);
     if (property == "background-color") return color(style.backgroundColor);
