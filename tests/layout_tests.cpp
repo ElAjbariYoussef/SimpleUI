@@ -841,6 +841,89 @@ void testGridLinePlacement() {
     }
 }
 
+void testGridTemplateAreas() {
+    // 3 rows, 2 columns layout with named grid areas:
+    // "head head" (row 1, col 1-2)
+    // "nav  main" (row 2, col 1-2)
+    // "nav  foot" (row 3, col 1-2)
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\">"
+            "<i id=\"h\" style=\"grid-area:head\"></i>"
+            "<i id=\"n\" style=\"grid-area:nav\"></i>"
+            "<i id=\"m\" style=\"grid-area:main\"></i>"
+            "<i id=\"f\" style=\"grid-area:foot\"></i>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;width:300px;"
+            "grid-template-areas:\"head head\" \"nav main\" \"nav foot\";"
+            "grid-template-columns:100px 200px;"
+            "grid-template-rows:50px 150px 40px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* g = document->getElementById("g");
+        Element* h = document->getElementById("h");
+        Element* n = document->getElementById("n");
+        Element* m = document->getElementById("m");
+        Element* f = document->getElementById("f");
+        check(h && n && m && f && g, "grid area elements found");
+        if (!h || !n || !m || !f || !g) {
+            return;
+        }
+
+        // head spans columns 1-2 (x=0, w=300), sits on row 1 (y=0, h=50)
+        check(std::fabs(h->layoutX() - 0.0f) < 0.5f, "head area starts at x=0");
+        check(std::fabs(h->layoutWidth() - 300.0f) < 0.5f, "head area spans both columns (w=300)");
+        check(std::fabs(h->layoutY() - 0.0f) < 0.5f, "head area sits at row 1 (y=0)");
+        check(std::fabs(h->layoutHeight() - 50.0f) < 0.5f, "head area height matches row 1 track (h=50)");
+
+        // nav starts at col 1 (x=0, w=100), spans rows 2-3 (y=50, h=150+40=190)
+        check(std::fabs(n->layoutX() - 0.0f) < 0.5f, "nav area starts at col 1 (x=0)");
+        check(std::fabs(n->layoutWidth() - 100.0f) < 0.5f, "nav area width matches col 1 (w=100)");
+        check(std::fabs(n->layoutY() - 50.0f) < 0.5f, "nav area starts at row 2 (y=50)");
+        check(std::fabs(n->layoutHeight() - 190.0f) < 0.5f, "nav area spans rows 2 and 3 (h=190)");
+
+        // main sits at col 2 row 2 (x=100, y=50, w=200, h=150)
+        check(std::fabs(m->layoutX() - 100.0f) < 0.5f, "main area starts at col 2 (x=100)");
+        check(std::fabs(m->layoutWidth() - 200.0f) < 0.5f, "main area width matches col 2 (w=200)");
+        check(std::fabs(m->layoutY() - 50.0f) < 0.5f, "main area starts at row 2 (y=50)");
+        check(std::fabs(m->layoutHeight() - 150.0f) < 0.5f, "main area height matches row 2 (h=150)");
+
+        // foot sits at col 2 row 3 (x=100, y=200, w=200, h=40)
+        check(std::fabs(f->layoutX() - 100.0f) < 0.5f, "foot area starts at col 2 (x=100)");
+        check(std::fabs(f->layoutWidth() - 200.0f) < 0.5f, "foot area width matches col 2 (w=200)");
+        check(std::fabs(f->layoutY() - 200.0f) < 0.5f, "foot area starts at row 3 (y=200)");
+        check(std::fabs(f->layoutHeight() - 40.0f) < 0.5f, "foot area height matches row 3 (h=40)");
+
+        // Serialization checks:
+        const ComputedStyle gs = resolver.resolve(*g);
+        check(sui::StyleResolver::propertyValue(gs, "grid-template-areas") ==
+                  "\"head head\" \"nav main\" \"nav foot\"",
+              "grid-template-areas roundtrips serialized value");
+        const ComputedStyle hs = resolver.resolve(*h);
+        check(sui::StyleResolver::propertyValue(hs, "grid-area") == "head",
+              "grid-area serializes as authored area name");
+    }
+
+    // Invalid non-rectangular template areas are rejected
+    {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("div { grid-template-areas: \"a b\" \"b a\"; }"));
+        auto doc = parseOrNull("<sui><body><div id=\"d\"></div></body></sui>");
+        if (doc) {
+            Element* d = doc->getElementById("d");
+            if (d) {
+                const auto cs = resolver.resolve(*d);
+                check(cs.gridTemplateAreas.empty(), "non-rectangular grid-template-areas is rejected");
+            }
+        }
+    }
+}
+
 void testInputPasswordLayout() {
     auto document = parseOrNull(
         "<sui><body>"
@@ -3614,6 +3697,7 @@ int main() {
     testGridStretch();
     testGridSpans();
     testGridLinePlacement();
+    testGridTemplateAreas();
     testBlockStacking();
     testNestedContainer();
     testTextWrappingAndBr();

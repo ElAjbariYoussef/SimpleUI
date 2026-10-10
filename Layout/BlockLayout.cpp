@@ -1021,9 +1021,17 @@ private:
 
         std::vector<ComputedStyle::GridTrack> columns = s.gridColumns;
         if (columns.empty()) {
-            ComputedStyle::GridTrack only;
-            only.isAuto = true;
-            columns.push_back(only);
+            if (s.gridTemplateAreasColumns > 0) {
+                for (std::size_t c = 0; c < s.gridTemplateAreasColumns; ++c) {
+                    ComputedStyle::GridTrack t;
+                    t.isAuto = true;
+                    columns.push_back(t);
+                }
+            } else {
+                ComputedStyle::GridTrack only;
+                only.isAuto = true;
+                columns.push_back(only);
+            }
         }
         // `repeat(auto-fill/auto-fit, <body>)`: the stored list is one repetition of
         // the body, so repeat it to as many tracks as the container fits, each at
@@ -1081,15 +1089,30 @@ private:
 
         for (std::size_t i = 0; i < children.size(); ++i) {
             const ComputedStyle cs = resolver_.resolve(*children[i]);
-            int colSpan = cs.gridColumnSpan;
-            if (cs.gridColumnStart > 0 && cs.gridColumnEnd > cs.gridColumnStart) {
-                colSpan = cs.gridColumnEnd - cs.gridColumnStart;
+            int colStart = cs.gridColumnStart;
+            int colEnd   = cs.gridColumnEnd;
+            int rowStart = cs.gridRowStart;
+            int rowEnd   = cs.gridRowEnd;
+            int colSpan  = cs.gridColumnSpan;
+            int rowSpan  = cs.gridRowSpan;
+
+            if (!cs.gridAreaName.empty()) {
+                const auto it = s.gridTemplateAreas.find(cs.gridAreaName);
+                if (it != s.gridTemplateAreas.end()) {
+                    colStart = it->second.colStart;
+                    colEnd   = it->second.colEnd;
+                    rowStart = it->second.rowStart;
+                    rowEnd   = it->second.rowEnd;
+                }
+            }
+
+            if (colStart > 0 && colEnd > colStart) {
+                colSpan = colEnd - colStart;
             }
             cSpan[i] = std::min<int>(columnCount, std::max(1, colSpan));
 
-            int rowSpan = cs.gridRowSpan;
-            if (cs.gridRowStart > 0 && cs.gridRowEnd > cs.gridRowStart) {
-                rowSpan = cs.gridRowEnd - cs.gridRowStart;
+            if (rowStart > 0 && rowEnd > rowStart) {
+                rowSpan = rowEnd - rowStart;
             }
             rSpan[i] = std::max(1, rowSpan);
             naturalWidth[i] = measureNatural(*children[i], cs, true);
@@ -1105,8 +1128,17 @@ private:
         // Pass 1 – pin items that have an explicit column start and/or row start.
         for (std::size_t i = 0; i < children.size(); ++i) {
             const ComputedStyle cs = resolver_.resolve(*children[i]);
-            const bool hasCol = cs.gridColumnStart > 0;
-            const bool hasRow = cs.gridRowStart > 0;
+            int colStart = cs.gridColumnStart;
+            int rowStart = cs.gridRowStart;
+            if (!cs.gridAreaName.empty()) {
+                const auto it = s.gridTemplateAreas.find(cs.gridAreaName);
+                if (it != s.gridTemplateAreas.end()) {
+                    colStart = it->second.colStart;
+                    rowStart = it->second.rowStart;
+                }
+            }
+            const bool hasCol = colStart > 0;
+            const bool hasRow = rowStart > 0;
             if (!hasCol && !hasRow) {
                 continue;
             }
@@ -1115,11 +1147,11 @@ private:
                 hasCol
                     ? std::min(columnCount - 1,
                                static_cast<std::size_t>(
-                                   std::max(1, cs.gridColumnStart) - 1))
+                                   std::max(1, colStart) - 1))
                     : 0;  // will be resolved in pass 2 for column-auto / row-pinned
             const std::size_t r =
                 hasRow
-                    ? static_cast<std::size_t>(std::max(1, cs.gridRowStart) - 1)
+                    ? static_cast<std::size_t>(std::max(1, rowStart) - 1)
                     : 0;  // row-auto: deferred to pass 2
             if (hasCol) {
                 itemCol[i] = c;
@@ -1423,6 +1455,34 @@ private:
         for (std::size_t r = 0; r < rowCount; ++r) {
             rowY[r] = y;
             y += rowHeights[r] + rowGap + rowExtra;
+        }
+        // Second pass: stretch multi-row items to their full span height now that
+        // rowY and rowHeights are both finalised. Single-row items were already
+        // sized in the first pass (when the row track was known); only multi-row
+        // items need this deferred re-layout.
+        for (std::size_t i = 0; i < children.size(); ++i) {
+            if (rSpan[i] <= 1) {
+                continue;
+            }
+            ComputedStyle cs2 = resolver_.resolve(*children[i]);
+            const ComputedStyle::FlexAlign align2 =
+                cs2.alignSelf != ComputedStyle::AlignStretch ? cs2.alignSelf : s.alignItems;
+            if (align2 != ComputedStyle::AlignStretch) {
+                continue;
+            }
+            const std::size_t row2 = itemRow[i];
+            const std::size_t last2 = row2 + static_cast<std::size_t>(rSpan[i]) - 1;
+            const float spanH = rowY[last2] + rowHeights[last2] - rowY[row2];
+            if (spanH <= 0.0f) {
+                continue;
+            }
+            const UsedBox b2 = usedBox(cs2, children[i]->layoutWidth());
+            const float chrome2 = verticalEdges(b2.padding, b2.borderWidth);
+            cs2.height = Length(std::max(0.0f, spanH - chrome2));
+            cs2.margin = {};
+            runWith(*children[i], cs2,
+                    children[i]->layoutWidth() - horizontalEdges(b2.padding, b2.borderWidth),
+                    contentX + itemX[i], contentY);
         }
         for (std::size_t i = 0; i < children.size(); ++i) {
             const std::size_t row = itemRow[i];

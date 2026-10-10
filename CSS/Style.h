@@ -472,6 +472,19 @@ struct ComputedStyle {
     int gridColumnSpan = 1;
     int gridRowSpan = 1;
 
+    // Named grid areas from `grid-template-areas`. Each area is a 1-based line rectangle.
+    struct GridAreaRect {
+        int rowStart = 0;
+        int rowEnd   = 0;
+        int colStart = 0;
+        int colEnd   = 0;
+    };
+    std::map<std::string, GridAreaRect> gridTemplateAreas;
+    std::string gridTemplateAreasRaw;
+    std::size_t gridTemplateAreasColumns = 0;
+    std::size_t gridTemplateAreasRows = 0;
+    std::string gridAreaName;
+
     // Custom properties (`--name`). They are values, not styles: nothing types or
     // validates them, and `var(--name)` resolves against them once this element's
     // whole cascade has settled. They inherit like every other property — this

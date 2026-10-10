@@ -1351,6 +1351,107 @@ void parseGridLinePart(std::string_view part, int& lineOut, int& spanOut) {
     }
 }
 
+// Parses `grid-template-areas: "<row1>" "<row2>" ...` into named area bounding boxes.
+void parseGridTemplateAreas(std::string_view value,
+                            std::map<std::string, ComputedStyle::GridAreaRect>& areasOut,
+                            std::size_t& colsOut, std::size_t& rowsOut) {
+    value = trim(value);
+    if (value == "none" || value.empty()) {
+        return;
+    }
+    std::vector<std::vector<std::string>> matrix;
+    std::size_t pos = 0;
+    while (pos < value.size()) {
+        const char quote = value[pos];
+        if (quote == '"' || quote == '\'') {
+            const std::size_t next = value.find(quote, pos + 1);
+            if (next == std::string_view::npos) {
+                return;
+            }
+            const std::string_view rowContent = value.substr(pos + 1, next - pos - 1);
+            std::vector<std::string> rowCells;
+            std::size_t cp = 0;
+            while (cp < rowContent.size()) {
+                while (cp < rowContent.size() &&
+                       std::isspace(static_cast<unsigned char>(rowContent[cp]))) {
+                    ++cp;
+                }
+                if (cp >= rowContent.size()) {
+                    break;
+                }
+                const std::size_t cStart = cp;
+                while (cp < rowContent.size() &&
+                       !std::isspace(static_cast<unsigned char>(rowContent[cp]))) {
+                    ++cp;
+                }
+                rowCells.emplace_back(rowContent.substr(cStart, cp - cStart));
+            }
+            if (!rowCells.empty()) {
+                matrix.push_back(std::move(rowCells));
+            }
+            pos = next + 1;
+        } else {
+            ++pos;
+        }
+    }
+    if (matrix.empty()) {
+        return;
+    }
+    const std::size_t numCols = matrix[0].size();
+    for (const auto& r : matrix) {
+        if (r.size() != numCols) {
+            return;
+        }
+    }
+    const std::size_t numRows = matrix.size();
+
+    struct Bounds {
+        std::size_t minR = static_cast<std::size_t>(-1), maxR = 0;
+        std::size_t minC = static_cast<std::size_t>(-1), maxC = 0;
+        std::size_t cellCount = 0;
+    };
+    std::map<std::string, Bounds> boundsMap;
+    for (std::size_t r = 0; r < numRows; ++r) {
+        for (std::size_t c = 0; c < numCols; ++c) {
+            const std::string& name = matrix[r][c];
+            if (name == "." || name.empty()) {
+                continue;
+            }
+            Bounds& b = boundsMap[name];
+            b.minR = std::min(b.minR, r);
+            b.maxR = std::max(b.maxR, r);
+            b.minC = std::min(b.minC, c);
+            b.maxC = std::max(b.maxC, c);
+            b.cellCount++;
+        }
+    }
+
+    for (const auto& [name, b] : boundsMap) {
+        const std::size_t expectedCells = (b.maxR - b.minR + 1) * (b.maxC - b.minC + 1);
+        if (b.cellCount != expectedCells) {
+            return;
+        }
+        for (std::size_t r = b.minR; r <= b.maxR; ++r) {
+            for (std::size_t c = b.minC; c <= b.maxC; ++c) {
+                if (matrix[r][c] != name) {
+                    return;
+                }
+            }
+        }
+    }
+
+    for (const auto& [name, b] : boundsMap) {
+        ComputedStyle::GridAreaRect rect;
+        rect.rowStart = static_cast<int>(b.minR + 1);
+        rect.rowEnd   = static_cast<int>(b.maxR + 2);
+        rect.colStart = static_cast<int>(b.minC + 1);
+        rect.colEnd   = static_cast<int>(b.maxC + 2);
+        areasOut[name] = rect;
+    }
+    colsOut = numCols;
+    rowsOut = numRows;
+}
+
 // `flex` is a shorthand over grow, shrink and basis, where the one-value form
 // `flex: 1` means `1 1 0%` and anything numeric other than 0 sets shrink to 0.
 void applyFlexShorthand(ComputedStyle& s, std::string_view value, float rootFontSize) {
@@ -2276,6 +2377,13 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         s.gridRowsAutoFill = false;
         s.gridRowsAutoFit = false;
         s.gridRows = parseGridTrackList(value, &s.gridRowsAutoFill, &s.gridRowsAutoFit);
+    } else if (property == "grid-template-areas") {
+        s.gridTemplateAreas.clear();
+        s.gridTemplateAreasColumns = 0;
+        s.gridTemplateAreasRows = 0;
+        s.gridTemplateAreasRaw = std::string(trim(value));
+        parseGridTemplateAreas(value, s.gridTemplateAreas,
+                               s.gridTemplateAreasColumns, s.gridTemplateAreasRows);
     } else if (property == "grid-column") {
         // `grid-column: <start> / <end>` or `grid-column: span <n>`.
         // Parse both halves so an explicit start line is captured.
@@ -2390,10 +2498,21 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
                 s.gridColumnSpan = (s.gridColumnStart > 0) ? ceSpan : csSpan;
             }
         } else if (parts.size() == 1) {
-            // Single ident / number: treat as row-start and leave placement to auto.
-            parseGridLinePart(value, s.gridRowStart, s.gridRowSpan);
-            s.gridColumnStart = s.gridRowStart;
-            s.gridColumnSpan  = s.gridRowSpan;
+            const std::string_view trimmed = trim(value);
+            if (!trimmed.empty() && (std::isalpha(static_cast<unsigned char>(trimmed[0])) ||
+                                     trimmed[0] == '_' || trimmed[0] == '-')) {
+                if (trimmed.size() > 4 && trimmed.substr(0, 4) == "span") {
+                    parseGridLinePart(trimmed, s.gridRowStart, s.gridRowSpan);
+                    s.gridColumnStart = s.gridRowStart;
+                    s.gridColumnSpan  = s.gridRowSpan;
+                } else {
+                    s.gridAreaName = std::string(trimmed);
+                }
+            } else {
+                parseGridLinePart(trimmed, s.gridRowStart, s.gridRowSpan);
+                s.gridColumnStart = s.gridRowStart;
+                s.gridColumnSpan  = s.gridRowSpan;
+            }
         }
     } else if (property == "width") {
         s.width = parseLength(value);
@@ -3174,6 +3293,25 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "grid-row-end") {
         return style.gridRowEnd > 0 ? std::to_string(style.gridRowEnd) : "auto";
+    }
+    if (property == "grid-template-areas") {
+        if (!style.gridTemplateAreasRaw.empty()) {
+            return style.gridTemplateAreasRaw;
+        }
+        return "none";
+    }
+    if (property == "grid-area") {
+        if (!style.gridAreaName.empty()) {
+            return style.gridAreaName;
+        }
+        if (style.gridRowStart > 0 || style.gridColumnStart > 0 ||
+            style.gridRowEnd > 0 || style.gridColumnEnd > 0) {
+            return std::to_string(std::max(1, style.gridRowStart)) + " / " +
+                   std::to_string(std::max(1, style.gridColumnStart)) + " / " +
+                   std::to_string(std::max(1, style.gridRowEnd)) + " / " +
+                   std::to_string(std::max(1, style.gridColumnEnd));
+        }
+        return "auto";
     }
     if (property == "color") return color(style.color);
     if (property == "background-color") return color(style.backgroundColor);
