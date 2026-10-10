@@ -2808,6 +2808,8 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.position = ComputedStyle::Absolute;
         } else if (value == "fixed") {
             s.position = ComputedStyle::Fixed;
+        } else if (value == "sticky") {
+            s.position = ComputedStyle::Sticky;
         } else {
             s.position = ComputedStyle::Static;
         }

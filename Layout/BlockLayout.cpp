@@ -167,6 +167,14 @@ public:
         ComputedStyle style;
     };
 
+    // A sticky box, also in flow, whose offsets come from the scroll position
+    // of its nearest scrolling ancestor rather than from the insets.
+    struct Sticky {
+        Element* el;
+        ComputedStyle style;
+        Element* containingBlock;
+    };
+
     // Exposed for Flow, which needs the same answers run() uses.
     bool isLaidOut(Element& el) const { return laidOut(el); }
     ComputedStyle resolveStyle(Element& el) const { return resolver_.resolve(el); }
@@ -253,7 +261,14 @@ public:
                 pending_.push_back({&el, cbOwner_, s.position == ComputedStyle::Fixed});
                 return 0.0f;
             }
-            relative_.push_back({&el, s});
+            if (s.position == ComputedStyle::Sticky) {
+                // Stays in the flow, but its final place depends on how far its
+                // scrollport has moved, so it is resolved once every flow
+                // position is known.
+                sticky_.push_back({&el, s, blockAncestor(el)});
+            } else {
+                relative_.push_back({&el, s});
+            }
         }
         return borderH + box.margin.top + box.margin.bottom;
     }
@@ -281,6 +296,136 @@ public:
             placeAbsolute(*pending_[i].el, containingBlockOf(pending_[i]));
         }
         pending_.clear();
+        placeSticky();
+    }
+
+    // The nearest block-level ancestor, whose content box is the range a sticky
+    // box may move through while it clings to its scrollport.
+    Element* blockAncestor(Element& el) const {
+        for (Element* a = el.parent(); a; a = a->parent()) {
+            if (!a->isVisual()) {
+                continue;
+            }
+            // Only a genuinely inline box fails to be a block container; an
+            // inline-block, inline-flex or inline-grid still boxes its children.
+            const ComputedStyle as = resolver_.resolve(*a);
+            if (as.display == ComputedStyle::None || as.display == ComputedStyle::Inline) {
+                continue;
+            }
+            return a;
+        }
+        return nullptr;
+    }
+
+    // The nearest ancestor the given axis can scroll through; a sticky offset
+    // holds against that box's scrollport. Without one the page has no scroller
+    // on the axis and the box stays put.
+    Element* scrollAncestor(Element& el, bool vertical) const {
+        for (Element* a = el.parent(); a; a = a->parent()) {
+            if (!a->isVisual()) {
+                continue;
+            }
+            const ComputedStyle as = resolver_.resolve(*a);
+            const auto overflow = vertical ? as.overflowY : as.overflowX;
+            if (as.display != ComputedStyle::None && overflow != ComputedStyle::Visible) {
+                return a;
+            }
+        }
+        return nullptr;
+    }
+
+    // Moves a sticky box and everything it contains. Its padding and content
+    // boxes, which the painter clips to, and the text runs move too, so the
+    // whole subtree lands where the box is drawn.
+    void shiftSubtree(Element& el, float dx, float dy) {
+        if (dx == 0.0f && dy == 0.0f) {
+            return;
+        }
+        el.setLayoutX(el.layoutX() + dx);
+        el.setLayoutY(el.layoutY() + dy);
+        el.setPaddingX(el.paddingX() + dx);
+        el.setPaddingY(el.paddingY() + dy);
+        el.setContentX(el.contentX() + dx);
+        el.setContentY(el.contentY() + dy);
+        for (Element::TextRun& run : el.textRuns()) {
+            run.x += dx;
+            run.y += dy;
+        }
+        for (const auto& child : el.children()) {
+            if (child && !child->isTextNode()) {
+                shiftSubtree(*child, dx, dy);
+            }
+        }
+    }
+
+    // Reads the current scroll offsets of every sticky box's scrollport and
+    // shifts the box so each given inset clears the port edge: `top` and
+    // `left` pull the box down or right once the leading edge would pass it,
+    // `bottom` and `right` pull the other way once the trailing edge arrives.
+    // The box never leaves its containing block. The frame loop re-runs layout
+    // whenever the wheel moves a box, so every scroll notch lands here with
+    // fresh offsets.
+    void placeSticky() {
+        for (const Sticky& item : sticky_) {
+            Element& el = *item.el;
+            const ComputedStyle& s = item.style;
+            Element* cb = item.containingBlock;
+            const float em = s.fontSize;
+            const float rem = resolver_.rootFontSize();
+            const float cbH = cb ? cb->contentHeight() : viewportHeight_;
+            const float cbW = cb ? cb->contentWidth() : viewportWidth_;
+            const float cbTop = cb ? cb->contentY() : 0.0f;
+            const float cbLeft = cb ? cb->contentX() : 0.0f;
+            const float cbBottom = cb ? cb->contentY() + cb->contentHeight() : viewportHeight_;
+            const float cbRight = cb ? cb->contentX() + cb->contentWidth() : viewportWidth_;
+            const float y = el.layoutY();
+            const float x = el.layoutX();
+            const float h = el.layoutHeight();
+            const float w = el.layoutWidth();
+
+            float dy = 0.0f;
+            if (Element* scroller = scrollAncestor(el, /*vertical=*/true)) {
+                const float st = scroller->scrollTop();
+                const float viewTop = scroller->paddingY();
+                const float viewBottom = viewTop + scroller->paddingHeight();
+                if (!s.top.isAuto()) {
+                    // Keeping the leading edge clear of the port's top pulls the
+                    // box down; it never rises above its flow spot.
+                    dy = std::max(dy, viewTop + s.top.resolve(cbH, em, rem) + st - y);
+                } else if (!s.bottom.isAuto()) {
+                    // Keeping the trailing edge clear of the port's bottom pulls
+                    // the box up; it never sinks below where the flow put it.
+                    dy = std::min(dy,
+                                  viewBottom - s.bottom.resolve(cbH, em, rem) + st - y - h);
+                }
+                // A box taller than the scrollport has to fit inside it.
+                dy = std::min(dy, std::max(0.0f, viewBottom + st - y - h));
+            }
+            float dx = 0.0f;
+            if (Element* scroller = scrollAncestor(el, /*vertical=*/false)) {
+                const float sl = scroller->scrollLeft();
+                const float viewLeft = scroller->paddingX();
+                const float viewRight = viewLeft + scroller->paddingWidth();
+                if (!s.left.isAuto()) {
+                    dx = std::max(dx, viewLeft + s.left.resolve(cbW, em, rem) + sl - x);
+                } else if (!s.right.isAuto()) {
+                    dx = std::min(dx,
+                                  viewRight - s.right.resolve(cbW, em, rem) + sl - x - w);
+                }
+                dx = std::min(dx, std::max(0.0f, viewRight + sl - x - w));
+            }
+
+            // A sticky box may cross its containing block while it clings, but it
+            // never leaves it: each axis is bounded by that block's content box.
+            if (cb) {
+                dy = std::min(dy, std::max(0.0f, cbBottom - y - h));
+                dy = std::max(dy, cbTop - y);
+                dx = std::min(dx, std::max(0.0f, cbRight - x - w));
+                dx = std::max(dx, cbLeft - x);
+            }
+            shiftSubtree(el, dx, dy);
+        }
+        sticky_.clear();
     }
 
     Box containingBlockOf(const Pending& item) const {
@@ -469,6 +614,7 @@ public:
 private:
     std::vector<Pending> pending_;
     std::vector<Relative> relative_;
+    std::vector<Sticky> sticky_;
 
     // The padding box an out-of-flow box resolves against. Set while laying out a
     // positioned element, so its own out-of-flow descendants anchor to it.

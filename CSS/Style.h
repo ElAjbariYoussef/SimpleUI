@@ -534,7 +534,7 @@ struct ComputedStyle {
     TextAlign textAlign = Left;
 
     // Positioning (minimal for now)
-    enum Position : std::uint8_t { Static, Relative, Absolute, Fixed };
+    enum Position : std::uint8_t { Static, Relative, Absolute, Fixed, Sticky };
     Position position = Static;
     Length left;
     Length top;

@@ -4202,9 +4202,209 @@ void testGridAutoTracks() {
     }
 }
 
+// position:sticky: the box stays in the flow, but its place moves with its
+// scrollport's offset once an inset's threshold is crossed, and never leaves
+// its containing block.
+void testStickyPositioning() {
+    // An explicit sticky resolves to its own enum value and a positioned box.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"s\" style=\"position:sticky\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        layoutRoot(*document, resolver, 400.0f);
+        Element* s = document->getElementById("s");
+        if (s) {
+            const ComputedStyle cs = resolver.resolve(*s);
+            check(cs.position == sui::ComputedStyle::Sticky,
+                  "position:sticky resolves to Sticky");
+            check(cs.positioned, "a sticky box is positioned");
+        }
+    }
+
+    // A top-stuck header is pulled down past its flow spot as the scrollport
+    // moves, and pulls its own content along; a sibling keeps its place. The
+    // containing block is a taller inner box, so it never caps the stick.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"s\" style=\"width:200px;height:100px;overflow-y:auto\">"
+            "<div id=\"cb\" style=\"height:300px\">"
+            "<div id=\"h\" style=\"position:sticky;top:0;height:30px\">"
+            "<div id=\"b\" style=\"height:10px\"></div></div>"
+            "<div id=\"c1\" style=\"height:200px\"></div>"
+            "</div></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* s = document->getElementById("s");
+        Element* h = document->getElementById("h");
+        Element* b = document->getElementById("b");
+        Element* c1 = document->getElementById("c1");
+        if (!s || !h || !b || !c1) {
+            check(false, "sticky fixture elements found");
+            return;
+        }
+        checkNear(h->layoutY(), 0.0f, 0.01f, "at rest the sticky header holds the flow spot");
+        checkNear(c1->layoutY(), 30.0f, 0.01f, "the header still takes space in the flow");
+        checkNear(s->scrollHeight(), 300.0f, 0.01f, "the scroll range reaches past the viewport");
+
+        s->setScrollTop(60.0f);
+        layoutRoot(*document, resolver, 400.0f);
+        checkNear(h->layoutY(), 60.0f, 0.01f, "scrolling pulls the sticky header down");
+        checkNear(b->layoutY(), 60.0f, 0.01f, "the header's own content follows it");
+        checkNear(c1->layoutY(), 30.0f, 0.01f, "a sibling is not moved by the stick");
+
+        s->setScrollTop(130.0f);
+        layoutRoot(*document, resolver, 400.0f);
+        checkNear(h->layoutY(), 130.0f, 0.01f, "the header keeps sticking at the far scroll");
+    }
+
+    // The stick stops at the containing block's far edge: the header rides out
+    // with its section once the section has scrolled past the viewport.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"s\" style=\"width:200px;height:100px;overflow-y:auto\">"
+            "<div id=\"cb\" style=\"height:60px\">"
+            "<div id=\"h\" style=\"position:sticky;top:0;height:30px\"></div>"
+            "<div id=\"c1\" style=\"height:30px\"></div></div>"
+            "<div id=\"c2\" style=\"height:200px\"></div>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* s = document->getElementById("s");
+        Element* h = document->getElementById("h");
+        Element* c1 = document->getElementById("c1");
+        if (!s || !h || !c1) {
+            check(false, "ride-out fixture elements found");
+            return;
+        }
+        checkNear(h->layoutY(), 0.0f, 0.01f, "a short containing block starts unstuck");
+        s->setScrollTop(10.0f);
+        layoutRoot(*document, resolver, 400.0f);
+        checkNear(h->layoutY(), 10.0f, 0.01f, "the header sticks while its section is in view");
+        s->setScrollTop(160.0f);
+        layoutRoot(*document, resolver, 400.0f);
+        checkNear(h->layoutY(), 30.0f, 0.01f,
+                  "once its section is past, the header rides out at the end");
+        checkNear(c1->layoutY(), 30.0f, 0.01f, "the section content is not dragged along");
+    }
+
+    // An inset larger than zero pins the header that far from the port edge, the
+    // same resting position a relative offset would leave.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"s\" style=\"width:200px;height:100px;overflow-y:auto\">"
+            "<div id=\"h\" style=\"position:sticky;top:10px;height:30px\"></div>"
+            "<div id=\"c1\" style=\"height:200px\"></div>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* s = document->getElementById("s");
+        Element* h = document->getElementById("h");
+        if (!s || !h) {
+            check(false, "inset fixture elements found");
+            return;
+        }
+        checkNear(h->layoutY(), 10.0f, 0.01f, "top:10px rests ten below the port edge");
+        s->setScrollTop(60.0f);
+        layoutRoot(*document, resolver, 400.0f);
+        checkNear(h->layoutY(), 70.0f, 0.01f, "top:10px sticks the same distance while scrolled");
+    }
+
+    // bottom:0 keeps an end-of-content box visible at the bottom of the viewport
+    // until the flow finally puts it there, then lets it settle.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"s\" style=\"width:200px;height:100px;overflow-y:auto\">"
+            "<div id=\"top\" style=\"height:1000px\"></div>"
+            "<div id=\"f\" style=\"position:sticky;bottom:0;height:30px\"></div>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* s = document->getElementById("s");
+        Element* f = document->getElementById("f");
+        if (!s || !f) {
+            check(false, "bottom fixture elements found");
+            return;
+        }
+        // 1000px above it, the port's bottom edge is the only constraint, so the
+        // box holds right at the bottom until the flow delivers it there.
+        checkNear(f->layoutY(), 70.0f, 0.01f, "bottom:0 pins the box to the viewport bottom");
+        s->setScrollTop(900.0f);
+        layoutRoot(*document, resolver, 400.0f);
+        checkNear(f->layoutY(), 970.0f, 0.01f, "the pinned box tracks the bottom as it arrives");
+    }
+
+    // Without a scrollable ancestor there is nothing to stick to.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"s\" style=\"width:200px;height:100px\">"
+            "<div id=\"h\" style=\"position:sticky;top:0;height:30px\"></div>"
+            "<div id=\"c1\" style=\"height:200px\"></div>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* h = document->getElementById("h");
+        if (h) {
+            checkNear(h->layoutY(), 0.0f, 0.01f, "a sticky box with no scroller stays put");
+        }
+    }
+
+    // The horizontal axis works the same way with left / scrollLeft.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"s\" style=\"width:100px;height:50px;overflow-x:auto\">"
+            "<div id=\"cb\" style=\"width:300px\">"
+            "<div id=\"h\" style=\"position:sticky;left:0;width:30px;height:50px\"></div>"
+            "<div id=\"x1\" style=\"width:300px;height:50px\"></div>"
+            "</div></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* s = document->getElementById("s");
+        Element* h = document->getElementById("h");
+        if (!s || !h) {
+            check(false, "horizontal fixture elements found");
+            return;
+        }
+        checkNear(h->layoutX(), 0.0f, 0.01f, "a left-stuck box rests at its flow spot");
+        s->setScrollLeft(80.0f);
+        layoutRoot(*document, resolver, 400.0f);
+        checkNear(h->layoutX(), 80.0f, 0.01f, "left:0 tracks the horizontal scroll");
+        s->setScrollLeft(200.0f);
+        layoutRoot(*document, resolver, 400.0f);
+        checkNear(h->layoutX(), 200.0f, 0.01f, "left:0 sticks to the end of the horizontal range");
+    }
+}
+
 int main() {
     testLogicalPropertiesAndInsets();
     testGridAutoTracks();
+    testStickyPositioning();
     testAspectRatio();
     testTextOverflowEllipsis();
     testEasingAndTimingFunctions();
