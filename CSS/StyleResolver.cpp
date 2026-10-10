@@ -1033,6 +1033,17 @@ void applyBoxEdges(std::string_view value, BoxEdge& edges) {
     }
 }
 
+void applyTwoSides(std::string_view value, Length& start, Length& end) {
+    const std::vector<Length> parts = parseLengthList(value);
+    if (parts.size() == 1) {
+        start = parts[0];
+        end = parts[0];
+    } else if (parts.size() >= 2) {
+        start = parts[0];
+        end = parts[1];
+    }
+}
+
 const char* justifyName(ComputedStyle::FlexAlign v) {
     switch (v) {
         case ComputedStyle::AlignStart: return "flex-start";
@@ -2564,6 +2575,18 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         s.margin.bottom = parseLength(value);
     } else if (property == "margin-left") {
         s.margin.left = parseLength(value);
+    } else if (property == "margin-inline") {
+        applyTwoSides(value, s.margin.left, s.margin.right);
+    } else if (property == "margin-inline-start") {
+        s.margin.left = parseLength(value);
+    } else if (property == "margin-inline-end") {
+        s.margin.right = parseLength(value);
+    } else if (property == "margin-block") {
+        applyTwoSides(value, s.margin.top, s.margin.bottom);
+    } else if (property == "margin-block-start") {
+        s.margin.top = parseLength(value);
+    } else if (property == "margin-block-end") {
+        s.margin.bottom = parseLength(value);
     } else if (property == "padding") {
         applyBoxEdges(value, s.padding);
     } else if (property == "padding-top") {
@@ -2573,6 +2596,18 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
     } else if (property == "padding-left") {
         s.padding.left = parseLength(value);
     } else if (property == "padding-bottom") {
+        s.padding.bottom = parseLength(value);
+    } else if (property == "padding-inline") {
+        applyTwoSides(value, s.padding.left, s.padding.right);
+    } else if (property == "padding-inline-start") {
+        s.padding.left = parseLength(value);
+    } else if (property == "padding-inline-end") {
+        s.padding.right = parseLength(value);
+    } else if (property == "padding-block") {
+        applyTwoSides(value, s.padding.top, s.padding.bottom);
+    } else if (property == "padding-block-start") {
+        s.padding.top = parseLength(value);
+    } else if (property == "padding-block-end") {
         s.padding.bottom = parseLength(value);
     } else if (property == "border-width") {
         applyToSides(value, parseBorderWidth, s.borderWidth.top, s.borderWidth.right,
@@ -2763,6 +2798,25 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         s.bottom = parseLength(value);
     } else if (property == "left") {
         s.left = parseLength(value);
+    } else if (property == "inset") {
+        BoxEdge e;
+        applyBoxEdges(value, e);
+        s.top = e.top;
+        s.right = e.right;
+        s.bottom = e.bottom;
+        s.left = e.left;
+    } else if (property == "inset-inline") {
+        applyTwoSides(value, s.left, s.right);
+    } else if (property == "inset-inline-start") {
+        s.left = parseLength(value);
+    } else if (property == "inset-inline-end") {
+        s.right = parseLength(value);
+    } else if (property == "inset-block") {
+        applyTwoSides(value, s.top, s.bottom);
+    } else if (property == "inset-block-start") {
+        s.top = parseLength(value);
+    } else if (property == "inset-block-end") {
+        s.bottom = parseLength(value);
     } else if (property == "z-index") {
         s.zIndex = static_cast<int>(parseNumber(value));
     } else if (property == "overflow") {
@@ -3585,10 +3639,26 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "margin-right") return length(style.margin.right);
     if (property == "margin-bottom") return length(style.margin.bottom);
     if (property == "margin-left") return length(style.margin.left);
+    if (property == "margin-inline-start") return length(style.margin.left);
+    if (property == "margin-inline-end") return length(style.margin.right);
+    if (property == "margin-block-start") return length(style.margin.top);
+    if (property == "margin-block-end") return length(style.margin.bottom);
     if (property == "padding-top") return length(style.padding.top);
     if (property == "padding-right") return length(style.padding.right);
     if (property == "padding-bottom") return length(style.padding.bottom);
     if (property == "padding-left") return length(style.padding.left);
+    if (property == "padding-inline-start") return length(style.padding.left);
+    if (property == "padding-inline-end") return length(style.padding.right);
+    if (property == "padding-block-start") return length(style.padding.top);
+    if (property == "padding-block-end") return length(style.padding.bottom);
+    if (property == "top") return length(style.top, "auto");
+    if (property == "right") return length(style.right, "auto");
+    if (property == "bottom") return length(style.bottom, "auto");
+    if (property == "left") return length(style.left, "auto");
+    if (property == "inset-inline-start") return length(style.left, "auto");
+    if (property == "inset-inline-end") return length(style.right, "auto");
+    if (property == "inset-block-start") return length(style.top, "auto");
+    if (property == "inset-block-end") return length(style.bottom, "auto");
     if (property == "border-width-top" || property == "border-top-width")
         return length(style.borderWidth.top);
     if (property == "border-width-right" || property == "border-right-width")

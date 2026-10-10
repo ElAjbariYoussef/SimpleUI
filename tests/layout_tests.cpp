@@ -3990,7 +3990,67 @@ void testAspectRatio() {
     }
 }
 
+void testLogicalPropertiesAndInsets() {
+    auto doc = parseOrNull(
+        "<sui><body>"
+        "<div id=\"m1\" style=\"margin-inline: 10px 20px; margin-block: 30px 40px\"></div>"
+        "<div id=\"m2\" style=\"margin-inline: 15px; margin-block: 25px\"></div>"
+        "<div id=\"p1\" style=\"padding-inline-start: 5px; padding-inline-end: 15px; padding-block-start: 25px; padding-block-end: 35px\"></div>"
+        "<div id=\"p2\" style=\"padding-inline: 12px 14px; padding-block: 16px\"></div>"
+        "<div id=\"ins\" style=\"position: absolute; inset: 10px 20px 30px 40px\"></div>"
+        "<div id=\"ins2\" style=\"position: absolute; inset-inline: 50px 55px; inset-block: 60px 65px\"></div>"
+        "<div id=\"ins3\" style=\"position: absolute; inset-inline-start: 70px; inset-block-end: 80px\"></div>"
+        "</body></sui>");
+    if (!doc) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*doc, resolver, 500.0f);
+
+    const sui::ComputedStyle sm1 = resolver.resolve(*doc->getElementById("m1"));
+    checkNear(sm1.margin.left.value, 10.0f, 0.01f, "margin-inline first value maps to margin-left");
+    checkNear(sm1.margin.right.value, 20.0f, 0.01f, "margin-inline second value maps to margin-right");
+    checkNear(sm1.margin.top.value, 30.0f, 0.01f, "margin-block first value maps to margin-top");
+    checkNear(sm1.margin.bottom.value, 40.0f, 0.01f, "margin-block second value maps to margin-bottom");
+
+    const sui::ComputedStyle sm2 = resolver.resolve(*doc->getElementById("m2"));
+    checkNear(sm2.margin.left.value, 15.0f, 0.01f, "single margin-inline maps to left");
+    checkNear(sm2.margin.right.value, 15.0f, 0.01f, "single margin-inline maps to right");
+    checkNear(sm2.margin.top.value, 25.0f, 0.01f, "single margin-block maps to top");
+    checkNear(sm2.margin.bottom.value, 25.0f, 0.01f, "single margin-block maps to bottom");
+
+    const sui::ComputedStyle sp1 = resolver.resolve(*doc->getElementById("p1"));
+    checkNear(sp1.padding.left.value, 5.0f, 0.01f, "padding-inline-start maps to padding-left");
+    checkNear(sp1.padding.right.value, 15.0f, 0.01f, "padding-inline-end maps to padding-right");
+    checkNear(sp1.padding.top.value, 25.0f, 0.01f, "padding-block-start maps to padding-top");
+    checkNear(sp1.padding.bottom.value, 35.0f, 0.01f, "padding-block-end maps to padding-bottom");
+
+    const sui::ComputedStyle sp2 = resolver.resolve(*doc->getElementById("p2"));
+    checkNear(sp2.padding.left.value, 12.0f, 0.01f, "padding-inline first value maps to padding-left");
+    checkNear(sp2.padding.right.value, 14.0f, 0.01f, "padding-inline second value maps to padding-right");
+    checkNear(sp2.padding.top.value, 16.0f, 0.01f, "padding-block single value maps to padding-top");
+    checkNear(sp2.padding.bottom.value, 16.0f, 0.01f, "padding-block single value maps to padding-bottom");
+
+    const sui::ComputedStyle sins = resolver.resolve(*doc->getElementById("ins"));
+    checkNear(sins.top.value, 10.0f, 0.01f, "inset maps to top");
+    checkNear(sins.right.value, 20.0f, 0.01f, "inset maps to right");
+    checkNear(sins.bottom.value, 30.0f, 0.01f, "inset maps to bottom");
+    checkNear(sins.left.value, 40.0f, 0.01f, "inset maps to left");
+
+    const sui::ComputedStyle sins2 = resolver.resolve(*doc->getElementById("ins2"));
+    checkNear(sins2.left.value, 50.0f, 0.01f, "inset-inline first maps to left");
+    checkNear(sins2.right.value, 55.0f, 0.01f, "inset-inline second maps to right");
+    checkNear(sins2.top.value, 60.0f, 0.01f, "inset-block first maps to top");
+    checkNear(sins2.bottom.value, 65.0f, 0.01f, "inset-block second maps to bottom");
+
+    const sui::ComputedStyle sins3 = resolver.resolve(*doc->getElementById("ins3"));
+    checkNear(sins3.left.value, 70.0f, 0.01f, "inset-inline-start maps to left");
+    checkNear(sins3.bottom.value, 80.0f, 0.01f, "inset-block-end maps to bottom");
+}
+
 int main() {
+    testLogicalPropertiesAndInsets();
     testAspectRatio();
     testTextOverflowEllipsis();
     testEasingAndTimingFunctions();
