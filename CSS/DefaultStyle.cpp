@@ -164,6 +164,23 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
         s.margin = {8.0f, 0.0f, 8.0f, 0.0f};
         return s;
     }
+
+    if (tag == "tr") {
+        Style s;
+        s.display = Style::TableRow;
+        return s;
+    }
+    if (tag == "td" || tag == "th") {
+        Style s;
+        s.display = Style::TableCell;
+        s.padding = {4.0f, 8.0f, 4.0f, 8.0f};
+        return s;
+    }
+    if (tag == "thead" || tag == "tbody" || tag == "tfoot") {
+        Style s;
+        s.display = Style::TableRowGroup;
+        return s;
+    }
     if (tag == "tr") {
         return block();
     }
