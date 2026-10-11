@@ -3286,6 +3286,15 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.cursor = chosen;
             s.specified |= ComputedStyle::SpecifiedCursor;
         }
+    } else if (property == "float") {
+        if (value == "left") s.floatType = ComputedStyle::FloatLeft;
+        else if (value == "right") s.floatType = ComputedStyle::FloatRight;
+        else s.floatType = ComputedStyle::FloatNone;
+    } else if (property == "clear") {
+        if (value == "left") s.clearType = ComputedStyle::ClearLeft;
+        else if (value == "right") s.clearType = ComputedStyle::ClearRight;
+        else if (value == "both") s.clearType = ComputedStyle::ClearBoth;
+        else s.clearType = ComputedStyle::ClearNone;
     } else if (property == "counter-reset") {
         s.counterReset = parseCounterList(value);
     } else if (property == "counter-increment") {
@@ -3901,6 +3910,21 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "list-style-position") {
         return style.listStylePosition == ComputedStyle::LSPInside ? "inside" : "outside";
     }
+    if (property == "float") {
+        switch (style.floatType) {
+            case ComputedStyle::FloatLeft: return "left";
+            case ComputedStyle::FloatRight: return "right";
+            default: return "none";
+        }
+    }
+    if (property == "clear") {
+        switch (style.clearType) {
+            case ComputedStyle::ClearLeft: return "left";
+            case ComputedStyle::ClearRight: return "right";
+            case ComputedStyle::ClearBoth: return "both";
+            default: return "none";
+        }
+    }
     if (property == "pointer-events") {
         return style.pointerEventsNone ? "none" : "auto";
     }
@@ -3909,6 +3933,21 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "list-style-position") {
         return style.listStylePosition == ComputedStyle::LSPInside ? "inside" : "outside";
+    }
+    if (property == "float") {
+        switch (style.floatType) {
+            case ComputedStyle::FloatLeft: return "left";
+            case ComputedStyle::FloatRight: return "right";
+            default: return "none";
+        }
+    }
+    if (property == "clear") {
+        switch (style.clearType) {
+            case ComputedStyle::ClearLeft: return "left";
+            case ComputedStyle::ClearRight: return "right";
+            case ComputedStyle::ClearBoth: return "both";
+            default: return "none";
+        }
     }
     if (property == "text-overflow") {
         return style.textOverflow == ComputedStyle::TextOverflowEllipsis ? "ellipsis" : "clip";

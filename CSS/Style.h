@@ -589,6 +589,12 @@ struct ComputedStyle {
 
     // Visibility
     bool visible = true;
+    // Float and clear (block layout)
+    enum FloatType : std::uint8_t { FloatNone, FloatLeft, FloatRight };
+    FloatType floatType = FloatNone;
+    enum ClearType : std::uint8_t { ClearNone, ClearLeft, ClearRight, ClearBoth };
+    ClearType clearType = ClearNone;
+
 
     // CSS counters, keyed by name. `counterReset` sets the counter to `value` on
     // the element that declares it; `counterIncrement` adds `value` to it.
