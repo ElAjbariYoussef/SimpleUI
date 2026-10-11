@@ -3028,6 +3028,145 @@ void testHasSelector() {
     }
 }
 
+// `float` takes a box out of normal flow and reserves a strip along the left or
+// right content edge; following lines wrap beside it. `clear` drops a block below
+// the floats on the named side. These run without a font, so a 10px font advances
+// every glyph by 5px and a space by 2.5px.
+void testFloatsAndClear() {
+    // A left float indents the text on each line it covers.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\">"
+            "<img id=\"f\"/>"
+            "aaaaaaaa bbbbbbbb"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:200px;font-size:10px}"
+            "#f{float:left;width:60px;height:30px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* box = document->getElementById("box");
+        Element* f = document->getElementById("f");
+        check(f != nullptr && std::fabs(f->layoutX() - 0.0f) < 0.5f,
+              "a left float sits on the left content edge");
+        check(f != nullptr && std::fabs(f->layoutY() - 0.0f) < 0.5f,
+              "a left float starts at the top of the flow");
+        check(f != nullptr && std::fabs(f->layoutWidth() - 60.0f) < 0.5f &&
+                  std::fabs(f->layoutHeight() - 30.0f) < 0.5f,
+              "a float keeps its used width and height");
+        const auto& runs = box->textRuns();
+        check(runs.size() >= 2 && std::fabs(runs[0].x - 60.0f) < 0.5f,
+              "the first line starts beside the float");
+        check(runs.size() >= 2 && std::fabs(runs[1].x - 60.0f) < 0.5f,
+              "the wrapped line is indented too");
+        check(runs.size() >= 2 && std::fabs(runs[1].y - runs[0].y - 12.0f) < 0.5f,
+              "the second word wrapped onto the next line");
+        check(box != nullptr && std::fabs(box->layoutHeight() - 30.0f) < 0.5f,
+              "a container grows to hold its float");
+    }
+
+    // Two left floats that do not fit side by side stack vertically.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\">"
+            "<img id=\"a\"/><img id=\"b\"/>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:100px}"
+            "#a,#b{float:left;width:60px;height:20px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        check(a != nullptr && std::fabs(a->layoutY() - 0.0f) < 0.5f,
+              "the first float sits at the top");
+        check(b != nullptr && std::fabs(b->layoutY() - 20.0f) < 0.5f,
+              "a float that cannot fit beside the first drops below it");
+    }
+
+    // A right float anchors to the right content edge.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\">"
+            "<img id=\"f\"/>"
+            "aaaaaaaa"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:200px;font-size:10px}"
+            "#f{float:right;width:60px;height:30px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* f = document->getElementById("f");
+        check(f != nullptr && std::fabs(f->layoutX() - 140.0f) < 0.5f,
+              "a right float sits on the right content edge");
+        Element* box = document->getElementById("box");
+        const auto& runs = box->textRuns();
+        check(!runs.empty() && std::fabs(runs[0].x - 0.0f) < 0.5f,
+              "text beside a right float keeps the left edge");
+    }
+
+    // `clear:left` moves a block below the float.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\">"
+            "<img id=\"f\"/><div id=\"c\"></div>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:200px}"
+            "#f{float:left;width:50px;height:40px}"
+            "#c{clear:left;height:20px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* c = document->getElementById("c");
+        check(c != nullptr && std::fabs(c->layoutY() - 40.0f) < 0.5f,
+              "clear:left drops the box below the float");
+        Element* box = document->getElementById("box");
+        check(box != nullptr && std::fabs(box->layoutHeight() - 60.0f) < 0.5f,
+              "cleared content adds to the container height");
+    }
+
+    // A block box without `clear` starts at the top; only its lines avoid the
+    // float, so its own text still wraps.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\">"
+            "<img id=\"f\"/>"
+            "<p id=\"p\">aaaaaaaa bbbbbbbb</p>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:200px;font-size:10px}"
+            "#f{float:left;width:60px;height:30px} #p{margin:0}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* p = document->getElementById("p");
+        check(p != nullptr && std::fabs(p->layoutY() - 0.0f) < 0.5f,
+              "an uncleared block starts at the top");
+        const auto& runs = p->textRuns();
+        check(!runs.empty() && std::fabs(runs[0].x - 60.0f) < 0.5f,
+              "a following block's text wraps around the float");
+    }
+}
+
 }  // namespace
 
 // Resolves the style of every child of the body against `resolver`, so a stylesheet can
@@ -4712,6 +4851,7 @@ int main() {
     testPseudoElements();
     testCssCounters();
     testHasSelector();
+    testFloatsAndClear();
     testImportantAndCssWideKeywords();
     testBorderWidthLonghands();
     testMediaQueries();

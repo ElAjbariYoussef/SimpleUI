@@ -197,6 +197,23 @@ int main() {
           "<sui><body><p id=\"t\"><i></i><i></i></p></body></sui>",
           "body{margin:0} #t i{display:inline-flex;width:40px;height:10px}", "t");
 
+    report("float/clear");
+    probe("float:left indents the text",
+          "<sui><body><div id=\"t\"><img id=\"f\"/>aaa bbb ccc ddd</div></body></sui>",
+          "body{margin:0;font-size:20px} #t{width:200px}"
+          "#f{float:left;width:60px;height:40px}",
+          "f");
+    probe("float:right anchors right",
+          "<sui><body><div id=\"t\"><img id=\"f\"/>aaa bbb ccc</div></body></sui>",
+          "body{margin:0;font-size:20px} #t{width:200px}"
+          "#f{float:right;width:60px;height:40px}",
+          "f");
+    probe("clear:left drops a block",
+          "<sui><body><div id=\"t\"><img id=\"f\"/><div id=\"c\"></div></div></body></sui>",
+          "body{margin:0} #t{width:200px}#f{float:left;width:50px;height:40px}"
+          "#c{clear:left;height:20px}",
+          "c");
+
     report("documented gaps (expected to be no-ops)");
     probe("display:none removes the box",
           "<sui><body><div id=\"t\"></div></body></sui>",
@@ -217,8 +234,6 @@ int main() {
           "body{margin:0} #t{white-space:nowrap;width:40px;font-size:20px}", "t");
     probe("text-overflow ignored", "<sui><body><p id=\"t\">abcdefghij</p></body></sui>",
           "body{margin:0} #t{text-overflow:ellipsis;width:40px;font-size:20px}", "t");
-    probe("float ignored", "<sui><body><div id=\"t\"></div></body></sui>",
-          "body{margin:0} #t{float:left;width:50px;height:50px}", "t");
     probe("transform ignored", "<sui><body><div id=\"t\"></div></body></sui>",
           "body{margin:0} #t{transform:rotate(10deg);width:50px;height:50px}", "t");
     probe("box-shadow ignored", "<sui><body><div id=\"t\"></div></body></sui>",

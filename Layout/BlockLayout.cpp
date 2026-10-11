@@ -136,6 +136,87 @@ float textWidth(const TextFont* font, const ComputedStyle& s, std::string_view t
     return w;
 }
 
+bool isFloated(const ComputedStyle& s) {
+    return s.floatType != ComputedStyle::FloatNone;
+}
+
+// A floated box, recorded as its margin box in window coordinates so any line or
+// block can ask how much room is left beside it.
+struct FloatBox {
+    float top = 0.0f;
+    float bottom = 0.0f;
+    float left = 0.0f;
+    float right = 0.0f;
+    bool isLeft = true;
+};
+
+// The floated boxes belonging to one containing block. Browsers place a float at
+// the position of the line or block it belongs to and let everything that follows
+// wrap beside it, so `available` answers, for a vertical slice, how far the left
+// inset reaches and where the right edge sits. Coordinates are absolute, matching
+// the layout engine's line and box coordinates.
+class FloatContext {
+public:
+    void available(float yTop, float yBottom, float& leftEdge, float& rightEdge) const {
+        for (const FloatBox& f : floats_) {
+            // Half-open intervals: a float exactly touching the slice edge does
+            // not overlap it.
+            if (f.bottom <= yTop || f.top >= yBottom) {
+                continue;
+            }
+            if (f.isLeft) {
+                leftEdge = std::max(leftEdge, f.right);
+            } else {
+                rightEdge = std::min(rightEdge, f.left);
+            }
+        }
+    }
+
+    // The lowest float edge a `clear` box has to drop below; `baseline` is what
+    // to return when nothing is cleared.
+    float clearBottom(ComputedStyle::ClearType clear, float baseline) const {
+        float bottom = baseline;
+        for (const FloatBox& f : floats_) {
+            const bool matches =
+                clear == ComputedStyle::ClearBoth ||
+                (clear == ComputedStyle::ClearLeft && f.isLeft) ||
+                (clear == ComputedStyle::ClearRight && !f.isLeft);
+            if (matches) {
+                bottom = std::max(bottom, f.bottom);
+            }
+        }
+        return bottom;
+    }
+
+    // The next float bottom strictly below `y`, so a float that does not fit
+    // beside the others can try again lower down.
+    float nextBottom(float y) const {
+        float next = y;
+        bool found = false;
+        for (const FloatBox& f : floats_) {
+            if (f.bottom > y + kEpsilon && (!found || f.bottom < next)) {
+                next = f.bottom;
+                found = true;
+            }
+        }
+        return found ? next : y;
+    }
+
+    float bottom(float baseline) const {
+        float bottom = baseline;
+        for (const FloatBox& f : floats_) {
+            bottom = std::max(bottom, f.bottom);
+        }
+        return bottom;
+    }
+
+    void add(const FloatBox& f) { floats_.push_back(f); }
+
+private:
+    static constexpr float kEpsilon = 0.01f;
+    std::vector<FloatBox> floats_;
+};
+
 class Layout {
 public:
     Layout(const StyleResolver& resolver, const TextFont* font, float viewportWidth,
@@ -620,6 +701,11 @@ private:
     // positioned element, so its own out-of-flow descendants anchor to it.
     Element* cbOwner_ = nullptr;
 
+    // The floats currently in effect for in-flow descendants. A block container
+    // that declares floats owns this context; its in-flow children inherit it so
+    // their line boxes wrap around the floats.
+    FloatContext* floats_ = nullptr;
+
     bool laidOut(Element& el) const {
         if (!el.isVisual()) {
             return false;
@@ -630,12 +716,82 @@ private:
 
     bool hasBlockChild(Element& el) const {
         for (const auto& child : el.children()) {
+            if (child && !child->isTextNode() && laidOut(*child)) {
+                const ComputedStyle cs = resolver_.resolve(*child);
+                // A floated child is taken out of flow, so it does not force the
+                // container into block layout; it is placed while its siblings flow.
+                if (isBlockLevel(cs) && !isFloated(cs)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    bool hasFloatChild(Element& el) const {
+        for (const auto& child : el.children()) {
             if (child && !child->isTextNode() && laidOut(*child) &&
-                isBlockLevel(resolver_.resolve(*child))) {
+                isFloated(resolver_.resolve(*child))) {
                 return true;
             }
         }
         return false;
+    }
+
+    // Places a floated child's margin box against the container's left or right
+    // edge at `startY`, lowering it past any floats that leave too little room.
+    // `contentWidth`/`contentX` describe the containing block's content box. The
+    // float is laid out with the width CSS gives it: its used width, or a
+    // shrink-to-fit width capped at the container.
+    void placeFloat(Element& child, const ComputedStyle& cs, float contentWidth,
+                    float contentX, float startY) {
+        if (!floats_) {
+            return;
+        }
+        FloatContext& ctx = *floats_;
+        const bool left = cs.floatType == ComputedStyle::FloatLeft;
+        const UsedBox box = usedBox(cs, contentWidth);
+
+        // The float's own contents do not wrap around the floats beside it, so it
+        // lays out with no active context (it may still declare its own).
+        FloatContext* const saved = floats_;
+        floats_ = nullptr;
+
+        child.clearTextRuns();
+        float borderW = box.width;
+        if (borderW <= 0.0f) {
+            // Shrink to fit: the natural width, capped at the container.
+            borderW = std::min(contentWidth, probeWidth(child, box));
+        }
+        borderW += box.horizontalChrome();
+        const float outerW = borderW + box.margin.left + box.margin.right;
+
+        // Lower the float until the slice at its top has room for it. Each step
+        // drops it to the bottom of the nearest float that got in the way.
+        float y = startY;
+        float leftEdge = contentX;
+        float rightEdge = contentX + contentWidth;
+        for (int guard = 0; guard < 1000; ++guard) {
+            leftEdge = contentX;
+            rightEdge = contentX + contentWidth;
+            ctx.available(y, y + 0.01f, leftEdge, rightEdge);
+            if (rightEdge - leftEdge >= outerW - 0.01f) {
+                break;
+            }
+            const float next = ctx.nextBottom(y);
+            if (next <= y + 0.01f) {
+                break;
+            }
+            y = next;
+        }
+        const float x = left ? leftEdge : std::max(contentX, rightEdge - outerW);
+
+        run(child, borderW, x, y);
+        floats_ = saved;
+
+        const float top = y;
+        const float bottom = y + box.margin.top + child.layoutHeight() + box.margin.bottom;
+        ctx.add({top, bottom, x, x + outerW, left});
     }
 
     float layoutBlockContainer(Element& el, const UsedBox& box, float availableWidth,
@@ -646,12 +802,17 @@ private:
                              : std::max(0.0f, availableWidth - box.horizontalChrome()),
             box);
         if (box.width <= 0.0f) {
-            // Auto width still has to fit fixed-width children.
+            // Auto width still has to fit fixed-width children. Floats are
+            // shrink-to-fit, so they never widen the container.
             for (const auto& child : el.children()) {
                 if (!child || child->isTextNode() || !laidOut(*child)) {
                     continue;
                 }
-                const UsedBox childBox = usedBox(resolver_.resolve(*child), contentWidth);
+                const ComputedStyle childStyle = resolver_.resolve(*child);
+                if (isFloated(childStyle)) {
+                    continue;
+                }
+                const UsedBox childBox = usedBox(childStyle, contentWidth);
                 if (childBox.width > 0.0f) {
                     contentWidth = applyMinMax(
                         std::max(contentWidth, childBox.width + childBox.horizontalChrome()),
@@ -660,10 +821,24 @@ private:
             }
         }
 
+        FloatContext* const ctx = floats_;
         float cursorY = 0.0f;
         for (const auto& child : el.children()) {
             if (!child || child->isTextNode() || !laidOut(*child)) {
                 continue;
+            }
+            const ComputedStyle cs = resolver_.resolve(*child);
+            if (isFloated(cs)) {
+                // A float takes no flow space; it sits beside whatever follows.
+                if (ctx) {
+                    placeFloat(*child, cs, contentWidth, contentX, contentY + cursorY);
+                }
+                continue;
+            }
+            if (ctx && cs.clearType != ComputedStyle::ClearNone) {
+                // `clear` drops the box below the floats on the named side.
+                const float clearY = ctx->clearBottom(cs.clearType, contentY);
+                cursorY = std::max(cursorY, clearY - contentY);
             }
             cursorY += run(*child, contentWidth, contentX, contentY + cursorY);
         }
@@ -735,12 +910,32 @@ private:
             return layoutGridContainer(el, s, box, availableWidth, contentX, contentY,
                                        outWidth);
         }
-        if (hasBlockChild(el)) {
-            float height = 0.0f;
-            layoutBlockContainer(el, box, availableWidth, contentX, contentY, height, outWidth);
-            return height;
+
+        // A container that declares floats owns a context for them; in-flow
+        // descendants inherit it so their lines wrap beside the floats. A
+        // container without floats simply passes the ancestor's context through.
+        const bool ownsFloats = hasFloatChild(el);
+        FloatContext floatCtx;
+        FloatContext* const savedFloats = floats_;
+        if (ownsFloats) {
+            floats_ = &floatCtx;
         }
-        return layoutInlineContainer(el, s, box, availableWidth, contentX, contentY, outWidth);
+
+        float height = 0.0f;
+        if (hasBlockChild(el)) {
+            layoutBlockContainer(el, box, availableWidth, contentX, contentY, height, outWidth);
+        } else {
+            height = layoutInlineContainer(el, s, box, availableWidth, contentX, contentY,
+                                           outWidth);
+        }
+
+        // A block box contains the floats it declares, so they extend its height
+        // rather than spilling over whatever follows it.
+        if (ownsFloats) {
+            height = std::max(height, floatCtx.bottom(contentY) - contentY);
+            floats_ = savedFloats;
+        }
+        return height;
     }
 
     // Flexbox. A container lays its children out along one axis; leftover space goes
@@ -1796,6 +1991,22 @@ private:
             if (s.textIndent.unit != sui::Length::Auto) {
                 penX_ = std::max(0.0f, s.textIndent.resolve(s.fontSize, s.fontSize, 16.0f));
             }
+            syncLine();
+        }
+
+        // Sets the current line's left inset and available width from any floats
+        // overlapping the line box. Without floats this leaves the line exactly
+        // as wide as the container.
+        void syncLine() {
+            float left = originX_;
+            float right = originX_ + maxWidth_;
+            if (owner_.floats_) {
+                owner_.floats_->available(originY_ + cursorY_,
+                                          originY_ + cursorY_ + metrics_.lineHeight, left,
+                                          right);
+            }
+            lineIndent_ = std::max(0.0f, left - originX_);
+            lineAvail_ = std::max(0.0f, right - originX_ - lineIndent_);
         }
 
         void text(std::string_view text, const ComputedStyle& s) {
@@ -1881,6 +2092,18 @@ private:
                     continue;
                 }
                 const ComputedStyle cs = owner_.resolveStyle(*child);
+                // A floated child leaves the line and reserves space beside it
+                // for every following line.
+                if (isFloated(cs)) {
+                    if (owner_.floats_) {
+                        const float floatY = lineHasContent_
+                                                 ? originY_ + cursorY_ + metrics_.lineHeight
+                                                 : originY_ + cursorY_;
+                        owner_.placeFloat(*child, cs, maxWidth_, originX_, floatY);
+                        syncLine();
+                    }
+                    continue;
+                }
                 if (cs.display == ComputedStyle::Inline) {
                     inlineBox(*child, cs);
                     continue;
@@ -1892,21 +2115,31 @@ private:
         void atomic(Element& child, const ComputedStyle& cs) {
             const UsedBox box = owner_.usedBox(cs, maxWidth_);
             // Measure before deciding to wrap: an auto-width atomic box is as
-            // wide as its contents want, so the break test needs that number.
+            // wide as its contents want, so the break test needs that number. The
+            // probe must not wrap the atomic's contents around the container's
+            // floats, so they are hidden for the measurement.
             float boxWidth = box.width;
             if (boxWidth <= 0.0f) {
+                FloatContext* const savedFloats = owner_.floats_;
+                owner_.floats_ = nullptr;
                 owner_.run(child, kUnboundedProbe, 0.0f, 0.0f);
+                owner_.floats_ = savedFloats;
                 boxWidth = child.layoutWidth();
             }
             const float outerW = boxWidth + box.margin.left + box.margin.right +
                                  box.borderWidth.left + box.borderWidth.right +
                                  box.padding.left + box.padding.right;
-            if (lineHasContent_ && penX_ + outerW > maxWidth_) {
+            if (lineHasContent_ && lineIndent_ + penX_ + outerW > lineAvail_) {
                 newLine();
             }
             const float lineTop = originY_ + cursorY_;
             const float top = lineTop + box.margin.top + verticalAlignShift(cs);
-            owner_.run(child, maxWidth_, originX_ + penX_ + box.margin.left, top);
+            // The atomic box is placed as a unit; the container's floats do not
+            // wrap its own contents.
+            FloatContext* const savedFloats = owner_.floats_;
+            owner_.floats_ = nullptr;
+            owner_.run(child, maxWidth_, originX_ + lineIndent_ + penX_ + box.margin.left, top);
+            owner_.floats_ = savedFloats;
             // `top` and `bottom` align the box against the line box rather than the
             // baseline. The line box is the container's own line height, so its
             // extent is known here: `bottom` drops the box so its outer bottom sits
@@ -1938,6 +2171,7 @@ private:
             lineHasContent_ = false;
             ellipsisAdded_ = false;
             lineRunStartIndex_ = ownerEl_.textRuns().size();
+            syncLine();
         }
 
         void finish() {}
@@ -2006,7 +2240,7 @@ private:
             }
             const float wWidth = textWidth(owner_.font_, s, w);
             if (spacing_.wraps && lineHasContent_ &&
-                penX_ + metrics_.spaceWidth + wWidth > maxWidth_) {
+                lineIndent_ + penX_ + metrics_.spaceWidth + wWidth > lineAvail_) {
                 newLine();
             }
             float space = lineHasContent_ ? metrics_.spaceWidth : 0.0f;
@@ -2014,11 +2248,12 @@ private:
                 space += s.wordSpacing.resolve(s.fontSize, s.fontSize, 16.0f);
             }
 
-            if (isEllipsisActive() && penX_ + space + wWidth > maxWidth_) {
+            if (isEllipsisActive() && lineIndent_ + penX_ + space + wWidth > lineAvail_) {
                 // The current word overflows the container line box and text-overflow: ellipsis is active.
                 const std::string kEllipsis = "\xE2\x80\xA6";
                 const float ellWidth = textWidth(owner_.font_, s, kEllipsis);
-                const float availForWord = maxWidth_ - (penX_ + space) - ellWidth;
+                const float usedX = lineIndent_ + penX_ + space;
+                const float availForWord = lineAvail_ - usedX - ellWidth;
 
                 if (availForWord > 0.0f) {
                     std::string prefix;
@@ -2038,7 +2273,7 @@ private:
                     if (!prefix.empty()) {
                         std::string result = transformText(s, prefix) + kEllipsis;
                         const float rWidth = textWidth(owner_.font_, s, result);
-                        ownerEl_.addTextRun({result, originX_ + penX_ + space,
+                        ownerEl_.addTextRun({result, originX_ + lineIndent_ + penX_ + space,
                                              originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), rWidth,
                                              metrics_.lineHeight, metrics_.ascent + ascentDelta,
                                              s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
@@ -2051,8 +2286,8 @@ private:
                     }
                 }
 
-                if (maxWidth_ - (penX_ + space) >= ellWidth) {
-                    ownerEl_.addTextRun({kEllipsis, originX_ + penX_ + space,
+                if (lineAvail_ - (lineIndent_ + penX_ + space) >= ellWidth) {
+                    ownerEl_.addTextRun({kEllipsis, originX_ + lineIndent_ + penX_ + space,
                                          originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), ellWidth,
                                          metrics_.lineHeight, metrics_.ascent + ascentDelta,
                                          s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
@@ -2066,7 +2301,7 @@ private:
 
                 auto& runs = ownerEl_.textRuns();
                 while (runs.size() > lineRunStartIndex_) {
-                    const float avail = (originX_ + maxWidth_) - runs.back().x;
+                    const float avail = (originX_ + lineIndent_ + lineAvail_) - runs.back().x;
                     if (avail >= ellWidth) {
                         std::string& rText = runs.back().text;
                         while (!rText.empty() && textWidth(owner_.font_, s, rText) > avail - ellWidth) {
@@ -2078,7 +2313,7 @@ private:
                         }
                         rText += kEllipsis;
                         runs.back().width = textWidth(owner_.font_, s, rText);
-                        penX_ = (runs.back().x - originX_) + runs.back().width;
+                        penX_ = (runs.back().x - originX_ - lineIndent_) + runs.back().width;
                         lineHasContent_ = true;
                         widest_ = std::max(widest_, penX_);
                         ellipsisAdded_ = true;
@@ -2087,7 +2322,7 @@ private:
                     runs.pop_back();
                 }
 
-                ownerEl_.addTextRun({kEllipsis, originX_,
+                ownerEl_.addTextRun({kEllipsis, originX_ + lineIndent_,
                                      originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), ellWidth,
                                      metrics_.lineHeight, metrics_.ascent + ascentDelta,
                                      s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
@@ -2100,7 +2335,7 @@ private:
             }
 
             std::string wt = transformText(s, w);
-            ownerEl_.addTextRun({wt, originX_ + penX_ + space,
+            ownerEl_.addTextRun({wt, originX_ + lineIndent_ + penX_ + space,
                                  originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), wWidth,
                                  metrics_.lineHeight, metrics_.ascent + ascentDelta,
                                  s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
@@ -2121,6 +2356,10 @@ private:
         float cursorY_ = 0.0f;
         float bottom_ = 0.0f;
         float widest_ = 0.0f;
+        // Current line geometry with floats taken into account: `lineIndent_` is
+        // the left inset and `lineAvail_` is the width left after it.
+        float lineIndent_ = 0.0f;
+        float lineAvail_ = 0.0f;
         bool lineHasContent_ = false;
         bool ellipsisAdded_ = false;
         std::size_t lineRunStartIndex_ = 0;
