@@ -1125,6 +1125,94 @@ void testInputPasswordLayout() {
           "plain input text run has raw text");
 }
 
+void testTextAreaLayout() {
+    // A textarea's value is its text content, not an attribute, and the default
+    // pre-wrap white-space keeps line breaks in the line grid.
+    auto document = parseOrNull(
+        "<sui><body><textarea id=\"t\">first\nsecond</textarea></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body{margin:0;font-size:10px} #t{width:80px;height:40px}"));
+    layoutRoot(*document, resolver, 500.0f);
+
+    Element* t = document->getElementById("t");
+    check(t != nullptr, "textarea element found");
+    if (!t) {
+        return;
+    }
+    check(t->value() == "first\nsecond", "textarea value is its text content");
+
+    // The value flows as one line per newline, each its own text run.
+    check(t->textRuns().size() == 2 && t->textRuns()[0].text == "first" &&
+              t->textRuns()[1].text == "second",
+          "textarea newline splits the value into two text runs");
+    if (t->textRuns().size() == 2) {
+        checkNear(t->textRuns()[1].y - t->textRuns()[0].y, 10.0f, 0.01f,
+                  "textarea second line sits one line-height lower");
+    }
+
+    // Writing replaces the text content, so the next paint draws the new text.
+    t->setValue("rewritten");
+    check(t->value() == "rewritten", "textarea setValue rewrites its text content");
+
+    // Without a CSS size the control is `cols` characters by `rows` lines.
+    auto sized = parseOrNull(
+        "<sui><body><textarea id=\"s\" rows=\"3\" cols=\"10\"></textarea></body></sui>");
+    if (!sized) {
+        return;
+    }
+    sui::StyleResolver sizedResolver;
+    sizedResolver.setRules(sui::CSSParser::parse("body{margin:0;font-size:16px}"));
+    layoutRoot(*sized, sizedResolver, 500.0f);
+    Element* s = sized->getElementById("s");
+    check(s != nullptr, "sized textarea found");
+    if (s) {
+        // cols 10 * 8px advance = 80, rows 3 * 16px lines = 48; plus 2px
+        // padding and 1px border on each side.
+        checkNear(s->layoutWidth(), 86.0f, 0.01f,
+                  "textarea default width comes from cols");
+        checkNear(s->layoutHeight(), 54.0f, 0.01f,
+                  "textarea default height comes from rows");
+    }
+
+    // The 20 x 2 defaults apply when the attributes are missing.
+    auto plain = parseOrNull("<sui><body><textarea id=\"p\"></textarea></body></sui>");
+    if (!plain) {
+        return;
+    }
+    sui::StyleResolver plainResolver;
+    plainResolver.setRules(sui::CSSParser::parse("body{margin:0;font-size:16px}"));
+    layoutRoot(*plain, plainResolver, 500.0f);
+    Element* p = plain->getElementById("p");
+    check(p != nullptr, "default textarea found");
+    if (p) {
+        checkNear(p->layoutWidth(), 166.0f, 0.01f, "textarea defaults to 20 cols");
+        checkNear(p->layoutHeight(), 38.0f, 0.01f, "textarea defaults to 2 rows");
+    }
+
+    // An explicit CSS size wins over the attribute-based default.
+    auto overridden = parseOrNull(
+        "<sui><body><textarea id=\"o\" rows=\"10\" cols=\"10\"></textarea></body></sui>");
+    if (!overridden) {
+        return;
+    }
+    sui::StyleResolver overrideResolver;
+    overrideResolver.setRules(
+        sui::CSSParser::parse("body{margin:0;font-size:16px} #o{width:120px;height:50px}"));
+    layoutRoot(*overridden, overrideResolver, 500.0f);
+    Element* o = overridden->getElementById("o");
+    check(o != nullptr, "overridden textarea found");
+    if (o) {
+        checkNear(o->layoutWidth(), 126.0f, 0.01f,
+                  "explicit width beats the cols default");
+        checkNear(o->layoutHeight(), 56.0f, 0.01f,
+                  "explicit height beats the rows default");
+    }
+}
+
 void testPropertyParsing() {
     auto document = parseOrNull("<sui><body><div>x</div></body></sui>");
     if (!document) {
@@ -5140,6 +5228,7 @@ int main() {
     testGridAlignment();
     testInputValue();
     testInputPasswordLayout();
+    testTextAreaLayout();
     testGridMinmax();
     testGridAutoFill();
     testGridStretch();

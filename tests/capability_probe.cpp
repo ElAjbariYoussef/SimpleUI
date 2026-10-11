@@ -74,7 +74,7 @@ int main() {
     report("UA defaults");
     const char* tags[] = {"body",   "div",    "p",    "h1",  "h2",  "h6",
                           "a",     "span",   "br",   "strong", "em", "small",
-                          "button", "input", "ul",  "ol",  "li",  "table",
+                          "button", "input", "textarea", "ul",  "ol",  "li",  "table",
                           "caption", "thead", "tbody", "tfoot", "tr", "th", "td",
                           "img", "svg", "video",
                           "audio", "canvas", "iframe", "picture", "source", "track"};
@@ -252,6 +252,14 @@ int main() {
           "<sui><body><table id=\"t\"><caption id=\"c\">cap</caption>"
           "<tr><td>A</td></tr></table></body></sui>",
           "body{margin:0;font-size:20px} table{border-collapse:collapse}", "c");
+
+    report("textarea control");
+    probe("newline splits into lines",
+          "<sui><body><textarea id=\"t\">ab\ncd</textarea></body></sui>",
+          "body{margin:0;font-size:10px} #t{width:80px;height:40px}", "t");
+    probe("cols x rows default size",
+          "<sui><body><textarea id=\"s\" rows=\"3\" cols=\"10\"></textarea></body></sui>",
+          "body{margin:0;font-size:16px}", "s");
 
     report("documented gaps (expected to be no-ops)");
     probe("display:none removes the box",

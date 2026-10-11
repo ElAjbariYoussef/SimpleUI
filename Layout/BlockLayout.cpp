@@ -162,6 +162,26 @@ int spanAttribute(Element& el, const char* name) {
     return value < 1 ? 1 : value;
 }
 
+// A positive integer attribute, falling back to `fallback` when absent or
+// malformed, used for a textarea's `rows` / `cols`.
+int intAttribute(Element& el, const char* name, int fallback) {
+    const std::string_view text = el.attribute(name);
+    if (text.empty()) {
+        return fallback;
+    }
+    int value = 0;
+    for (char c : text) {
+        if (!std::isdigit(static_cast<unsigned char>(c))) {
+            return fallback;
+        }
+        value = value * 10 + (c - '0');
+        if (value > 10000) {
+            return fallback;
+        }
+    }
+    return value < 1 ? fallback : value;
+}
+
 // A floated box, recorded as its margin box in window coordinates so any line or
 // block can ask how much room is left beside it.
 struct FloatBox {
@@ -290,10 +310,30 @@ public:
         return resolveBox(s, availableWidth, viewportHeight_, resolver_.rootFontSize());
     }
 
+    void applyTextAreaSize(Element& el, ComputedStyle& s) const {
+        if (el.tag() != "textarea") {
+            return;
+        }
+        // Without a CSS size a textarea behaves like a replaced element: `cols`
+        // characters wide by `rows` lines tall, measured in its own font.
+        const int cols = intAttribute(el, "cols", 20);
+        const int rows = intAttribute(el, "rows", 2);
+        const float advance = (font_ && font_->hasFont()) ? font_->measureText("0", s.fontSize)
+                                                          : s.fontSize * 0.5f;
+        const Metrics m = metricsFor(font_, s);
+        if (s.width.isAuto()) {
+            s.width = Length(static_cast<float>(cols) * advance);
+        }
+        if (s.height.isAuto()) {
+            s.height = Length(static_cast<float>(rows) * m.lineHeight);
+        }
+    }
+
     // Lays out `el` with the given available width. Returns the outer height
     // consumed, margins included.
     float run(Element& el, float availableWidth, float originX, float originY) {
-        const ComputedStyle s = resolver_.resolve(el);
+        ComputedStyle s = resolver_.resolve(el);
+        applyTextAreaSize(el, s);
         const UsedBox box = usedBox(s, availableWidth);
         el.clearTextRuns();
         if (s.display == ComputedStyle::None || !s.visible) {
@@ -2415,10 +2455,12 @@ private:
         // transparent here: their contents continue the same line. Anything
         // atomic (inline-block, replaced media) is placed as a unit.
         void inlineBox(Element& el, const ComputedStyle& container) {
-            // A text field draws its current value where a normal element would draw
-            // its children, so its text takes part in the same line context.
-            // Password fields mask the value with bullet characters.
-            if (el.tag() == "input") {
+            // A control draws its current value where a normal element would
+            // draw its children, so its text takes part in the same line context.
+            // Password fields mask the value with bullet characters. A textarea
+            // uses its own `white-space`, which defaults to pre-wrap, so its
+            // newlines survive into the line grid.
+            if (el.tag() == "input" || el.tag() == "textarea") {
                 const std::string value = el.value();
                 if (!value.empty()) {
                     if (el.attribute("type") == "password") {

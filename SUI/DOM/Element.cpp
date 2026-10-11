@@ -256,10 +256,18 @@ void Element::setTextContent(std::string text) {
 }
 
 std::string Element::value() const {
+    // A textarea's value is its text content, not an attribute.
+    if (tag_ == "textarea") {
+        return textContent();
+    }
     return std::string(attribute("value"));
 }
 
 void Element::setValue(std::string text) {
+    if (tag_ == "textarea") {
+        setTextContent(std::move(text));
+        return;
+    }
     setAttribute("value", std::move(text));
 }
 
