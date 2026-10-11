@@ -45,6 +45,11 @@ public:
         selectionAnchor_ = pos;
     }
 
+    // How many times the caret blink cycle has been restarted. The blink itself
+    // is time-based, so this counts the resets a test can pin down: keys and
+    // edits that touch the field reset it, modifier keys must not.
+    std::uint64_t caretBlinkResets() const noexcept { return caretBlinkResets_; }
+
     std::size_t selectionStart() const noexcept { return std::min(selectionAnchor_, caretBytePos_); }
     std::size_t selectionEnd() const noexcept { return std::max(selectionAnchor_, caretBytePos_); }
     bool hasSelection() const noexcept { return selectionAnchor_ != caretBytePos_; }
@@ -73,6 +78,10 @@ private:
 
     // Runs every <script> in `phase`, reporting hrefs that were never compiled in.
     void runScripts(bool afterBody);
+
+    // Restarts the caret blink cycle and notes it, so a test can tell a key that
+    // moved the caret apart from a modifier key that only repeated.
+    void resetCaretBlink();
 
     std::unique_ptr<Resources> resources_;
     std::unique_ptr<Platform> platform_;
@@ -117,6 +126,7 @@ private:
     std::size_t caretBytePos_ = 0;
     std::size_t selectionAnchor_ = 0;
     std::uint64_t caretBlinkStart_ = 0;
+    std::uint64_t caretBlinkResets_ = 0;
     bool shiftDown_ = false;
     bool ctrlDown_ = false;
     std::string compositionText_;

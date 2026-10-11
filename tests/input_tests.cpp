@@ -11,6 +11,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <cstdint>
 #include <cstdio>
 
 namespace {
@@ -443,6 +444,24 @@ int main() {
             check(app.hasComposition(), "composition restored on txt");
             app.dispatch(sui::InputEvent(sui::InputKind::PointerDown, 0.0f, 0.0f, 1));
             check(!app.hasComposition(), "PointerDown clears composition");
+
+            // A modifier key (Shift in particular) repeats while held, and each
+            // repeat must not restart the caret blink or the caret looks stuck
+            // solid. Keys that touch the field still restart it. The field is
+            // primed first because the key that re-establishes focus after a
+            // click legitimately restarts the blink.
+            appDoc.setFocused(txt);
+            app.dispatch(leftEv);
+            const std::uint64_t blinkBefore = app.caretBlinkResets();
+            app.dispatch(shiftDown);
+            check(app.caretBlinkResets() == blinkBefore,
+                  "a modifier key press does not restart the caret blink");
+            app.dispatch(shiftUp);
+            check(app.caretBlinkResets() == blinkBefore,
+                  "a modifier key release does not restart the caret blink");
+            app.dispatch(leftEv);
+            check(app.caretBlinkResets() == blinkBefore + 1,
+                  "an arrow key press restarts the caret blink");
         }
     }
 

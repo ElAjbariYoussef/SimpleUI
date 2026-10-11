@@ -393,6 +393,22 @@ bool isEditableField(const Element* el) {
     return el && (el->tag() == "input" || el->tag() == "textarea");
 }
 
+// SDL modifier keycodes (LCTRL..RGUI and MODE). A modifier never moves the
+// caret or changes a field's value, so it must not restart the caret blink.
+// The OS repeats a held modifier (Shift in particular); restarting the blink on
+// every repeat would leave the caret solid instead of blinking.
+bool isModifierKey(int key) {
+    return (key >= 0x400000e0 && key <= 0x400000e7) || key == 0x40000101;
+}
+
+// Whether a caret with the given blink start is in the visible half of its
+// 500 ms cycle. `caretBlinkStart_` can be newer than the frame's `ticks`
+// snapshot because input is dispatched after that snapshot is taken; that reset
+// still counts as visible rather than underflowing the unsigned subtraction.
+bool caretVisible(std::uint64_t ticks, std::uint64_t blinkStart) {
+    return ticks < blinkStart || ((ticks - blinkStart) / 500) % 2 == 0;
+}
+
 // Width of `text` at `fontSize`: whatever the loaded font measures, or the
 // layout fallback of half an em per glyph when no font is available.
 float fieldTextWidth(const TextFont* font, std::string_view text, float fontSize) {
@@ -1118,6 +1134,11 @@ void Application::selectAll() noexcept {
     }
 }
 
+void Application::resetCaretBlink() {
+    caretBlinkStart_ = SDL_GetTicks();
+    ++caretBlinkResets_;
+}
+
 Document& Application::document() const {
     return *document_;
 }
@@ -1291,7 +1312,7 @@ void Application::dispatch(const InputEvent& event) {
                     const ComputedStyle cs = resolver_.resolve(*focused);
                     caretBytePos_ = static_cast<int>(byteAt(
                         *focused, focused->value(), event.x, event.y, cs, font_.get()));
-                    caretBlinkStart_ = SDL_GetTicks();
+                    resetCaretBlink();
                 }
             }
             return;
@@ -1306,7 +1327,7 @@ void Application::dispatch(const InputEvent& event) {
                 resolver_.setFocused(target);
                 lastFocused_ = target;
                 if (isEditableField(target)) {
-                    caretBlinkStart_ = SDL_GetTicks();
+                    resetCaretBlink();
                     caretBytePos_ = target->value().size();
                     if (!target->textRuns().empty()) {
                         const ComputedStyle cs = resolver_.resolve(*target);
@@ -1406,7 +1427,7 @@ void Application::dispatch(const InputEvent& event) {
                 selectionAnchor_ = caretBytePos_;
                 compositionText_.clear();
                 compositionCursor_ = 0;
-                caretBlinkStart_ = SDL_GetTicks();
+                resetCaretBlink();
             }
             if (caretBytePos_ > value.size()) {
                 caretBytePos_ = value.size();
@@ -1430,10 +1451,12 @@ void Application::dispatch(const InputEvent& event) {
                 if (!readOnly) {
                     compositionText_ = event.text;
                     compositionCursor_ = event.editStart;
-                    caretBlinkStart_ = SDL_GetTicks();
+                    resetCaretBlink();
                 }
             } else if (event.kind == InputKind::KeyDown) {
-                caretBlinkStart_ = SDL_GetTicks();
+                if (!isModifierKey(event.key)) {
+                    resetCaretBlink();
+                }
                 if (isCtrl && (event.key == kA || event.key == 'A')) {
                     selectionAnchor_ = 0;
                     caretBytePos_ = value.size();
@@ -1560,7 +1583,7 @@ void Application::dispatch(const InputEvent& event) {
                 compositionText_.clear();
                 compositionCursor_ = 0;
                 if (!event.text.empty()) {
-                    caretBlinkStart_ = SDL_GetTicks();
+                    resetCaretBlink();
                     if (selectionAnchor_ != caretBytePos_) {
                         const std::size_t sStart = std::min(selectionAnchor_, caretBytePos_);
                         const std::size_t sEnd = std::max(selectionAnchor_, caretBytePos_);
@@ -1735,10 +1758,9 @@ void Application::run() {
         // so an animated page repaints without any script.
         const bool timerFired = sui::script::pumpTimers();
         const bool animating = resolver_.hasRunningAnimations();
-        const bool inputFocused = document_ && document_->focused() &&
-                                  document_->focused()->tag() == "input";
+        const bool inputFocused = document_ && isEditableField(document_->focused());
         const Uint64 ticks = SDL_GetTicks();
-        const bool caretBlinkPhase = inputFocused && (((ticks - caretBlinkStart_) / 500) % 2 == 0);
+        const bool caretBlinkPhase = inputFocused && caretVisible(ticks, caretBlinkStart_);
         static bool lastCaretBlinkPhase = false;
         const bool caretPhaseChanged = inputFocused && (caretBlinkPhase != lastCaretBlinkPhase);
         if (caretPhaseChanged) {
@@ -2043,7 +2065,7 @@ void Application::run() {
                     int compCursor = 0;
                     if (document_ && document_->focused() == item.el) {
                         caretPos = static_cast<int>(caretBytePos_);
-                        showCaret = ((ticks - caretBlinkStart_) / 500) % 2 == 0;
+                        showCaret = caretVisible(ticks, caretBlinkStart_);
                         if (selectionAnchor_ != caretBytePos_) {
                             selStart = static_cast<int>(std::min(selectionAnchor_, caretBytePos_));
                             selEnd = static_cast<int>(std::max(selectionAnchor_, caretBytePos_));
