@@ -3303,8 +3303,11 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
                property == "-webkit-appearance") {
         // Accepted; these control browser chrome that this engine does not draw.
     } else if (property == "will-change" || property == "contain" ||
-               property == "isolation") {
-        // Performance / compositing hints: accepted and ignored.
+               property == "isolation" || property == "clip-path" ||
+               property == "mask" || property == "mask-image" ||
+               property == "-webkit-mask-image" || property == "backdrop-filter" ||
+               property == "filter") {
+        // Performance / compositing hints and effects: accepted and ignored.
     } else if (property == "tab-size" || property == "hyphens" ||
                property == "word-break" || property == "overflow-wrap") {
         // Text shaping hints that the layout engine does not yet implement.
