@@ -2791,6 +2791,142 @@ void testPseudoElements() {
     check(card->children()[0]->textContent() == "Prefix: HelloCard", "content: attr(title) resolves attribute");
 }
 
+// CSS counters: `counter-reset` creates a named counter, `counter-increment`
+// advances it, and `counter()` / `counters()` read the value into generated
+// content. The value is scoped to the resetting element's descendants and
+// following siblings, which is what makes per-section numbering restart.
+void testCssCounters() {
+    // Parsing and serialization.
+    {
+        sui::StyleResolver resolver;
+        resolver.setRules(
+            sui::CSSParser::parse("#a { counter-reset: section 5 other } "
+                                  "#b { counter-increment: item }"));
+        auto document = parseOrNull(
+            "<sui><body><div id=\"a\"></div><div id=\"b\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        const ComputedStyle a = resolver.resolve(*document->getElementById("a"));
+        check(a.counterReset.size() == 2, "counter-reset parses every name");
+        check(a.counterReset[0].name == "section" && a.counterReset[0].value == 5,
+              "counter-reset keeps an explicit value");
+        check(a.counterReset[1].name == "other" && a.counterReset[1].value == 0,
+              "counter-reset defaults a missing value to 0");
+        check(sui::StyleResolver::propertyValue(a, "counter-reset") == "section 5 other 0",
+              "counter-reset serializes back");
+        const ComputedStyle b = resolver.resolve(*document->getElementById("b"));
+        check(b.counterIncrement.size() == 1 && b.counterIncrement[0].value == 1,
+              "counter-increment defaults to 1");
+        check(sui::StyleResolver::propertyValue(b, "counter-increment") == "item 1",
+              "counter-increment serializes back");
+    }
+
+    // A container reset plus per-sibling increments counts up in generated text.
+    {
+        auto document = parseOrNull(
+            "<sui><body><h2>One</h2><h2>Two</h2><h2>Three</h2></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body { counter-reset: section }"
+            "h2 { counter-increment: section }"
+            "h2::before { content: counter(section) '. ' }"));
+        sui::generatePseudoElements(*document, resolver);
+        Element* body = document->querySelector("body");
+        if (!body) {
+            return;
+        }
+        const auto& h2s = body->children();
+        check(h2s.size() == 3, "three h2 elements survived");
+        if (h2s.size() == 3) {
+            check(h2s[0]->children().size() == 2, "::before is added ahead of the element text");
+            check(h2s[0]->children()[0]->textContent() == "1. ", "first heading reads 1");
+            check(h2s[1]->children()[0]->textContent() == "2. ", "second heading reads 2");
+            check(h2s[2]->children()[0]->textContent() == "3. ", "third heading reads 3");
+        }
+    }
+
+    // An explicit reset value is the starting point, and an increment that finds
+    // no counter creates one at the increment value.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"a\"></div><div id=\"b\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "#a { counter-reset: c 10 } #a::after { content: counter(c) }"
+            "#b { counter-increment: k 3 } #b::after { content: counter(k) }"));
+        sui::generatePseudoElements(*document, resolver);
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        if (!a || !b) {
+            return;
+        }
+        check(a->children().size() == 1 && a->children()[0]->textContent() == "10",
+              "an explicit reset value starts the counter");
+        check(b->children().size() == 1 && b->children()[0]->textContent() == "3",
+              "an increment with no reset creates the counter");
+    }
+
+    // `counters(name, sep)` joins every counter of that name in scope, outermost
+    // first, so nested lists number as 1, 1.1, and so on.
+    {
+        auto document = parseOrNull(
+            "<sui><body>"
+            "<ul><li id=\"a\"><ul><li id=\"b\"></li></ul></li></ul>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "ul { counter-reset: item }"
+            "li { counter-increment: item }"
+            "li::before { content: counters(item, '.') ' ' }"));
+        sui::generatePseudoElements(*document, resolver);
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        if (!a || !b) {
+            return;
+        }
+        check(a->children()[0]->textContent() == "1 ", "the outer item reads 1");
+        check(b->children()[0]->textContent() == "1.1 ", "the nested item reads 1.1");
+    }
+
+    // Two sibling sections each reset the counter, so numbering restarts rather
+    // than carrying on from the previous section.
+    {
+        auto document = parseOrNull(
+            "<sui><body>"
+            "<section id=\"s1\"><p></p><p></p></section>"
+            "<section id=\"s2\"><p></p><p></p></section>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "section { counter-reset: c }"
+            "p { counter-increment: c }"
+            "p::before { content: counter(c) '. ' }"));
+        sui::generatePseudoElements(*document, resolver);
+        Element* s1 = document->getElementById("s1");
+        Element* s2 = document->getElementById("s2");
+        if (!s1 || !s2) {
+            return;
+        }
+        check(s1->children()[0]->children()[0]->textContent() == "1. ", "first section starts at 1");
+        check(s1->children()[1]->children()[0]->textContent() == "2. ", "first section counts to 2");
+        check(s2->children()[0]->children()[0]->textContent() == "1. ", "second section restarts at 1");
+        check(s2->children()[1]->children()[0]->textContent() == "2. ", "second section counts to 2");
+    }
+}
+
 }  // namespace
 
 // Resolves the style of every child of the body against `resolver`, so a stylesheet can
@@ -4473,6 +4609,7 @@ int main() {
     testPositioning();
     testWhiteSpace();
     testPseudoElements();
+    testCssCounters();
     testImportantAndCssWideKeywords();
     testBorderWidthLonghands();
     testMediaQueries();

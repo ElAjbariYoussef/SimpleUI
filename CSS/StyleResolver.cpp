@@ -1133,7 +1133,28 @@ ContentResult parseContent(std::string_view v) {
             while (i < v.size() && v[i] != ')' && v[i] != ',') {
                 ++i;
             }
+            std::string nameWithSeparator;
             std::string_view name = v.substr(start, i - start);
+
+            // `counters(name, sep)` joins every counter with that name in scope
+            // using `sep`. The separator is folded into the name behind a unit
+            // separator byte, which a CSS identifier can never contain, so the
+            // generated-content reader can split the pair back apart.
+            while (i < v.size() && std::isspace(static_cast<unsigned char>(v[i]))) ++i;
+            if (i < v.size() && v[i] == ',') {
+                ++i;
+                while (i < v.size() && std::isspace(static_cast<unsigned char>(v[i]))) ++i;
+                if (i < v.size() && (v[i] == '"' || v[i] == '\'')) {
+                    const char quote = v[i++];
+                    const std::size_t sepStart = i;
+                    while (i < v.size() && v[i] != quote) ++i;
+                    const std::string separator =
+                        std::string(v.substr(sepStart, i - sepStart));
+                    if (i < v.size()) ++i;  // the closing quote
+                    nameWithSeparator = std::string(name) + '\x1f' + separator;
+                    name = nameWithSeparator;
+                }
+            }
             while (i < v.size() && v[i] != ')') ++i;
             if (i < v.size() && v[i] == ')') ++i;
             res.text.push_back('');
@@ -1147,27 +1168,34 @@ ContentResult parseContent(std::string_view v) {
 }
 
 
-std::vector<ComputedStyle::CounterOp> parseCounterList(std::string_view v) {
+// Parses a `counter-reset` / `counter-increment` list. `defaultValue` is the
+// amount used when a name is written without one: 0 for `counter-reset`, 1 for
+// `counter-increment`.
+std::vector<ComputedStyle::CounterOp> parseCounterList(std::string_view v, int defaultValue) {
     std::vector<ComputedStyle::CounterOp> out;
     std::size_t i = 0;
     while (i < v.size()) {
-        while (i < v.size() && std::isspace(static_cast<unsigned char>(v[i]))) ++i;
-        if (i >= v.size() || v[i] == ',') {
+        while (i < v.size() &&
+               (std::isspace(static_cast<unsigned char>(v[i])) || v[i] == ',')) {
             ++i;
-            continue;
         }
-        if (v.substr(i, 6) == "none" || v.substr(i, 4) == "auto") {
-            ++i;
-            while (i < v.size() && v[i] != ',') ++i;
-            if (i < v.size() && v[i] == ',') ++i;
-            continue;
+        if (i >= v.size()) {
+            break;
+        }
+        // `none` means no counters at all; it is the only value that ends the list.
+        if (v.substr(i, 4) == "none" &&
+            (i + 4 >= v.size() || std::isspace(static_cast<unsigned char>(v[i + 4])))) {
+            break;
         }
         const std::size_t start = i;
-        while (i < v.size() && !std::isspace(static_cast<unsigned char>(v[i])) && v[i] != ',') ++i;
+        while (i < v.size() && !std::isspace(static_cast<unsigned char>(v[i])) && v[i] != ',') {
+            ++i;
+        }
         std::string name = std::string(v.substr(start, i - start));
         while (i < v.size() && std::isspace(static_cast<unsigned char>(v[i]))) ++i;
-        int val = 0;
-        if (i < v.size() && v[i] != ',') {
+        int val = defaultValue;
+        if (i < v.size() && (v[i] == '+' || v[i] == '-' ||
+                             std::isdigit(static_cast<unsigned char>(v[i])))) {
             bool neg = false;
             if (v[i] == '+' || v[i] == '-') {
                 neg = (v[i] == '-');
@@ -1181,8 +1209,6 @@ std::vector<ComputedStyle::CounterOp> parseCounterList(std::string_view v) {
             }
         }
         out.push_back({name, val});
-        while (i < v.size() && v[i] != ',') ++i;
-        if (i < v.size() && v[i] == ',') ++i;
     }
     return out;
 }
@@ -3304,9 +3330,9 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         else if (value == "both") s.clearType = ComputedStyle::ClearBoth;
         else s.clearType = ComputedStyle::ClearNone;
     } else if (property == "counter-reset") {
-        s.counterReset = parseCounterList(value);
+        s.counterReset = parseCounterList(value, 0);
     } else if (property == "counter-increment") {
-        s.counterIncrement = parseCounterList(value);
+        s.counterIncrement = parseCounterList(value, 1);
     } else if (property == "resize" || property == "appearance" ||
                property == "-webkit-appearance") {
         // Accepted; these control browser chrome that this engine does not draw.
@@ -3584,6 +3610,16 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             case ComputedStyle::InlineFlex: return "inline-flex";
             case ComputedStyle::Grid: return "grid";
             case ComputedStyle::InlineGrid: return "inline-grid";
+            case ComputedStyle::Table: return "table";
+            case ComputedStyle::InlineTable: return "inline-table";
+            case ComputedStyle::TableRow: return "table-row";
+            case ComputedStyle::TableCell: return "table-cell";
+            case ComputedStyle::TableRowGroup: return "table-row-group";
+            case ComputedStyle::TableHeaderGroup: return "table-header-group";
+            case ComputedStyle::TableFooterGroup: return "table-footer-group";
+            case ComputedStyle::TableColumn: return "table-column";
+            case ComputedStyle::TableColumnGroup: return "table-column-group";
+            case ComputedStyle::TableCaption: return "table-caption";
             case ComputedStyle::None: return "none";
         }
         return {};
@@ -3941,6 +3977,20 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "cursor") {
         return std::string(cursorName(style.cursor));
+    }
+    if (property == "counter-reset" || property == "counter-increment") {
+        const std::vector<ComputedStyle::CounterOp>& ops =
+            property == "counter-reset" ? style.counterReset : style.counterIncrement;
+        std::string out;
+        for (const auto& op : ops) {
+            if (!out.empty()) {
+                out += ' ';
+            }
+            out += op.name;
+            out += ' ';
+            out += std::to_string(op.value);
+        }
+        return out.empty() ? std::string("none") : out;
     }
     if (property == "list-style-position") {
         return style.listStylePosition == ComputedStyle::LSPInside ? "inside" : "outside";

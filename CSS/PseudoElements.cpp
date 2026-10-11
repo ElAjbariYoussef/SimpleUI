@@ -1,12 +1,105 @@
 #include "CSS/PseudoElements.h"
 
+#include "CSS/Style.h"
 #include "CSS/StyleResolver.h"
 #include "SUI/DOM/Element.h"
 
+#include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace sui {
 namespace {
+
+// --- CSS counter engine --------------------------------------------------
+//
+// Counters are resolved for the real elements only, in document order, while
+// the generated boxes are built. Each element opens a scope holding the
+// counters its own `counter-reset` created; lookups walk the open scopes from
+// the innermost out, so an element sees its own counters, then each ancestor's.
+//
+// A counter is written into its *parent's* scope rather than the element's own:
+// CSS scopes a counter to the element, its descendants, and its following
+// siblings, and the parent scope is exactly the set of later siblings still
+// being walked. Resets that nest therefore land in progressively deeper scopes,
+// which is what lets `counters()` list them outermost-first.
+
+struct CounterScope {
+    std::vector<std::pair<std::string, int>> values;
+};
+
+struct CounterStack {
+    std::vector<CounterScope> scopes;
+};
+
+int* findCounter(CounterStack& stack, std::string_view name) {
+    for (auto scope = stack.scopes.rbegin(); scope != stack.scopes.rend(); ++scope) {
+        for (auto& entry : scope->values) {
+            if (entry.first == name) {
+                return &entry.second;
+            }
+        }
+    }
+    return nullptr;
+}
+
+int counterValue(CounterStack& stack, std::string_view name) {
+    const int* value = findCounter(stack, name);
+    return value ? *value : 0;
+}
+
+std::string countersValue(CounterStack& stack, std::string_view name,
+                          std::string_view separator) {
+    std::string out;
+    bool first = true;
+    for (const CounterScope& scope : stack.scopes) {  // outermost first
+        for (const auto& entry : scope.values) {
+            if (entry.first != name) {
+                continue;
+            }
+            if (!first) {
+                out.append(separator);
+            }
+            out += std::to_string(entry.second);
+            first = false;
+        }
+    }
+    return out;
+}
+
+// Applies one element's `counter-reset` and then `counter-increment`, in that
+// order, as CSS specifies. Both create their counter in the parent scope; an
+// increment that finds an existing counter updates it where it lives so the
+// value carries on to the following siblings.
+void applyCounters(const ComputedStyle& style, CounterStack& stack) {
+    if (stack.scopes.size() < 2) {
+        return;
+    }
+    CounterScope& scope = stack.scopes[stack.scopes.size() - 2];
+    for (const auto& op : style.counterReset) {
+        bool found = false;
+        for (auto& entry : scope.values) {
+            if (entry.first == op.name) {
+                entry.second = op.value;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            scope.values.push_back({op.name, op.value});
+        }
+    }
+    for (const auto& op : style.counterIncrement) {
+        if (int* value = findCounter(stack, op.name)) {
+            *value += op.value;
+        } else {
+            scope.values.push_back({op.name, op.value});
+        }
+    }
+}
+
+// --- generated content ---------------------------------------------------
 
 // Every generated box currently in the tree. They are collected before any are
 // removed, because removing one shifts the indices the walk is holding.
@@ -27,7 +120,7 @@ void collectGenerated(Element& element, std::vector<Element*>& out) {
 // so the two are added in that order and each picks its slot from the current child
 // count.
 void addBox(Element& element, const StyleResolver& resolver, const char* tag,
-            bool first) {
+            bool first, CounterStack& counters) {
     Document* document = element.document();
     const std::size_t index = first ? 0 : element.children().size();
     element.insertChild(std::make_unique<Element>(std::string(tag), document), index);
@@ -56,12 +149,21 @@ void addBox(Element& element, const StyleResolver& resolver, const char* tag,
         } else if (raw[i] == '\x03') {
             const std::size_t end = raw.find('\x04', i + 1);
             if (end != std::string::npos) {
+                const std::string name = raw.substr(i + 1, end - (i + 1));
+                text += std::to_string(counterValue(counters, name));
                 i = end + 1;
                 continue;
             }
         } else if (raw[i] == '\x05') {
             const std::size_t end = raw.find('\x06', i + 1);
             if (end != std::string::npos) {
+                const std::string body = raw.substr(i + 1, end - (i + 1));
+                const std::size_t split = body.find('\x1f');
+                const std::string name =
+                    split == std::string::npos ? body : body.substr(0, split);
+                const std::string separator =
+                    split == std::string::npos ? std::string() : body.substr(split + 1);
+                text += countersValue(counters, name, separator);
                 i = end + 1;
                 continue;
             }
@@ -72,16 +174,23 @@ void addBox(Element& element, const StyleResolver& resolver, const char* tag,
     box->appendChild(Element::createText(text, document));
 }
 
-void build(Element& element, const StyleResolver& resolver) {
+void build(Element& element, const StyleResolver& resolver, CounterStack& counters) {
     for (const auto& child : element.children()) {
         if (!child || child->isTextNode() || child->isPseudoElement()) {
             continue;
         }
-        addBox(*child, resolver, "::before", true);
-        addBox(*child, resolver, "::after", false);
+        // Resolve the element for its counter declarations before its generated
+        // boxes are built, so `::before`/`::after` can read the counters it set.
+        counters.scopes.push_back({});
+        const ComputedStyle style = resolver.resolve(*child);
+        applyCounters(style, counters);
+
+        addBox(*child, resolver, "::before", true, counters);
+        addBox(*child, resolver, "::after", false, counters);
         // Recursing after the boxes exist is safe: they are skipped above, and
         // `::before::before` is not a thing CSS can express.
-        build(*child, resolver);
+        build(*child, resolver, counters);
+        counters.scopes.pop_back();
     }
 }
 
@@ -105,7 +214,9 @@ void generatePseudoElements(Document& document, const StyleResolver& resolver) {
             }
         }
     }
-    build(*document.root(), resolver);
+    CounterStack counters;
+    counters.scopes.push_back({});  // the document root's scope
+    build(*document.root(), resolver, counters);
 }
 
 }  // namespace sui
