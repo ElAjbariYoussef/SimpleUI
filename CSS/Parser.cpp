@@ -115,7 +115,6 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
                 out.pseudoClasses.push_back(PseudoClass::Is);
             } else if (name == "has") {
                 out.pseudoClasses.push_back(PseudoClass::Has);
-                out.unsupported = true;
             } else {
                 out.unsupported = true;
             }
@@ -166,7 +165,6 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
                 out.pseudoClasses.push_back(PseudoClass::Is);
             } else if (name == "has") {
                 out.pseudoClasses.push_back(PseudoClass::Has);
-                out.unsupported = true;
             } else {
                 out.unsupported = true;
             }

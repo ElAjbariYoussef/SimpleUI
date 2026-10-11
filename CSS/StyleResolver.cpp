@@ -4099,6 +4099,131 @@ bool nthChildMatches(std::string_view arg, int index) {
     return diff % a == 0 && diff / a >= 0;
 }
 
+// --- `:has()` -------------------------------------------------------------
+
+// How a `:has()` argument is anchored to the element being matched.
+enum class RelativeCombinator { Descendant, Child, NextSibling, LaterSibling };
+
+// True when any descendant of `element` (skipping text nodes and generated
+// boxes) matches `branch`.
+bool anyDescendantMatches(const SimpleSelector& branch, const Element& element,
+                          const PseudoState* state) {
+    for (const auto& child : element.children()) {
+        if (!child || child->isTextNode() || child->isPseudoElement()) {
+            continue;
+        }
+        if (selectorMatches(branch, *child, state)) {
+            return true;
+        }
+        if (anyDescendantMatches(branch, *child, state)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The next element sibling after `element`, ignoring text nodes.
+const Element* nextElementSibling(const Element& element) {
+    const Element* parent = element.parent();
+    if (!parent) {
+        return nullptr;
+    }
+    bool seen = false;
+    for (const auto& sibling : parent->children()) {
+        if (!sibling) {
+            continue;
+        }
+        if (!seen) {
+            seen = sibling.get() == &element;
+            continue;
+        }
+        if (!sibling->isTextNode()) {
+            return sibling.get();
+        }
+    }
+    return nullptr;
+}
+
+// Evaluates one relative selector against `element`: the leading combinator
+// picks the candidates, and the branch is matched against each with the ordinary
+// matcher.
+bool relativeMatches(const SimpleSelector& branch, const Element& element,
+                     RelativeCombinator leading, const PseudoState* state) {
+    switch (leading) {
+        case RelativeCombinator::Child:
+            for (const auto& child : element.children()) {
+                if (child && !child->isTextNode() && !child->isPseudoElement() &&
+                    selectorMatches(branch, *child, state)) {
+                    return true;
+                }
+            }
+            return false;
+        case RelativeCombinator::Descendant:
+            return anyDescendantMatches(branch, element, state);
+        case RelativeCombinator::NextSibling: {
+            const Element* next = nextElementSibling(element);
+            return next && selectorMatches(branch, *next, state);
+        }
+        case RelativeCombinator::LaterSibling:
+            for (const Element* sibling = nextElementSibling(element); sibling;
+                 sibling = nextElementSibling(*sibling)) {
+                if (selectorMatches(branch, *sibling, state)) {
+                    return true;
+                }
+            }
+            return false;
+    }
+    return false;
+}
+
+// `:has(rs)` matches when an element described by the relative selector list `rs`
+// exists relative to `element`. The list is split on top-level commas; a leading
+// `>`, `+`, or `~` anchors each branch, and no combinator means a descendant. The
+// rest of the branch is parsed as an ordinary selector. A branch the parser cannot
+// understand is skipped rather than failing the whole list.
+bool hasMatches(std::string_view argument, const Element& element,
+                const PseudoState* state) {
+    std::size_t start = 0;
+    int depth = 0;
+    for (std::size_t i = 0; i <= argument.size(); ++i) {
+        const bool atEnd = i == argument.size();
+        const char c = atEnd ? '\0' : argument[i];
+        if (!atEnd && c == '(') {
+            ++depth;
+        } else if (!atEnd && c == ')') {
+            --depth;
+        }
+        if (!atEnd && !(c == ',' && depth == 0)) {
+            continue;
+        }
+        std::string_view piece = trim(argument.substr(start, i - start));
+        start = i + 1;
+        if (piece.empty()) {
+            continue;
+        }
+        RelativeCombinator leading = RelativeCombinator::Descendant;
+        if (piece.front() == '>') {
+            leading = RelativeCombinator::Child;
+            piece.remove_prefix(1);
+        } else if (piece.front() == '+') {
+            leading = RelativeCombinator::NextSibling;
+            piece.remove_prefix(1);
+        } else if (piece.front() == '~') {
+            leading = RelativeCombinator::LaterSibling;
+            piece.remove_prefix(1);
+        }
+        piece = trim(piece);
+        if (piece.empty()) {
+            continue;
+        }
+        const SimpleSelector branch = CSSParser::parseSelector(piece);
+        if (!branch.unsupported && relativeMatches(branch, element, leading, state)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool selectorMatches(const SimpleSelector& selector, const Element& element,
                      const PseudoState* state) {
     if (selector.unsupported) {
@@ -4178,6 +4303,14 @@ bool selectorMatches(const SimpleSelector& selector, const Element& element,
                 return false;
             }
             if (!nthChildMatches(selector.pseudoArgument, index)) {
+                return false;
+            }
+            continue;
+        }
+        if (pseudo == PseudoClass::Has) {
+            // `:has()` looks at the element's subtree and following siblings, so it
+            // is evaluated against the element itself rather than an ancestor.
+            if (!hasMatches(selector.pseudoArgument, element, state)) {
                 return false;
             }
             continue;

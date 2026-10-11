@@ -2927,6 +2927,107 @@ void testCssCounters() {
     }
 }
 
+// `:has()` selects an element by what it contains: a child (`>`), a descendant
+// (no combinator), or a following sibling (`+`, `~`). Each branch of the argument
+// is anchored to the element being matched.
+void testHasSelector() {
+    // Parsing.
+    const auto parsed = sui::CSSParser::parseSelector("div:has(> img)");
+    check(!parsed.unsupported, ":has() parses as a supported selector");
+    check(parsed.pseudoArgument == "> img", ":has() keeps its relative selector");
+    bool hasPseudo = false;
+    for (const sui::PseudoClass pseudo : parsed.pseudoClasses) {
+        if (pseudo == sui::PseudoClass::Has) {
+            hasPseudo = true;
+        }
+    }
+    check(hasPseudo, ":has() records the Has pseudo-class");
+
+    // Child combinator: a div matches only when it has a direct <img> child.
+    {
+        auto document = parseOrNull(
+            "<sui><body>"
+            "<div id=\"with\"><img/></div>"
+            "<div id=\"without\"><span><img/></span></div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body { color: #000000 } div:has(> img) { color: #ff0000 }"));
+        check(resolver.resolve(*document->getElementById("with")).color.r == 0xff,
+              ":has(> img) matches a direct image child");
+        check(resolver.resolve(*document->getElementById("without")).color.r == 0x00,
+              ":has(> img) ignores a deeper image");
+    }
+
+    // Descendant, with no leading combinator.
+    {
+        auto document = parseOrNull(
+            "<sui><body>"
+            "<div id=\"card\" class=\"card\"><span><b class=\"badge\"></b></span></div>"
+            "<div id=\"nog\" class=\"card\"><span></span></div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body { color: #000000 } .card:has(.badge) { color: #00ff00 }"));
+        check(resolver.resolve(*document->getElementById("card")).color.g == 0xff,
+              ":has(.badge) matches a descendant badge");
+        check(resolver.resolve(*document->getElementById("nog")).color.g == 0x00,
+              ":has(.badge) does not match when the badge is absent");
+    }
+
+    // Following-sibling combinators.
+    {
+        auto document = parseOrNull(
+            "<sui><body>"
+            "<h2 id=\"np\"></h2><p></p>"
+            "<h2 id=\"ns\"></h2><span></span>"
+            "<h2 id=\"gp\"></h2><span></span><p></p>"
+            "<h2 id=\"gs\"></h2><span></span>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        {
+            sui::StyleResolver resolver;
+            resolver.setRules(sui::CSSParser::parse(
+                "body { color: #000000 } h2:has(+ p) { color: #0000ff }"));
+            check(resolver.resolve(*document->getElementById("np")).color.b == 0xff,
+                  ":has(+ p) matches a heading followed immediately by a paragraph");
+            check(resolver.resolve(*document->getElementById("ns")).color.b == 0x00,
+                  ":has(+ p) ignores a heading followed by something else");
+        }
+        {
+            sui::StyleResolver resolver;
+            resolver.setRules(sui::CSSParser::parse(
+                "body { color: #000000 } h2:has(~ p) { color: #ffff00 }"));
+            check(resolver.resolve(*document->getElementById("gp")).color.r == 0xff,
+                  ":has(~ p) matches a heading with a later paragraph");
+            check(resolver.resolve(*document->getElementById("gs")).color.r == 0x00,
+                  ":has(~ p) ignores a heading with no later paragraph");
+        }
+    }
+
+    // A selector list keeps working when one branch is one the parser cannot use.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"v\"><video></video></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body { color: #000000 } div:has(> ::bogus, > video) { color: #ff0000 }"));
+        check(resolver.resolve(*document->getElementById("v")).color.r == 0xff,
+              "a usable :has() branch still matches beside an unusable one");
+    }
+}
+
 }  // namespace
 
 // Resolves the style of every child of the body against `resolver`, so a stylesheet can
@@ -4610,6 +4711,7 @@ int main() {
     testWhiteSpace();
     testPseudoElements();
     testCssCounters();
+    testHasSelector();
     testImportantAndCssWideKeywords();
     testBorderWidthLonghands();
     testMediaQueries();
