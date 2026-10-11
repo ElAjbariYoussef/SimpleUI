@@ -28,6 +28,8 @@
 
 #include <charconv>
 #include <cstdio>
+#include <limits>
+#include <utility>
 
 namespace sui {
 namespace {
@@ -385,6 +387,311 @@ void paintTextShadow(const ComputedStyle::TextShadow& shadow, const Element::Tex
     }
 }
 
+// A focused text field (an <input> or <textarea>) edits its value. Textareas are
+// always textual; inputs are, unless their type is a control such as button.
+bool isEditableField(const Element* el) {
+    return el && (el->tag() == "input" || el->tag() == "textarea");
+}
+
+// Width of `text` at `fontSize`: whatever the loaded font measures, or the
+// layout fallback of half an em per glyph when no font is available.
+float fieldTextWidth(const TextFont* font, std::string_view text, float fontSize) {
+    if (font && font->hasFont() && fontSize > 0.0f) {
+        return font->measureText(text, fontSize);
+    }
+    std::size_t cps = 0;
+    for (unsigned char c : text) {
+        if ((c & 0xC0) != 0x80) {
+            ++cps;
+        }
+    }
+    return static_cast<float>(cps) * fontSize * 0.5f;
+}
+
+std::size_t glyphCount(std::string_view text) {
+    std::size_t cps = 0;
+    for (unsigned char c : text) {
+        if ((c & 0xC0) != 0x80) {
+            ++cps;
+        }
+    }
+    return cps;
+}
+
+float resolvedLetterSpacing(const ComputedStyle& s) {
+    return s.letterSpacing.unit != sui::Length::Auto
+               ? s.letterSpacing.resolve(s.fontSize, s.fontSize, 16.0f)
+               : 0.0f;
+}
+
+// How many bytes of a word's text run one source character draws. A masked
+// password run renders bullets (three bytes per character), a plain run renders
+// the text itself, so this is 3 or 1.
+std::size_t runMaskFactor(std::string_view runText, std::size_t wordGlyphs) {
+    return wordGlyphs > 0 && runText.size() >= wordGlyphs ? runText.size() / wordGlyphs : 1;
+}
+
+// Width of the first `bytes` bytes of a word's text run, with the field's
+// letter-spacing added per glyph. The run holds the glyphs exactly as the line
+// grid drew them, so measuring it matches the rendered caret column.
+float wordPrefixWidth(const TextFont* font, std::string_view runText, std::size_t bytes,
+                      float fontSize, float letterSpacing) {
+    if (bytes > runText.size()) {
+        bytes = runText.size();
+    }
+    const std::string_view prefix = runText.substr(0, bytes);
+    float w = fieldTextWidth(font, prefix, fontSize);
+    const std::size_t cps = glyphCount(prefix);
+    if (letterSpacing != 0.0f && cps > 0) {
+        w += letterSpacing * static_cast<float>(cps);
+    }
+    return w;
+}
+
+// A field's only laid-out content is its own value, and the line grid draws one
+// run per whitespace-separated word of it (collapsing the gaps exactly like the
+// renderer's fallback). This returns, for every run, the byte range of the
+// value it drew, so a byte offset in the value maps back to a run and a column.
+std::vector<std::pair<std::size_t, std::size_t>> wordSpansFor(const std::string& value,
+                                                              std::size_t runCount) {
+    std::vector<std::pair<std::size_t, std::size_t>> spans;
+    spans.reserve(runCount);
+    std::size_t i = 0;
+    while (spans.size() < runCount && i < value.size()) {
+        while (i < value.size() && std::isspace(static_cast<unsigned char>(value[i]))) {
+            ++i;
+        }
+        const std::size_t start = i;
+        while (i < value.size() && !std::isspace(static_cast<unsigned char>(value[i]))) {
+            ++i;
+        }
+        if (i == start) {
+            break;
+        }
+        spans.push_back({start, i});
+    }
+    return spans;
+}
+
+// Byte offset of the start of the logical line holding byte `pos`.
+std::size_t lineStart(const std::string& value, std::size_t pos) {
+    const std::size_t nl = value.rfind('\n', pos == 0 ? std::string::npos : pos - 1);
+    return nl == std::string::npos ? 0 : nl + 1;
+}
+
+// Byte offset of the newline that ends the logical line holding byte `pos`.
+std::size_t lineEnd(const std::string& value, std::size_t pos) {
+    const std::size_t nl = value.find('\n', pos);
+    return nl == std::string::npos ? value.size() : nl;
+}
+
+// On-screen position of the caret at byte `pos` of a field's value. The run
+// whose word contains `pos` fixes the line and the measured prefix of that word
+// fixes the column. A caret in the whitespace on one line sits at the end of the
+// earlier word; a caret right after a newline sits at the start of the following
+// line, the way browsers place it.
+void caretGeometry(const Element& el, const std::string& value, std::size_t pos,
+                   const ComputedStyle& s, const TextFont* font, float offX, float offY,
+                   float& x, float& y, float& h) {
+    const auto& runs = el.textRuns();
+    const float tx = offX + (s.overflowX != ComputedStyle::Visible ? el.scrollLeft() : 0.0f);
+    const float ty = offY + (s.overflowY != ComputedStyle::Visible ? el.scrollTop() : 0.0f);
+    if (runs.empty()) {
+        x = std::floor(el.contentX() - offX);
+        y = std::floor(el.contentY() - offY);
+        h = s.fontSize > 0.0f ? s.fontSize * 1.2f : 16.0f;
+        if (el.contentHeight() > h) {
+            y += std::floor((el.contentHeight() - h) * 0.5f);
+        }
+        return;
+    }
+    const std::vector<std::pair<std::size_t, std::size_t>> spans = wordSpansFor(value, runs.size());
+    const bool password = el.attribute("type") == "password";
+    const float ls = resolvedLetterSpacing(s);
+
+    // The run to anchor on and how many of its word's glyphs precede the caret.
+    std::size_t run = runs.size() - 1;
+    std::size_t runBytes = 0;
+    if (!spans.empty()) {
+        for (std::size_t k = 0; k < spans.size(); ++k) {
+            if (pos <= spans[k].first) {
+                // At or before this word. A caret in the gap between two words of
+                // one line belongs to the earlier word's end; a gap that runs over
+                // a newline starts the following line at this word's origin.
+                if (k > 0 && pos > spans[k - 1].second) {
+                    bool newlineGap = false;
+                    for (std::size_t g = spans[k - 1].second; g < spans[k].first; ++g) {
+                        if (value[g] == '\n') {
+                            newlineGap = true;
+                            break;
+                        }
+                    }
+                    if (!newlineGap) {
+                        run = k - 1;
+                        runBytes = runs[run].text.size();
+                        break;
+                    }
+                }
+                run = k;
+                runBytes = 0;
+                break;
+            }
+            if (pos <= spans[k].second) {
+                run = k;
+                const std::size_t valueBytes = pos - spans[k].first;
+                const std::size_t factor =
+                    runMaskFactor(runs[run].text, glyphCount(std::string_view(value).substr(
+                                                      spans[k].first, spans[k].second - spans[k].first)));
+                runBytes = valueBytes * factor;
+                if (password) {
+                    runBytes = std::min(runBytes, runs[run].text.size());
+                }
+                break;
+            }
+        }
+        if (pos > spans.back().second) {
+            run = spans.size() - 1;
+            runBytes = runs[run].text.size();  // trailing space or end of value
+        }
+    }
+    const Element::TextRun& r = runs[run];
+    const float prefix = wordPrefixWidth(font, r.text, runBytes, r.fontSize, ls);
+    x = std::floor(r.x - tx + prefix);
+    y = std::floor(r.y - ty);
+    h = r.height > 0.0f ? r.height : (r.fontSize * 1.2f);
+}
+
+// Maps a screen position inside a field to a byte offset of its value. The
+// vertical coordinate picks the line whose run band is nearest, then the
+// horizontal coordinate picks the byte inside the closest word of that line.
+std::size_t byteAt(const Element& el, const std::string& value, float screenX, float screenY,
+                   const ComputedStyle& s, const TextFont* font) {
+    const auto& runs = el.textRuns();
+    if (runs.empty()) {
+        return value.size();
+    }
+    const std::vector<std::pair<std::size_t, std::size_t>> spans = wordSpansFor(value, runs.size());
+    if (spans.empty()) {
+        return value.size();
+    }
+    const float tx = (s.overflowX != ComputedStyle::Visible ? el.scrollLeft() : 0.0f);
+    const float ls = resolvedLetterSpacing(s);
+
+    // The nearest run band fixes the line.
+    std::size_t line = 0;
+    float bestBand = std::numeric_limits<float>::max();
+    for (std::size_t k = 0; k < runs.size(); ++k) {
+        const float d = std::fabs((runs[k].y + runs[k].height * 0.5f) - screenY);
+        if (d < bestBand) {
+            bestBand = d;
+            line = k;
+        }
+    }
+    // The nearest word of that line fixes the word.
+    std::size_t word = line;
+    float bestX = std::numeric_limits<float>::max();
+    for (std::size_t k = 0; k < runs.size(); ++k) {
+        if (std::fabs(runs[k].y - runs[line].y) > 0.5f) {
+            continue;
+        }
+        const float d = std::fabs((runs[k].x + runs[k].width * 0.5f) - screenX);
+        if (d < bestX) {
+            bestX = d;
+            word = k;
+        }
+    }
+    if (word >= spans.size()) {
+        return value.size();
+    }
+
+    const Element::TextRun& r = runs[word];
+    const float localX = screenX - (r.x - tx);
+    if (localX <= 0.0f) {
+        return spans[word].first;
+    }
+    if (localX >= r.width) {
+        return spans[word].second;
+    }
+    // The closest glyph boundary inside the word.
+    std::size_t bestByte = 0;
+    float bestDist = std::fabs(localX);
+    for (std::size_t b = 0; b <= r.text.size();) {
+        const float w = wordPrefixWidth(font, r.text, b, r.fontSize, ls);
+        const float d = std::fabs(localX - w);
+        if (d < bestDist) {
+            bestDist = d;
+            bestByte = b;
+        }
+        if (b == r.text.size()) {
+            break;
+        }
+        ++b;
+        while (b < r.text.size() && (static_cast<unsigned char>(r.text[b]) & 0xC0) == 0x80) {
+            ++b;
+        }
+    }
+    const std::size_t valueBytes =
+        bestByte /
+        runMaskFactor(r.text, glyphCount(std::string_view(value).substr(
+                                    spans[word].first, spans[word].second - spans[word].first)));
+    return spans[word].first + valueBytes;
+}
+
+// The byte offset the caret moves to when it travels one logical line up
+// (dir < 0) or down (dir > 0), keeping its column: the width of the current
+// line's prefix before the caret is rematched against the target line.
+std::size_t moveCaretLine(const TextFont* font, const std::string& value, std::size_t pos,
+                          int dir, const ComputedStyle& s) {
+    if (value.empty()) {
+        return 0;
+    }
+    const std::size_t start = lineStart(value, pos);
+    const std::size_t end = lineEnd(value, pos);
+    const std::size_t columnBytes = pos - start;
+    const std::string_view columnText = std::string_view(value).substr(start, columnBytes);
+    std::size_t targetStart = 0;
+    if (dir < 0) {
+        if (start == 0) {
+            return pos;  // already on the first line
+        }
+        targetStart = lineStart(value, start - 1);
+    } else {
+        if (end >= value.size()) {
+            return pos;  // already on the last line
+        }
+        targetStart = end + 1;
+    }
+    const std::size_t targetEnd = lineEnd(value, targetStart);
+    const std::string_view target =
+        std::string_view(value).substr(targetStart, targetEnd - targetStart);
+    if (target.empty()) {
+        return targetStart;
+    }
+    const float ls = resolvedLetterSpacing(s);
+    const float column = fieldTextWidth(font, columnText, s.fontSize) +
+                         (ls != 0.0f ? ls * static_cast<float>(glyphCount(columnText)) : 0.0f);
+    std::size_t best = 0;
+    float bestDist = std::fabs(column);
+    for (std::size_t b = 0; b <= target.size();) {
+        const std::string_view prefix = target.substr(0, b);
+        const float w = fieldTextWidth(font, prefix, s.fontSize) +
+                        (ls != 0.0f ? ls * static_cast<float>(glyphCount(prefix)) : 0.0f);
+        const float d = std::fabs(column - w);
+        if (d < bestDist) {
+            bestDist = d;
+            best = b;
+        }
+        if (b == target.size()) {
+            break;
+        }
+        ++b;
+        while (b < target.size() && (static_cast<unsigned char>(target[b]) & 0xC0) == 0x80) {
+            ++b;
+        }
+    }
+    return targetStart + best;
+}
+
 void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
               const StyleResolver& resolver, const TextFont& font, float opacity,
               ImageCache& images, float offX, float offY, int caretBytePos = -1,
@@ -617,68 +924,61 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         }
     }
 
-    auto measurePrefix = [&](std::size_t bytePos, const Element::TextRun& run) -> float {
-        float prefixW = 0.0f;
-        const std::string val = el.value();
-        const bool isPassword = el.attribute("type") == "password";
-        if (isPassword) {
-            std::size_t cp = 0;
-            for (std::size_t i = 0; i < bytePos && i < val.size(); ++i) {
-                if ((static_cast<unsigned char>(val[i]) & 0xC0) != 0x80) {
-                    ++cp;
-                }
-            }
-            std::string bullets;
-            bullets.reserve(cp * 3);
-            for (std::size_t k = 0; k < cp; ++k) {
-                bullets += "\xE2\x80\xA2";
-            }
-            if (font.hasFont() && run.fontSize > 0.0f) {
-                prefixW = font.measureText(bullets, run.fontSize);
-            } else {
-                prefixW = static_cast<float>(cp) * run.fontSize * 0.5f;
-            }
-        } else {
-            std::size_t prefixLen = std::min(bytePos, run.text.size());
-            while (prefixLen < run.text.size() &&
-                   (static_cast<unsigned char>(run.text[prefixLen]) & 0xC0) == 0x80) {
-                ++prefixLen;
-            }
-            std::string_view prefix = std::string_view(run.text).substr(0, prefixLen);
-            if (font.hasFont() && run.fontSize > 0.0f) {
-                prefixW = font.measureText(prefix, run.fontSize);
-            } else {
-                std::size_t cp = 0;
-                for (unsigned char c : prefix) {
-                    if ((c & 0xC0) != 0x80) ++cp;
-                }
-                prefixW = static_cast<float>(cp) * run.fontSize * 0.5f;
-            }
-            if (s.letterSpacing.unit != sui::Length::Auto && !prefix.empty()) {
-                std::size_t prefixGlyphs = 0;
-                for (unsigned char c : prefix) {
-                    if ((c & 0xC0) != 0x80) ++prefixGlyphs;
-                }
-                const float ls = s.letterSpacing.resolve(s.fontSize, s.fontSize, 16.0f);
-                prefixW += ls * static_cast<float>(prefixGlyphs);
-            }
-        }
-        return prefixW;
-    };
-
-    // Draw selection highlight for focused text input before drawing glyphs
-    if (selStart >= 0 && selEnd > selStart && el.tag() == "input" && !el.textRuns().empty()) {
-        const auto& run = el.textRuns().front();
+    // Draw the selection highlight for a focused field before drawing glyphs.
+    // Runs are grouped by line so every chosen line paints one bar, covering the
+    // whitespace gaps between words the way a browser's selection does.
+    if (selStart >= 0 && selEnd > selStart && isEditableField(&el) &&
+        !el.textRuns().empty()) {
+        const std::string value = el.value();
+        const std::vector<std::pair<std::size_t, std::size_t>> spans =
+            wordSpansFor(value, el.textRuns().size());
         const float tx = offX + (s.overflowX != ComputedStyle::Visible ? el.scrollLeft() : 0.0f);
         const float ty = offY + (s.overflowY != ComputedStyle::Visible ? el.scrollTop() : 0.0f);
-        const float startW = measurePrefix(static_cast<std::size_t>(selStart), run);
-        const float endW = measurePrefix(static_cast<std::size_t>(selEnd), run);
-        const float selH = run.height > 0.0f ? run.height : (run.fontSize * 1.2f);
-        const SDL_FRect selRect{std::floor(run.x - tx + startW), std::floor(run.y - ty),
-                                std::max(1.0f, endW - startW), selH};
-        SDL_SetRenderDrawColor(sdlRenderer, 51, 144, 255,
-                               static_cast<Uint8>(128.0f * opacity));
-        SDL_RenderFillRect(sdlRenderer, &selRect);
+        const float ls = resolvedLetterSpacing(s);
+        std::size_t lineStartIdx = 0;
+        while (lineStartIdx < el.textRuns().size()) {
+            std::size_t lineEndIdx = lineStartIdx + 1;
+            while (lineEndIdx < el.textRuns().size() &&
+                   std::fabs(el.textRuns()[lineEndIdx].y - el.textRuns()[lineStartIdx].y) <= 0.5f) {
+                ++lineEndIdx;
+            }
+            // Byte range the whole line covers, and how much of it is selected.
+            const std::size_t first = spans.empty() ? 0 : spans[lineStartIdx].first;
+            const std::size_t last = spans.empty()
+                                         ? 0
+                                         : spans[lineEndIdx - 1].second;
+            const std::size_t coverStart = std::max(static_cast<std::size_t>(selStart), first);
+            const std::size_t coverEnd = std::min(static_cast<std::size_t>(selEnd), last);
+            if (coverEnd > coverStart) {
+                // Left edge: the start of the line, or the prefix of the word
+                // holding the selection's start.
+                float startX = 0.0f;
+                float endX = 0.0f;
+                for (std::size_t k = lineStartIdx; k < lineEndIdx; ++k) {
+                    const Element::TextRun& r = el.textRuns()[k];
+                    if (k == lineStartIdx && coverStart <= spans[k].first) {
+                        startX = r.x - tx;
+                    } else if (coverStart > spans[k].first && coverStart <= spans[k].second) {
+                        startX = r.x - tx + wordPrefixWidth(&font, r.text, coverStart - spans[k].first,
+                                                            r.fontSize, ls);
+                    }
+                    if (k == lineEndIdx - 1 && coverEnd >= spans[k].second) {
+                        endX = r.x - tx + r.width;
+                    } else if (coverEnd >= spans[k].first && coverEnd < spans[k].second) {
+                        endX = r.x - tx + wordPrefixWidth(&font, r.text, coverEnd - spans[k].first,
+                                                          r.fontSize, ls);
+                    }
+                }
+                const Element::TextRun& firstRun = el.textRuns()[lineStartIdx];
+                const float selH = firstRun.height > 0.0f ? firstRun.height : (firstRun.fontSize * 1.2f);
+                const SDL_FRect selRect{std::floor(startX), std::floor(firstRun.y - ty),
+                                        std::max(1.0f, endX - startX), selH};
+                SDL_SetRenderDrawColor(sdlRenderer, 51, 144, 255,
+                                       static_cast<Uint8>(128.0f * opacity));
+                SDL_RenderFillRect(sdlRenderer, &selRect);
+            }
+            lineStartIdx = lineEndIdx;
+        }
     }
 
     // A text shadow is the run drawn again, offset and blurred, before the run
@@ -744,25 +1044,12 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         SDL_DestroyTexture(texture);
     }
 
-    if (caretBytePos >= 0 && el.tag() == "input" && !el.hasAttribute("disabled")) {
+    if (caretBytePos >= 0 && isEditableField(&el) && !el.hasAttribute("disabled")) {
         float caretX = 0.0f;
         float caretY = 0.0f;
         float caretH = s.fontSize > 0.0f ? s.fontSize * 1.2f : 16.0f;
-        if (el.textRuns().empty()) {
-            caretX = std::floor(el.contentX() - offX);
-            caretY = std::floor(el.contentY() - offY);
-            if (el.contentHeight() > caretH) {
-                caretY += std::floor((el.contentHeight() - caretH) * 0.5f);
-            }
-        } else {
-            const auto& run = el.textRuns().front();
-            const float tx = offX + (s.overflowX != ComputedStyle::Visible ? el.scrollLeft() : 0.0f);
-            const float ty = offY + (s.overflowY != ComputedStyle::Visible ? el.scrollTop() : 0.0f);
-            const float prefixW = measurePrefix(static_cast<std::size_t>(caretBytePos), run);
-            caretX = std::floor(run.x - tx + prefixW);
-            caretY = std::floor(run.y - ty);
-            caretH = run.height > 0.0f ? run.height : (run.fontSize * 1.2f);
-        }
+        caretGeometry(el, el.value(), static_cast<std::size_t>(caretBytePos), s, &font,
+                      offX, offY, caretX, caretY, caretH);
         if (compositionText && *compositionText && font.hasFont()) {
             SDL_Texture* compTex = font.renderText(
                 sdlRenderer, compositionText, s.fontSize,
@@ -825,7 +1112,7 @@ Application::~Application() {
 }
 
 void Application::selectAll() noexcept {
-    if (document_ && document_->focused() && document_->focused()->tag() == "input") {
+    if (document_ && document_->focused() && isEditableField(document_->focused())) {
         selectionAnchor_ = 0;
         caretBytePos_ = document_->focused()->value().size();
     }
@@ -997,48 +1284,13 @@ void Application::dispatch(const InputEvent& event) {
             // field is zero for a plain hover, which is what separates the two.
             if (event.button != 0) {
                 resolver_.setActive(target);
-                // Mouse drag updates selection on a focused text input
+                // Mouse drag updates selection on a focused text field
                 Element* focused = document_ ? document_->focused() : nullptr;
-                if (focused && focused->tag() == "input" && !focused->hasAttribute("disabled") &&
-                    !focused->textRuns().empty() && font_ && font_->hasFont()) {
-                    const auto& run = focused->textRuns().front();
+                if (focused && isEditableField(focused) && !focused->hasAttribute("disabled") &&
+                    !focused->textRuns().empty()) {
                     const ComputedStyle cs = resolver_.resolve(*focused);
-                    const float tx = (cs.overflowX != ComputedStyle::Visible ? focused->scrollLeft() : 0.0f);
-                    const float localX = event.x - (run.x - tx);
-                    if (localX <= 0.0f) {
-                        caretBytePos_ = 0;
-                    } else if (localX >= run.width) {
-                        caretBytePos_ = focused->value().size();
-                    } else {
-                        const std::string val = focused->value();
-                        const bool isPassword = focused->attribute("type") == "password";
-                        std::size_t bestByte = 0;
-                        float bestDist = std::abs(localX);
-                        std::size_t cp = 0;
-                        for (std::size_t b = 0; b <= val.size(); ) {
-                            float w = 0.0f;
-                            if (isPassword) {
-                                std::string bullets;
-                                bullets.reserve(cp * 3);
-                                for (std::size_t k = 0; k < cp; ++k) bullets += "\xE2\x80\xA2";
-                                w = font_->measureText(bullets, run.fontSize);
-                            } else {
-                                w = font_->measureText(val.substr(0, b), run.fontSize);
-                            }
-                            float dist = std::abs(localX - w);
-                            if (dist < bestDist) {
-                                bestDist = dist;
-                                bestByte = b;
-                            }
-                            if (b == val.size()) break;
-                            ++b;
-                            while (b < val.size() && (static_cast<unsigned char>(val[b]) & 0xC0) == 0x80) {
-                                ++b;
-                            }
-                            ++cp;
-                        }
-                        caretBytePos_ = bestByte;
-                    }
+                    caretBytePos_ = static_cast<int>(byteAt(
+                        *focused, focused->value(), event.x, event.y, cs, font_.get()));
                     caretBlinkStart_ = SDL_GetTicks();
                 }
             }
@@ -1053,48 +1305,13 @@ void Application::dispatch(const InputEvent& event) {
                 document_->setFocused(target);
                 resolver_.setFocused(target);
                 lastFocused_ = target;
-                if (target->tag() == "input") {
+                if (isEditableField(target)) {
                     caretBlinkStart_ = SDL_GetTicks();
                     caretBytePos_ = target->value().size();
-                    if (!target->textRuns().empty() && font_ && font_->hasFont()) {
-                        const auto& run = target->textRuns().front();
+                    if (!target->textRuns().empty()) {
                         const ComputedStyle cs = resolver_.resolve(*target);
-                        const float tx = (cs.overflowX != ComputedStyle::Visible ? target->scrollLeft() : 0.0f);
-                        const float localX = event.x - (run.x - tx);
-                        if (localX <= 0.0f) {
-                            caretBytePos_ = 0;
-                        } else if (localX >= run.width) {
-                            caretBytePos_ = target->value().size();
-                        } else {
-                            const std::string val = target->value();
-                            const bool isPassword = target->attribute("type") == "password";
-                            std::size_t bestByte = 0;
-                            float bestDist = std::abs(localX);
-                            std::size_t cp = 0;
-                            for (std::size_t b = 0; b <= val.size(); ) {
-                                float w = 0.0f;
-                                if (isPassword) {
-                                    std::string bullets;
-                                    bullets.reserve(cp * 3);
-                                    for (std::size_t k = 0; k < cp; ++k) bullets += "\xE2\x80\xA2";
-                                    w = font_->measureText(bullets, run.fontSize);
-                                } else {
-                                    w = font_->measureText(val.substr(0, b), run.fontSize);
-                                }
-                                float dist = std::abs(localX - w);
-                                if (dist < bestDist) {
-                                    bestDist = dist;
-                                    bestByte = b;
-                                }
-                                if (b == val.size()) break;
-                                ++b;
-                                while (b < val.size() && (static_cast<unsigned char>(val[b]) & 0xC0) == 0x80) {
-                                    ++b;
-                                }
-                                ++cp;
-                            }
-                            caretBytePos_ = bestByte;
-                        }
+                        caretBytePos_ = static_cast<int>(byteAt(
+                            *target, target->value(), event.x, event.y, cs, font_.get()));
                     }
                     selectionAnchor_ = caretBytePos_;
                 } else {
@@ -1161,17 +1378,24 @@ void Application::dispatch(const InputEvent& event) {
     // an `oninput` handler reads the text the field now holds.
     // Readonly and disabled fields reject edits. Non-textual types (e.g. button, submit)
     // do not edit their value on text input.
-    if (target && target->tag() == "input") {
+    if (target && isEditableField(target)) {
         constexpr int kBackspace = 0x08;
         constexpr int kDelete = 0x7F;
         constexpr int kHome = 0x4000004A;
         constexpr int kEnd = 0x4000004D;
         constexpr int kRight = 0x4000004F;
         constexpr int kLeft = 0x40000050;
+        constexpr int kUp = 0x40000052;
+        constexpr int kDown = 0x40000051;
+        constexpr int kReturn = 0x0D;
+        constexpr int kKPEnter = 0x40000058;
         constexpr int kA = 0x61;
         const bool readOnly = target->hasAttribute("readonly") || target->hasAttribute("disabled");
         const std::string_view type = target->attribute("type");
-        const bool isTextual = (type.empty() || type == "text" || type == "password" ||
+        // A textarea is always a multiline text editor; an input is textual
+        // unless its type is a control such as button or submit.
+        const bool isTextual = target->tag() == "textarea" ||
+                               (type.empty() || type == "text" || type == "password" ||
                                 type == "search" || type == "email" || type == "url" ||
                                 type == "tel" || type == "number");
         if (isTextual) {
@@ -1262,15 +1486,43 @@ void Application::dispatch(const InputEvent& event) {
                         }
                     }
                 } else if (event.key == kHome) {
-                    caretBytePos_ = 0;
+                    // Home goes to the line start in a textarea, the value start
+                    // in a single-line input.
+                    caretBytePos_ = target->tag() == "textarea"
+                                        ? static_cast<int>(lineStart(value, static_cast<std::size_t>(caretBytePos_)))
+                                        : 0;
                     if (!isShift) {
-                        selectionAnchor_ = 0;
+                        selectionAnchor_ = caretBytePos_;
                     }
                 } else if (event.key == kEnd) {
-                    caretBytePos_ = value.size();
+                    caretBytePos_ = target->tag() == "textarea"
+                                        ? static_cast<int>(lineEnd(value, static_cast<std::size_t>(caretBytePos_)))
+                                        : static_cast<int>(value.size());
                     if (!isShift) {
-                        selectionAnchor_ = value.size();
+                        selectionAnchor_ = caretBytePos_;
                     }
+                } else if (target->tag() == "textarea" && (event.key == kUp || event.key == kDown)) {
+                    const ComputedStyle cs = resolver_.resolve(*target);
+                    caretBytePos_ = static_cast<int>(moveCaretLine(
+                        font_.get(), value, static_cast<std::size_t>(caretBytePos_),
+                        event.key == kUp ? -1 : 1, cs));
+                    if (!isShift) {
+                        selectionAnchor_ = caretBytePos_;
+                    }
+                } else if (target->tag() == "textarea" && !readOnly &&
+                           (event.key == kReturn || event.key == kKPEnter)) {
+                    // Return starts a new line at the caret.
+                    if (selectionAnchor_ != caretBytePos_) {
+                        const std::size_t sStart = std::min(selectionAnchor_, caretBytePos_);
+                        const std::size_t sEnd = std::max(selectionAnchor_, caretBytePos_);
+                        value.erase(sStart, sEnd - sStart);
+                        caretBytePos_ = sStart;
+                        selectionAnchor_ = sStart;
+                    }
+                    value.insert(caretBytePos_, "\n");
+                    caretBytePos_ += 1;
+                    selectionAnchor_ = caretBytePos_;
+                    target->setValue(std::move(value));
                 } else if (!readOnly && (event.key == kBackspace || event.key == kDelete)) {
                     if (selectionAnchor_ != caretBytePos_) {
                         const std::size_t sStart = std::min(selectionAnchor_, caretBytePos_);

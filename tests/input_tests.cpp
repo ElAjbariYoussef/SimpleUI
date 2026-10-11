@@ -446,6 +446,128 @@ int main() {
         }
     }
 
+    // A `<textarea>` edits its text content as a multiline value: typing works at
+    // any caret position, Return starts a new line, Home/End bound the caret to
+    // the line instead of the value, and Up/Down keep the column while changing
+    // lines. Pointer input maps onto the nearest line.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<textarea id=\"ta\">ab\ncd</textarea>"
+            "<textarea id=\"ro\" readonly>no</textarea>"
+            "<textarea id=\"dis\" disabled>no</textarea>"
+            "</body></sui>", err);
+        check(doc != nullptr, "textarea edit document parsed");
+        if (doc) {
+            sui::Element* ta = doc->getElementById("ta");
+            sui::Element* ro = doc->getElementById("ro");
+            sui::Element* dis = doc->getElementById("dis");
+            check(ta != nullptr && ro != nullptr && dis != nullptr,
+                  "textarea elements found");
+            if (ta && ro && dis) {
+                app.setDocument(std::move(doc));
+                sui::Document& appDoc = app.document();
+
+                check(ta->value() == "ab\ncd",
+                      "textarea value keeps the newline in its text content");
+
+                // Focus the textarea; its caret initialises on the first edit.
+                appDoc.setFocused(ta);
+
+                // Typing inserts at the caret without merging the lines.
+                app.dispatch(sui::InputEvent(sui::InputKind::TextInput, 0, 0, 0, 0, 0, 0, "X"));
+                check(ta->value() == "ab\ncdX", "typing appends to a textarea");
+                check(app.caretPosition() == 6, "caret advances past the textarea insert");
+
+                // Return starts a new line.
+                app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x0D));
+                check(ta->value() == "ab\ncdX\n", "Return starts a new textarea line");
+                check(app.caretPosition() == 7, "caret follows the inserted newline");
+
+                // Backspace joins the lines again by deleting the newline.
+                app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x08));
+                check(ta->value() == "ab\ncdX", "backspace deletes a textarea newline");
+                check(app.caretPosition() == 6, "caret lands where the newline was");
+
+                // Left/right arrows cross the newline one byte at a time.
+                sui::InputEvent leftEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x40000050);
+                sui::InputEvent rightEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x4000004F);
+                app.setCaretPosition(3);  // start of the second line, "cdX"
+                app.dispatch(leftEv);
+                check(app.caretPosition() == 2,
+                      "left arrow crosses a newline into the earlier line");
+                app.dispatch(rightEv);
+                check(app.caretPosition() == 3,
+                      "right arrow crosses back over the newline");
+                app.dispatch(rightEv);
+                check(app.caretPosition() == 4,
+                      "right arrow moves within a textarea line");
+
+                // Home/End are scoped to the current line in a textarea.
+                app.setCaretPosition(5);
+                app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x4000004A));
+                check(app.caretPosition() == 3, "Home goes to the current line start");
+                app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x4000004D));
+                check(app.caretPosition() == 6, "End goes to the current line end");
+
+                // Up/Down move between lines keeping the horizontal column.
+                app.setCaretPosition(6);
+                app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x40000052));
+                check(app.caretPosition() == 2,
+                      "Up moves to the end of the previous line");
+                app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x40000051));
+                check(app.caretPosition() == 5, "Down moves back keeping the column");
+
+                // Readonly and disabled textareas reject edits, Return included.
+                appDoc.setFocused(ro);
+                app.dispatch(sui::InputEvent(sui::InputKind::TextInput, 0, 0, 0, 0, 0, 0, "x"));
+                check(ro->value() == "no", "readonly textarea ignores typing");
+                app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x0D));
+                check(ro->value() == "no", "readonly textarea ignores Return");
+                appDoc.setFocused(dis);
+                app.dispatch(sui::InputEvent(sui::InputKind::TextInput, 0, 0, 0, 0, 0, 0, "x"));
+                check(dis->value() == "no", "disabled textarea ignores typing");
+
+                // Select-all covers the whole value, newlines included.
+                appDoc.setFocused(ta);
+                app.selectAll();
+                check(app.hasSelection(), "textarea selectAll creates a selection");
+                check(app.selectionStart() == 0, "textarea selection starts at 0");
+                check(app.selectionEnd() == 6, "textarea selection covers the whole value");
+
+                // Pointer input maps onto the nearest line, and dragging selects
+                // across lines, so click-and-drag reads like a desktop app. The
+                // fields are stacked as blocks so no neighbour overlaps the
+                // click targets.
+                sui::StyleResolver layoutResolver;
+                layoutResolver.setRules(sui::CSSParser::parse("textarea{display:block}"));
+                sui::LayoutInput layoutIn;
+                layoutIn.resolver = &layoutResolver;
+                layoutIn.viewportWidth = 400.0f;
+                layoutIn.viewportHeight = 300.0f;
+                sui::BlockLayout().layout(app.document().root(), layoutIn);
+                const std::vector<sui::Element::TextRun>& runs = ta->textRuns();
+                check(runs.size() == 2 && runs[0].text == "ab" && runs[1].text == "cdX",
+                      "layout split the textarea value into one run per line");
+                if (runs.size() == 2) {
+                    app.dispatch(sui::InputEvent(sui::InputKind::PointerDown,
+                                                 runs[1].x + runs[1].width * 0.5f,
+                                                 runs[1].y + runs[1].height * 0.5f, 1));
+                    check(app.caretPosition() >= 3 && app.caretPosition() <= 6,
+                          "clicking the second line moves the caret into it");
+                    app.dispatch(sui::InputEvent(sui::InputKind::PointerMove,
+                                                 runs[0].x + 1.0f, runs[0].y + 1.0f, 1));
+                    check(ta->value() == "ab\ncdX", "dragging leaves the value unchanged");
+                    check(app.hasSelection(), "dragging across lines selects");
+                    check(app.selectionStart() <= 3 && app.selectionEnd() >= 3,
+                          "the drag selection spans both lines");
+                }
+            }
+        }
+    }
+
     // `cursor` is resolved from the hovered element and handed to the platform.
     // The decision is observable without a window through Application::activeCursor.
     {
