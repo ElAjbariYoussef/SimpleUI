@@ -3167,6 +3167,276 @@ void testFloatsAndClear() {
     }
 }
 
+void testTableLayout() {
+    // Cells are placed side by side; a column is as wide as its widest cell and
+    // a row as tall as its tallest.
+    {
+        auto document = parseOrNull(
+            "<sui><body><table id=\"t\">"
+            "<tr><td id=\"a\"></td><td id=\"b\"></td></tr>"
+            "</table></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{border-collapse:collapse} td{padding:0}"
+            "#a{width:50px;height:20px} #b{width:70px;height:30px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* t = document->getElementById("t");
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        check(t != nullptr && std::fabs(t->layoutWidth() - 120.0f) < 0.5f,
+              "a table is as wide as the sum of its columns");
+        check(t != nullptr && std::fabs(t->layoutHeight() - 30.0f) < 0.5f,
+              "a table is as tall as its tallest row");
+        check(a != nullptr && std::fabs(a->layoutX() - 0.0f) < 0.5f &&
+                  std::fabs(a->layoutWidth() - 50.0f) < 0.5f,
+              "the first cell fills its column");
+        check(b != nullptr && std::fabs(b->layoutX() - 50.0f) < 0.5f &&
+                  std::fabs(b->layoutWidth() - 70.0f) < 0.5f,
+              "the second cell starts after the first column");
+        check(a != nullptr && std::fabs(a->layoutHeight() - 30.0f) < 0.5f,
+              "a short cell stretches to its row's height");
+    }
+
+    // A table is block-level, so following content starts below it.
+    {
+        auto document = parseOrNull(
+            "<sui><body><table id=\"t\">"
+            "<tr><td id=\"a\"></td></tr></table>"
+            "<div id=\"d\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{border-collapse:collapse} td{padding:0}"
+            "#a{width:50px;height:20px} #d{height:10px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* t = document->getElementById("t");
+        Element* d = document->getElementById("d");
+        check(t != nullptr && d != nullptr &&
+                  d->layoutY() >= t->layoutY() + t->layoutHeight() - 0.5f,
+              "a block after a table starts below the table");
+    }
+
+    // Rows can be wrapped in a row group (`thead` / `tbody`).
+    {
+        auto document = parseOrNull(
+            "<sui><body><table id=\"t\">"
+            "<thead><tr><td id=\"h\"></td><td id=\"i\"></td></tr></thead>"
+            "<tbody><tr><td id=\"b\"></td><td id=\"c\"></td></tr></tbody>"
+            "</table></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{border-collapse:collapse} td{padding:0}"
+            "#h{width:40px;height:10px} #i{width:60px;height:10px} #c{height:20px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* t = document->getElementById("t");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        check(t != nullptr && std::fabs(t->layoutHeight() - 30.0f) < 0.5f,
+              "rows inside a row group are stacked");
+        check(b != nullptr && std::fabs(b->layoutY() - 18.0f) < 0.5f &&
+                  std::fabs(c->layoutX() - 40.0f) < 0.5f,
+              "a later row group continues below the first");
+    }
+
+    // `border-spacing` surrounds and separates the cells.
+    {
+        auto document = parseOrNull(
+            "<sui><body><table id=\"t\">"
+            "<tr><td id=\"a\"></td><td id=\"b\"></td></tr>"
+            "</table></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{border-spacing:10px} td{padding:0}"
+            "#a{width:50px;height:20px} #b{width:70px;height:20px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* t = document->getElementById("t");
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        check(t != nullptr && std::fabs(t->layoutWidth() - 150.0f) < 0.5f,
+              "border-spacing adds a gap on each side and between the columns");
+        check(t != nullptr && std::fabs(t->layoutHeight() - 40.0f) < 0.5f,
+              "border-spacing adds a gap above and below the rows");
+        check(a != nullptr && std::fabs(a->layoutX() - 10.0f) < 0.5f &&
+                  std::fabs(a->layoutY() - 18.0f) < 0.5f,
+              "the first cell is inset by the spacing");
+        check(b != nullptr && std::fabs(b->layoutX() - 70.0f) < 0.5f,
+              "the second column is separated by the spacing");
+    }
+
+    // A `colspan` cell covers several columns and the later rows still align.
+    {
+        auto document = parseOrNull(
+            "<sui><body><table id=\"t\">"
+            "<tr><td id=\"a\" colspan=\"2\"></td></tr>"
+            "<tr><td id=\"b\"></td><td id=\"c\"></td></tr>"
+            "</table></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{border-collapse:collapse} td{padding:0}"
+            "#a{height:40px} #b{width:50px;height:10px} #c{width:70px;height:10px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* t = document->getElementById("t");
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        check(t != nullptr && std::fabs(t->layoutHeight() - 50.0f) < 0.5f,
+              "a rowspan-free table stacks its rows");
+        check(a != nullptr && std::fabs(a->layoutWidth() - 120.0f) < 0.5f,
+              "a colspan cell spans the width of the columns it covers");
+        check(b != nullptr && std::fabs(b->layoutX() - 0.0f) < 0.5f &&
+                  std::fabs(c->layoutX() - 50.0f) < 0.5f,
+              "the columns under a colspan keep their own widths");
+    }
+
+    // A wide `colspan` cell pulls the columns under it open.
+    {
+        auto document = parseOrNull(
+            "<sui><body><table id=\"t\">"
+            "<tr><td id=\"a\" colspan=\"2\"></td></tr>"
+            "<tr><td id=\"b\"></td><td id=\"c\"></td></tr>"
+            "</table></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{border-collapse:collapse} td{padding:0}"
+            "#a{width:100px;height:10px} #b{width:10px;height:10px}"
+            "#c{width:10px;height:10px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        check(a != nullptr && std::fabs(a->layoutWidth() - 100.0f) < 0.5f,
+              "a colspan cell keeps its declared width");
+        check(b != nullptr && std::fabs(b->layoutWidth() - 50.0f) < 0.5f &&
+                  std::fabs(c->layoutX() - 50.0f) < 0.5f,
+              "the columns under a colspan share the extra width");
+    }
+
+    // A `rowspan` cell skips the slot it holds in the next row.
+    {
+        auto document = parseOrNull(
+            "<sui><body><table id=\"t\">"
+            "<tr><td id=\"a\" rowspan=\"2\"></td><td id=\"b\"></td></tr>"
+            "<tr><td id=\"c\"></td></tr>"
+            "</table></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{border-collapse:collapse} td{padding:0}"
+            "#a{width:40px;height:10px} #b{width:30px;height:20px}"
+            "#c{height:20px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        check(a != nullptr && std::fabs(a->layoutHeight() - 40.0f) < 0.5f,
+              "a rowspan cell is as tall as the rows it covers");
+        check(b != nullptr && std::fabs(b->layoutX() - 40.0f) < 0.5f,
+              "a rowspan shifts the cell beside it into the second column");
+        check(c != nullptr && std::fabs(c->layoutX() - 40.0f) < 0.5f &&
+                  std::fabs(c->layoutY() - 28.0f) < 0.5f,
+              "the row under a rowspan starts below the first row");
+    }
+
+    // A caption occupies the table's width above (or below) the rows.
+    {
+        auto document = parseOrNull(
+            "<sui><body><table id=\"t\"><caption id=\"cap\"></caption>"
+            "<tr><td id=\"a\"></td></tr>"
+            "</table></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{border-collapse:collapse} td{padding:0}"
+            "#cap{height:15px} #a{width:80px;height:20px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* t = document->getElementById("t");
+        Element* cap = document->getElementById("cap");
+        Element* a = document->getElementById("a");
+        check(cap != nullptr && std::fabs(cap->layoutWidth() - 80.0f) < 0.5f &&
+                  std::fabs(cap->layoutY() - 8.0f) < 0.5f,
+              "a caption spans the table's width at the top");
+        check(a != nullptr && std::fabs(a->layoutY() - 23.0f) < 0.5f,
+              "the rows begin below the caption");
+        check(t != nullptr && std::fabs(t->layoutHeight() - 35.0f) < 0.5f,
+              "the caption adds to the table's height");
+    }
+
+    // `table-layout: fixed` takes the columns from the first row and the table
+    // width rather than from the content.
+    {
+        auto document = parseOrNull(
+            "<sui><body><table id=\"t\">"
+            "<tr><td id=\"a\"></td><td id=\"b\"></td></tr>"
+            "</table></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{table-layout:fixed;width:200px;border-collapse:collapse}"
+            "td{padding:0} #a{width:50px;height:10px} #b{height:10px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        check(a != nullptr && std::fabs(a->layoutWidth() - 50.0f) < 0.5f,
+              "a fixed layout keeps a declared column width");
+        check(b != nullptr && std::fabs(b->layoutX() - 50.0f) < 0.5f &&
+                  std::fabs(b->layoutWidth() - 150.0f) < 0.5f,
+              "the undeclared columns share the remaining width");
+    }
+
+    // The table properties parse and serialize back.
+    {
+        auto document = parseOrNull("<sui><body><div id=\"x\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "#x{border-collapse:collapse;border-spacing:4px 6px;"
+            "table-layout:fixed;caption-side:bottom}"));
+        const ComputedStyle s = resolver.resolve(*document->getElementById("x"));
+        check(sui::StyleResolver::propertyValue(s, "border-collapse") == "collapse",
+              "border-collapse round-trips");
+        check(sui::StyleResolver::propertyValue(s, "border-spacing") == "4px 6px",
+              "border-spacing round-trips two values");
+        check(sui::StyleResolver::propertyValue(s, "table-layout") == "fixed",
+              "table-layout round-trips");
+        check(sui::StyleResolver::propertyValue(s, "caption-side") == "bottom",
+              "caption-side round-trips");
+    }
+}
+
 }  // namespace
 
 // Resolves the style of every child of the body against `resolver`, so a stylesheet can
@@ -4852,6 +5122,7 @@ int main() {
     testCssCounters();
     testHasSelector();
     testFloatsAndClear();
+    testTableLayout();
     testImportantAndCssWideKeywords();
     testBorderWidthLonghands();
     testMediaQueries();

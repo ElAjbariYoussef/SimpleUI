@@ -161,7 +161,17 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
 
     if (tag == "table") {
         Style s = block();
+        s.display = Style::Table;
         s.margin = {8.0f, 0.0f, 8.0f, 0.0f};
+        // The HTML default: the separate border model with a 2px gap.
+        s.borderSpacingH = 2.0f;
+        s.borderSpacingV = 2.0f;
+        return s;
+    }
+
+    if (tag == "caption") {
+        Style s = block();
+        s.display = Style::TableCaption;
         return s;
     }
 
@@ -174,22 +184,25 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
         Style s;
         s.display = Style::TableCell;
         s.padding = {4.0f, 8.0f, 4.0f, 8.0f};
+        if (tag == "th") {
+            s.specified = Style::SpecifiedFontBold;
+            s.fontBold = true;
+        }
         return s;
     }
-    if (tag == "thead" || tag == "tbody" || tag == "tfoot") {
+    if (tag == "thead") {
+        Style s;
+        s.display = Style::TableHeaderGroup;
+        return s;
+    }
+    if (tag == "tbody") {
         Style s;
         s.display = Style::TableRowGroup;
         return s;
     }
-    if (tag == "tr") {
-        return block();
-    }
-    if (tag == "th" || tag == "td") {
+    if (tag == "tfoot") {
         Style s;
-        s.display = Style::InlineBlock;
-        s.padding = {4.0f, 8.0f, 4.0f, 8.0f};
-        s.borderWidth = {1.0f, 1.0f, 1.0f, 1.0f};
-        s.borderColor = {63, 63, 70, 255};
+        s.display = Style::TableFooterGroup;
         return s;
     }
 

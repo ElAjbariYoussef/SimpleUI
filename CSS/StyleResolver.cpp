@@ -3329,6 +3329,30 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         else if (value == "right") s.clearType = ComputedStyle::ClearRight;
         else if (value == "both") s.clearType = ComputedStyle::ClearBoth;
         else s.clearType = ComputedStyle::ClearNone;
+    } else if (property == "border-collapse") {
+        s.borderCollapse = value == "collapse" ? ComputedStyle::CollapseCollapse
+                                                : ComputedStyle::CollapseSeparate;
+    } else if (property == "border-spacing") {
+        // One length sets both axes; two set horizontal then vertical.
+        const std::string_view text = trim(value);
+        const std::size_t space = text.find(' ');
+        const auto toPx = [&](std::string_view v) {
+            return parseLength(v).resolve(0.0f, s.fontSize, rootFontSize);
+        };
+        if (space == std::string_view::npos) {
+            const float px = toPx(text);
+            s.borderSpacingH = px;
+            s.borderSpacingV = px;
+        } else {
+            s.borderSpacingH = toPx(text.substr(0, space));
+            s.borderSpacingV = toPx(trim(text.substr(space + 1)));
+        }
+    } else if (property == "table-layout") {
+        s.tableLayout = value == "fixed" ? ComputedStyle::TableLayoutFixed
+                                         : ComputedStyle::TableLayoutAuto;
+    } else if (property == "caption-side") {
+        s.captionSide = value == "bottom" ? ComputedStyle::CaptionBottom
+                                          : ComputedStyle::CaptionTop;
     } else if (property == "counter-reset") {
         s.counterReset = parseCounterList(value, 0);
     } else if (property == "counter-increment") {
@@ -4009,6 +4033,22 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             case ComputedStyle::ClearBoth: return "both";
             default: return "none";
         }
+    }
+    if (property == "border-collapse") {
+        return style.borderCollapse == ComputedStyle::CollapseCollapse ? "collapse"
+                                                                      : "separate";
+    }
+    if (property == "border-spacing") {
+        if (style.borderSpacingH == style.borderSpacingV) {
+            return number(style.borderSpacingH);
+        }
+        return number(style.borderSpacingH) + " " + number(style.borderSpacingV);
+    }
+    if (property == "table-layout") {
+        return style.tableLayout == ComputedStyle::TableLayoutFixed ? "fixed" : "auto";
+    }
+    if (property == "caption-side") {
+        return style.captionSide == ComputedStyle::CaptionBottom ? "bottom" : "top";
     }
     if (property == "text-overflow") {
         return style.textOverflow == ComputedStyle::TextOverflowEllipsis ? "ellipsis" : "clip";

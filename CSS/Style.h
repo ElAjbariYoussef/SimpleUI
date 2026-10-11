@@ -605,6 +605,28 @@ struct ComputedStyle {
     enum ClearType : std::uint8_t { ClearNone, ClearLeft, ClearRight, ClearBoth };
     ClearType clearType = ClearNone;
 
+    // Table layout. `border-collapse` picks the separated edge model (a gap
+    // between every cell, sized by `border-spacing`) or the collapsed one (no
+    // gap). `table-layout` decides how the columns are sized.
+    enum BorderCollapse : std::uint8_t { CollapseSeparate, CollapseCollapse };
+    BorderCollapse borderCollapse = CollapseSeparate;
+    float borderSpacingH = 0.0f;
+    float borderSpacingV = 0.0f;
+    enum TableLayoutKind : std::uint8_t { TableLayoutAuto, TableLayoutFixed };
+    TableLayoutKind tableLayout = TableLayoutAuto;
+    enum CaptionSide : std::uint8_t { CaptionTop, CaptionBottom };
+    CaptionSide captionSide = CaptionTop;
+
+    bool isTableContainer() const noexcept {
+        return display == Display::Table || display == Display::InlineTable;
+    }
+    bool isTableRow() const noexcept { return display == Display::TableRow; }
+    bool isTableRowGroup() const noexcept {
+        return display == Display::TableRowGroup ||
+               display == Display::TableHeaderGroup ||
+               display == Display::TableFooterGroup;
+    }
+    bool isTableCell() const noexcept { return display == Display::TableCell; }
 
     // CSS counters, keyed by name. `counterReset` sets the counter to `value` on
     // the element that declares it; `counterIncrement` adds `value` to it.

@@ -15,8 +15,10 @@ namespace {
 
 bool isBlockLevel(const ComputedStyle& s) {
     // CSS puts `display: flex` in the block formatting context; only
-    // `inline-flex` behaves like an inline-level box.
-    return s.display == ComputedStyle::Block || s.display == ComputedStyle::Flex;
+    // `inline-flex` behaves like an inline-level box. A `display: table` box is
+    // block-level too (an `inline-table` is not).
+    return s.display == ComputedStyle::Block || s.display == ComputedStyle::Flex ||
+           s.display == ComputedStyle::Table;
 }
 
 // CSS clamps by max-* first and then by min-*, so min-width and min-height win
@@ -138,6 +140,26 @@ float textWidth(const TextFont* font, const ComputedStyle& s, std::string_view t
 
 bool isFloated(const ComputedStyle& s) {
     return s.floatType != ComputedStyle::FloatNone;
+}
+
+// The HTML `colspan` / `rowspan` value, clamped to a sane range. An absent or
+// malformed value falls back to one cell.
+int spanAttribute(Element& el, const char* name) {
+    const std::string_view text = el.attribute(name);
+    if (text.empty()) {
+        return 1;
+    }
+    int value = 0;
+    for (char c : text) {
+        if (!std::isdigit(static_cast<unsigned char>(c))) {
+            return 1;
+        }
+        value = value * 10 + (c - '0');
+        if (value > 1000) {
+            return 1000;
+        }
+    }
+    return value < 1 ? 1 : value;
 }
 
 // A floated box, recorded as its margin box in window coordinates so any line or
@@ -909,6 +931,9 @@ private:
         if (s.isGridContainer()) {
             return layoutGridContainer(el, s, box, availableWidth, contentX, contentY,
                                        outWidth);
+        }
+        if (s.isTableContainer()) {
+            return layoutTable(el, s, box, availableWidth, contentX, contentY, outWidth);
         }
 
         // A container that declares floats owns a context for them; in-flow
@@ -1941,6 +1966,348 @@ private:
             return box.height;
         }
         return rowCount == 0 ? 0.0f : std::max(0.0f, y - rowGap - rowExtra);
+    }
+
+    // CSS table layout. Rows (direct, or reached through a row group) are gathered
+    // into a grid; a column is as wide as its widest cell and a row as tall as its
+    // tallest. `border-spacing` separates the cells unless the borders collapse.
+    // Cells honour `colspan` / `rowspan` from their HTML attributes.
+    float layoutTable(Element& el, const ComputedStyle& s, const UsedBox& box,
+                      float availableWidth, float contentX, float contentY,
+                      float& outWidth) {
+        const bool separate = s.borderCollapse != ComputedStyle::CollapseCollapse;
+        const float spacingX = separate ? s.borderSpacingH : 0.0f;
+        const float spacingY = separate ? s.borderSpacingV : 0.0f;
+
+        struct Cell {
+            Element* el = nullptr;
+            ComputedStyle style;
+            UsedBox box;
+            int row = 0;
+            int col = 0;
+            int colspan = 1;
+            int rowspan = 1;
+            float width = 0.0f;
+        };
+        struct Row {
+            Element* el = nullptr;
+            ComputedStyle style;
+            float y = 0.0f;
+            float height = 0.0f;
+            std::vector<Cell> cells;
+        };
+
+        std::vector<Row> rows;
+        std::vector<Element*> captions;
+
+        auto collectRow = [&](Element* rowEl) {
+            Row row;
+            row.el = rowEl;
+            row.style = resolver_.resolve(*rowEl);
+            for (const auto& child : rowEl->children()) {
+                if (!child || child->isTextNode() || !laidOut(*child)) {
+                    continue;
+                }
+                const ComputedStyle cs = resolver_.resolve(*child);
+                if (!cs.isTableCell()) {
+                    continue;
+                }
+                Cell cell;
+                cell.el = child.get();
+                cell.style = cs;
+                cell.box = usedBox(cs, kUnbounded);
+                cell.colspan = spanAttribute(*child, "colspan");
+                cell.rowspan = spanAttribute(*child, "rowspan");
+                row.cells.push_back(std::move(cell));
+            }
+            rows.push_back(std::move(row));
+        };
+
+        for (const auto& child : el.children()) {
+            if (!child || child->isTextNode()) {
+                continue;
+            }
+            const ComputedStyle cs = resolver_.resolve(*child);
+            if (cs.display == ComputedStyle::None || !cs.visible) {
+                continue;
+            }
+            if (cs.isTableRow()) {
+                collectRow(child.get());
+            } else if (cs.isTableRowGroup()) {
+                // Row groups are non-visual nodes, so they are traversed explicitly
+                // rather than laid out as boxes.
+                for (const auto& gc : child->children()) {
+                    if (!gc || gc->isTextNode()) {
+                        continue;
+                    }
+                    if (resolver_.resolve(*gc).isTableRow()) {
+                        collectRow(gc.get());
+                    }
+                }
+            } else if (cs.display == ComputedStyle::TableCaption) {
+                captions.push_back(child.get());
+            }
+        }
+
+        // Give every cell a column, skipping slots a `rowspan` from an earlier row
+        // has already claimed.
+        int columns = 0;
+        std::vector<int> occupied;  // per column: first row not already claimed
+        for (int r = 0; r < static_cast<int>(rows.size()); ++r) {
+            int col = 0;
+            for (Cell& cell : rows[r].cells) {
+                while (col < static_cast<int>(occupied.size()) && occupied[col] > r) {
+                    ++col;
+                }
+                cell.row = r;
+                cell.col = col;
+                const int end = col + cell.colspan;
+                if (end > static_cast<int>(occupied.size())) {
+                    occupied.resize(end, 0);
+                }
+                for (int c = col; c < end; ++c) {
+                    occupied[c] = std::max(occupied[c], r + cell.rowspan);
+                }
+                col = end;
+            }
+            columns = std::max(columns, col);
+        }
+        columns = std::max(1, columns);
+
+        // Column widths: the widest single-column cell, then any excess a spanning
+        // cell asks for is shared across the columns it covers.
+        std::vector<float> colWidth(columns, 0.0f);
+        auto cellNatural = [&](Cell& cell) {
+            const float natural = measureNatural(*cell.el, cell.style, true);
+            return (cell.box.width > 0.0f ? cell.box.width : natural) +
+                   cell.box.horizontalChrome();
+        };
+        auto columnSpanWidth = [&](const Cell& cell) {
+            const int end = std::min(columns, cell.col + cell.colspan);
+            float w = spacingX * static_cast<float>(std::max(0, end - cell.col - 1));
+            for (int c = cell.col; c < end; ++c) {
+                w += colWidth[c];
+            }
+            return w;
+        };
+        // The left edge of a column, spacing included: a cell is positioned by the
+        // column it occupies, not by where the previous cell in its row ended.
+        auto columnLeft = [&](int col) {
+            float x = contentX + spacingX;
+            for (int c = 0; c < col && c < columns; ++c) {
+                x += colWidth[c] + spacingX;
+            }
+            return x;
+        };
+        // A cell is as wide as its column: the authored width only informs the
+        // column sizing, so the used width is dropped before laying the cell out.
+        auto cellSized = [&](const Cell& cell) {
+            ComputedStyle sized = cell.style;
+            sized.width = decltype(sized.width){};
+            return sized;
+        };
+        for (Row& row : rows) {
+            for (Cell& cell : row.cells) {
+                if (cell.colspan == 1) {
+                    colWidth[cell.col] = std::max(colWidth[cell.col], cellNatural(cell));
+                }
+            }
+        }
+        for (Row& row : rows) {
+            for (Cell& cell : row.cells) {
+                if (cell.colspan <= 1) {
+                    continue;
+                }
+                const int end = std::min(columns, cell.col + cell.colspan);
+                float spanned = spacingX * static_cast<float>(end - cell.col - 1);
+                for (int c = cell.col; c < end; ++c) {
+                    spanned += colWidth[c];
+                }
+                const float wanted = cellNatural(cell);
+                if (wanted > spanned && end > cell.col) {
+                    const float share =
+                        (wanted - spanned) / static_cast<float>(end - cell.col);
+                    for (int c = cell.col; c < end; ++c) {
+                        colWidth[c] += share;
+                    }
+                }
+            }
+        }
+
+        // Table width: the authored one, or the sum of the columns plus spacing.
+        const float spacingTotal = spacingX * static_cast<float>(columns + 1);
+        float contentWidth = spacingTotal;
+        for (float w : colWidth) {
+            contentWidth += w;
+        }
+        if (box.width > 0.0f) {
+            contentWidth = box.width;
+        } else if (s.tableLayout == ComputedStyle::TableLayoutFixed && availableWidth > 0.0f &&
+                   availableWidth < kUnbounded) {
+            contentWidth = std::max(contentWidth, availableWidth);
+        }
+
+        // An automatic table with an authored width spreads what is left over
+        // across the columns, the way a browser expands a table to fill it.
+        if (box.width > 0.0f && s.tableLayout == ComputedStyle::TableLayoutAuto &&
+            columns > 0) {
+            float natural = 0.0f;
+            for (float w : colWidth) {
+                natural += w;
+            }
+            const float free = std::max(0.0f, contentWidth - spacingTotal);
+            if (natural <= 0.0f) {
+                for (float& w : colWidth) {
+                    w = free / static_cast<float>(columns);
+                }
+            } else {
+                const float extra = free - natural;
+                if (extra >= 0.0f) {
+                    const float each = extra / static_cast<float>(columns);
+                    for (float& w : colWidth) {
+                        w += each;
+                    }
+                } else {
+                    // Shrink proportionally rather than to nothing.
+                    const float scale = free / natural;
+                    for (float& w : colWidth) {
+                        w *= scale;
+                    }
+                }
+            }
+        }
+
+        // `table-layout: fixed` sizes columns from the first row: a declared width
+        // wins and the rest share what is left.
+        if (s.tableLayout == ComputedStyle::TableLayoutFixed && columns > 0) {
+            std::vector<float> fixed(columns, -1.0f);
+            bool anyFixed = false;
+            if (!rows.empty()) {
+                for (Cell& cell : rows[0].cells) {
+                    if (cell.colspan == 1 && cell.box.width > 0.0f) {
+                        fixed[cell.col] = cell.box.width + cell.box.horizontalChrome();
+                        anyFixed = true;
+                    }
+                }
+            }
+            const float free = std::max(0.0f, contentWidth - spacingTotal);
+            float declared = 0.0f;
+            int open = 0;
+            for (float w : fixed) {
+                if (w >= 0.0f) {
+                    declared += w;
+                } else {
+                    ++open;
+                }
+            }
+            for (int c = 0; c < columns; ++c) {
+                if (fixed[c] >= 0.0f) {
+                    colWidth[c] = fixed[c];
+                } else if (anyFixed && open > 0) {
+                    colWidth[c] = std::max(0.0f, free - declared) / static_cast<float>(open);
+                } else {
+                    colWidth[c] = free / static_cast<float>(columns);
+                }
+            }
+        }
+
+        // Row heights from the single-row cells.
+        for (Row& row : rows) {
+            float height = std::max(0.0f, row.style.height.resolve(0.0f, row.style.fontSize, 16.0f));
+            for (Cell& cell : row.cells) {
+                if (cell.rowspan != 1) {
+                    continue;
+                }
+                cell.width = columnSpanWidth(cell);
+                const ComputedStyle sized = cellSized(cell);
+                const UsedBox sbox = usedBox(sized, cell.width);
+                float cw = 0.0f;
+                const float content =
+                    cell.box.height > 0.0f
+                        ? cell.box.height
+                        : layoutContents(*cell.el, sized, sbox, cell.width, contentX,
+                                         contentY, cw);
+                height = std::max(height, content + sbox.verticalChrome());
+            }
+            row.height = height;
+        }
+        // A cell spanning several rows can still be taller than they are; the
+        // excess is added to the last row it covers.
+        for (Row& row : rows) {
+            for (Cell& cell : row.cells) {
+                if (cell.rowspan <= 1) {
+                    continue;
+                }
+                cell.width = columnSpanWidth(cell);
+                const ComputedStyle sized = cellSized(cell);
+                const UsedBox sbox = usedBox(sized, cell.width);
+                float cw = 0.0f;
+                const float content =
+                    cell.box.height > 0.0f
+                        ? cell.box.height
+                        : layoutContents(*cell.el, sized, sbox, cell.width, contentX,
+                                         contentY, cw);
+                const float wanted = content + sbox.verticalChrome();
+                const int last =
+                    std::min<int>(static_cast<int>(rows.size()) - 1, cell.row + cell.rowspan - 1);
+                float spanned = spacingY * static_cast<float>(cell.rowspan - 1);
+                for (int r = cell.row; r <= last; ++r) {
+                    spanned += rows[r].height;
+                }
+                if (wanted > spanned) {
+                    rows[last].height += wanted - spanned;
+                }
+            }
+        }
+
+        // A caption spans the table's width and sits above or below the rows
+        // depending on `caption-side`.
+        auto layCaption = [&](Element* caption, float atY) {
+            const ComputedStyle cs = resolver_.resolve(*caption);
+            runWith(*caption, cs, contentWidth, contentX, atY);
+            const UsedBox captionBox = usedBox(cs, contentWidth);
+            return captionBox.margin.top + caption->layoutHeight() + captionBox.margin.bottom;
+        };
+        float cursor = contentY;
+        for (Element* caption : captions) {
+            if (s.captionSide != ComputedStyle::CaptionBottom) {
+                cursor += layCaption(caption, cursor);
+            }
+        }
+
+        float y = cursor + spacingY;
+        for (Row& row : rows) {
+            row.y = y;
+            for (Cell& cell : row.cells) {
+                cell.width = columnSpanWidth(cell);
+                const int last =
+                    std::min<int>(static_cast<int>(rows.size()) - 1, cell.row + cell.rowspan - 1);
+                float height = spacingY * static_cast<float>(last - cell.row);
+                for (int r = cell.row; r <= last; ++r) {
+                    height += rows[r].height;
+                }
+                runWith(*cell.el, cellSized(cell), cell.width, columnLeft(cell.col), y);
+                // The cell stretches to the height of the rows it covers.
+                cell.el->setLayoutHeight(std::max(cell.el->layoutHeight(), height));
+            }
+            if (row.el) {
+                row.el->clearTextRuns();
+                row.el->setLayoutX(contentX);
+                row.el->setLayoutY(row.y);
+                row.el->setLayoutWidth(contentWidth);
+                row.el->setLayoutHeight(row.height);
+            }
+            y += row.height + spacingY;
+        }
+
+        for (Element* caption : captions) {
+            if (s.captionSide == ComputedStyle::CaptionBottom) {
+                y += layCaption(caption, y);
+            }
+        }
+
+        outWidth = contentWidth;
+        return box.height > 0.0f ? box.height : std::max(0.0f, y - contentY);
     }
 
     // Every inline descendant of `el` flows into one line-breaking context, so

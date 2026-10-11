@@ -23,7 +23,19 @@ const char* displayName(int d) {
         case 2: return "inline-block";
         case 3: return "flex";
         case 4: return "inline-flex";
-        case 5: return "none";
+        case 5: return "grid";
+        case 6: return "inline-grid";
+        case 7: return "table";
+        case 8: return "inline-table";
+        case 9: return "table-row";
+        case 10: return "table-cell";
+        case 11: return "table-row-group";
+        case 12: return "table-header-group";
+        case 13: return "table-footer-group";
+        case 14: return "table-column";
+        case 15: return "table-column-group";
+        case 16: return "table-caption";
+        case 17: return "none";
         default: return "?";
     }
 }
@@ -63,7 +75,8 @@ int main() {
     const char* tags[] = {"body",   "div",    "p",    "h1",  "h2",  "h6",
                           "a",     "span",   "br",   "strong", "em", "small",
                           "button", "input", "ul",  "ol",  "li",  "table",
-                          "tr",    "th",     "td",   "img", "svg", "video",
+                          "caption", "thead", "tbody", "tfoot", "tr", "th", "td",
+                          "img", "svg", "video",
                           "audio", "canvas", "iframe", "picture", "source", "track"};
     for (const char* tag : tags) {
         const sui::ComputedStyle s = sui::defaultStyleFor(tag);
@@ -213,6 +226,32 @@ int main() {
           "body{margin:0} #t{width:200px}#f{float:left;width:50px;height:40px}"
           "#c{clear:left;height:20px}",
           "c");
+
+    report("table layout");
+    probe("cells sit side by side",
+          "<sui><body><table id=\"t\"><tr><td>A</td><td id=\"b\">BB</td></tr></table>"
+          "</body></sui>",
+          "body{margin:0;font-size:20px} #t{border-collapse:collapse;width:200px}", "b");
+    probe("auto columns fit their content",
+          "<sui><body><table id=\"t\"><tr><td>AAAA</td><td id=\"b\">B</td></tr>"
+          "<tr><td>C</td><td>D</td></tr></table></body></sui>",
+          "body{margin:0;font-size:20px} table{border-collapse:collapse}", "b");
+    probe("border-spacing separates cells",
+          "<sui><body><table id=\"t\"><tr><td>A</td><td id=\"b\">B</td></tr></table>"
+          "</body></sui>",
+          "body{margin:0;font-size:20px} #t{border-spacing:10px}", "b");
+    probe("row height follows the tallest cell",
+          "<sui><body><table id=\"t\"><tr><td id=\"a\">A</td><td>B<br />C</td></tr>"
+          "</table></body></sui>",
+          "body{margin:0;font-size:20px} table{border-collapse:collapse}", "a");
+    probe("colspan shares the covered columns",
+          "<sui><body><table id=\"t\"><tr><td colspan=\"2\" id=\"a\">wide</td></tr>"
+          "<tr><td>B</td><td>C</td></tr></table></body></sui>",
+          "body{margin:0;font-size:20px} table{border-collapse:collapse}", "a");
+    probe("caption sits above the rows",
+          "<sui><body><table id=\"t\"><caption id=\"c\">cap</caption>"
+          "<tr><td>A</td></tr></table></body></sui>",
+          "body{margin:0;font-size:20px} table{border-collapse:collapse}", "c");
 
     report("documented gaps (expected to be no-ops)");
     probe("display:none removes the box",
