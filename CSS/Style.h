@@ -157,6 +157,16 @@ struct ComputedStyle {
         InlineFlex,
         Grid,
         InlineGrid,
+        Table,
+        InlineTable,
+        TableRow,
+        TableCell,
+        TableRowGroup,
+        TableHeaderGroup,
+        TableFooterGroup,
+        TableColumn,
+        TableColumnGroup,
+        TableCaption,
         None
     };
 

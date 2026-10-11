@@ -2475,6 +2475,14 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.display = ComputedStyle::Grid;
         } else if (value == "inline-grid") {
             s.display = ComputedStyle::InlineGrid;
+        } else if (value == "table") {
+            s.display = ComputedStyle::Table;
+        } else if (value == "inline-table") {
+            s.display = ComputedStyle::InlineTable;
+        } else if (value == "table-row") {
+            s.display = ComputedStyle::TableRow;
+        } else if (value == "table-cell") {
+            s.display = ComputedStyle::TableCell;
         } else {
             s.display = ComputedStyle::Block;
         }
