@@ -53,6 +53,18 @@ void addBox(Element& element, const StyleResolver& resolver, const char* tag,
                 i = end + 1;
                 continue;
             }
+        } else if (raw[i] == '\x03') {
+            const std::size_t end = raw.find('\x04', i + 1);
+            if (end != std::string::npos) {
+                i = end + 1;
+                continue;
+            }
+        } else if (raw[i] == '\x05') {
+            const std::size_t end = raw.find('\x06', i + 1);
+            if (end != std::string::npos) {
+                i = end + 1;
+                continue;
+            }
         }
         text.push_back(raw[i]);
         ++i;

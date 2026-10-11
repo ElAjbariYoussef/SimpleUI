@@ -1112,11 +1112,79 @@ ContentResult parseContent(std::string_view v) {
             res.text.push_back('\x01');
             res.text.append(attrName);
             res.text.push_back('\x02');
+        } else if (v.substr(i, 8) == "counter(") {
+            i += 8;
+            while (i < v.size() && std::isspace(static_cast<unsigned char>(v[i]))) ++i;
+            const std::size_t start = i;
+            while (i < v.size() && v[i] != ')' && v[i] != ',') {
+                ++i;
+            }
+            std::string_view name = v.substr(start, i - start);
+            // Skip optional style
+            while (i < v.size() && v[i] != ')') ++i;
+            if (i < v.size() && v[i] == ')') ++i;
+            res.text.push_back('');
+            res.text.append(name);
+            res.text.push_back('');
+        } else if (v.substr(i, 9) == "counters(") {
+            i += 9;
+            while (i < v.size() && std::isspace(static_cast<unsigned char>(v[i]))) ++i;
+            const std::size_t start = i;
+            while (i < v.size() && v[i] != ')' && v[i] != ',') {
+                ++i;
+            }
+            std::string_view name = v.substr(start, i - start);
+            while (i < v.size() && v[i] != ')') ++i;
+            if (i < v.size() && v[i] == ')') ++i;
+            res.text.push_back('');
+            res.text.append(name);
+            res.text.push_back('');
         } else {
             ++i;
         }
     }
     return res;
+}
+
+
+std::vector<ComputedStyle::CounterOp> parseCounterList(std::string_view v) {
+    std::vector<ComputedStyle::CounterOp> out;
+    std::size_t i = 0;
+    while (i < v.size()) {
+        while (i < v.size() && std::isspace(static_cast<unsigned char>(v[i]))) ++i;
+        if (i >= v.size() || v[i] == ',') {
+            ++i;
+            continue;
+        }
+        if (v.substr(i, 6) == "none" || v.substr(i, 4) == "auto") {
+            ++i;
+            while (i < v.size() && v[i] != ',') ++i;
+            if (i < v.size() && v[i] == ',') ++i;
+            continue;
+        }
+        const std::size_t start = i;
+        while (i < v.size() && !std::isspace(static_cast<unsigned char>(v[i])) && v[i] != ',') ++i;
+        std::string name = std::string(v.substr(start, i - start));
+        while (i < v.size() && std::isspace(static_cast<unsigned char>(v[i]))) ++i;
+        int val = 0;
+        if (i < v.size() && v[i] != ',') {
+            bool neg = false;
+            if (v[i] == '+' || v[i] == '-') {
+                neg = (v[i] == '-');
+                ++i;
+            }
+            if (i < v.size() && std::isdigit(static_cast<unsigned char>(v[i]))) {
+                const std::size_t numstart = i;
+                while (i < v.size() && std::isdigit(static_cast<unsigned char>(v[i]))) ++i;
+                val = std::stoi(std::string(v.substr(numstart, i - numstart)));
+                if (neg) val = -val;
+            }
+        }
+        out.push_back({name, val});
+        while (i < v.size() && v[i] != ',') ++i;
+        if (i < v.size() && v[i] == ',') ++i;
+    }
+    return out;
 }
 
 ComputedStyle::Overflow parseOverflow(std::string_view v) {
@@ -3218,6 +3286,10 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.cursor = chosen;
             s.specified |= ComputedStyle::SpecifiedCursor;
         }
+    } else if (property == "counter-reset") {
+        s.counterReset = parseCounterList(value);
+    } else if (property == "counter-increment") {
+        s.counterIncrement = parseCounterList(value);
     } else if (property == "resize" || property == "appearance" ||
                property == "-webkit-appearance") {
         // Accepted; these control browser chrome that this engine does not draw.
