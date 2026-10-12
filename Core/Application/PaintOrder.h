@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "CSS/Style.h"
+#include "Rendering/ClipMask.h"
 
 namespace sui {
 
@@ -44,6 +45,11 @@ struct PaintItem {
     // The tightest rect every ancestor's `overflow` imposes, in window
     // coordinates. A width or height of zero or less means no clip at all.
     SDL_FRect clip{0.0f, 0.0f, 0.0f, 0.0f};
+    // A `clip-path` shape in the same window coordinates, resolved at collect
+    // time so paint and hit-testing share one answer. `None` clips nothing.
+    // Under an ancestor transform the painted shape follows the affine while
+    // hit-testing reads it straight: exact unless transformed.
+    ResolvedClip clipShape;
     // Scroll offsets accumulated from clipping ancestors. Content moves up and
     // left by them, so this element's box is drawn at layout minus the offset;
     // its own scroll only shifts what is inside it.

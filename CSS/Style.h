@@ -278,6 +278,45 @@ struct ComputedStyle {
     };
     Radii borderRadii;
 
+    // A `clip-path` shape, kept as lengths for the same reason as the radii:
+    // percentages resolve against the reference box at paint time. Anything
+    // the parser cannot express (`path()`, `url()`) stays `None`.
+    struct ClipPath {
+        enum class Shape : std::uint8_t { None, Inset, Circle, Ellipse, Polygon };
+        // Sizes relative to the box: the border box, unless `box` says else.
+        // `fill-box`, `stroke-box` and `view-box` behave as the border box on
+        // HTML elements.
+        enum class Box : std::uint8_t { Margin, Border, Padding, Content };
+        // Circle/ellipse radii given as keywords instead of lengths.
+        enum class Radial : std::uint8_t {
+            Explicit,
+            ClosestSide,
+            FarthestSide,
+            ClosestCorner,
+            FarthestCorner
+        };
+        struct Point {
+            Length x;
+            Length y;
+        };
+        Shape shape = Shape::None;
+        Box box = Box::Border;
+        Length inset[4] = {};  // top, right, bottom, left
+        Length insetRadius;    // `round`, one radius for every corner
+        Radial radius = Radial::Explicit;  // circle
+        Length radiusLength;
+        Radial radiusX = Radial::Explicit;  // ellipse
+        Radial radiusY = Radial::Explicit;
+        Length radiusXLength;
+        Length radiusYLength;
+        // `at` position; defaulted to 50% 50% when the shape omits it.
+        Length centerX = Length(Length::Percent, 50.0f);
+        Length centerY = Length(Length::Percent, 50.0f);
+        std::vector<Point> points;  // polygon, three or more
+        bool evenOdd = false;
+    };
+    ClipPath clipPath;
+
     // An outline is drawn outside the border box and takes no space in layout.
     struct Outline {
         Length width;

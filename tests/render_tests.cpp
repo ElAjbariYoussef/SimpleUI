@@ -1,5 +1,6 @@
 // Geometry checks for the renderer that need no device, so the parts a screenshot
 // cannot pin down precisely still have a regression test.
+#include "Rendering/ClipMask.h"
 #include "Rendering/ColorMatrix.h"
 #include "Rendering/ImageBlur.h"
 #include "Rendering/Renderer.h"
@@ -378,6 +379,130 @@ void testColorMatrix() {
           "an empty filter chain stays identity");
 }
 
+// The CPU clip-path mask the executor hands a composited group. Coverage is
+// exact at 0, 0.5 and 1 by construction (signed distance through a half-pixel
+// ramp), so every value below is hand-checkable: rect edges read 0.5 on the
+// boundary, 1 inside, 0 outside; circles and ellipses behave the same around
+// their own metrics; polygons wind correctly.
+void testClipCoverage() {
+    using Kind = sui::ResolvedClip::Kind;
+    sui::ResolvedClip rect;
+    rect.kind = Kind::Rect;
+    rect.x = 0.0f;
+    rect.y = 0.0f;
+    rect.w = 10.0f;
+    rect.h = 10.0f;
+    check(sui::clipCoverage(rect, 5.0f, 5.0f) == 1.0f, "a rect keeps its middle");
+    check(sui::clipCoverage(rect, 10.0f, 5.0f) == 0.5f, "a rect edge covers half");
+    check(sui::clipCoverage(rect, 11.0f, 5.0f) == 0.0f, "a rect drops the outside");
+    check(sui::clipCoverage(rect, -0.5f, 5.0f) == 0.0f, "half a pixel out is empty");
+
+    sui::ResolvedClip rounded = rect;
+    rounded.radius = 2.0f;
+    check(sui::clipCoverage(rounded, 5.0f, 5.0f) == 1.0f, "a round rect keeps its middle");
+    check(sui::clipCoverage(rounded, 0.0f, 0.0f) == 0.0f,
+          "a round rect cuts its sharp corner");
+    check(sui::clipCoverage(rounded, 0.0f, 2.0f) == 0.5f,
+          "a round rect edge covers half where the arc meets the side");
+    check(sui::clipCoverage(rounded, 2.0f, 0.0f) == 0.5f,
+          "a round rect edge covers half where the side meets the arc");
+
+    sui::ResolvedClip circle;
+    circle.kind = Kind::Circle;
+    circle.cx = 5.0f;
+    circle.cy = 5.0f;
+    circle.rx = 4.0f;
+    circle.ry = 4.0f;
+    check(sui::clipCoverage(circle, 5.0f, 5.0f) == 1.0f, "a circle keeps its centre");
+    check(sui::clipCoverage(circle, 9.0f, 5.0f) == 0.5f, "a circle edge covers half");
+    check(sui::clipCoverage(circle, 9.5f, 5.0f) == 0.0f, "a circle drops the outside");
+
+    sui::ResolvedClip ellipse;
+    ellipse.kind = Kind::Ellipse;
+    ellipse.cx = 5.0f;
+    ellipse.cy = 5.0f;
+    ellipse.rx = 4.0f;
+    ellipse.ry = 2.0f;
+    check(sui::clipCoverage(ellipse, 5.0f, 5.0f) == 1.0f, "an ellipse keeps its centre");
+    check(sui::clipCoverage(ellipse, 9.0f, 5.0f) == 0.5f,
+          "an ellipse edge covers half on x");
+    check(sui::clipCoverage(ellipse, 5.0f, 7.0f) == 0.5f,
+          "an ellipse edge covers half on y");
+    check(sui::clipCoverage(ellipse, 5.0f, 7.5f) == 0.0f, "an ellipse drops the outside");
+
+    sui::ResolvedClip triangle;
+    triangle.kind = Kind::Polygon;
+    triangle.points = {SDL_FPoint{0.0f, 0.0f}, SDL_FPoint{10.0f, 0.0f},
+                       SDL_FPoint{5.0f, 10.0f}};
+    check(sui::clipCoverage(triangle, 5.0f, 3.0f) == 1.0f, "a polygon keeps its middle");
+    check(sui::clipCoverage(triangle, 5.0f, 0.0f) == 0.5f, "a polygon edge covers half");
+    check(sui::clipCoverage(triangle, 5.0f, 11.0f) == 0.0f, "a polygon drops the outside");
+    check(sui::clipContains(triangle, 5.0f, 3.0f), "contains reads inside as inside");
+    check(!sui::clipContains(triangle, 5.0f, 11.0f), "contains reads outside as outside");
+
+    sui::ResolvedClip empty;
+    empty.kind = Kind::Polygon;
+    empty.points = {SDL_FPoint{0.0f, 0.0f}, SDL_FPoint{1.0f, 1.0f}};
+    check(sui::clipCoverage(empty, 0.5f, 0.5f) == 0.0f, "a digon keeps nothing");
+
+    sui::ResolvedClip none;
+    check(sui::clipCoverage(none, -100.0f, 999.0f) == 1.0f, "no clip keeps everything");
+}
+
+// `applyClipMask` scales alpha by coverage and leaves colour alone, over a 4x4
+// image with a 2x2 rect kept at (1,1): the kept pixels stay opaque, the rest
+// go transparent, and the red channel is untouched throughout.
+void testClipMask() {
+    sui::ResolvedClip rect;
+    rect.kind = sui::ResolvedClip::Kind::Rect;
+    rect.x = 1.0f;
+    rect.y = 1.0f;
+    rect.w = 2.0f;
+    rect.h = 2.0f;
+    std::vector<std::uint8_t> img(4 * 4 * 4, 0);
+    for (int i = 0; i < 16; ++i) {
+        img[4 * i] = 200;
+        img[4 * i + 3] = 255;
+    }
+    sui::applyClipMask(img.data(), 4, 4, rect);
+    const auto alpha = [&](int x, int y) { return img[4 * (y * 4 + x) + 3]; };
+    check(alpha(1, 1) == 255 && alpha(2, 2) == 255, "kept pixels stay opaque");
+    check(alpha(0, 0) == 0 && alpha(3, 3) == 0 && alpha(1, 0) == 0,
+          "clipped pixels go transparent");
+    bool red = true;
+    for (int i = 0; i < 16; ++i) {
+        red = red && img[4 * i] == 200;
+    }
+    check(red, "masking leaves colour alone");
+
+    sui::ResolvedClip none;
+    std::vector<std::uint8_t> flat(16, 77);
+    sui::applyClipMask(flat.data(), 2, 2, none);
+    check(flat == std::vector<std::uint8_t>(16, 77), "no clip leaves pixels alone");
+
+    sui::ResolvedClip offset = rect;
+    sui::offsetResolvedClip(offset, -1.0f, -1.0f);
+    check(offset.x == 0.0f && offset.y == 0.0f, "offsetting rebases a rect");
+    sui::ResolvedClip poly;
+    poly.kind = sui::ResolvedClip::Kind::Polygon;
+    poly.points = {SDL_FPoint{10.0f, 20.0f}};
+    sui::offsetResolvedClip(poly, 5.0f, -5.0f);
+    check(poly.points[0].x == 15.0f && poly.points[0].y == 15.0f,
+          "offsetting rebases polygon points");
+
+    // `applyClipToSurface` is the executor's step: rebase a window-space shape
+    // into the surface, then mask. A rect at (1,1,2,2) over a surface starting
+    // at (1,1) keeps exactly its top-left 2x2.
+    std::vector<std::uint8_t> framed(4 * 4 * 4, 0);
+    for (int i = 0; i < 16; ++i) {
+        framed[4 * i + 3] = 255;
+    }
+    sui::applyClipToSurface(framed.data(), 4, 4, rect, 1.0f, 1.0f);
+    const auto kept = [&](int x, int y) { return framed[4 * (y * 4 + x) + 3]; };
+    check(kept(0, 0) == 255 && kept(1, 1) == 255, "a rebased mask keeps the shape");
+    check(kept(3, 3) == 0 && kept(2, 0) == 0, "a rebased mask drops the rest");
+}
+
 }  // namespace
 
 int main() {
@@ -395,6 +520,8 @@ int main() {
     testFontSizeIsTheEmSquare();
     testBoxBlur();
     testColorMatrix();
+    testClipCoverage();
+    testClipMask();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

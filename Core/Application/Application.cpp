@@ -7,6 +7,7 @@
 #include "CSS/PseudoElements.h"
 #include "CSS/StyleResolver.h"
 #include "Layout/BlockLayout.h"
+#include "Rendering/ClipMask.h"
 #include "Rendering/ColorMatrix.h"
 #include "Rendering/ImageBlur.h"
 #include "Rendering/ImageCache.h"
@@ -62,6 +63,11 @@ struct GroupFrame {
     // A `filter: drop-shadow()`: a recoloured, blurred silhouette of the
     // readback, blitted offset under the content.
     DropShadowFilter dropShadow{};
+    // A `clip-path` shape in window coordinates, rebased into the surface
+    // before masking. The mask runs after blur (filters first, then the clip)
+    // so the shadow pass traces the clipped silhouette.
+    bool clip = false;
+    ResolvedClip clipShape;
 };
 
 // window width/height/state arrive as markup attributes, so parse them leniently.
@@ -2638,6 +2644,8 @@ void Application::run() {
                         frame.blur = op.blur;
                         frame.shift = op.shift;
                         frame.dropShadow = op.dropShadow;
+                        frame.clip = op.item.clipShape.kind != ResolvedClip::Kind::None;
+                        frame.clipShape = op.item.clipShape;
                         for (int i = 0; i < 12; ++i) {
                             frame.filter[i] = op.filter[i];
                         }
@@ -2686,7 +2694,8 @@ void Application::run() {
                             SDL_Texture* shadow = nullptr;
                             const int blurRadius =
                                 frame.blur > 0.0f ? std::lround(frame.blur) : 0;
-                            if (frame.shift || blurRadius > 0 || frame.dropShadow.present) {
+                            if (frame.shift || blurRadius > 0 || frame.dropShadow.present ||
+                                frame.clip) {
                                 SDL_Surface* read = SDL_RenderReadPixels(sdlRenderer, nullptr);
                                 if (read) {
                                     SDL_Surface* conv = SDL_ConvertSurface(
@@ -2701,6 +2710,15 @@ void Application::run() {
                                         }
                                         if (blurRadius > 0) {
                                             sui::blurRGBA(pixels, conv->w, conv->h, blurRadius);
+                                        }
+                                        if (frame.clip) {
+                                            // The mask runs after the filters
+                                            // (filters first, then the clip),
+                                            // so the shadow pass traces the
+                                            // clipped silhouette.
+                                            sui::applyClipToSurface(
+                                                pixels, conv->w, conv->h, frame.clipShape,
+                                                frame.bounds.x, frame.bounds.y);
                                         }
                                         if (frame.dropShadow.present) {
                                             // The silhouette: the content's own

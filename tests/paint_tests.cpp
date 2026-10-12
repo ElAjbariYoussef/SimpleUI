@@ -265,6 +265,8 @@ void testGroupDetection() {
         <div id="trnone" style="transform:none"></div>
         <div id="fi" style="filter:opacity(0.5)"></div>
         <div id="finone" style="filter:none"></div>
+        <div id="clip" style="clip-path:circle(50%)"></div>
+        <div id="clipnone" style="clip-path:none"></div>
     </body></sui>)HTML");
     if (!document) {
         return;
@@ -287,6 +289,8 @@ void testGroupDetection() {
         {"trnone", false, "transform:none opens no group"},
         {"fi", true, "a filter opens a group"},
         {"finone", false, "filter:none opens no group"},
+        {"clip", true, "a clip-path opens a group"},
+        {"clipnone", false, "clip-path:none opens no group"},
     };
     for (const Case& c : cases) {
         Element* el = document->getElementById(c.id);
@@ -296,6 +300,86 @@ void testGroupDetection() {
         }
         check(sui::createsPaintGroup(resolver.resolve(*el)) == c.opens, c.what);
     }
+}
+
+// A clipped box carries its resolved shape on its paint op, in window pixels:
+// the executor masks from exactly this, and hit-testing reads it too.
+void testClipShapeInOps() {
+    auto document = parseOrNull(R"HTML(<sui><body>
+        <div id="circle" style="width:100px;height:100px;clip-path:circle(50%)"></div>
+        <div id="box" style="width:100px;height:100px;clip-path:inset(10px)"></div>
+        <div id="plain" style="width:100px;height:100px"></div>
+    </body></sui>)HTML");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    const auto items = orderOf(*document, resolver);
+    const PaintItem* circle = paintOf(items, document->getElementById("circle"));
+    const PaintItem* box = paintOf(items, document->getElementById("box"));
+    const PaintItem* plain = paintOf(items, document->getElementById("plain"));
+    check(circle && box && plain, "clipped boxes paint");
+    if (!circle || !box || !plain) {
+        return;
+    }
+    // The circle is centred on its 100px box with the diagonal radius.
+    check(circle->clipShape.kind == sui::ResolvedClip::Kind::Circle,
+          "a circle rides its paint op");
+    check(circle->clipShape.cx == 50.0f && circle->clipShape.cy == 50.0f,
+          "the circle centres on its box");
+    checkNear(circle->clipShape.rx, 50.0f, 0.01f, "a 50% radius spans half the diagonal");
+    // The inset rect starts 10px in on a 100px box.
+    check(box->clipShape.kind == sui::ResolvedClip::Kind::Rect, "an inset rides its op");
+    check(box->clipShape.x == 10.0f && box->clipShape.y == 110.0f &&
+              box->clipShape.w == 80.0f && box->clipShape.h == 80.0f,
+          "the inset rect matches the box");
+    check(plain->clipShape.kind == sui::ResolvedClip::Kind::None,
+          "an unclipped box carries no shape");
+}
+
+// A clipped box composites: its box sits bracketed by BeginGroup/EndGroup so
+// the executor can mask the surface, and the BeginGroup carries the shape the
+// mask reads.
+void testClipComposites() {
+    auto document = parseOrNull(R"HTML(<sui><body>
+        <div id="clip" style="width:40px;height:20px;clip-path:inset(4px)">
+            <div id="c"></div>
+        </div>
+        <div id="plain" style="width:40px;height:20px">
+            <div id="c2"></div>
+        </div>
+    </body></sui>)HTML");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*document, resolver);
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+    Element* clip = document->getElementById("clip");
+    Element* plain = document->getElementById("plain");
+    if (!clip || !plain) {
+        check(false, "clip composite document parsed");
+        return;
+    }
+    bool sawClip = false;
+    int depth = 0;
+    for (std::size_t i = 0; i < ops.size(); ++i) {
+        if (ops[i].kind == sui::PaintOp::Kind::BeginGroup) {
+            if (ops[i].item.el == clip) {
+                sawClip = true;
+                check(ops[i].item.clipShape.kind == sui::ResolvedClip::Kind::Rect,
+                      "the clip group carries its shape for the mask");
+            }
+            ++depth;
+        } else if (ops[i].kind == sui::PaintOp::Kind::EndGroup) {
+            --depth;
+        } else if (ops[i].item.el == clip) {
+            check(depth > 0, "a clipped box paints inside its group");
+        }
+    }
+    check(sawClip, "a clip-path alone brackets its box");
 }
 
 // transform and filter are properties of the box they are declared on: a
@@ -1018,6 +1102,8 @@ int main() {
     testNestedGroupIsAtomic();
     testEscapeKeepsZOrder();
     testGroupDetection();
+    testClipShapeInOps();
+    testClipComposites();
     testEffectsDontCompound();
     testGroupBecomesOffscreenBlit();
     testNestedGroupAlphas();

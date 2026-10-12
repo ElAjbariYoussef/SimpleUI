@@ -37,6 +37,7 @@ add_library(sui STATIC
     Core/Application/Background.cpp
     Rendering/ImageCache.cpp
     Rendering/ImageBlur.cpp
+    Rendering/ClipMask.cpp
     Rendering/ColorMatrix.cpp
     Rendering/Renderer.cpp
     Rendering/Text.cpp

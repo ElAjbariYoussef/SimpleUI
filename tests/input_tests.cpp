@@ -1129,6 +1129,43 @@ int main() {
         }
     }
 
+    // A `clip-path` masks hit-testing too: the pointer lands on whatever shows
+    // through the clipped-away region instead of the clipped box.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<div id=\"clip\" style=\"width:100px;height:100px;cursor:pointer;"
+            "clip-path:circle(50%)\"></div>"
+            "</body></sui>", err);
+        check(doc != nullptr, "clip hit document parsed");
+        if (doc) {
+            sui::Element* clip = doc->getElementById("clip");
+            app.setDocument(std::move(doc));
+
+            sui::StyleResolver layoutResolver;
+            sui::LayoutInput input;
+            input.resolver = &layoutResolver;
+            input.viewportWidth = 400.0f;
+            input.viewportHeight = 300.0f;
+            sui::BlockLayout().layout(app.document().root(), input);
+
+            // The 100px box sits at the body margin (8,8); its circle spans
+            // the box, so the middle hits and a corner misses.
+            app.dispatch(sui::InputEvent(sui::InputKind::PointerMove,
+                                         clip->layoutX() + 50.0f,
+                                         clip->layoutY() + 50.0f, 0));
+            check(app.activeCursor() == sui::ComputedStyle::CursorPointer,
+                  "the circle middle hits the clipped box");
+            app.dispatch(sui::InputEvent(sui::InputKind::PointerMove,
+                                         clip->layoutX() + 5.0f,
+                                         clip->layoutY() + 5.0f, 0));
+            check(app.activeCursor() == sui::ComputedStyle::CursorAuto,
+                  "a clipped-away corner falls through to the body");
+        }
+    }
+
     platform->shutdown();
 
     std::printf("input_tests: %d checks, %d failures\n", checks, failures);

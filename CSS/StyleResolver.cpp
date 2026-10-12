@@ -2505,6 +2505,349 @@ void noteCustomUsage(Rule& rule) {
 // The CSS cursor keyword set lives in CSS/Style.h so the application layer can
 // reuse the same enum-to-keyword mapping when it hands the shape to the platform.
 
+// --- clip-path parsing ---
+
+// Splits `name(...) rest` into its arguments and the trimmed text after the
+// closing paren. False when the text is not that function.
+bool splitCall(std::string_view text, std::string_view name, std::string_view& args,
+               std::string_view& rest) {
+    if (text.size() <= name.size() + 2 || text.compare(0, name.size(), name) != 0 ||
+        text[name.size()] != '(') {
+        return false;
+    }
+    int depth = 0;
+    for (std::size_t i = name.size(); i < text.size(); ++i) {
+        if (text[i] == '(') {
+            ++depth;
+        } else if (text[i] == ')') {
+            if (--depth == 0) {
+                args = text.substr(name.size() + 1, i - name.size() - 1);
+                rest = trim(text.substr(i + 1));
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// A strict length: anything parseLength reads as auto (garbage, `auto`,
+// `none`, empty) is not a length here, so a typo cannot silently clip
+// everything away.
+bool parseClipLength(std::string_view token, Length& out) {
+    const Length length = parseLength(token);
+    if (length.unit == Length::Auto) {
+        return false;
+    }
+    out = length;
+    return true;
+}
+
+bool parseClipBox(std::string_view text, ComputedStyle::ClipPath::Box& box) {
+    using Box = ComputedStyle::ClipPath::Box;
+    if (text.empty()) {
+        return true;
+    }
+    if (text == "margin-box") {
+        box = Box::Margin;
+    } else if (text == "border-box") {
+        box = Box::Border;
+    } else if (text == "padding-box") {
+        box = Box::Padding;
+    } else if (text == "content-box") {
+        box = Box::Content;
+    } else if (text == "fill-box" || text == "stroke-box" || text == "view-box") {
+        // SVG viewport boxes behave as the border box on HTML elements.
+        box = Box::Border;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// Finds a whole word at paren depth zero, for the `round` and `at` keywords
+// hiding among lengths.
+std::size_t findTopLevelWord(std::string_view text, std::string_view word) {
+    const auto isNameChar = [](char c) {
+        const auto u = static_cast<unsigned char>(c);
+        return std::isalnum(u) != 0 || c == '-' || c == '_';
+    };
+    int depth = 0;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (c == '(') {
+            ++depth;
+        } else if (c == ')') {
+            depth = depth > 0 ? depth - 1 : 0;
+        } else if (depth == 0 && i + word.size() <= text.size() &&
+                   text.compare(i, word.size(), word) == 0 &&
+                   (i == 0 || !isNameChar(text[i - 1])) &&
+                   (i + word.size() >= text.size() || !isNameChar(text[i + word.size()]))) {
+            return i;
+        }
+    }
+    return std::string_view::npos;
+}
+
+// One or two position tokens (`left`, `top`, `center`, lengths) into x/y.
+// `center` and lengths fill the missing axis, so `at left` centres vertically.
+bool parseClipPosition(const std::vector<std::string_view>& tokens, Length& x, Length& y) {
+    if (tokens.empty() || tokens.size() > 2) {
+        return false;
+    }
+    const Length centre(Length::Percent, 50.0f);
+    bool haveX = false;
+    bool haveY = false;
+    for (const std::string_view token : tokens) {
+        if (token == "left") {
+            if (haveX) {
+                return false;
+            }
+            x = Length(Length::Percent, 0.0f);
+            haveX = true;
+        } else if (token == "right") {
+            if (haveX) {
+                return false;
+            }
+            x = Length(Length::Percent, 100.0f);
+            haveX = true;
+        } else if (token == "top") {
+            if (haveY) {
+                return false;
+            }
+            y = Length(Length::Percent, 0.0f);
+            haveY = true;
+        } else if (token == "bottom") {
+            if (haveY) {
+                return false;
+            }
+            y = Length(Length::Percent, 100.0f);
+            haveY = true;
+        } else if (token == "center") {
+            if (!haveX) {
+                x = centre;
+                haveX = true;
+            } else if (!haveY) {
+                y = centre;
+                haveY = true;
+            } else {
+                return false;
+            }
+        } else {
+            Length length;
+            if (!parseClipLength(token, length)) {
+                return false;
+            }
+            if (!haveX) {
+                x = length;
+                haveX = true;
+            } else if (!haveY) {
+                y = length;
+                haveY = true;
+            } else {
+                return false;
+            }
+        }
+    }
+    if (!haveX) {
+        x = centre;
+    }
+    if (!haveY) {
+        y = centre;
+    }
+    return true;
+}
+
+bool parseClipRadial(std::string_view token, ComputedStyle::ClipPath::Radial& radial,
+                     Length& length) {
+    using Radial = ComputedStyle::ClipPath::Radial;
+    if (token == "closest-side") {
+        radial = Radial::ClosestSide;
+    } else if (token == "farthest-side") {
+        radial = Radial::FarthestSide;
+    } else if (token == "closest-corner") {
+        radial = Radial::ClosestCorner;
+    } else if (token == "farthest-corner") {
+        radial = Radial::FarthestCorner;
+    } else if (parseClipLength(token, length)) {
+        radial = Radial::Explicit;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+bool parseClipInset(std::string_view args, std::string_view rest,
+                    ComputedStyle::ClipPath& clip) {
+    using CP = ComputedStyle::ClipPath;
+    std::string_view main = args;
+    std::string_view round;
+    const std::size_t at = findTopLevelWord(args, "round");
+    if (at != std::string_view::npos) {
+        main = trim(args.substr(0, at));
+        round = trim(args.substr(at + 5));
+    }
+    const std::vector<std::string_view> sides = splitTopLevelSpaces(main);
+    if (sides.empty() || sides.size() > 4) {
+        return false;
+    }
+    Length parsed[4];
+    for (std::size_t i = 0; i < sides.size(); ++i) {
+        if (!parseClipLength(sides[i], parsed[i])) {
+            return false;
+        }
+    }
+    Length radius;
+    if (!round.empty() && !parseClipLength(round, radius)) {
+        return false;
+    }
+    CP box;
+    box.shape = CP::Shape::Inset;
+    box.inset[0] = parsed[0];
+    box.inset[1] = sides.size() > 1 ? parsed[1] : parsed[0];
+    box.inset[2] = sides.size() > 2 ? parsed[2] : parsed[0];
+    box.inset[3] = sides.size() > 3 ? parsed[3] : box.inset[1];
+    box.insetRadius = radius;
+    if (!parseClipBox(rest, box.box)) {
+        return false;
+    }
+    clip = box;
+    return true;
+}
+
+bool parseClipCircle(std::string_view args, std::string_view rest,
+                     ComputedStyle::ClipPath& clip) {
+    using CP = ComputedStyle::ClipPath;
+    const std::size_t at = findTopLevelWord(args, "at");
+    const std::string_view radiusPart = trim(at == std::string_view::npos
+                                                 ? args
+                                                 : args.substr(0, at));
+    const std::string_view posPart =
+        at == std::string_view::npos ? std::string_view{} : trim(args.substr(at + 2));
+    CP circle;
+    circle.shape = CP::Shape::Circle;
+    if (!radiusPart.empty()) {
+        const std::vector<std::string_view> tokens = splitTopLevelSpaces(radiusPart);
+        if (tokens.size() != 1 ||
+            !parseClipRadial(tokens[0], circle.radius, circle.radiusLength)) {
+            return false;
+        }
+    } else {
+        // An omitted radius inscribes the box.
+        circle.radius = CP::Radial::ClosestSide;
+    }
+    if (at != std::string_view::npos &&
+        !parseClipPosition(splitTopLevelSpaces(posPart), circle.centerX, circle.centerY)) {
+        return false;
+    }
+    if (!parseClipBox(rest, circle.box)) {
+        return false;
+    }
+    clip = circle;
+    return true;
+}
+
+bool parseClipEllipse(std::string_view args, std::string_view rest,
+                      ComputedStyle::ClipPath& clip) {
+    using CP = ComputedStyle::ClipPath;
+    const std::size_t at = findTopLevelWord(args, "at");
+    const std::string_view radiusPart = trim(at == std::string_view::npos
+                                                 ? args
+                                                 : args.substr(0, at));
+    const std::string_view posPart =
+        at == std::string_view::npos ? std::string_view{} : trim(args.substr(at + 2));
+    CP ellipse;
+    ellipse.shape = CP::Shape::Ellipse;
+    if (!radiusPart.empty()) {
+        const std::vector<std::string_view> tokens = splitTopLevelSpaces(radiusPart);
+        if (tokens.size() != 2 ||
+            !parseClipRadial(tokens[0], ellipse.radiusX, ellipse.radiusXLength) ||
+            !parseClipRadial(tokens[1], ellipse.radiusY, ellipse.radiusYLength)) {
+            return false;
+        }
+    } else {
+        ellipse.radiusX = CP::Radial::ClosestSide;
+        ellipse.radiusY = CP::Radial::ClosestSide;
+    }
+    if (at != std::string_view::npos &&
+        !parseClipPosition(splitTopLevelSpaces(posPart), ellipse.centerX,
+                           ellipse.centerY)) {
+        return false;
+    }
+    if (!parseClipBox(rest, ellipse.box)) {
+        return false;
+    }
+    clip = ellipse;
+    return true;
+}
+
+bool parseClipPolygon(std::string_view args, std::string_view rest,
+                      ComputedStyle::ClipPath& clip) {
+    using CP = ComputedStyle::ClipPath;
+    const std::vector<std::string_view> parts = splitTopLevelCommas(args);
+    if (parts.empty()) {
+        return false;
+    }
+    CP polygon;
+    polygon.shape = CP::Shape::Polygon;
+    std::size_t first = 0;
+    const std::string_view head = trim(parts[0]);
+    if (head == "evenodd" || head == "nonzero") {
+        polygon.evenOdd = head == "evenodd";
+        first = 1;
+    }
+    for (std::size_t i = first; i < parts.size(); ++i) {
+        const std::vector<std::string_view> xy = splitTopLevelSpaces(trim(parts[i]));
+        if (xy.size() != 2) {
+            return false;
+        }
+        CP::Point point;
+        if (!parseClipLength(xy[0], point.x) || !parseClipLength(xy[1], point.y)) {
+            return false;
+        }
+        polygon.points.push_back(point);
+    }
+    if (polygon.points.size() < 3) {
+        return false;
+    }
+    if (!parseClipBox(rest, polygon.box)) {
+        return false;
+    }
+    clip = polygon;
+    return true;
+}
+
+bool parseClipPath(std::string_view value, ComputedStyle::ClipPath& clip) {
+    using CP = ComputedStyle::ClipPath;
+    const std::string_view text = trim(value);
+    if (text == "none") {
+        clip = CP();
+        return true;
+    }
+    std::string_view args;
+    std::string_view rest;
+    if (splitCall(text, "inset", args, rest)) {
+        return parseClipInset(args, rest, clip);
+    }
+    if (splitCall(text, "circle", args, rest)) {
+        return parseClipCircle(args, rest, clip);
+    }
+    if (splitCall(text, "ellipse", args, rest)) {
+        return parseClipEllipse(args, rest, clip);
+    }
+    if (splitCall(text, "polygon", args, rest)) {
+        return parseClipPolygon(args, rest, clip);
+    }
+    // A bare geometry box crops to itself, like `inset(0)` against that box.
+    CP::Box box = CP::Box::Border;
+    if (!text.empty() && parseClipBox(text, box)) {
+        clip = CP();
+        clip.shape = CP::Shape::Inset;
+        clip.box = box;
+        return true;
+    }
+    return false;
+}
+
 void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontSize) {
     const std::string& property = decl.property;
     const std::string_view value = trim(decl.value);
@@ -3426,11 +3769,17 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
                property == "-webkit-appearance") {
         // Accepted; these control browser chrome that this engine does not draw.
     } else if (property == "will-change" || property == "contain" ||
-               property == "isolation" || property == "clip-path" ||
-               property == "mask" || property == "mask-image" ||
+               property == "isolation" || property == "mask" || property == "mask-image" ||
                property == "-webkit-mask-image" || property == "backdrop-filter" ||
                property == "filter") {
         // Performance / compositing hints and effects: accepted and ignored.
+    } else if (property == "clip-path") {
+        // Shapes clip the element and its subtree; anything else keeps the
+        // previous cascade winner, like any failed parse.
+        ComputedStyle::ClipPath parsed;
+        if (parseClipPath(value, parsed)) {
+            s.clipPath = parsed;
+        }
     } else if (property == "tab-size" || property == "hyphens" ||
                property == "word-break" || property == "overflow-wrap") {
         // Text shaping hints that the layout engine does not yet implement.
@@ -4073,6 +4422,66 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             case ComputedStyle::Visible: return "visible";
         }
         return "visible";
+    }
+    if (property == "clip-path") {
+        using Clip = ComputedStyle::ClipPath;
+        const auto& clip = style.clipPath;
+        if (clip.shape == Clip::Shape::None) {
+            return "none";
+        }
+        const auto boxName = [&] {
+            switch (clip.box) {
+                case Clip::Box::Margin: return " margin-box";
+                case Clip::Box::Padding: return " padding-box";
+                case Clip::Box::Content: return " content-box";
+                case Clip::Box::Border: return "";
+            }
+            return "";
+        };
+        const auto radialName = [&](Clip::Radial radial, const Length& size) {
+            switch (radial) {
+                case Clip::Radial::ClosestSide: return std::string("closest-side");
+                case Clip::Radial::FarthestSide: return std::string("farthest-side");
+                case Clip::Radial::ClosestCorner: return std::string("closest-corner");
+                case Clip::Radial::FarthestCorner: return std::string("farthest-corner");
+                case Clip::Radial::Explicit: return length(size);
+            }
+            return std::string();
+        };
+        if (clip.shape == Clip::Shape::Inset) {
+            std::string out = "inset(" + length(clip.inset[0]) + " " +
+                              length(clip.inset[1]) + " " +
+                              length(clip.inset[2]) + " " +
+                              length(clip.inset[3]);
+            if (clip.insetRadius.unit != Length::Auto) {
+                out += " round " + length(clip.insetRadius);
+            }
+            return out + ")" + boxName();
+        }
+        if (clip.shape == Clip::Shape::Circle) {
+            return "circle(" + radialName(clip.radius, clip.radiusLength) + " at " +
+                   length(clip.centerX) + " " + length(clip.centerY) + ")" +
+                   boxName();
+        }
+        if (clip.shape == Clip::Shape::Ellipse) {
+            return "ellipse(" + radialName(clip.radiusX, clip.radiusXLength) + " " +
+                   radialName(clip.radiusY, clip.radiusYLength) + " at " +
+                   length(clip.centerX) + " " + length(clip.centerY) + ")" +
+                   boxName();
+        }
+        std::string out = "polygon(";
+        if (clip.evenOdd) {
+            out += "evenodd, ";
+        }
+        bool first = true;
+        for (const auto& point : clip.points) {
+            if (!first) {
+                out += ", ";
+            }
+            first = false;
+            out += length(point.x) + " " + length(point.y);
+        }
+        return out + ")" + boxName();
     }
     if (property == "container-type") {
         switch (style.containerType) {

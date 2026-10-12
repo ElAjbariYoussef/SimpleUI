@@ -1726,6 +1726,116 @@ void testContainerQueries() {
     }
 }
 
+void testClipPath() {
+    auto document = parseOrNull("<sui><body><div id=\"x\">hi</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* x = document->getElementById("x");
+    check(x != nullptr, "clipped element found");
+    if (!x) {
+        return;
+    }
+    using Clip = sui::ComputedStyle::ClipPath;
+    const auto clipOf = [&](const char* css) {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(css));
+        return resolver.resolve(*x).clipPath;
+    };
+    const auto isPx = [](sui::Length l, float v) {
+        return l.unit == sui::Length::Px && l.value == v;
+    };
+    const auto isPct = [](sui::Length l, float v) {
+        return l.unit == sui::Length::Percent && l.value == v;
+    };
+
+    Clip inset = clipOf("#x{clip-path:inset(10px 20px)}");
+    check(inset.shape == Clip::Shape::Inset, "inset() parses to a box");
+    check(isPx(inset.inset[0], 10.0f) && isPx(inset.inset[1], 20.0f) &&
+              isPx(inset.inset[2], 10.0f) && isPx(inset.inset[3], 20.0f),
+          "inset() expands two sides like a margin");
+    check(inset.box == Clip::Box::Border, "a shape defaults to the border box");
+    Clip round = clipOf("#x{clip-path:inset(10px round 5px)}");
+    check(isPx(round.insetRadius, 5.0f), "inset() keeps its round radius");
+    Clip padded = clipOf("#x{clip-path:inset(10px 20px 30px 40px) padding-box}");
+    check(isPx(padded.inset[0], 10.0f) && isPx(padded.inset[1], 20.0f) &&
+              isPx(padded.inset[2], 30.0f) && isPx(padded.inset[3], 40.0f),
+          "inset() reads four sides");
+    check(padded.box == Clip::Box::Padding, "a trailing box keyword sticks");
+    Clip three = clipOf("#x{clip-path:inset(1px 2px 3px)}");
+    check(isPx(three.inset[0], 1.0f) && isPx(three.inset[1], 2.0f) &&
+              isPx(three.inset[2], 3.0f) && isPx(three.inset[3], 2.0f),
+          "inset() mirrors the horizontal side with three values");
+    Clip one = clipOf("#x{clip-path:inset(7px)}");
+    check(isPx(one.inset[0], 7.0f) && isPx(one.inset[1], 7.0f) &&
+              isPx(one.inset[2], 7.0f) && isPx(one.inset[3], 7.0f),
+          "inset() spreads one value to every side");
+
+    Clip circle = clipOf("#x{clip-path:circle(50%)}");
+    check(circle.shape == Clip::Shape::Circle, "circle() parses");
+    check(circle.radius == Clip::Radial::Explicit && isPct(circle.radiusLength, 50.0f),
+          "circle() keeps an explicit radius");
+    check(isPct(circle.centerX, 50.0f) && isPct(circle.centerY, 50.0f),
+          "a circle centres itself by default");
+    Clip named = clipOf("#x{clip-path:circle(closest-side at 10px top)}");
+    check(named.radius == Clip::Radial::ClosestSide, "circle() reads a radial keyword");
+    check(isPx(named.centerX, 10.0f) && isPct(named.centerY, 0.0f),
+          "circle() reads an at position");
+
+    Clip ellipse = clipOf("#x{clip-path:ellipse(10px 20px at left bottom)}");
+    check(ellipse.shape == Clip::Shape::Ellipse, "ellipse() parses");
+    check(isPx(ellipse.radiusXLength, 10.0f) && isPx(ellipse.radiusYLength, 20.0f),
+          "ellipse() keeps both radii");
+    check(isPct(ellipse.centerX, 0.0f) && isPct(ellipse.centerY, 100.0f),
+          "ellipse() reads keyword positions");
+
+    Clip polygon = clipOf("#x{clip-path:polygon(0 0, 10px 0, 5px 8px)}");
+    check(polygon.shape == Clip::Shape::Polygon, "polygon() parses");
+    check(polygon.points.size() == 3, "polygon() keeps three points");
+    check(!polygon.evenOdd, "polygon() defaults to nonzero");
+    if (polygon.points.size() == 3) {
+        check(isPx(polygon.points[2].x, 5.0f) && isPx(polygon.points[2].y, 8.0f),
+              "polygon() reads point coordinates");
+    }
+    Clip even = clipOf("#x{clip-path:polygon(evenodd, 0 0, 10px 0, 5px 8px)}");
+    check(even.evenOdd && even.points.size() == 3, "polygon() reads its fill rule");
+
+    // Garbage never clips: a failed parse keeps whatever won before, which is
+    // `none` on a fresh resolve.
+    const char* bad[] = {"banana",
+                         "inset(10px banana)",
+                         "polygon(0 0)",
+                         "path(\"M0 0\")",
+                         "url(#clip)",
+                         "circle(10px banana)",
+                         "ellipse(10px)"};
+    for (const char* css : bad) {
+        const std::string rule = std::string("#x{clip-path:") + css + "}";
+        check(clipOf(rule.c_str()).shape == Clip::Shape::None,
+              (std::string("invalid clip-path rejected: ") + css).c_str());
+    }
+
+    // A bare geometry box crops to itself.
+    Clip bare = clipOf("#x{clip-path:padding-box}");
+    check(bare.shape == Clip::Shape::Inset && bare.box == Clip::Box::Padding,
+          "a bare box clips to itself");
+
+    // Serialization round-trips the shapes the parser accepts.
+    const auto serialOf = [&](const char* css) {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(css));
+        return sui::StyleResolver::propertyValue(resolver.resolve(*x), "clip-path");
+    };
+    check(serialOf("#x{clip-path:inset(10px 20px)}") == "inset(10px 20px 10px 20px)",
+          "inset() serializes");
+    check(serialOf("#x{clip-path:circle(50%)}") == "circle(50% at 50% 50%)",
+          "circle() serializes");
+    check(serialOf("#x{clip-path:polygon(evenodd, 0 0, 10px 0, 5px 8px)}") ==
+              "polygon(evenodd, 0px 0px, 10px 0px, 5px 8px)",
+          "polygon() serializes");
+    check(serialOf("#x{clip-path:none}") == "none", "none serializes");
+}
+
 void testCssImports() {
     auto document = parseOrNull("<sui><body><div id=\"x\">hi</div></body></sui>");
     if (!document) {
@@ -5949,6 +6059,7 @@ int main() {
     testCascadeLayers();
     testContainerQueries();
     testCssImports();
+    testClipPath();
     testDefaultStyles();
     testFormControlDefaults();
     testRangeDefaults();

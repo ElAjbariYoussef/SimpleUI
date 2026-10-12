@@ -27,7 +27,7 @@ struct HitCtx {
 inline HitCtx hitBase() { return HitCtx{{0,0,0,0},{1,0,0,1,0,0}}; }
 inline bool hitPointIn(const SDL_FRect& r,float x,float y){ if(r.w<=0||r.h<=0)return true; return x>=r.x&&x<r.x+r.w&&y>=r.y&&y<r.y+r.h; }
 inline bool hitToLocal(const HitAffine& m,float x,float y,float* lx,float* ly){ float det=m.a*m.d-m.b*m.c; if(std::fabs(det)<1e-18f)return false; float dx=x-m.e,dy=y-m.f; *lx=(m.d*dx-m.c*dy)/det; *ly=(-m.b*dx+m.a*dy)/det; return true; }
-inline bool hitBox(const HitCtx& ctx,const PaintItem& item,float x,float y){ if(!hitPointIn(item.clip,x,y))return false; float lx,ly; if(!hitToLocal(ctx.transform,x,y,&lx,&ly))return false; float bx=item.el->layoutX()-item.dx,by=item.el->layoutY()-item.dy,bw=item.el->layoutWidth(),bh=item.el->layoutHeight(); if(lx<bx||lx>=bx+bw||ly<by||ly>=by+bh)return false; return true; }
+inline bool hitBox(const HitCtx& ctx,const PaintItem& item,float x,float y){ if(!hitPointIn(item.clip,x,y))return false; float lx,ly; if(!hitToLocal(ctx.transform,x,y,&lx,&ly))return false; float bx=item.el->layoutX()-item.dx,by=item.el->layoutY()-item.dy,bw=item.el->layoutWidth(),bh=item.el->layoutHeight(); if(lx<bx||lx>=bx+bw||ly<by||ly>=by+bh)return false; if(item.clipShape.kind!=ResolvedClip::Kind::None&&!clipContains(item.clipShape,x,y))return false; return true; }
 } // namespace
 
 namespace {
@@ -440,6 +440,11 @@ GroupKind classifyGroup(const ComputedStyle& s) {
     if (s.opacity < 1.0f || declares(s.transform) || declares(s.filter)) {
         return GroupKind::Real;
     }
+    // A `clip-path` composites its subtree through a surface to mask it, so it
+    // groups for real: descendants must not escape above the mask.
+    if (s.clipPath.shape != ComputedStyle::ClipPath::Shape::None) {
+        return GroupKind::Real;
+    }
     if (s.positioned) {
         return s.zIndex != 0 ? GroupKind::Real : GroupKind::Pseudo;
     }
@@ -487,6 +492,134 @@ SDL_FRect unionRect(const SDL_FRect& a, const SDL_FRect& b) {
     const float x = std::min(a.x, b.x);
     const float y = std::min(a.y, b.y);
     return {x, y, std::max(a.x + a.w, b.x + b.w) - x, std::max(a.y + a.h, b.y + b.h) - y};
+}
+
+// The reference box a `clip-path` resolves against, in window coordinates:
+// the element's own box shifted the way it paints.
+SDL_FRect clipReferenceBox(const Element& el, ComputedStyle::ClipPath::Box box,
+                           float dx, float dy) {
+    switch (box) {
+        case ComputedStyle::ClipPath::Box::Margin:
+        case ComputedStyle::ClipPath::Box::Border:
+            return SDL_FRect{el.layoutX() - dx, el.layoutY() - dy, el.layoutWidth(),
+                             el.layoutHeight()};
+        case ComputedStyle::ClipPath::Box::Padding:
+            return SDL_FRect{el.paddingX() - dx, el.paddingY() - dy, el.paddingWidth(),
+                             el.paddingHeight()};
+        case ComputedStyle::ClipPath::Box::Content:
+            return SDL_FRect{el.contentX() - dx, el.contentY() - dy, el.contentWidth(),
+                             el.contentHeight()};
+    }
+    return SDL_FRect{el.layoutX() - dx, el.layoutY() - dy, el.layoutWidth(),
+                     el.layoutHeight()};
+}
+
+float clipRadialSize(ComputedStyle::ClipPath::Radial radial, float explicitSize,
+                     float centerX, float centerY, float x, float y, float w, float h,
+                     bool allSides, bool horizontal) {
+    using Radial = ComputedStyle::ClipPath::Radial;
+    const float left = centerX - x;
+    const float right = x + w - centerX;
+    const float top = centerY - y;
+    const float bottom = y + h - centerY;
+    // A circle reads every side; an ellipse reads its own axis.
+    const float nearSide =
+        allSides ? std::min(std::min(left, right), std::min(top, bottom))
+                 : (horizontal ? std::min(left, right) : std::min(top, bottom));
+    const float farSide =
+        allSides ? std::max(std::max(left, right), std::max(top, bottom))
+                 : (horizontal ? std::max(left, right) : std::max(top, bottom));
+    switch (radial) {
+        case Radial::Explicit:
+            return explicitSize;
+        case Radial::ClosestSide:
+            return nearSide;
+        case Radial::FarthestSide:
+            return farSide;
+        case Radial::ClosestCorner:
+        case Radial::FarthestCorner: {
+            const float corners[4] = {
+                std::sqrt(left * left + top * top), std::sqrt(right * right + top * top),
+                std::sqrt(left * left + bottom * bottom),
+                std::sqrt(right * right + bottom * bottom)};
+            float picked = corners[0];
+            for (float c : corners) {
+                picked = radial == Radial::ClosestCorner ? std::min(picked, c)
+                                                         : std::max(picked, c);
+            }
+            return picked;
+        }
+    }
+    return explicitSize;
+}
+
+// Resolves a parsed shape against its reference box into surface pixels.
+// Lengths resolve the CSS way: x against the width, y against the height,
+// radii against the normalized diagonal, em/rem against the font sizes.
+ResolvedClip resolveClipPath(const ComputedStyle::ClipPath& clip, const Element& el,
+                             float dx, float dy, float fontSize, float rootFontSize) {
+    using CP = ComputedStyle::ClipPath;
+    ResolvedClip out;
+    if (clip.shape == CP::Shape::None) {
+        return out;
+    }
+    const SDL_FRect ref = clipReferenceBox(el, clip.box, dx, dy);
+    const auto px = [&](const Length& l, float base) {
+        return l.resolve(base, fontSize, rootFontSize);
+    };
+    if (clip.shape == CP::Shape::Inset) {
+        const float top = px(clip.inset[0], ref.h);
+        const float right = px(clip.inset[1], ref.w);
+        const float bottom = px(clip.inset[2], ref.h);
+        const float left = px(clip.inset[3], ref.w);
+        out.kind = ResolvedClip::Kind::Rect;
+        out.x = ref.x + left;
+        out.y = ref.y + top;
+        out.w = std::max(0.0f, ref.w - left - right);
+        out.h = std::max(0.0f, ref.h - top - bottom);
+        const float cornerBase =
+            std::min(ref.w, ref.h) > 0.0f ? std::min(ref.w, ref.h) : 0.0f;
+        out.radius = std::max(0.0f, px(clip.insetRadius, cornerBase));
+        return out;
+    }
+    const float cx = ref.x + px(clip.centerX, ref.w);
+    const float cy = ref.y + px(clip.centerY, ref.h);
+    if (clip.shape == CP::Shape::Circle) {
+        float radius = clip.radius == CP::Radial::Explicit
+                           ? px(clip.radiusLength,
+                                std::sqrt(ref.w * ref.w + ref.h * ref.h) /
+                                    std::sqrt(2.0f))
+                           : clipRadialSize(clip.radius, 0.0f, cx, cy, ref.x, ref.y, ref.w,
+                                            ref.h, true, true);
+        out.kind = ResolvedClip::Kind::Circle;
+        out.cx = cx;
+        out.cy = cy;
+        out.rx = out.ry = out.radius = std::max(0.0f, radius);
+        return out;
+    }
+    if (clip.shape == CP::Shape::Ellipse) {
+        const float rx = clip.radiusX == CP::Radial::Explicit
+                             ? px(clip.radiusXLength, ref.w)
+                             : clipRadialSize(clip.radiusX, 0.0f, cx, cy, ref.x, ref.y,
+                                              ref.w, ref.h, false, true);
+        const float ry = clip.radiusY == CP::Radial::Explicit
+                             ? px(clip.radiusYLength, ref.h)
+                             : clipRadialSize(clip.radiusY, 0.0f, cx, cy, ref.x, ref.y,
+                                              ref.w, ref.h, false, false);
+        out.kind = ResolvedClip::Kind::Ellipse;
+        out.cx = cx;
+        out.cy = cy;
+        out.rx = std::max(0.0f, rx);
+        out.ry = std::max(0.0f, ry);
+        return out;
+    }
+    out.kind = ResolvedClip::Kind::Polygon;
+    out.evenOdd = clip.evenOdd;
+    for (const auto& point : clip.points) {
+        out.points.push_back(
+            SDL_FPoint{ref.x + px(point.x, ref.w), ref.y + px(point.y, ref.h)});
+    }
+    return out;
 }
 
 // How far a box's painting can reach beyond its layout box, so an offscreen
@@ -668,6 +801,12 @@ struct Collector {
         item.dy = box.child.dy;
         item.opacity = box.child.opacity;
         item.pointerEventsNone = s.pointerEventsNone;
+        // A `clip-path` shape resolves against its reference box now, in the
+        // same window coordinates, so paint and hit-testing share one answer.
+        if (s.clipPath.shape != ComputedStyle::ClipPath::Shape::None) {
+            item.clipShape = resolveClipPath(s.clipPath, el, item.dx, item.dy, s.fontSize,
+                                             resolver.rootFontSize());
+        }
         // The point the transform turns about: the resolved transform-origin,
         // measured from the box's own top-left (which scroll offsets have already
         // moved out of `dx`/`dy`).
@@ -763,7 +902,8 @@ struct Collector {
         for (PaintEntry& entry : entries) {
             if (entry.group &&
                 (entry.groupAlpha < 1.0f || entry.transformed || entry.blur > 0.0f ||
-                 entry.shift || entry.dropShadow.present)) {
+                 entry.shift || entry.dropShadow.present ||
+                 entry.item.clipShape.kind != ResolvedClip::Kind::None)) {
                 out.push_back(groupStart(entry.item, entry.groupAlpha, entry.transformed, entry.m,
                                         entry.origin, entry.blur, entry.shift, entry.filter,
                                         entry.dropShadow));
@@ -798,7 +938,8 @@ std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolve
     // whole frame.
     const Collector::BoxState box = collector.resolve(root, PaintEnv{});
     if (box.paints && (box.groupAlpha < 1.0f || box.transformed || box.blur > 0.0f ||
-                       box.shift || box.dropShadow.present)) {
+                       box.shift || box.dropShadow.present ||
+                       box.item.clipShape.kind != ResolvedClip::Kind::None)) {
         out.push_back(groupStart(box.item, box.groupAlpha, box.transformed, box.m, box.origin,
                                 box.blur, box.shift, box.filter, box.dropShadow));
     }
