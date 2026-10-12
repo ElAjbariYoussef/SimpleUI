@@ -465,6 +465,33 @@ void paintBackground(const ComputedStyle& style, const BackgroundBoxes& boxes, f
                 paintBox = visible;
                 break;
             }
+            case ComputedStyle::BackgroundImage::ConicalGradientImage: {
+                const SDL_FRect destination = placeLayer(size, position, originBox, clipBox.w,
+                                                          clipBox.h, true, fontSize, rootFontSize);
+                ConicalGradient gradient;
+                gradient.cx = layer.conical.centreX.resolve(destination.w, fontSize,
+                                                            rootFontSize) +
+                              destination.x;
+                gradient.cy = layer.conical.centreY.resolve(destination.h, fontSize,
+                                                            rootFontSize) +
+                              destination.y;
+                gradient.fromAngle = layer.conical.angle;
+                gradient.radius = std::max(destination.w, destination.h) * 0.5f;
+                // Stop positions are fractions of the turn, so percentages need
+                // no measuring length.
+                gradient.stops = toGradientStops(layer.conical.stops, 1.0f, fontSize,
+                                                 rootFontSize, opacity);
+                if (gradient.stops.empty()) {
+                    continue;
+                }
+                shader = Shader::conical(gradient);
+                SDL_FRect visible;
+                if (!coveredArea(clipBox, destination, repeatPair.x, repeatPair.y, visible)) {
+                    continue;
+                }
+                paintBox = visible;
+                break;
+            }
             case ComputedStyle::BackgroundImage::None:
                 continue;
         }

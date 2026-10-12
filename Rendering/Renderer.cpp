@@ -84,6 +84,22 @@ float clamp01(float v) {
     return std::clamp(v, 0.0f, 1.0f);
 }
 
+// Where a point sits on a conic sweep, 0 at `fromAngle` and 1 after a full turn.
+// CSS counts clockwise from twelve o'clock on a y-down canvas, so the angle is
+// `atan2(dx, -dy)`. The centre itself is every angle at once; it reads as the
+// sweep start.
+float conicalPosition(const ConicalGradient& g, float x, float y) {
+    const float dx = x - g.cx;
+    const float dy = y - g.cy;
+    const float pi = static_cast<float>(M_PI);
+    float degrees = std::atan2(dx, -dy) * 180.0f / pi;
+    float turn = std::fmod(degrees - g.fromAngle, 360.0f);
+    if (turn < 0.0f) {
+        turn += 360.0f;
+    }
+    return turn / 360.0f;
+}
+
 // Where a point sits on a radial gradient, 0 at the focus and 1 past the ending
 // shape. The gradient line runs from the focus through the centre and on to the
 // far edge, so a point's position is where its own ray crosses that line: the
@@ -292,6 +308,13 @@ Shader Shader::radial(const RadialGradient& gradient) {
     return shader;
 }
 
+Shader Shader::conical(const ConicalGradient& gradient) {
+    Shader shader;
+    shader.kind_ = Kind::Conical;
+    shader.conical_ = gradient;
+    return shader;
+}
+
 Shader Shader::image(SDL_Texture* texture, const SDL_FRect& source,
                      const SDL_FRect& destination, Repeat repeat, Color tint) {
     Shader shader;
@@ -305,7 +328,7 @@ Shader Shader::image(SDL_Texture* texture, const SDL_FRect& source,
 }
 
 bool Shader::needsMesh() const {
-    if (kind_ == Kind::Radial) {
+    if (kind_ == Kind::Radial || kind_ == Kind::Conical) {
         return true;
     }
     // A single ramp between the two ends is a linear function of position, so the
@@ -323,6 +346,11 @@ float Shader::meshStep() const {
         const float radius = std::max(radial_.radiusX, radial_.radiusY);
         return std::clamp(radius / 14.0f, 1.0f, 12.0f);
     }
+    if (kind_ == Kind::Conical) {
+        // The sweep bends uniformly in angle, so arc length — radius times angle
+        // — decides the error, and the same relative step applies.
+        return std::clamp(conical_.radius / 14.0f, 1.0f, 12.0f);
+    }
     // A linear ramp only bends where a stop sits, and the corners already carry the
     // slope on either side, so a fine outline is enough.
     return 4.0f;
@@ -336,6 +364,8 @@ Color Shader::colorAt(float x, float y) const {
             return sampleStops(linear_.stops, projectLinear(linear_, x, y));
         case Kind::Radial:
             return sampleStops(radial_.stops, radialPosition(radial_, x, y));
+        case Kind::Conical:
+            return sampleStops(conical_.stops, conicalPosition(conical_, x, y));
         case Kind::Image:
             return tint_;
     }

@@ -4655,6 +4655,63 @@ void testRadialGradientParsing() {
           "an extent with no shape takes the default shape");
 }
 
+void testConicalGradientParsing() {
+    const auto rules = sui::CSSParser::parse(R"(
+        .a { background-image: conic-gradient(red, blue) }
+        .b { background-image: conic-gradient(from 45deg, red, blue) }
+        .c { background-image: conic-gradient(from 0.25turn at 20% 30%, red, blue) }
+        .d { background-image: conic-gradient(at center, red, blue) }
+        .e { background-image: conic-gradient(red 90deg, blue) }
+        .f { background-image: conic-gradient(red) }
+        .g { background-image: conic-gradient(sideways, red, blue) }
+        .h { background-image: conic-gradient(red 10px, blue) }
+    )");
+    sui::StyleResolver resolver;
+    resolver.setRules(rules);
+    static const char* kClasses =
+        "<div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div>"
+        "<div class=\"d\"></div><div class=\"e\"></div><div class=\"f\"></div>"
+        "<div class=\"g\"></div><div class=\"h\"></div>";
+    auto body = parseOrNull((std::string("<sui><body>") + kClasses + "</body></sui>").c_str());
+    if (!body) {
+        return;
+    }
+    const std::vector<ComputedStyle> styles = bodyStyles(*body, resolver);
+    if (styles.size() < 8) {
+        check(false, "conic gradient elements found");
+        return;
+    }
+    using Kind = sui::ComputedStyle::BackgroundImage::Kind;
+    check(styles[0].backgroundImages[0].kind == Kind::ConicalGradientImage &&
+              styles[0].backgroundImages[0].conical.angle == 0.0f &&
+              styles[0].backgroundImages[0].conical.stops.size() == 2,
+          "a plain conic starts at twelve with two stops");
+    // The centre defaults to the middle of the box, like the radial default.
+    check(styles[0].backgroundImages[0].conical.centreX.unit == sui::Length::Percent &&
+              styles[0].backgroundImages[0].conical.centreX.value == 50.0f,
+          "the default centre is 50%, not 50px");
+    check(styles[1].backgroundImages[0].conical.angle == 45.0f, "from sets the angle");
+    check(styles[2].backgroundImages[0].conical.angle == 90.0f &&
+              styles[2].backgroundImages[0].conical.centreX.value == 20.0f &&
+              styles[2].backgroundImages[0].conical.centreY.value == 30.0f,
+          "turns read as degrees and at takes a position");
+    check(styles[3].backgroundImages[0].conical.centreX.value == 50.0f &&
+              styles[3].backgroundImages[0].conical.centreY.value == 50.0f,
+          "at center means the middle");
+    check(styles[4].backgroundImages[0].conical.stops.size() == 2 &&
+              styles[4].backgroundImages[0].conical.stops[0].offset.unit ==
+                  sui::Length::Percent &&
+              styles[4].backgroundImages[0].conical.stops[0].offset.value == 25.0f,
+          "an angle stop becomes a percentage of the turn");
+    check(styles[5].backgroundImages[0].kind == Kind::ConicalGradientImage &&
+              styles[5].backgroundImages[0].conical.stops.size() == 1,
+          "a one-stop conic paints as a flat fill");
+    check(styles[6].backgroundImages[0].kind == Kind::None,
+          "a bad prelude drops the gradient");
+    check(styles[7].backgroundImages[0].kind == Kind::None,
+          "a length stop drops the gradient");
+}
+
 // The seven background longhands are parallel lists that CSS matches up by
 // position, repeating whichever is shortest, so one value can serve every layer.
 void testBackgroundListsAreParallel() {
@@ -6217,6 +6274,7 @@ int main() {
     testBackgroundColourParsing();
     testLinearGradientParsing();
     testRadialGradientParsing();
+    testConicalGradientParsing();
     testBackgroundListsAreParallel();
     testBackgroundSizeAndPositionKeywords();
     testFlexCrossSizeExcludesChrome();

@@ -554,6 +554,10 @@ bool startsWith(std::string_view value, std::string_view prefix) {
     return value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0;
 }
 
+// One or two position tokens into x/y; shared with `clip-path` positions,
+// which is why it is declared early.
+bool parseClipPosition(const std::vector<std::string_view>& tokens, Length& x, Length& y);
+
 bool endsWith(std::string_view value, std::string_view suffix) {
     return value.size() >= suffix.size() &&
            value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
@@ -2072,6 +2076,94 @@ bool parseRadialGradient(std::string_view args, ComputedStyle::RadialGradient& o
     return out.stops.size() >= 1;
 }
 
+// One colour stop inside a `conic-gradient()`: the position is optional and
+// takes a percentage or an angle, which becomes a percentage of the turn.
+// Lengths are not positions here, so unlike the linear stops they fail.
+bool parseConicalStop(std::string_view entry, ComputedStyle::GradientStop& out) {
+    const std::vector<std::string_view> parts = splitTokens(entry);
+    if (parts.empty()) {
+        return false;
+    }
+    for (const std::string_view part : parts) {
+        SDL_Color color;
+        if (parseColor(part, color)) {
+            out.color = color;
+            continue;
+        }
+        if (!part.empty() && part.back() == '%') {
+            const Length length = parseLength(part);
+            if (length.unit != Length::Percent) {
+                return false;
+            }
+            out.offset = length;
+            continue;
+        }
+        float angle = 0.0f;
+        if (!parseAngle(part, angle)) {
+            return false;
+        }
+        out.offset = Length(Length::Percent, angle / 3.6f);
+    }
+    return true;
+}
+
+// The first entry that names a colour is where a conic gradient's stops
+// begin; `from <angle>` and `at <position>` never do.
+std::size_t firstConicalStopEntry(const std::vector<std::string_view>& entries) {
+    ComputedStyle::GradientStop probe;
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (parseConicalStop(entries[i], probe)) {
+            return i;
+        }
+    }
+    return entries.size();
+}
+
+// `conic-gradient()` takes an optional `from <angle>` then an optional
+// `at <position>` before the stops, in that order. Anything else in the
+// prelude drops the whole function.
+bool parseConicalGradient(std::string_view args, ComputedStyle::ConicalGradient& out) {
+    const std::vector<std::string_view> entries = splitTopLevel(args);
+    const std::size_t first = firstConicalStopEntry(entries);
+    if (first == entries.size()) {
+        return false;
+    }
+    // The prelude is `from <angle>` then `at <position>`, each optional, with
+    // the clauses possibly sharing one comma entry (`from 45deg at center`).
+    std::vector<std::string_view> prelude;
+    for (std::size_t i = 0; i < first; ++i) {
+        for (std::string_view token : splitTokens(entries[i])) {
+            prelude.push_back(token);
+        }
+    }
+    std::size_t p = 0;
+    if (p < prelude.size() && prelude[p] == "from") {
+        if (p + 1 >= prelude.size() || !parseAngle(prelude[p + 1], out.angle)) {
+            return false;
+        }
+        p += 2;
+    }
+    if (p < prelude.size() && prelude[p] == "at") {
+        ++p;
+        std::vector<std::string_view> position(prelude.begin() + p, prelude.end());
+        if (!parseClipPosition(position, out.centreX, out.centreY)) {
+            return false;
+        }
+        p = prelude.size();
+    }
+    if (p != prelude.size()) {
+        return false;
+    }
+    for (std::size_t i = first; i < entries.size(); ++i) {
+        ComputedStyle::GradientStop stop;
+        if (!parseConicalStop(entries[i], stop)) {
+            return false;
+        }
+        out.stops.push_back(stop);
+    }
+    return out.stops.size() >= 1;
+}
+
 void applyBackgroundImage(ComputedStyle& s, std::string_view value) {
     if (value == "none") {
         s.backgroundImages.assign(1, ComputedStyle::BackgroundImage{});
@@ -2094,6 +2186,10 @@ void applyBackgroundImage(ComputedStyle& s, std::string_view value) {
         } else if (std::string_view args; functionArgs(entry, "radial-gradient", args)) {
             if (parseRadialGradient(args, image.radial)) {
                 image.kind = ComputedStyle::BackgroundImage::RadialGradientImage;
+            }
+        } else if (std::string_view args; functionArgs(entry, "conic-gradient", args)) {
+            if (parseConicalGradient(args, image.conical)) {
+                image.kind = ComputedStyle::BackgroundImage::ConicalGradientImage;
             }
         }
         s.backgroundImages.push_back(image);

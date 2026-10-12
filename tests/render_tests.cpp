@@ -261,6 +261,49 @@ void testFontSizeIsTheEmSquare() {
               "doubling font-size doubles the line box");
 }
 
+// The CPU conic sweep the executor hands a `conic-gradient()` background.
+// Twelve o'clock is the sweep start and angles run clockwise; `from` rotates
+// the whole dial. Values below are hand-checkable fractions of a
+// white-to-black ramp.
+void testConicalPosition() {
+    sui::ConicalGradient sweep;
+    sweep.cx = 100.0f;
+    sweep.cy = 100.0f;
+    sweep.fromAngle = 0.0f;
+    sweep.radius = 40.0f;
+    sweep.stops = {{0.0f, sui::Color{255, 255, 255, 255}},
+                   {1.0f, sui::Color{0, 0, 0, 255}}};
+    const sui::Shader cone = sui::Shader::conical(sweep);
+    checkNear(cone.colorAt(100.0f, 60.0f).r, 255.0f, 2.0f, "twelve o'clock starts the sweep");
+    checkNear(cone.colorAt(140.0f, 100.0f).r, 191.0f, 3.0f, "three o'clock is a quarter turn");
+    checkNear(cone.colorAt(100.0f, 140.0f).r, 128.0f, 3.0f, "six o'clock is half turn");
+    checkNear(cone.colorAt(60.0f, 100.0f).r, 64.0f, 3.0f, "nine o'clock is three quarters");
+
+    // `from` rotates the dial: with `from 90deg` twelve o'clock reads 0.75.
+    sui::ConicalGradient turned = sweep;
+    turned.fromAngle = 90.0f;
+    checkNear(sui::Shader::conical(turned).colorAt(100.0f, 60.0f).r, 64.0f, 3.0f,
+              "from 90deg moves twelve o'clock three quarters along");
+
+    // Two stops at one offset are a hard edge: just before it reads as the
+    // earlier colour, just after as the later one.
+    sui::ConicalGradient hard = sweep;
+    hard.stops = {{0.0f, sui::Color{0, 0, 0, 255}},
+                  {0.25f, sui::Color{255, 0, 0, 255}},
+                  {0.25f, sui::Color{0, 0, 255, 255}},
+                  {1.0f, sui::Color{255, 255, 255, 255}}};
+    const sui::Shader hardCone = sui::Shader::conical(hard);
+    const sui::Color before = hardCone.colorAt(139.994f, 99.302f);
+    const sui::Color after = hardCone.colorAt(139.994f, 100.698f);
+    check(before.r > 200 && before.b < 55, "a double stop is red just before");
+    check(after.b > 200 && after.r < 55, "a double stop is blue just after");
+
+    check(sui::Shader::conical(sweep).needsMesh(), "a sweep needs a mesh");
+    sui::ConicalGradient wide = sweep;
+    wide.radius = 140.0f;
+    check(sui::Shader::conical(wide).meshStep() == 10.0f, "the mesh step follows the radius");
+}
+
 // The CPU box blur `filter: blur()` hands the executor. The kernel averages a
 // 2r+1 window with the border pixels replicating, so these values are exact
 // hand-checkable fractions of 255 across a 5x5 image with an opaque red block
@@ -522,6 +565,7 @@ int main() {
     testColorMatrix();
     testClipCoverage();
     testClipMask();
+    testConicalPosition();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

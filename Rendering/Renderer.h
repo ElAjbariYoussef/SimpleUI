@@ -133,6 +133,16 @@ struct RadialGradient {
     std::vector<GradientStop> stops;
 };
 
+// A conic sweep around a centre: `fromAngle` starts it clockwise from twelve
+// o'clock, and `radius` hints how fast the field bends for the mesh step.
+struct ConicalGradient {
+    float cx = 0.0f;
+    float cy = 0.0f;
+    float fromAngle = 0.0f;
+    float radius = 0.0f;
+    std::vector<GradientStop> stops;
+};
+
 enum class Repeat {
     No,
     Tile,
@@ -147,6 +157,7 @@ public:
     static Shader solid(Color color);
     static Shader linear(const LinearGradient& gradient);
     static Shader radial(const RadialGradient& gradient);
+    static Shader conical(const ConicalGradient& gradient);
     static Shader image(SDL_Texture* texture, const SDL_FRect& source,
                         const SDL_FRect& destination, Repeat repeat, Color tint);
 
@@ -173,11 +184,12 @@ public:
     Color tint() const { return tint_; }
 
 private:
-    enum class Kind { Solid, Linear, Radial, Image };
+    enum class Kind { Solid, Linear, Radial, Conical, Image };
     Kind kind_ = Kind::Solid;
     Color solid_{};
     LinearGradient linear_{};
     RadialGradient radial_{};
+    ConicalGradient conical_{};
     SDL_Texture* texture_ = nullptr;
     SDL_FRect source_{};
     SDL_FRect destination_{};

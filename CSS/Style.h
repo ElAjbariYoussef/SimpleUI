@@ -392,12 +392,23 @@ struct ComputedStyle {
         std::vector<GradientStop> stops;
     };
 
+    struct ConicalGradient {
+        // Degrees clockwise from 12 o'clock, where the sweep starts.
+        float angle = 0.0f;
+        // The centre, defaulting to the middle of the box for the same reason
+        // as the radial default above.
+        Length centreX{Length::Percent, 50.0f};
+        Length centreY{Length::Percent, 50.0f};
+        std::vector<GradientStop> stops;
+    };
+
     struct BackgroundImage {
-        enum Kind : std::uint8_t { None, Url, LinearGradientImage, RadialGradientImage };
+        enum Kind : std::uint8_t { None, Url, LinearGradientImage, RadialGradientImage, ConicalGradientImage };
         Kind kind = None;
         std::string href;
         LinearGradient linear;
         RadialGradient radial;
+        ConicalGradient conical;
     };
     std::vector<BackgroundImage> backgroundImages;
 
