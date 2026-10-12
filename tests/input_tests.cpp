@@ -1166,6 +1166,37 @@ int main() {
         }
     }
 
+    // A `mask-image` fades paint but never hit-testing: a fully transparent
+    // corner still lands on its box.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<div id=\"mask\" style=\"width:100px;height:100px;cursor:pointer;"
+            "mask-image:linear-gradient(to right, black 50%, transparent 50%)\"></div>"
+            "</body></sui>", err);
+        check(doc != nullptr, "mask hit document parsed");
+        if (doc) {
+            sui::Element* mask = doc->getElementById("mask");
+            app.setDocument(std::move(doc));
+
+            sui::StyleResolver layoutResolver;
+            sui::LayoutInput input;
+            input.resolver = &layoutResolver;
+            input.viewportWidth = 400.0f;
+            input.viewportHeight = 300.0f;
+            sui::BlockLayout().layout(app.document().root(), input);
+
+            // The right half is fully transparent, yet it still hits.
+            app.dispatch(sui::InputEvent(sui::InputKind::PointerMove,
+                                         mask->layoutX() + mask->layoutWidth() - 5.0f,
+                                         mask->layoutY() + 5.0f, 0));
+            check(app.activeCursor() == sui::ComputedStyle::CursorPointer,
+                  "a masked-away corner still hits its box");
+        }
+    }
+
     platform->shutdown();
 
     std::printf("input_tests: %d checks, %d failures\n", checks, failures);

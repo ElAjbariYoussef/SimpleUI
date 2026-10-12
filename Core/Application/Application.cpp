@@ -68,6 +68,13 @@ struct GroupFrame {
     // so the shadow pass traces the clipped silhouette.
     bool clip = false;
     ResolvedClip clipShape;
+    // A gradient mask: the spec, the destination border box rebased into the
+    // surface, and the font size its lengths resolve against. Runs after the
+    // clip mask, before the shadow, for the same filter-then-mask ordering.
+    bool mask = false;
+    ComputedStyle::MaskImage maskImage;
+    SDL_FRect maskDest{};
+    float maskFontSize = 16.0f;
 };
 
 // window width/height/state arrive as markup attributes, so parse them leniently.
@@ -2646,6 +2653,28 @@ void Application::run() {
                         frame.dropShadow = op.dropShadow;
                         frame.clip = op.item.clipShape.kind != ResolvedClip::Kind::None;
                         frame.clipShape = op.item.clipShape;
+                        using MaskKind = ComputedStyle::MaskImage::Kind;
+                        frame.mask = op.item.maskImage.kind == MaskKind::LinearGradient ||
+                                     op.item.maskImage.kind == MaskKind::RadialGradient ||
+                                     op.item.maskImage.kind == MaskKind::ConicalGradient;
+                        if (frame.mask && op.item.el) {
+                            frame.maskImage = op.item.maskImage;
+                            frame.maskFontSize = resolver_.resolve(*op.item.el).fontSize;
+                            // Border box in surface coords: layout minus the
+                            // offsets paint uses, rebased to the surface origin.
+                            float ox = 0.0f, oy = 0.0f;
+                            for (auto it = groups.rbegin(); it != groups.rend(); ++it) {
+                                if (it->texture) {
+                                    ox = it->originX;
+                                    oy = it->originY;
+                                    break;
+                                }
+                            }
+                            frame.maskDest = SDL_FRect{
+                                op.item.el->layoutX() - op.item.dx - ox - op.bounds.x,
+                                op.item.el->layoutY() - op.item.dy - oy - op.bounds.y,
+                                op.item.el->layoutWidth(), op.item.el->layoutHeight()};
+                        }
                         for (int i = 0; i < 12; ++i) {
                             frame.filter[i] = op.filter[i];
                         }
@@ -2719,6 +2748,15 @@ void Application::run() {
                                             sui::applyClipToSurface(
                                                 pixels, conv->w, conv->h, frame.clipShape,
                                                 frame.bounds.x, frame.bounds.y);
+                                        }
+                                        if (frame.mask) {
+                                            // A gradient mask multiplies what
+                                            // the clip left, in the same
+                                            // surface space.
+                                            sui::applyMaskImage(
+                                                pixels, conv->w, conv->h, frame.maskImage,
+                                                frame.maskDest, frame.maskFontSize,
+                                                resolver_.rootFontSize());
                                         }
                                         if (frame.dropShadow.present) {
                                             // The silhouette: the content's own

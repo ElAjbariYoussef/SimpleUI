@@ -2164,6 +2164,48 @@ bool parseConicalGradient(std::string_view args, ComputedStyle::ConicalGradient&
     return out.stops.size() >= 1;
 }
 
+// One `mask-image` layer: a gradient applies as an alpha mask stretched over
+// the border box, while a `url()` source is accepted but stays unapplied.
+// Only the first layer counts; there is no compositing, sizing, or
+// positioning yet.
+bool parseMaskImage(std::string_view value, ComputedStyle::MaskImage& mask) {
+    using Mask = ComputedStyle::MaskImage;
+    const std::string_view text = trim(value);
+    if (text.empty() || text == "none") {
+        mask = Mask();
+        return true;
+    }
+    const std::vector<std::string_view> layers = splitTopLevel(text);
+    if (layers.empty()) {
+        return false;
+    }
+    const std::string_view first = trim(layers[0]);
+    Mask parsed;
+    if (std::string_view args; functionArgs(first, "linear-gradient", args)) {
+        if (!parseLinearGradient(args, parsed.linear)) {
+            return false;
+        }
+        parsed.kind = Mask::Kind::LinearGradient;
+    } else if (functionArgs(first, "radial-gradient", args)) {
+        if (!parseRadialGradient(args, parsed.radial)) {
+            return false;
+        }
+        parsed.kind = Mask::Kind::RadialGradient;
+    } else if (functionArgs(first, "conic-gradient", args)) {
+        if (!parseConicalGradient(args, parsed.conical)) {
+            return false;
+        }
+        parsed.kind = Mask::Kind::ConicalGradient;
+    } else if (const std::string_view href = unwrapUrl(first); !href.empty()) {
+        parsed.kind = Mask::Kind::Url;
+        parsed.href = std::string(href);
+    } else {
+        return false;
+    }
+    mask = parsed;
+    return true;
+}
+
 void applyBackgroundImage(ComputedStyle& s, std::string_view value) {
     if (value == "none") {
         s.backgroundImages.assign(1, ComputedStyle::BackgroundImage{});
@@ -3865,10 +3907,16 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
                property == "-webkit-appearance") {
         // Accepted; these control browser chrome that this engine does not draw.
     } else if (property == "will-change" || property == "contain" ||
-               property == "isolation" || property == "mask" || property == "mask-image" ||
-               property == "-webkit-mask-image" || property == "backdrop-filter" ||
-               property == "filter") {
+               property == "isolation" || property == "mask" ||
+               property == "backdrop-filter" || property == "filter") {
         // Performance / compositing hints and effects: accepted and ignored.
+    } else if (property == "mask-image" || property == "-webkit-mask-image") {
+        // One gradient layer applies as an alpha mask; anything else keeps the
+        // previous cascade winner, like any failed parse.
+        ComputedStyle::MaskImage mask;
+        if (parseMaskImage(value, mask)) {
+            s.maskImage = mask;
+        }
     } else if (property == "clip-path") {
         // Shapes clip the element and its subtree; anything else keeps the
         // previous cascade winner, like any failed parse.

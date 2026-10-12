@@ -503,4 +503,67 @@ void paintBackground(const ComputedStyle& style, const BackgroundBoxes& boxes, f
     }
 }
 
+void applyMaskImage(std::uint8_t* pixels, int width, int height,
+                    const ComputedStyle::MaskImage& mask, const SDL_FRect& destination,
+                    float fontSize, float rootFontSize) {
+    using Mask = ComputedStyle::MaskImage;
+    if (!pixels || width <= 0 || height <= 0 || destination.w <= 0.0f ||
+        destination.h <= 0.0f) {
+        return;
+    }
+    // The mask paints the destination the way a background layer would, then
+    // each pixel keeps the resulting alpha. Stop alphas stay authored: group
+    // opacity lands later, at the blit.
+    if (mask.kind != Mask::Kind::LinearGradient &&
+        mask.kind != Mask::Kind::RadialGradient &&
+        mask.kind != Mask::Kind::ConicalGradient) {
+        return;
+    }
+    Shader shader = Shader::solid(Color{0, 0, 0, 0});
+    if (mask.kind == Mask::Kind::LinearGradient) {
+        LinearGradient gradient;
+        const float lineLength = gradientLine(mask.linear.angle, destination, gradient);
+        gradient.stops = toGradientStops(mask.linear.stops, lineLength, fontSize,
+                                         rootFontSize, 1.0f);
+        if (gradient.stops.empty()) {
+            return;
+        }
+        shader = Shader::linear(gradient);
+    } else if (mask.kind == Mask::Kind::RadialGradient) {
+        RadialGradient gradient;
+        radialRadii(mask.radial, destination, fontSize, rootFontSize, gradient);
+        gradient.stops = toGradientStops(
+            mask.radial.stops, std::max(gradient.radiusX, gradient.radiusY), fontSize,
+            rootFontSize, 1.0f);
+        if (gradient.stops.empty()) {
+            return;
+        }
+        shader = Shader::radial(gradient);
+    } else {
+        ConicalGradient gradient;
+        gradient.cx = mask.conical.centreX.resolve(destination.w, fontSize, rootFontSize) +
+                      destination.x;
+        gradient.cy = mask.conical.centreY.resolve(destination.h, fontSize, rootFontSize) +
+                      destination.y;
+        gradient.fromAngle = mask.conical.angle;
+        gradient.radius = std::max(destination.w, destination.h) * 0.5f;
+        gradient.stops =
+            toGradientStops(mask.conical.stops, 1.0f, fontSize, rootFontSize, 1.0f);
+        if (gradient.stops.empty()) {
+            return;
+        }
+        shader = Shader::conical(gradient);
+    }
+    for (int row = 0; row < height; ++row) {
+        for (int col = 0; col < width; ++col) {
+            const Color kept = shader.colorAt(static_cast<float>(col) + 0.5f,
+                                              static_cast<float>(row) + 0.5f);
+            std::uint8_t* alpha = pixels + 4 * (row * width + col) + 3;
+            *alpha = static_cast<std::uint8_t>(static_cast<float>(*alpha) *
+                                                   static_cast<float>(kept.a) / 255.0f +
+                                               0.5f);
+        }
+    }
+}
+
 }  // namespace sui

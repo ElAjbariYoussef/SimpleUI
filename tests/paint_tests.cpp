@@ -267,6 +267,9 @@ void testGroupDetection() {
         <div id="finone" style="filter:none"></div>
         <div id="clip" style="clip-path:circle(50%)"></div>
         <div id="clipnone" style="clip-path:none"></div>
+        <div id="mask" style="mask-image:linear-gradient(black, transparent)"></div>
+        <div id="masknone" style="mask-image:none"></div>
+        <div id="maskurl" style="mask-image:url(m.png)"></div>
     </body></sui>)HTML");
     if (!document) {
         return;
@@ -291,6 +294,9 @@ void testGroupDetection() {
         {"finone", false, "filter:none opens no group"},
         {"clip", true, "a clip-path opens a group"},
         {"clipnone", false, "clip-path:none opens no group"},
+        {"mask", true, "a gradient mask opens a group"},
+        {"masknone", false, "mask-image:none opens no group"},
+        {"maskurl", false, "an unapplied url mask opens no group"},
     };
     for (const Case& c : cases) {
         Element* el = document->getElementById(c.id);
@@ -380,6 +386,53 @@ void testClipComposites() {
         }
     }
     check(sawClip, "a clip-path alone brackets its box");
+}
+
+// A gradient mask rides its box's paint op for the executor, and brackets it
+// for compositing; anything unapplied paints flat.
+void testMaskShapeInOps() {
+    auto document = parseOrNull(R"HTML(<sui><body>
+        <div id="mask" style="width:100px;height:100px;mask-image:linear-gradient(black, transparent)"></div>
+        <div id="plain" style="width:100px;height:100px"></div>
+        <div id="url" style="width:100px;height:100px;mask-image:url(m.png)"></div>
+    </body></sui>)HTML");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    const auto items = orderOf(*document, resolver);
+    const PaintItem* mask = paintOf(items, document->getElementById("mask"));
+    const PaintItem* plain = paintOf(items, document->getElementById("plain"));
+    const PaintItem* url = paintOf(items, document->getElementById("url"));
+    check(mask && plain && url, "masked boxes paint");
+    if (!mask || !plain || !url) {
+        return;
+    }
+    using MaskKind = sui::ComputedStyle::MaskImage::Kind;
+    check(mask->maskImage.kind == MaskKind::LinearGradient,
+          "a gradient mask rides its paint op");
+    check(mask->maskImage.linear.stops.size() == 2, "the mask keeps its stops");
+    check(plain->maskImage.kind == MaskKind::None, "an unmasked box carries no mask");
+    check(url->maskImage.kind == MaskKind::None, "an unapplied url mask rides nothing");
+
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+    Element* masked = document->getElementById("mask");
+    bool sawMask = false;
+    int depth = 0;
+    for (std::size_t i = 0; i < ops.size(); ++i) {
+        if (ops[i].kind == sui::PaintOp::Kind::BeginGroup) {
+            if (ops[i].item.el == masked) {
+                sawMask = true;
+            }
+            ++depth;
+        } else if (ops[i].kind == sui::PaintOp::Kind::EndGroup) {
+            --depth;
+        } else if (ops[i].item.el == masked) {
+            check(depth > 0, "a masked box paints inside its group");
+        }
+    }
+    check(sawMask, "a gradient mask alone brackets its box");
 }
 
 // transform and filter are properties of the box they are declared on: a
@@ -1104,6 +1157,7 @@ int main() {
     testGroupDetection();
     testClipShapeInOps();
     testClipComposites();
+    testMaskShapeInOps();
     testEffectsDontCompound();
     testGroupBecomesOffscreenBlit();
     testNestedGroupAlphas();

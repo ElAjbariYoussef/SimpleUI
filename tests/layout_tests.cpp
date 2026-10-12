@@ -4717,6 +4717,53 @@ void testConicalGradientParsing() {
           "a length stop drops the gradient");
 }
 
+void testMaskImage() {
+    const auto rules = sui::CSSParser::parse(R"(
+        .a { mask-image: linear-gradient(black, transparent) }
+        .b { mask-image: radial-gradient(circle, black, transparent) }
+        .c { mask-image: conic-gradient(black, transparent) }
+        .d { mask-image: url(m.png) }
+        .e { mask-image: none }
+        .f { mask-image: banana }
+        .g { mask-image: linear-gradient(red, blue), radial-gradient(red, blue) }
+        .h { -webkit-mask-image: linear-gradient(black, transparent) }
+    )");
+    sui::StyleResolver resolver;
+    resolver.setRules(rules);
+    static const char* kClasses =
+        "<div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div>"
+        "<div class=\"d\"></div><div class=\"e\"></div><div class=\"f\"></div>"
+        "<div class=\"g\"></div><div class=\"h\"></div>";
+    auto body = parseOrNull((std::string("<sui><body>") + kClasses + "</body></sui>").c_str());
+    if (!body) {
+        return;
+    }
+    const std::vector<ComputedStyle> styles = bodyStyles(*body, resolver);
+    if (styles.size() < 8) {
+        check(false, "mask elements found");
+        return;
+    }
+    using Mask = sui::ComputedStyle::MaskImage;
+    check(styles[0].maskImage.kind == Mask::Kind::LinearGradient &&
+              styles[0].maskImage.linear.stops.size() == 2,
+          "a linear mask parses with its stops");
+    check(styles[1].maskImage.kind == Mask::Kind::RadialGradient &&
+              styles[1].maskImage.radial.stops.size() == 2,
+          "a radial mask parses with its stops");
+    check(styles[2].maskImage.kind == Mask::Kind::ConicalGradient &&
+              styles[2].maskImage.conical.stops.size() == 2,
+          "a conic mask parses with its stops");
+    check(styles[3].maskImage.kind == Mask::Kind::Url &&
+              styles[3].maskImage.href == "m.png",
+          "a url mask records its href");
+    check(styles[4].maskImage.kind == Mask::Kind::None, "none clears the mask");
+    check(styles[5].maskImage.kind == Mask::Kind::None, "garbage keeps no mask");
+    check(styles[6].maskImage.kind == Mask::Kind::LinearGradient,
+          "only the first mask layer counts");
+    check(styles[7].maskImage.kind == Mask::Kind::LinearGradient,
+          "the webkit prefix masks alike");
+}
+
 // The seven background longhands are parallel lists that CSS matches up by
 // position, repeating whichever is shortest, so one value can serve every layer.
 void testBackgroundListsAreParallel() {
@@ -6280,6 +6327,7 @@ int main() {
     testLinearGradientParsing();
     testRadialGradientParsing();
     testConicalGradientParsing();
+    testMaskImage();
     testBackgroundListsAreParallel();
     testBackgroundSizeAndPositionKeywords();
     testFlexCrossSizeExcludesChrome();

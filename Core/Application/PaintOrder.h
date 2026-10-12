@@ -50,6 +50,9 @@ struct PaintItem {
     // Under an ancestor transform the painted shape follows the affine while
     // hit-testing reads it straight: exact unless transformed.
     ResolvedClip clipShape;
+    // A `mask-image` gradient. Masks ride the same surface the clip does, so
+    // the executor needs the spec; anything else stays `None`.
+    ComputedStyle::MaskImage maskImage;
     // Scroll offsets accumulated from clipping ancestors. Content moves up and
     // left by them, so this element's box is drawn at layout minus the offset;
     // its own scroll only shifts what is inside it.

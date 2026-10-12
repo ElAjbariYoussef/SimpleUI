@@ -52,6 +52,14 @@ enum class GroupKind {
              // but positioned descendants rejoin the context around it
 };
 
+// Whether a mask spec needs a compositing surface: gradient masks evaluate
+// against it, while `none` and unapplied `url()` sources paint flat.
+bool hasGradientMask(const ComputedStyle::MaskImage& mask) {
+    using Kind = ComputedStyle::MaskImage::Kind;
+    return mask.kind == Kind::LinearGradient || mask.kind == Kind::RadialGradient ||
+           mask.kind == Kind::ConicalGradient;
+}
+
 // One entry in a context's list: the element's own box, plus the subgroup it
 // opens when it establishes a context. Only a group root fills `inner`, and it is
 // emitted -- box first, then everything the group orders -- the moment that
@@ -441,8 +449,9 @@ GroupKind classifyGroup(const ComputedStyle& s) {
         return GroupKind::Real;
     }
     // A `clip-path` composites its subtree through a surface to mask it, so it
-    // groups for real: descendants must not escape above the mask.
-    if (s.clipPath.shape != ComputedStyle::ClipPath::Shape::None) {
+    // groups for real: descendants must not escape above the mask. A gradient
+    // mask does the same for its own alpha pass.
+    if (s.clipPath.shape != ComputedStyle::ClipPath::Shape::None || hasGradientMask(s.maskImage)) {
         return GroupKind::Real;
     }
     if (s.positioned) {
@@ -807,6 +816,14 @@ struct Collector {
             item.clipShape = resolveClipPath(s.clipPath, el, item.dx, item.dy, s.fontSize,
                                              resolver.rootFontSize());
         }
+        // A gradient mask rides along untouched: the executor evaluates it
+        // against the surface.
+        using MaskKind = ComputedStyle::MaskImage::Kind;
+        if (s.maskImage.kind == MaskKind::LinearGradient ||
+            s.maskImage.kind == MaskKind::RadialGradient ||
+            s.maskImage.kind == MaskKind::ConicalGradient) {
+            item.maskImage = s.maskImage;
+        }
         // The point the transform turns about: the resolved transform-origin,
         // measured from the box's own top-left (which scroll offsets have already
         // moved out of `dx`/`dy`).
@@ -903,7 +920,8 @@ struct Collector {
             if (entry.group &&
                 (entry.groupAlpha < 1.0f || entry.transformed || entry.blur > 0.0f ||
                  entry.shift || entry.dropShadow.present ||
-                 entry.item.clipShape.kind != ResolvedClip::Kind::None)) {
+                 entry.item.clipShape.kind != ResolvedClip::Kind::None ||
+                 hasGradientMask(entry.item.maskImage))) {
                 out.push_back(groupStart(entry.item, entry.groupAlpha, entry.transformed, entry.m,
                                         entry.origin, entry.blur, entry.shift, entry.filter,
                                         entry.dropShadow));
@@ -939,7 +957,8 @@ std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolve
     const Collector::BoxState box = collector.resolve(root, PaintEnv{});
     if (box.paints && (box.groupAlpha < 1.0f || box.transformed || box.blur > 0.0f ||
                        box.shift || box.dropShadow.present ||
-                       box.item.clipShape.kind != ResolvedClip::Kind::None)) {
+                       box.item.clipShape.kind != ResolvedClip::Kind::None ||
+                       hasGradientMask(box.item.maskImage))) {
         out.push_back(groupStart(box.item, box.groupAlpha, box.transformed, box.m, box.origin,
                                 box.blur, box.shift, box.filter, box.dropShadow));
     }

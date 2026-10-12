@@ -32,4 +32,12 @@ void paintBackground(const ComputedStyle& style, const BackgroundBoxes& boxes, f
                      float rootFontSize, float opacity, Renderer& renderer, ImageCache& images,
                      const Radii& borderRadii);
 
+// Multiplies surface alpha by a `mask-image` gradient stretched over
+// `destination` (already in surface coordinates). Pure pixels and math: no
+// device, so tests drive it directly. Anything but a gradient is a no-op, as
+// is an empty stop list.
+void applyMaskImage(std::uint8_t* pixels, int width, int height,
+                    const ComputedStyle::MaskImage& mask, const SDL_FRect& destination,
+                    float fontSize, float rootFontSize);
+
 }  // namespace sui

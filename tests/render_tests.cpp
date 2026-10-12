@@ -1,5 +1,7 @@
 // Geometry checks for the renderer that need no device, so the parts a screenshot
 // cannot pin down precisely still have a regression test.
+#include "CSS/Style.h"
+#include "Core/Application/Background.h"
 #include "Rendering/ClipMask.h"
 #include "Rendering/ColorMatrix.h"
 #include "Rendering/ImageBlur.h"
@@ -304,6 +306,88 @@ void testConicalPosition() {
     check(sui::Shader::conical(wide).meshStep() == 10.0f, "the mesh step follows the radius");
 }
 
+// A gradient `mask-image` multiplies surface alpha by the painted mask: hard
+// edges make every value exact, so a black-to-transparent ramp with doubled
+// middle stops reads 255 on one side and 0 on the other, whatever the shape.
+void testMaskImage() {
+    using Mask = sui::ComputedStyle::MaskImage;
+    const auto alphaAt = [](const std::vector<std::uint8_t>& img, int x, int y) {
+        return img[4 * (y * 4 + x) + 3];
+    };
+    const auto opaque = [](float at) {
+        return sui::ComputedStyle::GradientStop{
+            sui::Length(sui::Length::Percent, at), SDL_Color{0, 0, 0, 255}};
+    };
+    const auto clear = [](float at) {
+        return sui::ComputedStyle::GradientStop{
+            sui::Length(sui::Length::Percent, at), SDL_Color{0, 0, 0, 0}};
+    };
+
+    // Left-to-right linear fade over a 4px box: the left half stays, the right
+    // half goes.
+    Mask linear;
+    linear.kind = Mask::Kind::LinearGradient;
+    linear.linear.angle = 90.0f;
+    linear.linear.stops = {opaque(0.0f), opaque(50.0f), clear(50.0f), clear(100.0f)};
+    std::vector<std::uint8_t> img(4 * 4 * 4, 0);
+    for (int i = 0; i < 16; ++i) {
+        img[4 * i + 3] = 255;
+    }
+    sui::applyMaskImage(img.data(), 4, 4, linear, SDL_FRect{0.0f, 0.0f, 4.0f, 4.0f},
+                        16.0f, 16.0f);
+    check(alphaAt(img, 0, 0) == 255 && alphaAt(img, 1, 2) == 255,
+          "a linear mask keeps before its edge");
+    check(alphaAt(img, 2, 0) == 0 && alphaAt(img, 3, 3) == 0,
+          "a linear mask drops past its edge");
+
+    // Centred radial fade: the middle stays, the corners go.
+    Mask radial;
+    radial.kind = Mask::Kind::RadialGradient;
+    radial.radial.stops = {opaque(0.0f), opaque(50.0f), clear(50.0f), clear(100.0f)};
+    std::vector<std::uint8_t> disc(4 * 4 * 4, 0);
+    for (int i = 0; i < 16; ++i) {
+        disc[4 * i + 3] = 255;
+    }
+    sui::applyMaskImage(disc.data(), 4, 4, radial, SDL_FRect{0.0f, 0.0f, 4.0f, 4.0f},
+                        16.0f, 16.0f);
+    check(alphaAt(disc, 1, 1) == 255, "a radial mask keeps its middle");
+    check(alphaAt(disc, 0, 0) == 0, "a radial mask drops its corners");
+
+    // A conic sweep: above the centre stays, below-left goes.
+    Mask conic;
+    conic.kind = Mask::Kind::ConicalGradient;
+    conic.conical.angle = 0.0f;
+    conic.conical.stops = {opaque(0.0f), opaque(25.0f), clear(25.0f), clear(100.0f)};
+    std::vector<std::uint8_t> sweep(4 * 4 * 4, 0);
+    for (int i = 0; i < 16; ++i) {
+        sweep[4 * i + 3] = 255;
+    }
+    sui::applyMaskImage(sweep.data(), 4, 4, conic, SDL_FRect{0.0f, 0.0f, 4.0f, 4.0f},
+                        16.0f, 16.0f);
+    check(alphaAt(sweep, 2, 0) == 255, "a conic mask keeps before its edge");
+    check(alphaAt(sweep, 0, 3) == 0, "a conic mask drops past its edge");
+
+    // Masks that cannot apply leave pixels alone.
+    Mask none;
+    std::vector<std::uint8_t> flat(16, 200);
+    sui::applyMaskImage(flat.data(), 2, 2, none, SDL_FRect{0.0f, 0.0f, 2.0f, 2.0f},
+                        16.0f, 16.0f);
+    check(flat == std::vector<std::uint8_t>(16, 200), "no mask leaves pixels alone");
+    Mask url;
+    url.kind = Mask::Kind::Url;
+    url.href = "m.png";
+    std::vector<std::uint8_t> pic(16, 200);
+    sui::applyMaskImage(pic.data(), 2, 2, url, SDL_FRect{0.0f, 0.0f, 2.0f, 2.0f},
+                        16.0f, 16.0f);
+    check(pic == std::vector<std::uint8_t>(16, 200), "a url mask stays unapplied");
+    Mask empty = linear;
+    empty.linear.stops.clear();
+    std::vector<std::uint8_t> bare(16, 200);
+    sui::applyMaskImage(bare.data(), 2, 2, empty, SDL_FRect{0.0f, 0.0f, 2.0f, 2.0f},
+                        16.0f, 16.0f);
+    check(bare == std::vector<std::uint8_t>(16, 200), "an empty mask stays quiet");
+}
+
 // The CPU box blur `filter: blur()` hands the executor. The kernel averages a
 // 2r+1 window with the border pixels replicating, so these values are exact
 // hand-checkable fractions of 255 across a 5x5 image with an opaque red block
@@ -566,6 +650,7 @@ int main() {
     testClipCoverage();
     testClipMask();
     testConicalPosition();
+    testMaskImage();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }
