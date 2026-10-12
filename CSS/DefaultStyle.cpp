@@ -155,6 +155,28 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
         return s;
     }
 
+    if (tag == "select") {
+        Style s;
+        s.display = Style::InlineBlock;
+        s.specified = Style::SpecifiedColor | Style::SpecifiedLineHeight;
+        s.padding = {4.0f, 8.0f, 4.0f, 8.0f};
+        s.borderWidth = {1.0f, 1.0f, 1.0f, 1.0f};
+        s.borderColor = {82, 82, 91, 255};
+        s.backgroundColor = {24, 24, 27, 255};
+        s.color = {228, 228, 231, 255};
+        s.lineHeight = 1.0f;
+        return s;
+    }
+
+    // An option never lays out as a box of its own: the closed select paints
+    // the selected text itself and the open popup is an overlay, so option and
+    // optgroup children take no space.
+    if (tag == "option" || tag == "optgroup") {
+        Style s;
+        s.display = Style::None;
+        return s;
+    }
+
     if (tag == "ul") {
         Style s = block(Style::SpecifiedListStyleType);
         s.margin = {8.0f, 0.0f, 8.0f, 0.0f};

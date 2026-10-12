@@ -260,6 +260,18 @@ std::string Element::value() const {
     if (tag_ == "textarea") {
         return textContent();
     }
+    // A select's value is the selected option's `value`, or its text when the
+    // attribute is absent; with no options there is no value at all.
+    if (tag_ == "select") {
+        Element* selected = selectedOption();
+        if (!selected) {
+            return {};
+        }
+        if (selected->hasAttribute("value")) {
+            return std::string(selected->attribute("value"));
+        }
+        return selected->optionLabel();
+    }
     return std::string(attribute("value"));
 }
 
@@ -268,7 +280,77 @@ void Element::setValue(std::string text) {
         setTextContent(std::move(text));
         return;
     }
+    // Selecting by value: the first option whose value-or-text matches takes
+    // `selected`, the rest drop it. No match clears every mark, and value()
+    // then falls back to the first option.
+    if (tag_ == "select") {
+        for (Element* option : selectOptions()) {
+            const std::string optionValue = option->hasAttribute("value")
+                                                ? std::string(option->attribute("value"))
+                                                : option->optionLabel();
+            if (optionValue == text) {
+                option->setAttribute("selected", "");
+            } else {
+                option->removeAttribute("selected");
+            }
+        }
+        return;
+    }
     setAttribute("value", std::move(text));
+}
+
+std::string Element::optionLabel() const {
+    const std::string text = textContent();
+    std::string out;
+    out.reserve(text.size());
+    bool pendingSpace = false;
+    bool started = false;
+    for (char c : text) {
+        const bool space = c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+        if (space) {
+            pendingSpace = started;
+            continue;
+        }
+        if (pendingSpace) {
+            out += ' ';
+            pendingSpace = false;
+        }
+        out += c;
+        started = true;
+    }
+    return out;
+}
+
+void Element::collectOptions(std::vector<Element*>& out) const {
+    for (const auto& child : children_) {
+        if (!child || child->isTextNode()) {
+            continue;
+        }
+        if (child->tag() == "option") {
+            out.push_back(child.get());
+        } else {
+            // An <optgroup> (or anything else the markup nests) groups options
+            // without being one itself.
+            child->collectOptions(out);
+        }
+    }
+}
+
+std::vector<Element*> Element::selectOptions() const {
+    std::vector<Element*> options;
+    collectOptions(options);
+    return options;
+}
+
+Element* Element::selectedOption() const {
+    std::vector<Element*> options;
+    collectOptions(options);
+    for (Element* option : options) {
+        if (option->hasAttribute("selected")) {
+            return option;
+        }
+    }
+    return options.empty() ? nullptr : options[0];
 }
 
 InlineStyle::InlineStyle(Element& owner) noexcept : owner_(owner) {}

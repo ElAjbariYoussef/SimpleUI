@@ -1570,6 +1570,72 @@ void testRangeDefaults() {
           "a range lays out as a 129x15 border box");
 }
 
+// A select is a closed combo: inline-block with text-field chrome, options
+// taking no space, auto-sized to the longest option plus the drop arrow.
+void testSelectDefaults() {
+    auto document = parseOrNull(
+        "<sui><body><select id=\"s\"><option>fig</option>"
+        "<option>cherry</option></select>"
+        "<select id=\"w\" style=\"width:200px;height:40px\">"
+        "<option>fig</option></select>"
+        "<select id=\"p\"><option>  plum  </option></select></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* s = document->getElementById("s");
+    Element* w = document->getElementById("w");
+    Element* p = document->getElementById("p");
+    check(s && w && p, "select elements found");
+    if (!s || !w || !p) {
+        return;
+    }
+    Element* option = nullptr;
+    if (!s->children().empty()) {
+        option = s->children()[0].get();
+    }
+    check(option && option->tag() == "option", "an option child parsed");
+    if (!option) {
+        return;
+    }
+
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+    const sui::ComputedStyle combo = resolver.resolve(*s);
+    check(combo.display == sui::ComputedStyle::InlineBlock,
+          "a select defaults to inline-block");
+    check(combo.padding.left.value == 8.0f && combo.padding.top.value == 4.0f,
+          "a select keeps text-field padding");
+    check(combo.borderWidth.top.value == 1.0f, "a select keeps its border");
+    check(combo.lineHeight == 1.0f, "a select is one line tall");
+    check(resolver.resolve(*option).display == sui::ComputedStyle::None,
+          "an option lays out no box of its own");
+
+    // Without a font the longest option ("cherry", 6 chars) measures
+    // 6 * 16 * 0.5 = 48px, plus 24px for the drop arrow.
+    sui::StyleResolver layout;
+    layout.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+    layoutRoot(*document, layout, 400.0f);
+    check(s->layoutWidth() == 48.0f + 24.0f + 16.0f + 2.0f,
+          "a select auto-sizes to its longest option plus the arrow");
+    check(s->layoutHeight() == 16.0f + 8.0f + 2.0f,
+          "a select is one line tall: its options take no space");
+    check(w->contentWidth() == 200.0f && w->contentHeight() == 40.0f,
+          "an author size overrides the select default");
+
+    // The value reads the selected option: the marked one, else the first.
+    check(s->value() == "fig", "a select value defaults to its first option");
+    s->children()[1]->setAttribute("selected", "");
+    check(s->value() == "cherry", "the marked option wins the value");
+    s->children()[1]->removeAttribute("selected");
+    check(s->value() == "fig", "clearing the mark falls back to the first");
+
+    // Indented markup reads cleanly: surrounding whitespace is stripped, so the
+    // padded "plum" (4 chars) sizes 4 * 16 * 0.5 + 24 + 18.
+    check(p->value() == "plum", "an option label strips surrounding whitespace");
+    check(p->layoutWidth() == 32.0f + 24.0f + 16.0f + 2.0f,
+          "the stripped label sizes the select");
+}
+
 // Phrasing tags that defaulted to block. Each one forced a line break, and the text
 // either side of it laid out into no run at all, so it was never drawn -- correct
 // markup lost its content rather than simply missing its decoration.
@@ -5356,6 +5422,7 @@ int main() {
     testDefaultStyles();
     testFormControlDefaults();
     testRangeDefaults();
+    testSelectDefaults();
     testPhrasingTagsStayInline();
     testUnknownPropertyIsReported();
     testCursorProperty();

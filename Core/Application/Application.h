@@ -69,6 +69,13 @@ public:
     // Exposed so the platform-independent decision can be checked without a window.
     ComputedStyle::Cursor activeCursor() const noexcept { return activeCursor_; }
 
+    // The select whose dropdown popup is open, if any. Exposed so tests can
+    // assert open/close/pick without a window; the popup itself only paints.
+    Element* openSelect() const noexcept { return openSelect_; }
+    // The highlighted option row while a popup is open. Hover and arrows move
+    // it without touching the tree; picking writes `selected`.
+    std::size_t selectHighlight() const noexcept { return selectHighlight_; }
+
 private:
     static WindowConfig windowConfigFrom(Document& document);
 
@@ -135,6 +142,13 @@ private:
     // The cursor keyword currently in effect, re-derived from the hovered element
     // whenever the pointer moves.
     ComputedStyle::Cursor activeCursor_ = ComputedStyle::CursorAuto;
+
+    // The select whose dropdown popup is open, and the highlighted option row.
+    // The popup is an overlay: it paints after the frame and never lays out,
+    // so the highlight needs no document mutation to show (pointer and key
+    // events already mark the frame stale).
+    Element* openSelect_ = nullptr;
+    std::size_t selectHighlight_ = 0;
 };
 
 }  // namespace sui

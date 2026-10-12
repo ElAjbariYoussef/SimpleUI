@@ -622,6 +622,161 @@ int main() {
         }
     }
 
+    // A select opens its popup on click and picks the clicked row; arrows move
+    // the selection when closed and the highlight when open; Enter opens, then
+    // picks the highlight; Escape closes; release over a row picks it. A
+    // disabled select and an empty one stay inert.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<select id=\"s\"><option>apple</option><option>banana</option>"
+            "<option>cherry</option></select>"
+            "<select id=\"m\"><option>aye</option>"
+            "<option value=\"B\" selected>bee</option></select>"
+            "<select id=\"d\" disabled><option>one</option></select>"
+            "<select id=\"e\"></select>"
+            "</body></sui>", err);
+        check(doc != nullptr, "select test document parsed");
+        if (doc) {
+            sui::Element* s = doc->getElementById("s");
+            sui::Element* m = doc->getElementById("m");
+            sui::Element* d = doc->getElementById("d");
+            sui::Element* e = doc->getElementById("e");
+            check(s && m && d && e, "select elements found");
+            if (s && m && d && e) {
+                app.setDocument(std::move(doc));
+
+                // One select per line so rows never overlap a neighbour. Rows
+                // are the select's own line (16px at the default size).
+                sui::StyleResolver layoutResolver;
+                layoutResolver.setRules(sui::CSSParser::parse("select{display:block}"));
+                sui::LayoutInput input;
+                input.resolver = &layoutResolver;
+                input.viewportWidth = 400.0f;
+                input.viewportHeight = 300.0f;
+                sui::BlockLayout().layout(app.document().root(), input);
+
+                constexpr float kRowH = 16.0f;
+                const auto box = [&](sui::Element* el) {
+                    return sui::InputEvent(sui::InputKind::PointerDown,
+                                           el->layoutX() + el->layoutWidth() * 0.5f,
+                                           el->layoutY() + el->layoutHeight() * 0.5f, 1);
+                };
+                const auto row = [&](sui::Element* el, int index, float dy = 0.5f) {
+                    return sui::InputEvent(sui::InputKind::PointerDown,
+                                           el->layoutX() + 5.0f,
+                                           el->layoutY() + el->layoutHeight() +
+                                               (static_cast<float>(index) + dy) * kRowH,
+                                           1);
+                };
+
+                check(s->value() == "apple", "a select value starts at its first option");
+                check(app.openSelect() == nullptr, "no popup starts open");
+                check(m->value() == "B", "an option value attribute beats its text");
+                check(e->value().empty(), "an empty select has no value");
+
+                // Click opens; clicking the second row picks it and closes.
+                app.dispatch(box(s));
+                check(app.openSelect() == s, "clicking a select opens its popup");
+                app.dispatch(row(s, 2));
+                check(s->value() == "cherry", "clicking a row picks that option");
+                check(app.openSelect() == nullptr, "a pick closes the popup");
+
+                // Clicking the open box toggles shut without changing the value.
+                app.dispatch(box(s));
+                check(app.openSelect() == s, "the popup reopens");
+                app.dispatch(box(s));
+                check(app.openSelect() == nullptr, "clicking the open box closes it");
+                check(s->value() == "cherry", "toggling shut keeps the value");
+
+                // Hovering rows moves the highlight; leaving the list keeps it.
+                app.dispatch(box(s));
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerMove,
+                                             s->layoutX() + 5.0f,
+                                             s->layoutY() + s->layoutHeight() + 0.5f * kRowH, 0));
+                check(app.selectHighlight() == 0, "hovering the first row highlights it");
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerMove,
+                                             s->layoutX() + 5.0f, 200.0f, 0));
+                check(app.selectHighlight() == 0, "hovering off the list keeps it");
+                // ... and clicking far below closes without picking.
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerDown,
+                                             s->layoutX() + 5.0f, 200.0f, 1));
+                check(app.openSelect() == nullptr, "clicking outside closes the popup");
+                check(s->value() == "cherry", "closing outside keeps the value");
+
+                // Press-drag-release picks the released row too.
+                app.dispatch(box(s));
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerMove,
+                                             s->layoutX() + 5.0f,
+                                             s->layoutY() + s->layoutHeight() + 1.5f * kRowH, 1));
+                check(app.selectHighlight() == 1, "dragging highlights the row under it");
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerUp,
+                                             s->layoutX() + 5.0f,
+                                             s->layoutY() + s->layoutHeight() + 1.5f * kRowH, 1));
+                check(s->value() == "banana", "releasing over a row picks it");
+                check(app.openSelect() == nullptr, "the release closes the popup");
+
+                // Arrows move the selection while closed (value is banana).
+                sui::Document& appDoc = app.document();
+                appDoc.setFocused(s);
+                sui::InputEvent upEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x40000052);
+                sui::InputEvent downEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x40000051);
+                sui::InputEvent enterEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x0D);
+                sui::InputEvent escEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x1B);
+                app.dispatch(upEv);
+                check(s->value() == "apple", "Up moves a closed selection up");
+                app.dispatch(upEv);
+                check(s->value() == "apple", "Up clamps at the first option");
+                app.dispatch(downEv);
+                app.dispatch(downEv);
+                check(s->value() == "cherry", "Down moves a closed selection down");
+
+                // Enter opens on the selection; arrows move the highlight;
+                // Enter picks it; Escape only closes.
+                app.dispatch(upEv);
+                check(s->value() == "banana", "back to banana for the open test");
+                app.dispatch(enterEv);
+                check(app.openSelect() == s, "Enter opens the popup");
+                check(app.selectHighlight() == 1, "it opens highlighted on the selection");
+                app.dispatch(downEv);
+                check(app.selectHighlight() == 2, "Down moves the highlight");
+                app.dispatch(enterEv);
+                check(s->value() == "cherry", "Enter picks the highlight");
+                check(app.openSelect() == nullptr, "picking closes the popup");
+                app.dispatch(enterEv);
+                check(app.openSelect() == s, "Enter reopens");
+                app.dispatch(escEv);
+                check(app.openSelect() == nullptr, "Escape closes the popup");
+                check(s->value() == "cherry", "Escape keeps the value");
+
+                // A disabled select ignores clicks and keys.
+                app.dispatch(box(d));
+                check(app.openSelect() == nullptr, "clicking a disabled select opens nothing");
+                appDoc.setFocused(d);
+                app.dispatch(downEv);
+                check(d->value() == "one", "keys on a disabled select do nothing");
+
+                // An empty select opens onto no rows and ignores keys.
+                app.dispatch(box(e));
+                check(app.openSelect() == e, "an empty select still opens");
+                app.dispatch(escEv);
+                check(app.openSelect() == nullptr, "Escape closes the empty popup");
+                appDoc.setFocused(e);
+                app.dispatch(downEv);
+                check(app.openSelect() == nullptr, "keys on an empty select do nothing");
+
+                // Writing the value selects the match; no match falls back to
+                // the first option.
+                s->setValue("apple");
+                check(s->value() == "apple", "setValue selects the matching option");
+                s->setValue("zzz");
+                check(s->value() == "apple", "an unmatched setValue falls back to first");
+            }
+        }
+    }
+
     // A `<textarea>` edits its text content as a multiline value: typing works at
     // any caret position, Return starts a new line, Home/End bound the caret to
     // the line instead of the value, and Up/Down keep the column while changing

@@ -103,6 +103,17 @@ public:
     std::string value() const;
     void setValue(std::string text);
 
+    // A <select>'s options in document order, recursing through <optgroup>.
+    // Options never lay out as boxes of their own; the closed select paints the
+    // selected text itself and the open popup is an overlay.
+    std::vector<Element*> selectOptions() const;
+    // The option carrying `selected`, else the first option, else null.
+    Element* selectedOption() const;
+    // An option's display text: its text content stripped of surrounding
+    // whitespace with internal runs collapsed to one space, the way a browser
+    // reads it (so indented markup still measures and shows cleanly).
+    std::string optionLabel() const;
+
     // Tags outside the visual set (meta, title, script, link, #text) are
     // retained so they stay reachable by the linker, but layout and paint skip
     // them.
@@ -189,6 +200,7 @@ public:
 
 private:
     void collectText(std::string& out) const;
+    void collectOptions(std::vector<Element*>& out) const;
     void touch();
 
     std::string tag_;

@@ -538,6 +538,186 @@ void dragRange(Element& el, float x) {
     setRangeValue(el, lim.min + f * (lim.max - lim.min));
 }
 
+// Index of the selected option: the marked one, else the first, which reads
+// as selected. Callers check for an empty select first.
+std::size_t selectSelectedIndex(const Element& select) {
+    const std::vector<Element*> options = select.selectOptions();
+    for (std::size_t i = 0; i < options.size(); ++i) {
+        if (options[i]->hasAttribute("selected")) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+// Marks option `index` selected, clearing the rest. A disabled option (or an
+// out-of-range index) picks nothing and reports false, leaving an open popup
+// open.
+bool selectOption(Element& select, std::size_t index) {
+    const std::vector<Element*> options = select.selectOptions();
+    if (index >= options.size() || options[index]->hasAttribute("disabled")) {
+        return false;
+    }
+    for (Element* option : options) {
+        if (option == options[index]) {
+            option->setAttribute("selected", "");
+        } else {
+            option->removeAttribute("selected");
+        }
+    }
+    return true;
+}
+
+// Moves an option index by `delta`, skipping disabled options and clamping at
+// the ends. Closed-select arrows move the selection with this; open-popup
+// arrows move the highlight.
+std::size_t stepOptionIndex(const std::vector<Element*>& options, std::size_t from,
+                            int delta) {
+    if (options.empty()) {
+        return 0;
+    }
+    std::size_t i = std::min(from, options.size() - 1);
+    if (delta > 0) {
+        for (int n = 0; n < delta; ++n) {
+            std::size_t next = i + 1;
+            while (next < options.size() && options[next]->hasAttribute("disabled")) {
+                ++next;
+            }
+            if (next >= options.size()) {
+                break;
+            }
+            i = next;
+        }
+    } else {
+        for (int n = 0; n < -delta; ++n) {
+            if (i == 0) {
+                break;
+            }
+            std::size_t prev = i - 1;
+            while (prev > 0 && options[prev]->hasAttribute("disabled")) {
+                --prev;
+            }
+            if (options[prev]->hasAttribute("disabled")) {
+                break;
+            }
+            i = prev;
+        }
+    }
+    return i;
+}
+
+// The open popup's list rect in window coordinates: one row per option, hung
+// below the select's border box and exactly its width. The row height is the
+// select's own line, so paint and hit-test agree with or without a font.
+struct SelectPopupGeom {
+    float x = 0.0f;
+    float y = 0.0f;
+    float w = 0.0f;
+    float rowH = 0.0f;
+    std::size_t rows = 0;
+};
+
+SelectPopupGeom selectPopupGeom(const Element& select, float offX, float offY,
+                                const ComputedStyle& style, std::size_t count) {
+    return {select.layoutX() - offX, select.layoutY() - offY + select.layoutHeight(),
+            select.layoutWidth(), style.fontSize * style.lineHeight, count};
+}
+
+// The option row under (x, y), or -1 outside the list.
+int selectPopupRowAt(const SelectPopupGeom& geom, float x, float y) {
+    if (geom.rows == 0 || geom.rowH <= 0.0f || x < geom.x || x >= geom.x + geom.w ||
+        y < geom.y) {
+        return -1;
+    }
+    const std::size_t row = static_cast<std::size_t>((y - geom.y) / geom.rowH);
+    return row < geom.rows ? static_cast<int>(row) : -1;
+}
+
+// The select's paint offsets (ancestor scrolls) from a paint-op sequence, for
+// positioning its popup the way hit-testing positions the select itself.
+// False when the select paints no box (author `display:none`, say).
+bool selectBoxOffset(const std::vector<PaintOp>& ops, const Element* el, float& dx,
+                     float& dy) {
+    for (const auto& op : ops) {
+        if (op.kind == PaintOp::Kind::Box && op.item.el == el) {
+            dx = op.item.dx;
+            dy = op.item.dy;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Whether `el` is still reachable from the document root. The open select is
+// a raw pointer into the tree, so a mutation that drops it must close the
+// popup rather than paint or hit-test a freed element.
+bool isReachable(Element& root, const Element* el) {
+    if (&root == el) {
+        return true;
+    }
+    for (const auto& child : root.children()) {
+        if (child && !child->isTextNode() && isReachable(*child, el)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Paints an open select's dropdown: a bordered list below the select's border
+// box, one row per option, the highlighted row accented and the selected row
+// shaded. Runs after the whole frame with no ancestor clip, the way a browser
+// lifts a popup above the page. Row text needs a font; the list chrome paints
+// without one.
+void paintSelectPopup(Element& select, Renderer& renderer, SDL_Renderer* sdlRenderer,
+                      const ComputedStyle& style, TextFont& font, float offX, float offY,
+                      std::size_t highlight, float opacity) {
+    const std::vector<Element*> options = select.selectOptions();
+    if (options.empty()) {
+        return;
+    }
+    const SelectPopupGeom geom = selectPopupGeom(select, offX, offY, style, options.size());
+    const std::size_t selected = selectSelectedIndex(select);
+    renderer.fillRect(SDL_FRect{geom.x, geom.y, geom.w, geom.rowH * static_cast<float>(geom.rows)},
+                      multiplyAlpha(toColor(style.backgroundColor), opacity));
+    for (std::size_t i = 0; i < options.size(); ++i) {
+        const SDL_FRect row{geom.x, geom.y + geom.rowH * static_cast<float>(i), geom.w,
+                            geom.rowH};
+        const bool hot = i == highlight;
+        if (hot) {
+            renderer.fillRect(row, multiplyAlpha(sui::Color{59, 130, 246, 255}, opacity));
+        } else if (i == selected) {
+            renderer.fillRect(row, multiplyAlpha(sui::Color{63, 63, 70, 255}, opacity));
+        }
+        if (!font.hasFont()) {
+            continue;
+        }
+        const std::string label = options[i]->optionLabel();
+        if (label.empty()) {
+            continue;
+        }
+        const SDL_Color base =
+            hot ? SDL_Color{255, 255, 255, 255}
+                : SDL_Color{style.color.r, style.color.g, style.color.b, style.color.a};
+        SDL_Texture* texture = font.renderText(
+            sdlRenderer, label, style.fontSize,
+            SDL_Color{base.r, base.g, base.b,
+                      static_cast<Uint8>(static_cast<float>(base.a) * opacity)});
+        if (!texture) {
+            continue;
+        }
+        float texW = 0.0f, texH = 0.0f;
+        SDL_GetTextureSize(texture, &texW, &texH);
+        const SDL_FRect dst{std::floor(geom.x + 8.0f),
+                            std::floor(geom.y + geom.rowH * static_cast<float>(i)), texW,
+                            texH};
+        SDL_RenderTexture(sdlRenderer, texture, nullptr, &dst);
+        SDL_DestroyTexture(texture);
+    }
+    renderer.strokeRect(
+        SDL_FRect{geom.x, geom.y, geom.w, geom.rowH * static_cast<float>(geom.rows)},
+        multiplyAlpha(toColor(style.borderColor), opacity), 1.0f);
+}
+
 // SDL modifier keycodes (LCTRL..RGUI and MODE). A modifier never moves the
 // caret or changes a field's value, so it must not restart the caret blink.
 // The OS repeats a held modifier (Shift in particular); restarting the blink on
@@ -1255,6 +1435,33 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         SDL_DestroyTexture(texture);
     }
 
+    // A closed select shows the selected option's text and a drop arrow. Its
+    // options never lay out, so there are no text runs to draw; like an input
+    // the text may spill when an author under-sizes the box.
+    if (el.tag() == "select") {
+        const SDL_FRect content{el.contentX() - offX, el.contentY() - offY,
+                                el.contentWidth(), el.contentHeight()};
+        const std::string label = el.value();
+        if (!label.empty()) {
+            SDL_Texture* texture = font.renderText(
+                sdlRenderer, label, s.fontSize,
+                SDL_Color{s.color.r, s.color.g, s.color.b,
+                          static_cast<Uint8>(static_cast<float>(s.color.a) * opacity)});
+            if (texture) {
+                float texW = 0.0f, texH = 0.0f;
+                SDL_GetTextureSize(texture, &texW, &texH);
+                const SDL_FRect dst{std::floor(content.x), std::floor(content.y), texW,
+                                    texH};
+                SDL_RenderTexture(sdlRenderer, texture, nullptr, &dst);
+                SDL_DestroyTexture(texture);
+            }
+        }
+        const float ax = content.x + content.w - 7.0f;
+        const float ay = content.y + content.h * 0.5f;
+        renderer.fillPolygon({{ax - 5.0f, ay - 2.5f}, {ax + 5.0f, ay - 2.5f}, {ax, ay + 3.5f}},
+                             multiplyAlpha(toColor(s.color), opacity));
+    }
+
     if (caretBytePos >= 0 && isEditableField(&el) && !el.hasAttribute("disabled")) {
         float caretX = 0.0f;
         float caretY = 0.0f;
@@ -1343,6 +1550,9 @@ void Application::setDocument(std::unique_ptr<Document> document) {
     scriptContext_.document = document_.get();
     scriptContext_.styles = &resolver_;
     script::setContext(&scriptContext_);
+    // The open popup points into the old tree.
+    openSelect_ = nullptr;
+    selectHighlight_ = 0;
 }
 
 WindowConfig Application::windowConfigFrom(Document& document) {
@@ -1476,11 +1686,50 @@ void Application::dispatch(const InputEvent& event) {
     // A key event has no coordinates and belongs to whatever holds focus; a pointer
     // event belongs to whatever is under it in paint order (topmost).
     Element* target = nullptr;
+    // A pick from an open select popup retargets onto the select itself, and a
+    // click on its own open box only closes it, so the toggle below must not
+    // reopen it on the same press.
+    bool suppressSelectToggle = false;
     if (keyboard) {
         target = document_->focused();
     } else {
         const auto ops = computePaintOps(*document_->root(), resolver_);
         target = hitTestPaintOrder(ops, event.x, event.y);
+        if (openSelect_ && !isReachable(*document_->root(), openSelect_)) {
+            openSelect_ = nullptr;
+        }
+        if (openSelect_ && event.kind == InputKind::PointerDown) {
+            // The popup is an overlay, not an element, so it never wins the hit
+            // test above; check its rows first. The select's own scroll offsets
+            // come from its paint op, the way hit-testing positions it.
+            float offX = 0.0f, offY = 0.0f;
+            if (!selectBoxOffset(ops, openSelect_, offX, offY)) {
+                // Hidden while open (author `display:none`, say): drop the popup.
+                openSelect_ = nullptr;
+            } else {
+                const ComputedStyle style = resolver_.resolve(*openSelect_);
+                const SelectPopupGeom geom = selectPopupGeom(
+                    *openSelect_, offX, offY, style, openSelect_->selectOptions().size());
+                const int row = selectPopupRowAt(geom, event.x, event.y);
+                if (row >= 0) {
+                    // A pick lands before any `onclick` handler so the handler
+                    // observes the control's new value.
+                    Element* picked = openSelect_;
+                    if (selectOption(*picked, static_cast<std::size_t>(row))) {
+                        openSelect_ = nullptr;
+                    }
+                    target = picked;
+                    suppressSelectToggle = true;
+                } else if (target == openSelect_) {
+                    // Toggle off: the press closes, and must not reopen below.
+                    openSelect_ = nullptr;
+                    suppressSelectToggle = true;
+                } else {
+                    // Anywhere else closes; normal handling continues.
+                    openSelect_ = nullptr;
+                }
+            }
+        }
     }
 
     // Interactive state is set first and unconditionally. A move that changes what
@@ -1512,6 +1761,23 @@ void Application::dispatch(const InputEvent& event) {
                 // ... or moves the focused range's thumb.
                 if (isRangeControl(focused)) {
                     dragRange(*focused, event.x);
+                }
+            }
+            // Hovering an open select popup moves its highlight. The row geometry
+            // comes from the select's paint offsets, the way hit-testing
+            // positions it; the highlight needs no document mutation to repaint
+            // because the move itself marks the frame stale.
+            if (openSelect_ && document_->root() && isReachable(*document_->root(), openSelect_)) {
+                const auto hoverOps = computePaintOps(*document_->root(), resolver_);
+                float offX = 0.0f, offY = 0.0f;
+                if (selectBoxOffset(hoverOps, openSelect_, offX, offY)) {
+                    const ComputedStyle style = resolver_.resolve(*openSelect_);
+                    const SelectPopupGeom geom = selectPopupGeom(
+                        *openSelect_, offX, offY, style, openSelect_->selectOptions().size());
+                    const int row = selectPopupRowAt(geom, event.x, event.y);
+                    if (row >= 0) {
+                        selectHighlight_ = static_cast<std::size_t>(row);
+                    }
                 }
             }
             return;
@@ -1557,9 +1823,38 @@ void Application::dispatch(const InputEvent& event) {
             if (target) {
                 dragRange(*target, event.x);
             }
+            // A select opens its popup on click, or closes an open one, before
+            // any `onclick` handler so the handler observes the new state. A
+            // pick or a toggle-off on the same press suppresses reopening.
+            if (target && target->tag() == "select" && !target->hasAttribute("disabled") &&
+                !suppressSelectToggle) {
+                if (openSelect_ == target) {
+                    openSelect_ = nullptr;
+                } else {
+                    openSelect_ = target;
+                    selectHighlight_ = selectSelectedIndex(*target);
+                }
+            }
             break;
         case InputKind::PointerUp:
             resolver_.setActive(nullptr);
+            // Releasing over an open popup's row picks it, so press-drag-release
+            // works alongside click-click. Anything else leaves the popup open.
+            if (openSelect_ && document_->root() &&
+                isReachable(*document_->root(), openSelect_)) {
+                const auto upOps = computePaintOps(*document_->root(), resolver_);
+                float offX = 0.0f, offY = 0.0f;
+                if (selectBoxOffset(upOps, openSelect_, offX, offY)) {
+                    const ComputedStyle style = resolver_.resolve(*openSelect_);
+                    const SelectPopupGeom geom = selectPopupGeom(
+                        *openSelect_, offX, offY, style, openSelect_->selectOptions().size());
+                    const int row = selectPopupRowAt(geom, event.x, event.y);
+                    if (row >= 0 &&
+                        selectOption(*openSelect_, static_cast<std::size_t>(row))) {
+                        openSelect_ = nullptr;
+                    }
+                }
+            }
             break;
         case InputKind::Wheel: {
             if (!target) {
@@ -1838,6 +2133,50 @@ void Application::dispatch(const InputEvent& event) {
         }
     }
 
+    // A focused select picks on arrows/Enter/Escape before any handler, so an
+    // `onkeydown` handler reads the value the control now holds. Arrows move
+    // the selection when closed and the highlight when open; Enter opens, then
+    // picks the highlight; Escape closes. There is no type-ahead.
+    if (target && event.kind == InputKind::KeyDown && target->tag() == "select" &&
+        !target->hasAttribute("disabled")) {
+        constexpr int kReturn = 0x0D;
+        constexpr int kEscape = 0x1B;
+        constexpr int kSpace = 0x20;
+        constexpr int kRight = 0x4000004F;
+        constexpr int kLeft = 0x40000050;
+        constexpr int kUp = 0x40000052;
+        constexpr int kDown = 0x40000051;
+        const std::vector<Element*> options = target->selectOptions();
+        const bool up = event.key == kUp || event.key == kLeft;
+        const bool down = event.key == kDown || event.key == kRight;
+        const bool open = openSelect_ == target;
+        if (event.key == kEscape) {
+            // Closing works with no options at all.
+            if (open) {
+                openSelect_ = nullptr;
+            }
+        } else if (!options.empty()) {
+            if (open) {
+                if (up || down) {
+                    selectHighlight_ = stepOptionIndex(options, selectHighlight_, up ? -1 : 1);
+                } else if (event.key == kReturn || event.key == kSpace) {
+                    if (selectOption(*target, selectHighlight_)) {
+                        openSelect_ = nullptr;
+                    }
+                }
+            } else if (up || down) {
+                const std::size_t to =
+                    stepOptionIndex(options, selectSelectedIndex(*target), up ? -1 : 1);
+                if (to != selectSelectedIndex(*target)) {
+                    selectOption(*target, to);
+                }
+            } else if (event.key == kReturn || event.key == kSpace) {
+                openSelect_ = target;
+                selectHighlight_ = selectSelectedIndex(*target);
+            }
+        }
+    }
+
     if (!target) {
         return;
     }
@@ -2078,6 +2417,11 @@ void Application::run() {
                     computePaintOps(*document_->root(), resolver_);
                 SDL_Renderer* sdlRenderer = platform_->renderer();
                 std::vector<GroupFrame> groups;
+                // Where the open select painted this frame, if it did: an open
+                // popup overlays the whole frame, so its list is positioned from
+                // the select's own offsets rather than re-derived.
+                float popupOffX = 0.0f, popupOffY = 0.0f, popupOpacity = 1.0f;
+                bool popupFound = false;
                 for (const PaintOp& op : paintOps) {
                     if (op.kind == PaintOp::Kind::BeginGroup) {
                         const int width = static_cast<int>(std::ceil(op.bounds.w));
@@ -2288,6 +2632,12 @@ void Application::run() {
                             groupOpacity *= group.alpha;
                         }
                     }
+                    if (openSelect_ && item.el == openSelect_) {
+                        popupOffX = item.dx + ox;
+                        popupOffY = item.dy + oy;
+                        popupOpacity = groupOpacity;
+                        popupFound = true;
+                    }
                     if (item.clip.w > 0.0f && item.clip.h > 0.0f) {
                         const SDL_Rect rect{static_cast<int>(std::floor(item.clip.x - ox)),
                                             static_cast<int>(std::floor(item.clip.y - oy)),
@@ -2317,6 +2667,23 @@ void Application::run() {
                     paintBox(*item.el, renderer, sdlRenderer, resolver_, *font_, groupOpacity,
                              *images_, item.dx + ox, item.dy + oy, caretPos, showCaret, selStart, selEnd,
                              compText, compCursor);
+                }
+                // An open select popup floats above the whole frame with no ancestor
+                // clip, the way a browser lifts a dropdown. A select that painted
+                // no box was hidden while open, so the popup closes with it. (An
+                // ancestor transform is not followed: the list hangs below the
+                // select's untransformed position.)
+                if (openSelect_ && document_->root() &&
+                    !isReachable(*document_->root(), openSelect_)) {
+                    openSelect_ = nullptr;
+                }
+                if (openSelect_ && popupFound) {
+                    SDL_SetRenderClipRect(sdlRenderer, nullptr);
+                    paintSelectPopup(*openSelect_, renderer, sdlRenderer,
+                                     resolver_.resolve(*openSelect_), *font_, popupOffX,
+                                     popupOffY, selectHighlight_, popupOpacity);
+                } else if (openSelect_) {
+                    openSelect_ = nullptr;
                 }
             } else {
                 SDL_FRect panel{40.0f, 40.0f, static_cast<float>(width) - 80.0f,
@@ -2374,6 +2741,8 @@ void Application::shutdown() {
     }
     // Before the resources, since the cache borrows them.
     lastFocused_ = nullptr;
+    openSelect_ = nullptr;
+    selectHighlight_ = 0;
     caretBytePos_ = 0;
     selectionAnchor_ = 0;
     compositionText_.clear();

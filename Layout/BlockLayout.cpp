@@ -329,11 +329,39 @@ public:
         }
     }
 
+    void applySelectSize(Element& el, ComputedStyle& s) const {
+        if (el.tag() != "select") {
+            return;
+        }
+        // A closed combo sizes like a replaced element: wide enough for the
+        // longest option plus the drop arrow, one line tall.
+        if (s.width.isAuto()) {
+            float text = 0.0f;
+            if (font_ && font_->hasFont()) {
+                for (Element* option : el.selectOptions()) {
+                    text = std::max(text, font_->measureText(option->optionLabel(), s.fontSize));
+                }
+            } else {
+                std::size_t longest = 0;
+                for (Element* option : el.selectOptions()) {
+                    longest = std::max(longest, option->optionLabel().size());
+                }
+                text = static_cast<float>(longest) * s.fontSize * 0.5f;
+            }
+            constexpr float kArrowRoom = 24.0f;
+            s.width = Length(text + kArrowRoom);
+        }
+        if (s.height.isAuto()) {
+            s.height = Length(metricsFor(font_, s).lineHeight);
+        }
+    }
+
     // Lays out `el` with the given available width. Returns the outer height
     // consumed, margins included.
     float run(Element& el, float availableWidth, float originX, float originY) {
         ComputedStyle s = resolver_.resolve(el);
         applyTextAreaSize(el, s);
+        applySelectSize(el, s);
         const UsedBox box = usedBox(s, availableWidth);
         el.clearTextRuns();
         if (s.display == ComputedStyle::None || !s.visible) {
