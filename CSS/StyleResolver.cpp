@@ -5128,6 +5128,42 @@ bool selectorMatches(const SimpleSelector& selector, const Element& element,
             }
             continue;
         }
+        if (pseudo == PseudoClass::NthLastOfType) {
+            int index = 0;
+            int seen = 0;
+            const std::vector<const Element*> siblings = elementSiblings(element);
+            for (std::size_t i = siblings.size(); i-- > 0;) {
+                if (siblings[i]->tag() == element.tag()) {
+                    ++seen;
+                    if (siblings[i] == &element) {
+                        index = seen;
+                    }
+                }
+            }
+            if (index == 0) {
+                return false;
+            }
+            if (!nthChildMatches(selector.pseudoArgument, index)) {
+                return false;
+            }
+            continue;
+        }
+        if (pseudo == PseudoClass::OnlyOfType) {
+            int count = 0;
+            bool self = false;
+            for (const Element* sibling : elementSiblings(element)) {
+                if (sibling->tag() == element.tag()) {
+                    ++count;
+                    if (sibling == &element) {
+                        self = true;
+                    }
+                }
+            }
+            if (count != 1 || !self) {
+                return false;
+            }
+            continue;
+        }
         if (pseudo == PseudoClass::Has) {
             // `:has()` looks at the element's subtree and following siblings, so it
             // is evaluated against the element itself rather than an ancestor.

@@ -377,6 +377,8 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
                 out.pseudoClasses.push_back(PseudoClass::LastChild);
             } else if (name == "only-child") {
                 out.pseudoClasses.push_back(PseudoClass::OnlyChild);
+            } else if (name == "only-of-type") {
+                out.pseudoClasses.push_back(PseudoClass::OnlyOfType);
             } else if (name == "root") {
                 out.pseudoClasses.push_back(PseudoClass::Root);
             } else if (name == "nth-child") {
@@ -387,6 +389,9 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
                 // skip args
             } else if (name == "nth-last-child") {
                 out.pseudoClasses.push_back(PseudoClass::NthLastChild);
+                // skip args
+            } else if (name == "nth-last-of-type") {
+                out.pseudoClasses.push_back(PseudoClass::NthLastOfType);
                 // skip args
             } else if (name == "not") {
                 out.pseudoClasses.push_back(PseudoClass::Not);
@@ -435,6 +440,8 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
                 out.pseudoClasses.push_back(PseudoClass::LastChild);
             } else if (name == "only-child") {
                 out.pseudoClasses.push_back(PseudoClass::OnlyChild);
+            } else if (name == "only-of-type") {
+                out.pseudoClasses.push_back(PseudoClass::OnlyOfType);
             } else if (name == "root") {
                 out.pseudoClasses.push_back(PseudoClass::Root);
             } else if (name == "nth-child") {
@@ -445,6 +452,9 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
                 // skip args
             } else if (name == "nth-last-child") {
                 out.pseudoClasses.push_back(PseudoClass::NthLastChild);
+                // skip args
+            } else if (name == "nth-last-of-type") {
+                out.pseudoClasses.push_back(PseudoClass::NthLastOfType);
                 // skip args
             } else if (name == "focus-within") {
                 out.pseudoClasses.push_back(PseudoClass::FocusWithin);

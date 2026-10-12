@@ -297,6 +297,11 @@ void testStructuralPseudoClasses() {
     check(!on("p:nth-last-child(1)", *p1), "nth-last-child(1) misses the first");
     check(on("p:only-child", *only), "only-child matches a lone child");
     check(!on("p:only-child", *p1), "only-child misses among siblings");
+    check(on("span:only-of-type", *mid), "only-of-type matches a lone tag");
+    check(!on("p:only-of-type", *p1), "only-of-type misses a repeated tag");
+    check(on("p:nth-last-of-type(1)", *p2), "nth-last-of-type(1) matches the last paragraph");
+    check(on("p:nth-last-of-type(2)", *p1), "nth-last-of-type counts back within the tag");
+    check(!on("span:nth-last-of-type(2)", *mid), "nth-last-of-type misses past the lone tag");
 
     // Generated boxes never count either: a `::before` on the parent must not
     // shift the paragraphs it precedes.
