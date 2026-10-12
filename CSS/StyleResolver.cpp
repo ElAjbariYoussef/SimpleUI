@@ -4306,6 +4306,17 @@ bool selectorMatches(const SimpleSelector& selector, const Element& element,
             }
             continue;
         }
+        if (pseudo == PseudoClass::Checked) {
+            // `:checked` is a form-control state: a checkable <input> (checkbox
+            // or radio) carrying the boolean `checked` attribute.
+            const std::string_view type = element.attribute("type");
+            const bool checkable =
+                element.tag() == "input" && (type == "checkbox" || type == "radio");
+            if (!checkable || !element.hasAttribute("checked")) {
+                return false;
+            }
+            continue;
+        }
         if (pseudo == PseudoClass::FirstChild || pseudo == PseudoClass::LastChild) {
             const Element* p = element.parent();
             if (!p) {
@@ -4482,6 +4493,9 @@ void applyCssWideKeyword(ComputedStyle& style, Element* element,
     ComputedStyle source;
     if (value == "revert") {
         source = element ? defaultStyleFor(element->tag()) : ComputedStyle();
+        if (element && element->tag() == "input") {
+            applyInputTypeStyle(source, element->attribute("type"));
+        }
     } else if (value == "initial") {
         source = ComputedStyle();
     } else {
@@ -4499,6 +4513,9 @@ void applyCssWideKeyword(ComputedStyle& style, Element* element,
 ComputedStyle StyleResolver::resolveWithParent(Element& element,
                                                const ComputedStyle& parent) const {
     ComputedStyle style = defaultStyleFor(element.tag());
+    if (element.tag() == "input") {
+        applyInputTypeStyle(style, element.attribute("type"));
+    }
     inheritInto(style, parent);
 
     // `!important` is a cascade level of its own, not a tiebreak: it outranks a

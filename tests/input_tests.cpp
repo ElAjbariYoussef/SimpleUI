@@ -465,6 +465,64 @@ int main() {
         }
     }
 
+    // A checkbox flips on click, and a radio takes the click for its group,
+    // clearing `checked` from the siblings that share its `name`. A disabled
+    // control ignores the click.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<input id=\"cb\" type=\"checkbox\"/>"
+            "<input id=\"r1\" type=\"radio\" name=\"g\"/>"
+            "<input id=\"r2\" type=\"radio\" name=\"g\"/>"
+            "<input id=\"dcb\" type=\"checkbox\" disabled/>"
+            "</body></sui>", err);
+        check(doc != nullptr, "control test document parsed");
+        if (doc) {
+            sui::Element* cb = doc->getElementById("cb");
+            sui::Element* r1 = doc->getElementById("r1");
+            sui::Element* r2 = doc->getElementById("r2");
+            sui::Element* dcb = doc->getElementById("dcb");
+            check(cb && r1 && r2 && dcb, "control elements found");
+            if (cb && r1 && r2 && dcb) {
+                app.setDocument(std::move(doc));
+
+                // A pointer press lands by geometry, so the document needs a
+                // layout pass before the click can find a control.
+                sui::StyleResolver layoutResolver;
+                sui::LayoutInput input;
+                input.resolver = &layoutResolver;
+                input.viewportWidth = 400.0f;
+                input.viewportHeight = 300.0f;
+                sui::BlockLayout().layout(app.document().root(), input);
+
+                const auto click = [&](sui::Element* el) {
+                    app.dispatch(sui::InputEvent(sui::InputKind::PointerDown,
+                                                 el->layoutX() + el->layoutWidth() * 0.5f,
+                                                 el->layoutY() + el->layoutHeight() * 0.5f, 1));
+                };
+
+                check(!cb->hasAttribute("checked"), "a checkbox starts unchecked");
+                click(cb);
+                check(cb->hasAttribute("checked"), "clicking a checkbox checks it");
+                click(cb);
+                check(!cb->hasAttribute("checked"), "clicking a checkbox again unchecks it");
+
+                click(r1);
+                check(r1->hasAttribute("checked"), "clicking a radio checks it");
+                click(r2);
+                check(r2->hasAttribute("checked"), "clicking the other radio checks it");
+                check(!r1->hasAttribute("checked"),
+                      "a radio click clears the rest of its group");
+
+                click(dcb);
+                check(!dcb->hasAttribute("checked"),
+                      "clicking a disabled checkbox does nothing");
+            }
+        }
+    }
+
     // A `<textarea>` edits its text content as a multiline value: typing works at
     // any caret position, Return starts a new line, Home/End bound the caret to
     // the line instead of the value, and Up/Down keep the column while changing

@@ -1460,6 +1460,78 @@ void testDefaultStyles() {
     check(heading.fontBold, "h1 is bold");
 }
 
+// A checkbox/radio is a control, not a text field: the UA style gives it a fixed
+// square instead of the input padding, and `:checked` reads the attribute.
+void testFormControlDefaults() {
+    const auto checked = sui::CSSParser::parseSelector("input:checked");
+    check(!checked.unsupported, ":checked parses as a supported selector");
+    bool checkedPseudo = false;
+    for (const sui::PseudoClass pseudo : checked.pseudoClasses) {
+        if (pseudo == sui::PseudoClass::Checked) {
+            checkedPseudo = true;
+        }
+    }
+    check(checkedPseudo, ":checked records the Checked pseudo-class");
+
+    auto document = parseOrNull(
+        "<sui><body><input id=\"cb\" type=\"checkbox\"/>"
+        "<input id=\"rb\" type=\"radio\" name=\"g\"/>"
+        "<input id=\"on\" type=\"checkbox\" checked/>"
+        "<input id=\"txt\" type=\"text\"/></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* cb = document->getElementById("cb");
+    Element* rb = document->getElementById("rb");
+    Element* on = document->getElementById("on");
+    Element* txt = document->getElementById("txt");
+    check(cb && rb && on && txt, "form-control elements found");
+    if (!cb || !rb || !on || !txt) {
+        return;
+    }
+
+    check(!selectorMatches(checked, *cb), ":checked misses an unchecked box");
+    check(selectorMatches(checked, *on), ":checked matches a checked box");
+    // `:checked` is a control state, not a bare attribute test: a text input
+    // carrying `checked` still does not match.
+    txt->setAttribute("checked", "");
+    check(!selectorMatches(checked, *txt), ":checked does not match a text input");
+    txt->removeAttribute("checked");
+
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    const sui::ComputedStyle box = resolver.resolve(*cb);
+    check(box.padding.top.value == 0.0f && box.padding.left.value == 0.0f,
+          "a checkbox has no text padding");
+    check(box.width.value == 13.0f && box.height.value == 13.0f,
+          "a checkbox is a fixed 13px control");
+    check(resolver.resolve(*rb).width.value == 13.0f,
+          "a radio is the same size as a checkbox");
+    check(resolver.resolve(*rb).borderRadii.topLeft.x.unit == sui::Length::Percent,
+          "a radio's corners are fully rounded");
+    check(resolver.resolve(*txt).padding.left.value == 8.0f,
+          "a text input keeps its UA padding");
+
+    // `:checked` drives the cascade, so an attribute flip restyles the element.
+    sui::StyleResolver themed;
+    themed.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } input:checked { background-color: #ff0000 }"));
+    check(themed.resolve(*cb).backgroundColor.r != 0xff, "an unchecked box is unstyled");
+    cb->setAttribute("checked", "");
+    check(themed.resolve(*cb).backgroundColor.r == 0xff,
+          ":checked applies once the attribute is set");
+    cb->removeAttribute("checked");
+    check(themed.resolve(*cb).backgroundColor.r != 0xff,
+          "clearing checked drops the rule");
+
+    // The fixed size survives layout: 13px of content plus a 1px border.
+    sui::StyleResolver layout;
+    layout.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    layoutRoot(*document, layout, 400.0f);
+    check(cb->layoutWidth() == 15.0f && cb->layoutHeight() == 15.0f,
+          "a checkbox lays out as a 15px border box");
+}
+
 // Phrasing tags that defaulted to block. Each one forced a line break, and the text
 // either side of it laid out into no run at all, so it was never drawn -- correct
 // markup lost its content rather than simply missing its decoration.
@@ -5244,6 +5316,7 @@ int main() {
     testInheritance();
     testChildOverridesInherited();
     testDefaultStyles();
+    testFormControlDefaults();
     testPhrasingTagsStayInline();
     testUnknownPropertyIsReported();
     testCursorProperty();

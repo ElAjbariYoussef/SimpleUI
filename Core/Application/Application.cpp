@@ -387,10 +387,62 @@ void paintTextShadow(const ComputedStyle::TextShadow& shadow, const Element::Tex
     }
 }
 
-// A focused text field (an <input> or <textarea>) edits its value. Textareas are
-// always textual; inputs are, unless their type is a control such as button.
+// A focused text field (an <input> or <textarea>) edits its value. Textareas
+// are always textual; an input is textual unless its type names a control such
+// as checkbox, radio, button, range, file, or color.
 bool isEditableField(const Element* el) {
-    return el && (el->tag() == "input" || el->tag() == "textarea");
+    if (!el) {
+        return false;
+    }
+    if (el->tag() == "textarea") {
+        return true;
+    }
+    if (el->tag() != "input") {
+        return false;
+    }
+    const std::string_view type = el->attribute("type");
+    return type.empty() || type == "text" || type == "password" ||
+           type == "search" || type == "email" || type == "url" ||
+           type == "tel" || type == "number";
+}
+
+// A checkbox/radio keeps its state as a boolean `checked` attribute.
+void setChecked(Element& el, bool checked) {
+    if (checked) {
+        el.setAttribute("checked", "");
+    } else {
+        el.removeAttribute("checked");
+    }
+}
+
+// Clears `checked` from every radio under `root` that shares `name` with
+// `except`. The engine has no form scoping, so the group is document-wide.
+void clearRadioGroup(Element& root, const Element& except, std::string_view name) {
+    for (const auto& child : root.children()) {
+        if (!child || child->isTextNode()) {
+            continue;
+        }
+        if (child.get() != &except && child->tag() == "input" &&
+            child->attribute("type") == "radio" && child->attribute("name") == name) {
+            setChecked(*child, false);
+        }
+        clearRadioGroup(*child, except, name);
+    }
+}
+
+// Applies the click a control owns: a checkbox flips, a radio takes the state
+// and drops it from the rest of its group. Other elements do nothing here.
+void activateControl(Element& el, Element& root) {
+    if (el.hasAttribute("disabled") || el.tag() != "input") {
+        return;
+    }
+    const std::string_view type = el.attribute("type");
+    if (type == "checkbox") {
+        setChecked(el, !el.hasAttribute("checked"));
+    } else if (type == "radio") {
+        clearRadioGroup(root, el, el.attribute("name"));
+        setChecked(el, true);
+    }
 }
 
 // SDL modifier keycodes (LCTRL..RGUI and MODE). A modifier never moves the
@@ -897,6 +949,34 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         }
     }
 
+    // A checked checkbox/radio draws its own control: a tick for the box, a dot
+    // for the circle. The background and border were painted above, and neither
+    // mark needs a font.
+    if (el.tag() == "input" && el.hasAttribute("checked")) {
+        const std::string_view type = el.attribute("type");
+        if (type == "checkbox" || type == "radio") {
+            const SDL_FRect content{el.contentX() - offX, el.contentY() - offY,
+                                    el.contentWidth(), el.contentHeight()};
+            if (content.w > 0.0f && content.h > 0.0f) {
+                const sui::Color mark = multiplyAlpha(toColor(s.color), opacity);
+                if (type == "radio") {
+                    renderer.fillCircle(content.x + content.w * 0.5f,
+                                        content.y + content.h * 0.5f,
+                                        std::min(content.w, content.h) * 0.28f, mark);
+                } else {
+                    const SDL_FPoint a{content.x + content.w * 0.20f,
+                                       content.y + content.h * 0.52f};
+                    const SDL_FPoint b{content.x + content.w * 0.42f,
+                                       content.y + content.h * 0.76f};
+                    const SDL_FPoint c{content.x + content.w * 0.82f,
+                                       content.y + content.h * 0.24f};
+                    renderer.line(a.x, a.y, b.x, b.y, mark, 1.5f);
+                    renderer.line(b.x, b.y, c.x, c.y, mark, 1.5f);
+                }
+            }
+        }
+    }
+
     if (!font.hasFont()) {
         return;
     }
@@ -1347,6 +1427,11 @@ void Application::dispatch(const InputEvent& event) {
                 selectionAnchor_ = 0;
                 compositionText_.clear();
                 compositionCursor_ = 0;
+            }
+            // A checkbox/radio toggles on click, before any `onclick` handler
+            // so the handler observes the control's new state.
+            if (target && document_->root()) {
+                activateControl(*target, *document_->root());
             }
             break;
         case InputKind::PointerUp:

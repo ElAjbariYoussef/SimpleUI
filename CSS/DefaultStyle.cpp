@@ -250,4 +250,21 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
     return block();
 }
 
+void applyInputTypeStyle(ComputedStyle& style, std::string_view type) {
+    if (type != "checkbox" && type != "radio") {
+        return;
+    }
+    // A checkbox or radio is a control-sized box rather than a text field: no
+    // padding, a fixed square, and (for the radio) a fully round corner.
+    constexpr float kSize = 13.0f;
+    style.padding = {0.0f, 0.0f, 0.0f, 0.0f};
+    style.width = Length(kSize);
+    style.height = Length(kSize);
+    const Length radius = type == "radio" ? Length(Length::Percent, 50.0f) : Length(2.0f);
+    style.borderRadii.topLeft = {radius, radius};
+    style.borderRadii.topRight = {radius, radius};
+    style.borderRadii.bottomRight = {radius, radius};
+    style.borderRadii.bottomLeft = {radius, radius};
+}
+
 }  // namespace sui

@@ -9,4 +9,10 @@ namespace sui {
 
 ComputedStyle defaultStyleFor(std::string_view tag);
 
+// Layers the type-specific form-control defaults over the generic `<input>`
+// UA style: a checkbox/radio is a control-sized square or circle with no
+// text padding, rather than the text-field chrome `defaultStyleFor` builds for
+// `<input>`.
+void applyInputTypeStyle(ComputedStyle& style, std::string_view type);
+
 }  // namespace sui

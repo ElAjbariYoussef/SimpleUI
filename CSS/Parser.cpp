@@ -100,6 +100,8 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
                 out.pseudoClasses.push_back(PseudoClass::Active);
             } else if (name == "focus") {
                 out.pseudoClasses.push_back(PseudoClass::Focus);
+            } else if (name == "checked") {
+                out.pseudoClasses.push_back(PseudoClass::Checked);
             } else if (name == "first-child") {
                 out.pseudoClasses.push_back(PseudoClass::FirstChild);
             } else if (name == "last-child") {
