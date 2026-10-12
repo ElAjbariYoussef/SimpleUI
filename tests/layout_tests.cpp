@@ -1532,6 +1532,44 @@ void testFormControlDefaults() {
           "a checkbox lays out as a 15px border box");
 }
 
+// A range is a fixed-size groove with no text-field chrome: no padding, no
+// border, and a transparent background. Author CSS still wins over the UA size.
+void testRangeDefaults() {
+    auto document = parseOrNull(
+        "<sui><body><input id=\"r\" type=\"range\"/>"
+        "<input id=\"w\" type=\"range\" style=\"width:200px\"/></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* r = document->getElementById("r");
+    Element* w = document->getElementById("w");
+    check(r && w, "range elements found");
+    if (!r || !w) {
+        return;
+    }
+
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    const sui::ComputedStyle groove = resolver.resolve(*r);
+    check(groove.padding.top.value == 0.0f && groove.padding.left.value == 0.0f,
+          "a range has no text padding");
+    check(groove.width.value == 129.0f && groove.height.value == 15.0f,
+          "a range is a fixed 129x15 control");
+    check(groove.borderWidth.top.value == 0.0f,
+          "a range has no text-field border");
+    check(groove.backgroundColor.a == 0,
+          "a range background stays transparent");
+    check(resolver.resolve(*w).width.value == 200.0f,
+          "an author width overrides the range default");
+
+    // No border or padding, so the border box is the content box.
+    sui::StyleResolver layout;
+    layout.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    layoutRoot(*document, layout, 400.0f);
+    check(r->layoutWidth() == 129.0f && r->layoutHeight() == 15.0f,
+          "a range lays out as a 129x15 border box");
+}
+
 // Phrasing tags that defaulted to block. Each one forced a line break, and the text
 // either side of it laid out into no run at all, so it was never drawn -- correct
 // markup lost its content rather than simply missing its decoration.
@@ -5317,6 +5355,7 @@ int main() {
     testChildOverridesInherited();
     testDefaultStyles();
     testFormControlDefaults();
+    testRangeDefaults();
     testPhrasingTagsStayInline();
     testUnknownPropertyIsReported();
     testCursorProperty();

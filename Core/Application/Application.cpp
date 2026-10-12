@@ -445,6 +445,99 @@ void activateControl(Element& el, Element& root) {
     }
 }
 
+// A decimal HTML attribute (a range's `min`/`max`/`step`/`value`): surrounding
+// whitespace is ignored and anything unparsable falls back, so markup can
+// never smuggle a NaN into the slider.
+float floatAttribute(const Element& el, const char* name, float fallback) {
+    const std::string_view raw = el.attribute(name);
+    std::size_t first = raw.find_first_not_of(" \t\n\r\f");
+    if (first == std::string_view::npos) {
+        return fallback;
+    }
+    const std::size_t last = raw.find_last_not_of(" \t\n\r\f");
+    const char* begin = raw.data() + first;
+    const char* end = raw.data() + last + 1;
+    float value = 0.0f;
+    const auto result = std::from_chars(begin, end, value);
+    if (result.ec != std::errc{} || result.ptr != end) {
+        return fallback;
+    }
+    return value;
+}
+
+// A range's bounds and step, sanitized: a max below min clamps to min, and a
+// missing or non-positive step means the default single step (`step="any"`
+// also lands here: every value is reachable by pointer, keys move by one).
+struct RangeLimits {
+    float min = 0.0f;
+    float max = 100.0f;
+    float step = 1.0f;
+};
+
+RangeLimits rangeLimits(const Element& el) {
+    RangeLimits lim;
+    lim.min = floatAttribute(el, "min", 0.0f);
+    lim.max = floatAttribute(el, "max", 100.0f);
+    if (lim.max < lim.min) {
+        lim.max = lim.min;
+    }
+    lim.step = floatAttribute(el, "step", 1.0f);
+    if (!(lim.step > 0.0f)) {
+        lim.step = 1.0f;
+    }
+    return lim;
+}
+
+// A range's current value: its live `value` clamped to [min, max] and snapped
+// to the step grid from min. An absent value starts halfway, like a browser.
+float rangeValue(const Element& el) {
+    const RangeLimits lim = rangeLimits(el);
+    const float fallback = lim.min + (lim.max - lim.min) * 0.5f;
+    float v = floatAttribute(el, "value", fallback);
+    v = std::min(std::max(v, lim.min), lim.max);
+    if (lim.step > 0.0f && lim.max > lim.min) {
+        v = lim.min + std::round((v - lim.min) / lim.step) * lim.step;
+        v = std::min(std::max(v, lim.min), lim.max);
+    }
+    return v;
+}
+
+void setRangeValue(Element& el, float v) {
+    const RangeLimits lim = rangeLimits(el);
+    float c = std::min(std::max(v, lim.min), lim.max);
+    if (lim.step > 0.0f && lim.max > lim.min) {
+        c = lim.min + std::round((c - lim.min) / lim.step) * lim.step;
+        c = std::min(std::max(c, lim.min), lim.max);
+    }
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%.4g", static_cast<double>(c));
+    // A write that changes nothing still mutates the document, so skip it:
+    // arrows held against a bound and drags inside one step must stay quiet.
+    if (el.value() != buffer) {
+        el.setValue(buffer);
+    }
+}
+
+// Whether `el` is a range the pointer or keys may move. `readonly` does not
+// apply to a slider; only `disabled` blocks it.
+bool isRangeControl(const Element* el) {
+    return el && el->tag() == "input" && el->attribute("type") == "range" &&
+           !el->hasAttribute("disabled");
+}
+
+// Moves a range to the value under the pointer: the fraction of the content
+// box left of `x` maps onto [min, max]. Anything else is left alone.
+void dragRange(Element& el, float x) {
+    if (!isRangeControl(&el)) {
+        return;
+    }
+    const RangeLimits lim = rangeLimits(el);
+    const float w = el.contentWidth();
+    float f = w > 0.0f ? (x - el.contentX()) / w : 0.0f;
+    f = std::min(std::max(f, 0.0f), 1.0f);
+    setRangeValue(el, lim.min + f * (lim.max - lim.min));
+}
+
 // SDL modifier keycodes (LCTRL..RGUI and MODE). A modifier never moves the
 // caret or changes a field's value, so it must not restart the caret blink.
 // The OS repeats a held modifier (Shift in particular); restarting the blink on
@@ -977,6 +1070,28 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         }
     }
 
+    // A range draws its own slider: a groove across the content box and a thumb
+    // at the value's fraction. No font needed, and a disabled range still paints.
+    if (el.tag() == "input" && el.attribute("type") == "range") {
+        const SDL_FRect content{el.contentX() - offX, el.contentY() - offY,
+                                el.contentWidth(), el.contentHeight()};
+        if (content.w > 0.0f && content.h > 0.0f) {
+            const RangeLimits lim = rangeLimits(el);
+            const float span = lim.max - lim.min;
+            const float f = span > 0.0f ? (rangeValue(el) - lim.min) / span : 0.0f;
+            const float trackH = std::min(4.0f, content.h);
+            const SDL_FRect track{content.x, content.y + (content.h - trackH) * 0.5f,
+                                  content.w, trackH};
+            renderer.fillRect(track, multiplyAlpha(toColor(s.borderColor), opacity));
+            const float r = std::min(content.h * 0.5f - 1.0f, 7.0f);
+            if (r > 0.0f) {
+                renderer.fillCircle(content.x + f * content.w,
+                                    content.y + content.h * 0.5f, r,
+                                    multiplyAlpha(toColor(s.color), opacity));
+            }
+        }
+    }
+
     if (!font.hasFont()) {
         return;
     }
@@ -1394,6 +1509,10 @@ void Application::dispatch(const InputEvent& event) {
                         *focused, focused->value(), event.x, event.y, cs, font_.get()));
                     resetCaretBlink();
                 }
+                // ... or moves the focused range's thumb.
+                if (isRangeControl(focused)) {
+                    dragRange(*focused, event.x);
+                }
             }
             return;
         case InputKind::PointerDown:
@@ -1432,6 +1551,11 @@ void Application::dispatch(const InputEvent& event) {
             // so the handler observes the control's new state.
             if (target && document_->root()) {
                 activateControl(*target, *document_->root());
+            }
+            // A range jumps to the value under the pointer; the drag path in
+            // PointerMove takes it from there.
+            if (target) {
+                dragRange(*target, event.x);
             }
             break;
         case InputKind::PointerUp:
@@ -1681,6 +1805,36 @@ void Application::dispatch(const InputEvent& event) {
                     target->setValue(std::move(value));
                 }
             }
+        }
+    }
+
+    // A focused range steps its value on arrows/Home/End before any handler, so
+    // an `onkeydown` handler reads the value the control now holds. Anything
+    // that leaves the snapped value unchanged writes nothing.
+    if (target && event.kind == InputKind::KeyDown && isRangeControl(target)) {
+        constexpr int kHome = 0x4000004A;
+        constexpr int kEnd = 0x4000004D;
+        constexpr int kRight = 0x4000004F;
+        constexpr int kLeft = 0x40000050;
+        constexpr int kUp = 0x40000052;
+        constexpr int kDown = 0x40000051;
+        const RangeLimits lim = rangeLimits(*target);
+        const float before = rangeValue(*target);
+        float stepped = before;
+        bool handled = true;
+        if (event.key == kLeft || event.key == kDown) {
+            stepped = before - lim.step;
+        } else if (event.key == kRight || event.key == kUp) {
+            stepped = before + lim.step;
+        } else if (event.key == kHome) {
+            stepped = lim.min;
+        } else if (event.key == kEnd) {
+            stepped = lim.max;
+        } else {
+            handled = false;
+        }
+        if (handled && stepped != before) {
+            setRangeValue(*target, stepped);
         }
     }
 

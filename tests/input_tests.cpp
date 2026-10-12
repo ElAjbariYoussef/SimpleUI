@@ -523,6 +523,105 @@ int main() {
         }
     }
 
+    // A range jumps to the value under the pointer, drags with the pointer
+    // held, and steps on arrows/Home/End. A disabled range ignores everything.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<input id=\"r\" type=\"range\"/>"
+            "<input id=\"s\" type=\"range\" min=\"0\" max=\"10\" step=\"2\" value=\"4\"/>"
+            "<input id=\"d\" type=\"range\" disabled/>"
+            "</body></sui>", err);
+        check(doc != nullptr, "range test document parsed");
+        if (doc) {
+            sui::Element* r = doc->getElementById("r");
+            sui::Element* s = doc->getElementById("s");
+            sui::Element* d = doc->getElementById("d");
+            check(r && s && d, "range elements found");
+            if (r && s && d) {
+                app.setDocument(std::move(doc));
+
+                // One range per line so no neighbour overlaps a click target.
+                sui::StyleResolver layoutResolver;
+                layoutResolver.setRules(sui::CSSParser::parse("input{display:block}"));
+                sui::LayoutInput input;
+                input.resolver = &layoutResolver;
+                input.viewportWidth = 400.0f;
+                input.viewportHeight = 300.0f;
+                sui::BlockLayout().layout(app.document().root(), input);
+
+                const auto at = [&](sui::Element* el, float fraction) {
+                    return sui::InputEvent(sui::InputKind::PointerDown,
+                                           el->layoutX() + el->layoutWidth() * fraction,
+                                           el->layoutY() + el->layoutHeight() * 0.5f, 1);
+                };
+
+                // An absent value starts halfway.
+                check(r->value().empty(), "a range starts with no live value");
+                app.dispatch(at(r, 0.25f));
+                check(r->value() == "25", "clicking a quarter along sets 25");
+                app.dispatch(at(r, 0.0f));
+                check(r->value() == "0", "clicking the start sets the min");
+                app.dispatch(at(r, 0.99f));
+                check(r->value() == "99", "clicking near the end sets 99");
+
+                // Dragging with the button held moves the thumb without a press,
+                // and clamps past the ends (the drag follows focus, not the hit).
+                app.dispatch(at(r, 0.5f));
+                check(r->value() == "50", "clicking the middle sets 50");
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerMove,
+                                             r->layoutX() + r->layoutWidth() * 1.5f,
+                                             r->layoutY() + r->layoutHeight() * 0.5f, 1));
+                check(r->value() == "100", "dragging past the end clamps to the max");
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerMove,
+                                             r->layoutX() - 20.0f,
+                                             r->layoutY() + r->layoutHeight() * 0.5f, 1));
+                check(r->value() == "0", "dragging past the start clamps to the min");
+                // A hover (no button) is not a drag.
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerMove,
+                                             r->layoutX() + r->layoutWidth() * 0.75f,
+                                             r->layoutY() + r->layoutHeight() * 0.5f, 0));
+                check(r->value() == "0", "a buttonless move leaves the value alone");
+
+                // Keys step a focused range; Home/End jump to the bounds.
+                sui::Document& appDoc = app.document();
+                appDoc.setFocused(r);
+                sui::InputEvent leftEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x40000050);
+                sui::InputEvent rightEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x4000004F);
+                sui::InputEvent homeEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x4000004A);
+                sui::InputEvent endEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x4000004D);
+                app.dispatch(endEv);
+                check(r->value() == "100", "End moves a range to its max");
+                app.dispatch(leftEv);
+                check(r->value() == "99", "Left steps a range down by one");
+                app.dispatch(rightEv);
+                app.dispatch(rightEv);
+                check(r->value() == "100", "Right steps a range up, clamped at the max");
+                app.dispatch(homeEv);
+                check(r->value() == "0", "Home moves a range to its min");
+                app.dispatch(leftEv);
+                check(r->value() == "0", "stepping past the min stays at the min");
+
+                // min/max/step shape the value: 4 snaps to the grid, Right adds 2.
+                check(s->value() == "4", "a stepped range keeps its markup value");
+                appDoc.setFocused(s);
+                app.dispatch(rightEv);
+                check(s->value() == "6", "Right steps by the step attribute");
+                app.dispatch(at(s, 0.35f));
+                check(s->value() == "4", "a click snaps to the step grid");
+
+                // A disabled range ignores the pointer and the keys.
+                app.dispatch(at(d, 0.75f));
+                check(d->value().empty(), "clicking a disabled range does nothing");
+                appDoc.setFocused(d);
+                app.dispatch(rightEv);
+                check(d->value().empty(), "keys on a disabled range do nothing");
+            }
+        }
+    }
+
     // A `<textarea>` edits its text content as a multiline value: typing works at
     // any caret position, Return starts a new line, Home/End bound the caret to
     // the line instead of the value, and Up/Down keep the column while changing

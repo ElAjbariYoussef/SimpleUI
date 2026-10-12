@@ -251,6 +251,16 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
 }
 
 void applyInputTypeStyle(ComputedStyle& style, std::string_view type) {
+    if (type == "range") {
+        // A slider is a fixed-size groove with no text-field chrome: no padding,
+        // no border, and a transparent background so the page shows through.
+        style.padding = {0.0f, 0.0f, 0.0f, 0.0f};
+        style.width = Length(129.0f);
+        style.height = Length(15.0f);
+        style.borderWidth = {0.0f, 0.0f, 0.0f, 0.0f};
+        style.backgroundColor = {0, 0, 0, 0};
+        return;
+    }
     if (type != "checkbox" && type != "radio") {
         return;
     }
