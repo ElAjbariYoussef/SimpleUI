@@ -12,6 +12,8 @@
 
 #include <cmath>
 #include <cstdio>
+#include <map>
+#include <optional>
 #include <string>
 
 namespace {
@@ -1721,6 +1723,156 @@ void testContainerQueries() {
             " @container (min-width:400px){ #box{display:none} }"));
         layoutRoot(*fresh, resolver, 400.0f);
         check(freshBox->layoutWidth() > 0.0f, "an unmatched query keeps its box");
+    }
+}
+
+void testCssImports() {
+    auto document = parseOrNull("<sui><body><div id=\"x\">hi</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* x = document->getElementById("x");
+    check(x != nullptr, "imported element found");
+    if (!x) {
+        return;
+    }
+    // Canned sheets stand in for resources; every href the parser asks for is
+    // recorded so relative resolution is observable.
+    std::map<std::string, std::string, std::less<>> sheets;
+    std::vector<std::string> fetched;
+    auto fetch = [&](std::string_view href) -> std::optional<std::string> {
+        fetched.emplace_back(href);
+        const auto it = sheets.find(href);
+        if (it == sheets.end()) {
+            return std::nullopt;
+        }
+        return it->second;
+    };
+    const auto resolveColor = [&](Element& el, const char* css,
+                                  const sui::CSSParser::FetchStylesheet& fetcher,
+                                  const char* base = "") {
+        sui::StyleResolver resolver;
+        std::vector<sui::Rule> rules;
+        std::vector<sui::KeyframeBlock> keyframes;
+        sui::CSSParser::parseWithKeyframes(css, rules, keyframes, fetcher, base);
+        resolver.setRules(std::move(rules));
+        layoutRoot(*document, resolver, 400.0f);
+        return resolver.resolve(el).color;
+    };
+    const auto isRed = [](SDL_Color c) {
+        return c.r == 0xff && c.g == 0x00 && c.b == 0x00;
+    };
+    const auto isGreen = [](SDL_Color c) {
+        return c.r == 0x00 && c.g == 0xff && c.b == 0x00;
+    };
+    const auto isDefault = [](SDL_Color c) {
+        return c.r == 228 && c.g == 228 && c.b == 231;
+    };
+
+    // An import inlines where it stands: the base sheet first, the main sheet
+    // after, so the main rule wins ties.
+    sheets["base.css"] = "#x{color:#00ff00}";
+    check(isGreen(resolveColor(*x, "@import \"base.css\"; div{color:#ff0000}", fetch)),
+          "imported rules carry their specificity");
+
+    // An import after any other rule is invalid and ignored.
+    {
+        sui::StyleResolver resolver;
+        std::vector<sui::Rule> rules;
+        std::vector<sui::KeyframeBlock> keyframes;
+        sui::CSSParser::parseWithKeyframes("#x{color:#ff0000} @import \"base.css\";",
+                                           rules, keyframes, fetch);
+        check(rules.size() == 1, "a misplaced import produces no rules");
+        resolver.setRules(std::move(rules));
+        layoutRoot(*document, resolver, 400.0f);
+        check(isRed(resolver.resolve(*x).color), "a misplaced import changes nothing");
+    }
+
+    // Relative hrefs resolve against the importing sheet.
+    fetched.clear();
+    sheets["css/reset.css"] = "#x{color:#00ff00}";
+    check(isGreen(resolveColor(*x, "@import \"reset.css\";", fetch, "css/main.css")),
+          "a relative import applies");
+    check(fetched.size() == 1 && fetched[0] == "css/reset.css",
+          "a relative href resolves against its importer");
+
+    // An unreadable sheet is skipped, not fatal.
+    check(isRed(resolveColor(*x, "@import \"nope.css\"; #x{color:#ff0000}", fetch)),
+          "a missing sheet is skipped");
+
+    // Without a fetcher every import is skipped, which is what parse() does.
+    {
+        const auto rules = sui::CSSParser::parse("@import \"base.css\"; #x{color:#ff0000}");
+        check(rules.size() == 1, "parse() skips imports");
+    }
+
+    // Cycles terminate: each sheet applies once.
+    sheets["b.css"] = "@import \"c.css\"; #y{color:#00ff00}";
+    sheets["c.css"] = "@import \"b.css\"; #z{color:#00ff00}";
+    {
+        std::vector<sui::Rule> rules;
+        std::vector<sui::KeyframeBlock> keyframes;
+        sui::CSSParser::parseWithKeyframes("@import \"b.css\"; #x{color:#ff0000}", rules,
+                                           keyframes, fetch);
+        check(rules.size() == 3, "a cyclic import terminates with each sheet once");
+    }
+
+    // An import condition gates the sheet: matching media applies it.
+    sheets["m.css"] = "#x{color:#00ff00}";
+    {
+        sui::StyleResolver resolver;
+        std::vector<sui::Rule> rules;
+        std::vector<sui::KeyframeBlock> keyframes;
+        sui::CSSParser::parseWithKeyframes("@import \"m.css\" (min-width:100px);", rules,
+                                           keyframes, fetch);
+        resolver.setRules(std::move(rules));
+        resolver.setViewportSize(800.0f, 600.0f);
+        layoutRoot(*document, resolver, 400.0f);
+        check(isGreen(resolver.resolve(*x).color), "a matching import condition applies");
+    }
+    {
+        sui::StyleResolver resolver;
+        std::vector<sui::Rule> rules;
+        std::vector<sui::KeyframeBlock> keyframes;
+        sui::CSSParser::parseWithKeyframes("@import \"m.css\" (min-width:100px);", rules,
+                                           keyframes, fetch);
+        resolver.setRules(std::move(rules));
+        layoutRoot(*document, resolver, 400.0f);
+        check(isDefault(resolver.resolve(*x).color),
+              "a failing import condition applies nothing");
+    }
+
+    // An import layer wraps the sheet: unlayered main rules still win, even
+    // against higher specificity inside the layer.
+    sheets["l.css"] = "#x{color:#00ff00}";
+    {
+        std::vector<sui::Rule> rules;
+        std::vector<sui::KeyframeBlock> keyframes;
+        sui::CSSParser::parseWithKeyframes(
+            "@import \"l.css\" layer(foo); div{color:#ff0000}", rules, keyframes, fetch);
+        check(rules.size() == 2 && rules[0].layer == "foo",
+              "an import layer wraps the sheet");
+        sui::StyleResolver resolver;
+        resolver.setRules(std::move(rules));
+        layoutRoot(*document, resolver, 400.0f);
+        check(isRed(resolver.resolve(*x).color), "unlayered rules beat an import layer");
+    }
+    // A bare `layer` wraps the sheet anonymously; a `supports()` condition the
+    // engine cannot evaluate drops the import.
+    {
+        std::vector<sui::Rule> rules;
+        std::vector<sui::KeyframeBlock> keyframes;
+        sui::CSSParser::parseWithKeyframes("@import \"l.css\" layer;", rules, keyframes,
+                                           fetch);
+        check(rules.size() == 1 && rules[0].layer.rfind("@anonymous-", 0) == 0,
+              "a bare import layer is anonymous");
+    }
+    {
+        std::vector<sui::Rule> rules;
+        std::vector<sui::KeyframeBlock> keyframes;
+        sui::CSSParser::parseWithKeyframes(
+            "@import \"l.css\" supports(display:grid);", rules, keyframes, fetch);
+        check(rules.empty(), "an unevaluable supports() drops the import");
     }
 }
 
@@ -5796,6 +5948,7 @@ int main() {
     testChildOverridesInherited();
     testCascadeLayers();
     testContainerQueries();
+    testCssImports();
     testDefaultStyles();
     testFormControlDefaults();
     testRangeDefaults();

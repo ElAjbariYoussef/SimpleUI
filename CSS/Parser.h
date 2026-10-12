@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -131,11 +133,25 @@ public:
     // Parses CSS source into rules, skipping comments and at-rules.
     static std::vector<Rule> parse(std::string_view source);
 
+    // Fetches an imported stylesheet by its resolved href. The application
+    // hands its resources over; tests hand canned sheets. Absent means the
+    // sheet cannot be read and the import is skipped.
+    using FetchStylesheet =
+        std::function<std::optional<std::string>(std::string_view href)>;
+
     // Like parse(), but additionally captures `@keyframes` blocks. Both are
     // returned so one stylesheet can carry rules and keyframes separately;
     // parse() is this minus the keyframes.
+    //
+    // With a fetcher, `@import` inlines the imported sheet where the statement
+    // stands: relative hrefs resolve against `baseHref`, cycles are dropped,
+    // and the import's media condition and layer wrap the imported rules. An
+    // `@import` after any other rule is invalid and ignored, and without a
+    // fetcher every import is skipped, which is what parse() does.
     static void parseWithKeyframes(std::string_view source, std::vector<Rule>& rules,
-                                   std::vector<KeyframeBlock>& keyframes);
+                                   std::vector<KeyframeBlock>& keyframes,
+                                   FetchStylesheet fetch = {},
+                                   std::string_view baseHref = {});
 
     // Parses a single selector (no comma list, no declarations).
     static SimpleSelector parseSelector(std::string_view source);

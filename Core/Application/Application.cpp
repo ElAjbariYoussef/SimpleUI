@@ -1764,7 +1764,15 @@ bool Application::start(std::string_view entrySuiPath, std::string& error) {
         }
         std::vector<Rule> rules;
         std::vector<KeyframeBlock> keyframes;
-        CSSParser::parseWithKeyframes(*css, rules, keyframes);
+        // Imported sheets inline where their statements stand, fetched through
+        // the same resources; relative hrefs resolve against the importing
+        // sheet.
+        CSSParser::parseWithKeyframes(
+            *css, rules, keyframes,
+            [this](std::string_view href) -> std::optional<std::string> {
+                return resources_->readText(href);
+            },
+            link.href);
         for (auto& rule : rules) {
             resolver_.addRule(std::move(rule));
         }

@@ -74,6 +74,142 @@ std::string anonymousLayerName() {
     return "@anonymous-" + std::to_string(++count);
 }
 
+// Threaded through nested blocks so `@import` resolves hrefs, dedupes sheets,
+// and stays in order wherever it nests. Copies are cheap (one function plus
+// one path); the seen set is shared.
+struct ImportContext {
+    CSSParser::FetchStylesheet fetch;
+    std::string baseHref;
+    std::set<std::string>* seen = nullptr;
+};
+
+// One `@import` prelude: the sheet, an optional media condition, and an
+// optional layer to wrap the imported rules in.
+struct ImportSpec {
+    std::string href;
+    std::vector<MediaQuery> media;
+    bool hasMedia = false;
+    std::string layerName;  // empty for a bare `layer`
+    bool hasLayer = false;
+};
+
+// Resolves an imported href against the importing sheet: absolute paths and
+// URLs pass through, anything else joins onto the importer's directory.
+std::string joinHref(std::string_view base, std::string_view href) {
+    if (href.find("://") != std::string_view::npos ||
+        (!href.empty() && href.front() == '/')) {
+        return std::string(href);
+    }
+    const std::size_t slash = base.find_last_of('/');
+    std::string out;
+    if (slash != std::string_view::npos) {
+        out.append(base.substr(0, slash + 1));
+    }
+    out.append(href);
+    return out;
+}
+
+// Reads `url(...)` or a quoted string into `href`. Returns false for anything
+// else, including an empty reference.
+bool readImportHref(std::string_view& rest, std::string& href) {
+    std::string_view text = trim(rest);
+    std::string_view body;
+    if (text.size() > 5 && text.compare(0, 4, "url(") == 0) {
+        const std::size_t close = text.find_last_of(')');
+        if (close == std::string_view::npos || close <= 4) {
+            return false;
+        }
+        body = trim(text.substr(4, close - 4));
+    } else if (text.size() >= 2 && (text.front() == '"' || text.front() == '\'')) {
+        const char quote = text.front();
+        const std::size_t close = text.find(quote, 1);
+        if (close == std::string_view::npos) {
+            return false;
+        }
+        body = text.substr(1, close - 1);
+        rest = text.substr(close + 1);
+        if (body.empty()) {
+            return false;
+        }
+        href = std::string(body);
+        return true;
+    } else {
+        return false;
+    }
+    if (body.size() >= 2 && (body.front() == '"' || body.front() == '\'') &&
+        body.back() == body.front()) {
+        body = body.substr(1, body.size() - 2);
+    }
+    if (body.empty()) {
+        return false;
+    }
+    // The prelude continues after the closing paren.
+    const std::size_t close = text.find_last_of(')');
+    rest = text.substr(close + 1);
+    href = std::string(body);
+    return true;
+}
+
+// Parses `@import <url> [media] [layer | layer(name)]`. A `supports(...)`
+// condition cannot be evaluated, so like an `@supports` block it drops the
+// import. Unparsable media drops it too, the way `@media` itself drops.
+bool parseImportPrelude(std::string_view prelude, ImportSpec& spec) {
+    std::string_view rest = trim(prelude);
+    if (!readImportHref(rest, spec.href)) {
+        return false;
+    }
+    rest = trim(rest);
+    if (rest.empty()) {
+        return true;
+    }
+    if (rest.size() >= 8 && rest.compare(0, 8, "supports") == 0 &&
+        (rest.size() == 8 || !isIdentChar(rest[8]))) {
+        return false;
+    }
+    // A depth-zero `layer` word splits media from layer. Neither may nest
+    // inside the other's parens here.
+    std::size_t depth = 0;
+    std::size_t split = std::string_view::npos;
+    for (std::size_t i = 0; i + 5 <= rest.size(); ++i) {
+        const char c = rest[i];
+        if (c == '(') {
+            ++depth;
+        } else if (c == ')') {
+            depth = depth > 0 ? depth - 1 : 0;
+        } else if (depth == 0 && rest.compare(i, 5, "layer") == 0 &&
+                   (i + 5 >= rest.size() || !isIdentChar(rest[i + 5]))) {
+            split = i;
+            break;
+        }
+    }
+    std::string_view mediaPart = trim(split == std::string_view::npos
+                                          ? rest
+                                          : rest.substr(0, split));
+    if (!mediaPart.empty()) {
+        spec.media = parseMediaList(mediaPart);
+        if (spec.media.empty()) {
+            return false;
+        }
+        spec.hasMedia = true;
+    }
+    if (split != std::string_view::npos) {
+        std::string_view layerPart = trim(rest.substr(split + 5));
+        if (layerPart.empty()) {
+            spec.hasLayer = true;
+        } else if (layerPart.front() == '(' && layerPart.back() == ')') {
+            const std::string_view name = trim(layerPart.substr(1, layerPart.size() - 2));
+            if (name.empty() || name.find(',') != std::string_view::npos) {
+                return false;
+            }
+            spec.layerName = std::string(name);
+            spec.hasLayer = true;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Parses an `@container` prelude: an optional name list followed by one
 // `(min-width: Npx)` / `(max-width: Npx)` feature, optionally `and`-chained.
 // Anything else (style queries, other units, garbage) fails, and the block is
@@ -944,8 +1080,11 @@ void parseKeyframesBody(std::string_view source,
 void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                 std::size_t& order, std::vector<Rule>& out,
                 std::vector<KeyframeBlock>& keyframes, const std::string& layer,
-                Rule::ContainerQuery container) {
+                Rule::ContainerQuery container, const ImportContext& imports) {
     std::size_t i = 0;
+    // An `@import` only counts before any other rule in its block (layer
+    // statements excepted); anything later is invalid and ignored.
+    bool importAllowed = true;
 
     while (i < source.size()) {
         if (isSpace(source[i])) {
@@ -1009,7 +1148,39 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                     }
                 }
                 parseRules(source.substr(bodyStart, bodyEnd - bodyStart), combined, order, out,
-                           keyframes, layer, container);
+                           keyframes, layer, container, imports);
+                importAllowed = false;
+                continue;
+            }
+
+            if (name == "import" && i < source.size() && source[i] == ';') {
+                ++i;
+                // Inlines the sheet where the statement stands: relative hrefs
+                // resolve against the importer, repeats and cycles are dropped,
+                // and the import's media and layer wrap the imported rules.
+                // Misplaced imports and unfetchable sheets are skipped.
+                if (importAllowed && imports.fetch && imports.seen) {
+                    ImportSpec spec;
+                    if (parseImportPrelude(
+                            trim(source.substr(preludeStart, i - 1 - preludeStart)), spec)) {
+                        const std::string href = joinHref(imports.baseHref, spec.href);
+                        if (imports.seen->insert(href).second) {
+                            if (std::optional<std::string> text = imports.fetch(href)) {
+                                const std::vector<MediaQuery>& outerMedia =
+                                    spec.hasMedia ? spec.media : media;
+                                const std::string layerName =
+                                    spec.hasLayer
+                                        ? (spec.layerName.empty()
+                                               ? anonymousLayerName()
+                                               : composeLayerName(layer, spec.layerName))
+                                        : layer;
+                                const ImportContext nested{imports.fetch, href, imports.seen};
+                                parseRules(*text, outerMedia, order, out, keyframes, layerName,
+                                           container, nested);
+                            }
+                        }
+                    }
+                }
                 continue;
             }
 
@@ -1049,7 +1220,8 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                     }
                     merged.active = true;
                     parseRules(source.substr(bodyStart, bodyEnd - bodyStart), media, order,
-                               out, keyframes, layer, merged);
+                               out, keyframes, layer, merged, imports);
+                    importAllowed = false;
                 }
                 continue;
             }
@@ -1092,11 +1264,12 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                     const bool singleName =
                         !prelude.empty() && prelude.find(',') == std::string_view::npos;
                     if (singleName || prelude.empty()) {
+                        importAllowed = false;
                         parseRules(source.substr(bodyStart, bodyEnd - bodyStart), media, order,
                                    out, keyframes,
                                    singleName ? composeLayerName(layer, prelude)
                                               : anonymousLayerName(),
-                                   container);
+                                   container, imports);
                     }
                     continue;
                 }
@@ -1127,6 +1300,7 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                         keyframes.push_back(std::move(block));
                     }
                 }
+                importAllowed = false;
                 continue;
             }
 
@@ -1145,6 +1319,7 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                     ++i;
                 }
             }
+            importAllowed = false;
             continue;
         }
 
@@ -1202,6 +1377,7 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                 rule.container = container;
                 if (!rule.selector.parts.empty()) {
                     out.push_back(std::move(rule));
+                    importAllowed = false;
                 }
             }
         }
@@ -1211,9 +1387,13 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
 }  // namespace
 
 void CSSParser::parseWithKeyframes(std::string_view source, std::vector<Rule>& rules,
-                                   std::vector<KeyframeBlock>& keyframes) {
+                                   std::vector<KeyframeBlock>& keyframes,
+                                   FetchStylesheet fetch, std::string_view baseHref) {
     std::size_t order = 0;
-    parseRules(source, {}, order, rules, keyframes, std::string(), Rule::ContainerQuery());
+    std::set<std::string> seen;
+    const ImportContext imports{std::move(fetch), std::string(baseHref), &seen};
+    parseRules(source, {}, order, rules, keyframes, std::string(), Rule::ContainerQuery(),
+               imports);
 }
 
 std::vector<Rule> CSSParser::parse(std::string_view source) {
