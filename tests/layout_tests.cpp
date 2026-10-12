@@ -1530,6 +1530,200 @@ void testCascadeLayers() {
           "a block stamps its rules with the layer");
 }
 
+void testContainerQueries() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"wrap\"><div id=\"box\">hi</div></div>"
+        "<div id=\"plain\"><div id=\"box2\">hi</div></div>"
+        "<div id=\"outer\"><div id=\"inner\"><div id=\"deep\">hi</div></div></div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* box = document->getElementById("box");
+    Element* box2 = document->getElementById("box2");
+    Element* deep = document->getElementById("deep");
+    Element* wrap = document->getElementById("wrap");
+    check(box && box2 && deep && wrap, "container elements found");
+    if (!box || !box2 || !deep || !wrap) {
+        return;
+    }
+    // Queries read laid-out widths, so each case lays out before resolving.
+    const auto colorOf = [&](Element& el, const char* css) {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(css));
+        layoutRoot(*document, resolver, 400.0f);
+        return resolver.resolve(el).color;
+    };
+    const auto isRed = [](SDL_Color c) {
+        return c.r == 0xff && c.g == 0x00 && c.b == 0x00;
+    };
+    const auto isGreen = [](SDL_Color c) {
+        return c.r == 0x00 && c.g == 0xff && c.b == 0x00;
+    };
+
+    // A 300px container matches min-200 but not min-400.
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+                                     " #box{color:#ff0000}"
+                                     " @container (min-width:200px){ #box{color:#00ff00} }")),
+          "a query matches its container's width");
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+                                   " #box{color:#ff0000}"
+                                   " @container (min-width:400px){ #box{color:#00ff00} }")),
+          "a query misses above its container's width");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+                                     " #box{color:#ff0000}"
+                                     " @container (max-width:400px){ #box{color:#00ff00} }")),
+          "max-width matches below its bound");
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+                                   " #box{color:#ff0000}"
+                                   " @container (max-width:200px){ #box{color:#00ff00} }")),
+          "max-width misses above its container");
+
+    // With no container ancestor the same query never matches.
+    check(isRed(colorOf(*box2, "body{margin:0} #box2{color:#ff0000}"
+                                      " @container (min-width:10px){ #box2{color:#00ff00} }")),
+          "a query without a container never matches");
+
+    // `size` establishes a container exactly like `inline-size`.
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:size}"
+                                     " #box{color:#ff0000}"
+                                     " @container (min-width:200px){ #box{color:#00ff00} }")),
+          "container-type:size queries too");
+
+    // Names pick which ancestor reads: the 100px inner answers for `b`, the
+    // 500px outer answers for `a`, and an unknown name answers never.
+    check(isGreen(colorOf(*deep, "body{margin:0} #outer{width:500px;container-type:inline-size;"
+                                        "container-name:a}"
+                                        " #inner{width:100px;container-type:inline-size;"
+                                        "container-name:b} #deep{color:#ff0000}"
+                                        " @container b (min-width:50px){ #deep{color:#00ff00} }")),
+          "a named query reads its own container");
+    check(isGreen(colorOf(*deep, "body{margin:0} #outer{width:500px;container-type:inline-size;"
+                                        "container-name:a}"
+                                        " #inner{width:100px;container-type:inline-size;"
+                                        "container-name:b} #deep{color:#ff0000}"
+                                        " @container a (min-width:400px){ #deep{color:#00ff00} }")),
+          "a query skips a nearer container with another name");
+    check(isRed(colorOf(*deep, "body{margin:0} #outer{width:500px;container-type:inline-size;"
+                                      "container-name:a}"
+                                      " #inner{width:100px;container-type:inline-size;"
+                                      "container-name:b} #deep{color:#ff0000}"
+                                      " @container c (min-width:10px){ #deep{color:#00ff00} }")),
+          "an unknown name never matches");
+
+    // `and` chains intersect bounds.
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+                                     " #box{color:#ff0000} @container (min-width:100px) and"
+                                     " (max-width:400px){ #box{color:#00ff00} }")),
+          "an and-chain matches inside both bounds");
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+                                   " #box{color:#ff0000} @container (min-width:100px) and"
+                                   " (max-width:200px){ #box{color:#00ff00} }")),
+          "an and-chain misses outside either bound");
+
+    // Only px lengths query: anything else drops the block, as do style
+    // queries and garbage.
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+                                   " #box{color:#ff0000}"
+                                   " @container (min-width:10em){ #box{color:#00ff00} }")),
+          "a non-px query drops its block");
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+                                   " #box{color:#ff0000}"
+                                   " @container style(color:#ff0000){ #box{color:#00ff00} }")),
+          "a style query drops its block");
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+                                   " #box{color:#ff0000}"
+                                   " @container (color:#ff0000){ #box{color:#00ff00} }")),
+          "a non-width feature drops its block");
+
+    // A query inside `@media` needs both to hold.
+    {
+        sui::StyleResolver resolver;
+        resolver.setViewportSize(800.0f, 600.0f);
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+            " #box{color:#ff0000}"
+            " @media (min-width:1px){ @container (min-width:200px){"
+            " #box{color:#00ff00} } }"));
+        layoutRoot(*document, resolver, 400.0f);
+        check(isGreen(resolver.resolve(*box).color),
+              "a query nested in matching media applies");
+    }
+
+    // The shorthand sets both longhands at once.
+    {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #wrap{width:300px;container:side/inline-size}"));
+        layoutRoot(*document, resolver, 400.0f);
+        const sui::ComputedStyle style = resolver.resolve(*wrap);
+        check(style.containerType == sui::ComputedStyle::ContainerInlineSize,
+              "the shorthand sets the type");
+        check(style.containerNames.size() == 1 && style.containerNames[0] == "side",
+              "the shorthand sets the name");
+    }
+
+    // The rule carries its query for the resolver to evaluate.
+    const auto rules = sui::CSSParser::parse(
+        "@container sidebar (min-width:100px){ div{color:#00ff00} }");
+    check(rules.size() == 1 && rules[0].container.active,
+          "a query block produces an active query rule");
+    if (rules.size() == 1) {
+        check(rules[0].container.names.size() == 1 &&
+                  rules[0].container.names[0] == "sidebar",
+              "the query keeps its name");
+        check(rules[0].container.minWidth == 100.0f,
+              "the query keeps its bound");
+    }
+
+    // Layout and paint agree: a matched display rule hides the box it laid
+    // out, which is what the passes are for. Fresh documents here: a box
+    // skipped as `display:none` keeps whatever geometry it had, so reusing a
+    // laid-out tree would read stale widths. The sibling proves the reflow:
+    // without a second pass it would sit a line too low.
+    {
+        auto fresh = parseOrNull(
+            "<sui><body><div id=\"wrap\"><div id=\"box\">hi</div>"
+            "<div id=\"after\">yo</div></div></body></sui>");
+        if (!fresh) {
+            return;
+        }
+        Element* freshBox = fresh->getElementById("box");
+        Element* freshAfter = fresh->getElementById("after");
+        Element* freshWrap = fresh->getElementById("wrap");
+        check(freshBox && freshAfter && freshWrap, "fresh boxes found");
+        if (!freshBox || !freshAfter || !freshWrap) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+            " @container (min-width:200px){ #box{display:none} }"));
+        layoutRoot(*fresh, resolver, 400.0f);
+        check(freshBox->layoutWidth() == 0.0f, "a matched query hides its box");
+        check(freshAfter->layoutY() == freshWrap->contentY(),
+              "siblings reflow around the hidden box");
+    }
+    {
+        auto fresh = parseOrNull(
+            "<sui><body><div id=\"wrap\"><div id=\"box\">hi</div></div></body></sui>");
+        if (!fresh) {
+            return;
+        }
+        Element* freshBox = fresh->getElementById("box");
+        check(freshBox != nullptr, "fresh box found");
+        if (!freshBox) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+            " @container (min-width:400px){ #box{display:none} }"));
+        layoutRoot(*fresh, resolver, 400.0f);
+        check(freshBox->layoutWidth() > 0.0f, "an unmatched query keeps its box");
+    }
+}
+
 void testDefaultStyles() {
     sui::ComputedStyle body = sui::defaultStyleFor("body");
     check(body.display == sui::ComputedStyle::Block, "body defaults to block");
@@ -5601,6 +5795,7 @@ int main() {
     testInheritance();
     testChildOverridesInherited();
     testCascadeLayers();
+    testContainerQueries();
     testDefaultStyles();
     testFormControlDefaults();
     testRangeDefaults();

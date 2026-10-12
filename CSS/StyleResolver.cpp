@@ -1226,6 +1226,29 @@ ComputedStyle::Overflow parseOverflow(std::string_view v) {
     return ComputedStyle::Visible;
 }
 
+// Splits a `container-name` list on whitespace. `none` clears every name,
+// alone or among others.
+void parseContainerNames(std::string_view value, std::vector<std::string>& names) {
+    names.clear();
+    std::size_t i = 0;
+    while (i < value.size()) {
+        while (i < value.size() && std::isspace(static_cast<unsigned char>(value[i]))) {
+            ++i;
+        }
+        std::size_t j = i;
+        while (j < value.size() && !std::isspace(static_cast<unsigned char>(value[j]))) {
+            ++j;
+        }
+        if (j > i) {
+            const std::string_view token = value.substr(i, j - i);
+            if (token != "none") {
+                names.emplace_back(token);
+            }
+        }
+        i = j;
+    }
+}
+
 // `centre` is the legacy British spelling of `center`; CSS 2.1 allowed it and browsers
 // still accept it wherever the American spelling appears.
 bool isCentre(std::string_view token) {
@@ -2955,6 +2978,48 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         s.overflowX = parseOverflow(value);
     } else if (property == "overflow-y") {
         s.overflowY = parseOverflow(value);
+    } else if (property == "container-type") {
+        if (value == "inline-size") {
+            s.containerType = ComputedStyle::ContainerInlineSize;
+        } else if (value == "size") {
+            s.containerType = ComputedStyle::ContainerSize;
+        } else {
+            s.containerType = ComputedStyle::ContainerNormal;
+        }
+    } else if (property == "container-name") {
+        parseContainerNames(value, s.containerNames);
+    } else if (property == "container") {
+        // Shorthand: `name / type`, either side alone, or `none`/`normal`
+        // for both. Each side applies as whatever it parses as.
+        const std::string_view trimmed = trim(value);
+        if (trimmed == "none" || trimmed == "normal") {
+            s.containerType = ComputedStyle::ContainerNormal;
+            s.containerNames.clear();
+        } else {
+            const std::size_t slash = value.find('/');
+            const std::string_view before =
+                trim(slash == std::string_view::npos ? value : value.substr(0, slash));
+            const std::string_view after = slash == std::string_view::npos
+                                               ? std::string_view{}
+                                               : trim(value.substr(slash + 1));
+            const auto applySide = [&](std::string_view side) {
+                if (side.empty()) {
+                    return;
+                }
+                if (side == "inline-size") {
+                    s.containerType = ComputedStyle::ContainerInlineSize;
+                } else if (side == "size") {
+                    s.containerType = ComputedStyle::ContainerSize;
+                } else if (side == "normal" || side == "none") {
+                    s.containerType = ComputedStyle::ContainerNormal;
+                    s.containerNames.clear();
+                } else {
+                    parseContainerNames(side, s.containerNames);
+                }
+            };
+            applySide(before);
+            applySide(after);
+        }
     } else if (property == "white-space") {
         if (value == "nowrap") {
             s.whiteSpace = ComputedStyle::WrapNone;
@@ -3560,6 +3625,47 @@ int StyleResolver::specificityOf(const SimpleSelector& selector) {
     return selectorRank(selector);
 }
 
+bool StyleResolver::containerMatches(const Rule::ContainerQuery& query,
+                                     Element& element) const {
+    // The nearest ancestor that establishes a query container — named when the
+    // query names names — read at its laid-out content width. Only widths are
+    // queried: heights settle bottom-up, so they are never final while a pass
+    // is still resolving. An ancestor without a box (`display:none`) is not a
+    // container; with no container at all the query never matches.
+    for (Element* ancestor = element.parent(); ancestor;
+         ancestor = ancestor->parent()) {
+        const ComputedStyle cs = resolve(*ancestor);
+        if (cs.display == ComputedStyle::None) {
+            continue;
+        }
+        if (cs.containerType == ComputedStyle::ContainerNormal) {
+            continue;
+        }
+        if (!query.names.empty()) {
+            bool named = false;
+            for (const std::string& want : query.names) {
+                if (std::find(cs.containerNames.begin(), cs.containerNames.end(), want) !=
+                    cs.containerNames.end()) {
+                    named = true;
+                    break;
+                }
+            }
+            if (!named) {
+                continue;
+            }
+        }
+        const float width = ancestor->contentWidth();
+        if (query.minWidth >= 0.0f && width < query.minWidth) {
+            return false;
+        }
+        if (query.maxWidth >= 0.0f && width > query.maxWidth) {
+            return false;
+        }
+        return true;
+    }
+    return false;
+}
+
 void StyleResolver::noteLayer(const std::string& name) {
     if (name.empty()) {
         return;
@@ -3629,8 +3735,12 @@ void StyleResolver::setRules(std::vector<Rule> rules) {
     // A fresh rule set re-declares its layers: statements and first use both
     // register in stream order.
     layerOrder_.clear();
+    anyContainerRules_ = false;
     for (const Rule& rule : rules_) {
         noteLayer(rule.layer);
+        if (rule.container.active) {
+            anyContainerRules_ = true;
+        }
     }
     sortRulesNormal();
     rebuildImportantOrder();
@@ -3640,6 +3750,9 @@ void StyleResolver::setRules(std::vector<Rule> rules) {
 void StyleResolver::addRule(Rule rule) {
     noteCustomUsage(rule);
     noteLayer(rule.layer);
+    if (rule.container.active) {
+        anyContainerRules_ = true;
+    }
     rules_.push_back(std::move(rule));
     sortRulesNormal();
     rebuildImportantOrder();
@@ -3651,6 +3764,13 @@ void StyleResolver::eraseRule(std::size_t index) {
         return;
     }
     rules_.erase(rules_.begin() + static_cast<std::ptrdiff_t>(index));
+    anyContainerRules_ = false;
+    for (const Rule& rule : rules_) {
+        if (rule.container.active) {
+            anyContainerRules_ = true;
+            break;
+        }
+    }
     rebuildImportantOrder();
     ++generation_;
 }
@@ -3953,6 +4073,27 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             case ComputedStyle::Visible: return "visible";
         }
         return "visible";
+    }
+    if (property == "container-type") {
+        switch (style.containerType) {
+            case ComputedStyle::ContainerInlineSize: return "inline-size";
+            case ComputedStyle::ContainerSize: return "size";
+            case ComputedStyle::ContainerNormal: return "normal";
+        }
+        return "normal";
+    }
+    if (property == "container-name") {
+        if (style.containerNames.empty()) {
+            return "none";
+        }
+        std::string names;
+        for (const std::string& name : style.containerNames) {
+            if (!names.empty()) {
+                names += ' ';
+            }
+            names += name;
+        }
+        return names;
     }
     if (property == "margin-top") return length(style.margin.top);
     if (property == "margin-right") return length(style.margin.right);
@@ -4636,6 +4777,9 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
                 !mediaMatches(rule.media, viewportWidth_, viewportHeight_)) {
                 return;
             }
+            if (rule.container.active && !containerMatches(rule.container, element)) {
+                return;
+            }
             if (!selectorMatches(rule.selector, element, &state_)) {
                 return;
             }
@@ -4696,6 +4840,9 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
             // an ordinary stylesheet at the cost it had before.
             if (!rule.media.empty() &&
                 !mediaMatches(rule.media, viewportWidth_, viewportHeight_)) {
+                return;
+            }
+            if (rule.container.active && !containerMatches(rule.container, element)) {
                 return;
             }
             if (!selectorMatches(rule.selector, element, &state_)) {

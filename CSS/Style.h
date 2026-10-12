@@ -558,6 +558,14 @@ struct ComputedStyle {
     Overflow overflowX = Visible;
     Overflow overflowY = Visible;
 
+    // Containment for `@container` size queries. `InlineSize` (or `Size`)
+    // marks a query container, optionally named; `Normal` (default) does not
+    // establish one. Only widths are queried, and layout containment itself is
+    // not applied: sizes are read as laid out.
+    enum ContainerType : std::uint8_t { ContainerNormal, ContainerInlineSize, ContainerSize };
+    ContainerType containerType = ContainerNormal;
+    std::vector<std::string> containerNames;
+
     // Paint order within a stacking context. Higher wins; equal values keep
     // document order. Only positioned elements and flex/grid items take part.
     int zIndex = 0;

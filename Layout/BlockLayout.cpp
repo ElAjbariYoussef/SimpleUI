@@ -2853,15 +2853,77 @@ ScrollExtent measureScrollExtents(Element& el, const StyleResolver& resolver) {
     return {right, bottom};
 }
 
+// Every laid-out width in one number, so a multipass layout can tell a settled
+// tree apart from one whose container queries are still moving boxes. The walk
+// is deterministic, so equal trees sum equal.
+double layoutWidthChecksum(const Element& el) {
+    double sum = static_cast<double>(el.layoutWidth());
+    for (const auto& child : el.children()) {
+        if (child && !child->isTextNode()) {
+            sum += layoutWidthChecksum(*child);
+        }
+    }
+    return sum;
+}
+
+// Elements skipped as `display:none` keep whatever boxes an earlier pass (or
+// frame) gave them. With container queries flipping display mid-layout that
+// stale geometry would disagree with paint — which skips them — so a
+// multipass layout zeroes hidden boxes and drops their runs once the passes
+// settle. Anything else keeps the behavior it always had.
+void clearHiddenBoxes(Element& el, const StyleResolver& resolver) {
+    // Non-visual wrappers still contain laid-out descendants, so only the
+    // zeroing (not the walk) skips them.
+    if (el.isVisual() && resolver.resolve(el).display == ComputedStyle::None) {
+        el.setLayoutX(0.0f);
+        el.setLayoutY(0.0f);
+        el.setLayoutWidth(0.0f);
+        el.setLayoutHeight(0.0f);
+        el.setPaddingX(0.0f);
+        el.setPaddingY(0.0f);
+        el.setPaddingWidth(0.0f);
+        el.setPaddingHeight(0.0f);
+        el.setContentX(0.0f);
+        el.setContentY(0.0f);
+        el.setContentWidth(0.0f);
+        el.setContentHeight(0.0f);
+        el.clearTextRuns();
+    }
+    for (const auto& child : el.children()) {
+        if (child && !child->isTextNode()) {
+            clearHiddenBoxes(*child, resolver);
+        }
+    }
+}
+
 }  // namespace
 
 void BlockLayout::layout(Element* root, const LayoutInput& input) {
     if (!root || !input.resolver) {
         return;
     }
-    Layout layout(*input.resolver, input.font, input.viewportWidth, input.viewportHeight);
-    layout.run(*root, input.viewportWidth, 0.0f, 0.0f);
-    layout.placeOutOfFlow();
+    // Container queries read laid-out widths, which only exist after a pass:
+    // with container rules in play, repeat until widths settle (at most three
+    // passes; definite widths settle on the second). Anything else lays out
+    // exactly once, as before.
+    double settled = -1.0;
+    for (int pass = 0; pass < 3; ++pass) {
+        Layout layout(*input.resolver, input.font, input.viewportWidth,
+                      input.viewportHeight);
+        layout.run(*root, input.viewportWidth, 0.0f, 0.0f);
+        layout.placeOutOfFlow();
+        if (!input.resolver->anyContainerRules()) {
+            break;
+        }
+        const double widths = layoutWidthChecksum(*root);
+        if (widths == settled) {
+            break;
+        }
+        settled = widths;
+    }
+    if (input.resolver->anyContainerRules()) {
+        clearHiddenBoxes(*root, *input.resolver);
+    }
     measureScrollExtents(*root, *input.resolver);
 }
 

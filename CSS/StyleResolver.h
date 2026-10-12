@@ -107,6 +107,10 @@ public:
     // resolution may differ even when the DOM did not move.
     std::uint64_t generation() const noexcept { return generation_; }
 
+    // Whether any registered rule sits under `@container`. Layout asks once
+    // per pass: without container rules there is nothing to re-read.
+    bool anyContainerRules() const noexcept { return anyContainerRules_; }
+
     // What `rem` and initial `font-size: <percentage>` resolve against. The
     // application sets this from the document root once it is known.
     float rootFontSize() const noexcept { return rootFontSize_; }
@@ -140,6 +144,9 @@ private:
     int layerRank(const std::string& layer, bool important) const;
     void sortRulesNormal();
     void rebuildImportantOrder();
+    // Whether a rule under `@container` reads the nearest query container
+    // ancestor's laid-out content width. Const because `resolve()` is.
+    bool containerMatches(const Rule::ContainerQuery& query, Element& element) const;
 
     // Runs every transition and keyframe animation for `element` into `style`,
     // which must still hold the raw computed values. Called at the end of
@@ -157,6 +164,7 @@ private:
     std::vector<std::size_t> importantOrder_;
     // `@layer` names in first-declared order, from statements and first use.
     std::vector<std::string> layerOrder_;
+    bool anyContainerRules_ = false;
     std::map<std::string, std::vector<KeyframeBlock::Keyframe>, std::less<>> keyframes_;
     mutable std::map<const Element*, ElementAnim> animations_;
     mutable double (*timeSource_)() = nullptr;

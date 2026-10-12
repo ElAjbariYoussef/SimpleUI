@@ -74,6 +74,92 @@ std::string anonymousLayerName() {
     return "@anonymous-" + std::to_string(++count);
 }
 
+// Parses an `@container` prelude: an optional name list followed by one
+// `(min-width: Npx)` / `(max-width: Npx)` feature, optionally `and`-chained.
+// Anything else (style queries, other units, garbage) fails, and the block is
+// dropped, the way an unparsable `@media` is.
+bool parseContainerPrelude(std::string_view prelude, Rule::ContainerQuery& query) {
+    std::size_t i = 0;
+    const auto skipSpaces = [&] {
+        while (i < prelude.size() && isSpace(prelude[i])) {
+            ++i;
+        }
+    };
+    skipSpaces();
+    // Leading idents name the container; the first '(' starts the features.
+    while (i < prelude.size() && prelude[i] != '(') {
+        const std::size_t start = i;
+        while (i < prelude.size() && (isIdentChar(prelude[i]) || prelude[i] == '.')) {
+            ++i;
+        }
+        const std::string_view name = trim(prelude.substr(start, i - start));
+        if (!name.empty() && name != "and" && name != "not" && name != "or") {
+            query.names.emplace_back(name);
+        }
+        skipSpaces();
+        if (i < prelude.size() && prelude[i] != '(' && !isIdentChar(prelude[i]) &&
+            !isSpace(prelude[i])) {
+            return false;
+        }
+    }
+    bool anyFeature = false;
+    while (true) {
+        skipSpaces();
+        if (i >= prelude.size() || prelude[i] != '(') {
+            return false;
+        }
+        ++i;
+        const std::size_t close = prelude.find(')', i);
+        if (close == std::string_view::npos) {
+            return false;
+        }
+        const std::string_view feature = prelude.substr(i, close - i);
+        i = close + 1;
+        const std::size_t colon = feature.find(':');
+        if (colon == std::string_view::npos) {
+            return false;
+        }
+        const std::string_view property = trim(feature.substr(0, colon));
+        const std::string_view amount = trim(feature.substr(colon + 1));
+        if (amount.size() < 3 || amount.substr(amount.size() - 2) != "px") {
+            return false;
+        }
+        const float value =
+            std::strtof(std::string(amount.substr(0, amount.size() - 2)).c_str(), nullptr);
+        if (!std::isfinite(value) || value < 0.0f) {
+            return false;
+        }
+        if (property == "min-width") {
+            query.minWidth = anyFeature && query.minWidth >= 0.0f
+                                 ? std::max(query.minWidth, value)
+                                 : value;
+        } else if (property == "max-width") {
+            query.maxWidth = anyFeature && query.maxWidth >= 0.0f
+                                 ? std::min(query.maxWidth, value)
+                                 : value;
+        } else {
+            return false;
+        }
+        anyFeature = true;
+        skipSpaces();
+        if (i >= prelude.size()) {
+            break;
+        }
+        // Only `and` chains; `or`/`not` stay unsupported and drop the block.
+        if ((prelude.substr(i, 3) == "and" &&
+             (i + 3 >= prelude.size() || !isIdentChar(prelude[i + 3])))) {
+            i += 3;
+            continue;
+        }
+        return false;
+    }
+    if (!anyFeature) {
+        return false;
+    }
+    query.active = true;
+    return true;
+}
+
 // Advances past a `/* ... */` comment starting at `i`, or returns `i` unchanged
 // when there is no comment there.
 std::size_t skipComment(std::string_view source, std::size_t i) {
@@ -857,7 +943,8 @@ void parseKeyframesBody(std::string_view source,
 
 void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                 std::size_t& order, std::vector<Rule>& out,
-                std::vector<KeyframeBlock>& keyframes, const std::string& layer) {
+                std::vector<KeyframeBlock>& keyframes, const std::string& layer,
+                Rule::ContainerQuery container) {
     std::size_t i = 0;
 
     while (i < source.size()) {
@@ -922,7 +1009,48 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                     }
                 }
                 parseRules(source.substr(bodyStart, bodyEnd - bodyStart), combined, order, out,
-                           keyframes, layer);
+                           keyframes, layer, container);
+                continue;
+            }
+
+            if (name == "container" && i < source.size() && source[i] == '{') {
+                const std::string_view prelude =
+                    trim(source.substr(preludeStart, i - preludeStart));
+                ++i;  // '{'
+                const std::size_t bodyStart = i;
+                int depth = 1;
+                while (i < source.size() && depth > 0) {
+                    if (source[i] == '{') {
+                        ++depth;
+                    } else if (source[i] == '}') {
+                        --depth;
+                    }
+                    ++i;
+                }
+                const std::size_t bodyEnd =
+                    (i > bodyStart && source[i - 1] == '}') ? i - 1 : i;
+                // Anything the query grammar cannot express drops the block,
+                // the way an unparsable `@media` does. A nested query
+                // intersects the outer one: bounds tighten, names union.
+                Rule::ContainerQuery inner;
+                if (parseContainerPrelude(prelude, inner)) {
+                    Rule::ContainerQuery merged = container;
+                    merged.names.insert(merged.names.end(), inner.names.begin(),
+                                        inner.names.end());
+                    if (inner.minWidth >= 0.0f) {
+                        merged.minWidth = merged.minWidth >= 0.0f
+                                              ? std::max(merged.minWidth, inner.minWidth)
+                                              : inner.minWidth;
+                    }
+                    if (inner.maxWidth >= 0.0f) {
+                        merged.maxWidth = merged.maxWidth >= 0.0f
+                                              ? std::min(merged.maxWidth, inner.maxWidth)
+                                              : inner.maxWidth;
+                    }
+                    merged.active = true;
+                    parseRules(source.substr(bodyStart, bodyEnd - bodyStart), media, order,
+                               out, keyframes, layer, merged);
+                }
                 continue;
             }
 
@@ -967,7 +1095,8 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                         parseRules(source.substr(bodyStart, bodyEnd - bodyStart), media, order,
                                    out, keyframes,
                                    singleName ? composeLayerName(layer, prelude)
-                                              : anonymousLayerName());
+                                              : anonymousLayerName(),
+                                   container);
                     }
                     continue;
                 }
@@ -1070,6 +1199,7 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                 rule.order = order++;
                 rule.media = media;
                 rule.layer = layer;
+                rule.container = container;
                 if (!rule.selector.parts.empty()) {
                     out.push_back(std::move(rule));
                 }
@@ -1083,7 +1213,7 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
 void CSSParser::parseWithKeyframes(std::string_view source, std::vector<Rule>& rules,
                                    std::vector<KeyframeBlock>& keyframes) {
     std::size_t order = 0;
-    parseRules(source, {}, order, rules, keyframes, std::string());
+    parseRules(source, {}, order, rules, keyframes, std::string(), Rule::ContainerQuery());
 }
 
 std::vector<Rule> CSSParser::parse(std::string_view source) {

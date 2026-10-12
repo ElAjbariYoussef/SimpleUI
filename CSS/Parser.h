@@ -91,6 +91,16 @@ struct Rule {
     std::vector<Declaration> declarations;
     std::size_t order = 0;  // source position, used as the final tiebreak
     std::vector<MediaQuery> media;
+    // A `@container` size query the rule was nested under. Inactive means none:
+    // only `min-width`/`max-width` in px (joined by `and`, with an optional
+    // name list) become rules; anything else is dropped at parse time.
+    struct ContainerQuery {
+        std::vector<std::string> names;
+        float minWidth = -1.0f;  // px, negative when absent
+        float maxWidth = -1.0f;  // px, negative when absent
+        bool active = false;
+    };
+    ContainerQuery container;
     // True once any declaration is a custom property (`--name`) or references one
     // (`var(...)`). Computed by the resolver when the rule is registered, so a
     // rule built by hand does not silently miss the custom-property path.
