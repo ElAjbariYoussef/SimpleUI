@@ -3560,24 +3560,89 @@ int StyleResolver::specificityOf(const SimpleSelector& selector) {
     return selectorRank(selector);
 }
 
+void StyleResolver::noteLayer(const std::string& name) {
+    if (name.empty()) {
+        return;
+    }
+    if (std::find(layerOrder_.begin(), layerOrder_.end(), name) == layerOrder_.end()) {
+        layerOrder_.push_back(name);
+    }
+}
+
+int StyleResolver::layerIndex(const std::string& name) const {
+    for (std::size_t i = 0; i < layerOrder_.size(); ++i) {
+        if (layerOrder_[i] == name) {
+            return static_cast<int>(i);
+        }
+    }
+    // Unreachable after registration; sorting unknown layers last is saner
+    // than crashing.
+    return static_cast<int>(layerOrder_.size());
+}
+
+// One integer that orders layers for a cascade pass. Normal declarations run
+// first-declared-layer first with unlayered last; `!important` runs unlayered
+// first with later-declared layers first.
+int StyleResolver::layerRank(const std::string& layer, bool important) const {
+    if (layer.empty()) {
+        return important ? std::numeric_limits<int>::min()
+                         : std::numeric_limits<int>::max();
+    }
+    const int index = layerIndex(layer);
+    return important ? -index : index;
+}
+
+void StyleResolver::sortRulesNormal() {
+    std::stable_sort(rules_.begin(), rules_.end(),
+                     [this](const Rule& a, const Rule& b) {
+                         const int la = layerRank(a.layer, false);
+                         const int lb = layerRank(b.layer, false);
+                         if (la != lb) {
+                             return la < lb;
+                         }
+                         return selectorRank(a.selector) < selectorRank(b.selector);
+                     });
+}
+
+void StyleResolver::rebuildImportantOrder() {
+    importantOrder_.resize(rules_.size());
+    for (std::size_t i = 0; i < rules_.size(); ++i) {
+        importantOrder_[i] = i;
+    }
+    std::stable_sort(importantOrder_.begin(), importantOrder_.end(),
+                     [this](std::size_t a, std::size_t b) {
+                         const int la = layerRank(rules_[a].layer, true);
+                         const int lb = layerRank(rules_[b].layer, true);
+                         if (la != lb) {
+                             return la < lb;
+                         }
+                         return selectorRank(rules_[a].selector) <
+                                selectorRank(rules_[b].selector);
+                     });
+}
+
 void StyleResolver::setRules(std::vector<Rule> rules) {
     for (Rule& rule : rules) {
         noteCustomUsage(rule);
     }
     rules_ = std::move(rules);
-    std::stable_sort(rules_.begin(), rules_.end(), [](const Rule& a, const Rule& b) {
-        return selectorRank(a.selector) < selectorRank(b.selector);
-    });
+    // A fresh rule set re-declares its layers: statements and first use both
+    // register in stream order.
+    layerOrder_.clear();
+    for (const Rule& rule : rules_) {
+        noteLayer(rule.layer);
+    }
+    sortRulesNormal();
+    rebuildImportantOrder();
     ++generation_;
 }
 
 void StyleResolver::addRule(Rule rule) {
     noteCustomUsage(rule);
-    const int rank = selectorRank(rule.selector);
-    const auto pos = std::upper_bound(
-        rules_.begin(), rules_.end(), rank,
-        [](int value, const Rule& existing) { return value < selectorRank(existing.selector); });
-    rules_.insert(pos, std::move(rule));
+    noteLayer(rule.layer);
+    rules_.push_back(std::move(rule));
+    sortRulesNormal();
+    rebuildImportantOrder();
     ++generation_;
 }
 
@@ -3586,6 +3651,7 @@ void StyleResolver::eraseRule(std::size_t index) {
         return;
     }
     rules_.erase(rules_.begin() + static_cast<std::ptrdiff_t>(index));
+    rebuildImportantOrder();
     ++generation_;
 }
 
@@ -4562,22 +4628,31 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
     }
 
     const auto collectCustom = [&](bool important) {
-        for (const auto& rule : rules_) {
-            if (!rule.usesCustom) {
-                continue;
+        const auto visit = [&](const Rule& rule) {
+            if (rule.layerStatement || !rule.usesCustom) {
+                return;
             }
             if (!rule.media.empty() &&
                 !mediaMatches(rule.media, viewportWidth_, viewportHeight_)) {
-                continue;
+                return;
             }
             if (!selectorMatches(rule.selector, element, &state_)) {
-                continue;
+                return;
             }
             for (const auto& decl : rule.declarations) {
                 if (decl.important != important || !isCustomProperty(decl.property)) {
                     continue;
                 }
                 style.custom[decl.property] = decl.value;
+            }
+        };
+        if (!important) {
+            for (const auto& rule : rules_) {
+                visit(rule);
+            }
+        } else {
+            for (std::size_t index : importantOrder_) {
+                visit(rules_[index]);
             }
         }
         for (const auto& decl : inlineDecls) {
@@ -4613,20 +4688,32 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
     };
 
     const auto applyLevel = [&](bool important) {
-        for (const auto& rule : rules_) {
+        const auto visit = [&](const Rule& rule) {
+            if (rule.layerStatement) {
+                return;
+            }
             // Only a rule under an `@media` pays for evaluating one, which keeps
             // an ordinary stylesheet at the cost it had before.
             if (!rule.media.empty() &&
                 !mediaMatches(rule.media, viewportWidth_, viewportHeight_)) {
-                continue;
+                return;
             }
             if (!selectorMatches(rule.selector, element, &state_)) {
-                continue;
+                return;
             }
             for (const auto& decl : rule.declarations) {
                 if (decl.important == important) {
                     applyOne(decl);
                 }
+            }
+        };
+        if (!important) {
+            for (const auto& rule : rules_) {
+                visit(rule);
+            }
+        } else {
+            for (std::size_t index : importantOrder_) {
+                visit(rules_[index]);
             }
         }
         for (const auto& decl : inlineDecls) {

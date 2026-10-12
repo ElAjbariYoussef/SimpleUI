@@ -33,6 +33,47 @@ bool isSpace(char c) {
     return std::isspace(static_cast<unsigned char>(c)) != 0;
 }
 
+// Splits a `@layer` statement prelude on commas: `@layer a, b.c;` declares
+// two names in order. Anything non-empty survives; validation beyond that
+// would only rename a map key.
+std::vector<std::string> splitLayerNames(std::string_view prelude) {
+    std::vector<std::string> names;
+    std::size_t start = 0;
+    for (std::size_t i = 0; i <= prelude.size(); ++i) {
+        if (i < prelude.size() && prelude[i] != ',') {
+            continue;
+        }
+        const std::string_view name = trim(prelude.substr(start, i - start));
+        start = i + 1;
+        if (!name.empty()) {
+            names.emplace_back(name);
+        }
+    }
+    return names;
+}
+
+// A layer nested inside another is named by joining with a dot, so
+// `@layer a { @layer b { } }` orders `a` before `a.b`.
+std::string composeLayerName(const std::string& outer, std::string_view inner) {
+    if (outer.empty()) {
+        return std::string(inner);
+    }
+    std::string composed;
+    composed.reserve(outer.size() + 1 + inner.size());
+    composed += outer;
+    composed += '.';
+    composed += inner;
+    return composed;
+}
+
+// Anonymous layers (`@layer { }`) are each their own layer, ordered by
+// appearance. The counter is process-wide so names stay unique across
+// stylesheets, the way separate <style> elements stay separate layers.
+std::string anonymousLayerName() {
+    static unsigned count = 0;
+    return "@anonymous-" + std::to_string(++count);
+}
+
 // Advances past a `/* ... */` comment starting at `i`, or returns `i` unchanged
 // when there is no comment there.
 std::size_t skipComment(std::string_view source, std::size_t i) {
@@ -816,7 +857,7 @@ void parseKeyframesBody(std::string_view source,
 
 void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                 std::size_t& order, std::vector<Rule>& out,
-                std::vector<KeyframeBlock>& keyframes) {
+                std::vector<KeyframeBlock>& keyframes, const std::string& layer) {
     std::size_t i = 0;
 
     while (i < source.size()) {
@@ -881,8 +922,57 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                     }
                 }
                 parseRules(source.substr(bodyStart, bodyEnd - bodyStart), combined, order, out,
-                           keyframes);
+                           keyframes, layer);
                 continue;
+            }
+
+            if (name == "layer") {
+                const std::string_view prelude =
+                    trim(source.substr(preludeStart, i - preludeStart));
+                if (i < source.size() && source[i] == ';') {
+                    // A statement: `@layer a, b;` declares the order up front.
+                    // Each name becomes a marker rule so the order survives in
+                    // the rule stream itself.
+                    ++i;
+                    for (std::string layerName : splitLayerNames(prelude)) {
+                        Rule marker;
+                        marker.layer = composeLayerName(layer, layerName);
+                        marker.layerStatement = true;
+                        marker.media = media;
+                        marker.order = order++;
+                        out.push_back(std::move(marker));
+                    }
+                    continue;
+                }
+                if (i < source.size() && source[i] == '{') {
+                    ++i;  // '{'
+                    const std::size_t bodyStart = i;
+                    int depth = 1;
+                    while (i < source.size() && depth > 0) {
+                        if (source[i] == '{') {
+                            ++depth;
+                        } else if (source[i] == '}') {
+                            --depth;
+                        }
+                        ++i;
+                    }
+                    const std::size_t bodyEnd =
+                        (i > bodyStart && source[i - 1] == '}') ? i - 1 : i;
+                    // A block holds one layer; an empty prelude is an anonymous
+                    // one. A comma list here is invalid CSS and is ignored,
+                    // like any rule the engine cannot parse.
+                    const bool singleName =
+                        !prelude.empty() && prelude.find(',') == std::string_view::npos;
+                    if (singleName || prelude.empty()) {
+                        parseRules(source.substr(bodyStart, bodyEnd - bodyStart), media, order,
+                                   out, keyframes,
+                                   singleName ? composeLayerName(layer, prelude)
+                                              : anonymousLayerName());
+                    }
+                    continue;
+                }
+                // Malformed (`@layer` with neither `;` nor `{`): fall through
+                // to the generic skip below.
             }
 
             if (name == "keyframes" && i < source.size() && source[i] == '{') {
@@ -979,6 +1069,7 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                 rule.declarations = declarations;
                 rule.order = order++;
                 rule.media = media;
+                rule.layer = layer;
                 if (!rule.selector.parts.empty()) {
                     out.push_back(std::move(rule));
                 }
@@ -992,7 +1083,7 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
 void CSSParser::parseWithKeyframes(std::string_view source, std::vector<Rule>& rules,
                                    std::vector<KeyframeBlock>& keyframes) {
     std::size_t order = 0;
-    parseRules(source, {}, order, rules, keyframes);
+    parseRules(source, {}, order, rules, keyframes, std::string());
 }
 
 std::vector<Rule> CSSParser::parse(std::string_view source) {

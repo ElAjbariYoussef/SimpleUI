@@ -1447,6 +1447,89 @@ void testChildOverridesInherited() {
               "the most specific rule wins over an ancestor's value");
 }
 
+void testCascadeLayers() {
+    auto document = parseOrNull("<sui><body><div id=\"x\">hi</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* x = document->getElementById("x");
+    check(x != nullptr, "layered element found");
+    if (!x) {
+        return;
+    }
+    const auto colorOf = [&](const char* css) {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(css));
+        return resolver.resolve(*x).color;
+    };
+    const auto isRed = [](SDL_Color c) {
+        return c.r == 0xff && c.g == 0x00 && c.b == 0x00;
+    };
+    const auto isGreen = [](SDL_Color c) {
+        return c.r == 0x00 && c.g == 0xff && c.b == 0x00;
+    };
+
+    // A later layer beats an earlier one whatever the specificity says.
+    check(isGreen(colorOf("body{margin:0} @layer a{ #x{color:#ff0000} }"
+                          " @layer b{ div{color:#00ff00} }")),
+          "a later layer beats higher specificity");
+    // Specificity still orders rules inside one layer.
+    check(isGreen(colorOf("body{margin:0} @layer a{ div{color:#ff0000} #x{color:#00ff00} }")),
+          "specificity still wins inside a layer");
+    // Unlayered author rules beat every layer, either side of it.
+    check(isGreen(colorOf("body{margin:0} @layer a{ #x{color:#ff0000} }"
+                          " div{color:#00ff00}")),
+          "an unlayered rule beats a later layer");
+    check(isGreen(colorOf("body{margin:0} div{color:#00ff00}"
+                          " @layer a{ #x{color:#ff0000} }")),
+          "an unlayered rule beats an earlier layer too");
+
+    // A statement orders layers up front: the same two blocks pick different
+    // winners under different statements.
+    check(isGreen(colorOf("body{margin:0} @layer low, high;"
+                          " @layer low{ div{color:#ff0000} }"
+                          " @layer high{ div{color:#00ff00} }")),
+          "the statement order decides between blocks");
+    check(isRed(colorOf("body{margin:0} @layer high, low;"
+                        " @layer low{ div{color:#ff0000} }"
+                        " @layer high{ div{color:#00ff00} }")),
+          "a reordered statement flips the winner");
+
+    // Nesting dots the names: `outer.inner` follows `outer`.
+    check(isGreen(colorOf("body{margin:0} @layer outer{ div{color:#ff0000}"
+                          " @layer inner{ div{color:#00ff00} } }")),
+          "a nested layer beats its parent");
+    // Anonymous layers order by appearance like named ones.
+    check(isGreen(colorOf("body{margin:0} @layer{ div{color:#ff0000} }"
+                          " @layer{ div{color:#00ff00} }")),
+          "a later anonymous layer wins");
+
+    // `!important` reverses the layer order: layered important beats
+    // unlayered important, and the first layer beats the later ones.
+    check(isGreen(colorOf("body{margin:0} @layer a{ div{color:#00ff00 !important} }"
+                          " div{color:#ff0000 !important}")),
+          "layered !important beats unlayered !important");
+    check(isRed(colorOf("body{margin:0} @layer a{ div{color:#ff0000 !important} }"
+                        " @layer b{ div{color:#00ff00 !important} }")),
+          "the first layer wins among !important");
+
+    // The rules carry their layers: statements arrive as markers, blocks stamp
+    // their rules, plain rules stay unlayered.
+    const auto rules = sui::CSSParser::parse("@layer a, b; div{color:#ff0000}");
+    check(rules.size() == 3, "a statement emits one marker per name plus the rule");
+    if (rules.size() == 3) {
+        check(rules[0].layerStatement && rules[0].layer == "a",
+              "the first marker names the first layer");
+        check(rules[1].layerStatement && rules[1].layer == "b",
+              "the second marker names the second layer");
+        check(!rules[2].layerStatement && rules[2].layer.empty(),
+              "a plain rule stays unlayered");
+    }
+    const auto blocked = sui::CSSParser::parse("@layer a{ div{color:#ff0000} }");
+    check(blocked.size() == 1 && blocked[0].layer == "a",
+          "a block stamps its rules with the layer");
+}
+
 void testDefaultStyles() {
     sui::ComputedStyle body = sui::defaultStyleFor("body");
     check(body.display == sui::ComputedStyle::Block, "body defaults to block");
@@ -5517,6 +5600,7 @@ int main() {
     testDisplayNoneIsSkipped();
     testInheritance();
     testChildOverridesInherited();
+    testCascadeLayers();
     testDefaultStyles();
     testFormControlDefaults();
     testRangeDefaults();

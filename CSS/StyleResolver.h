@@ -132,6 +132,15 @@ public:
 private:
     ComputedStyle resolveWithParent(Element& element, const ComputedStyle& parent) const;
 
+    // Cascade layers (`@layer`), in first-declared order. A rule's layer sorts
+    // before its specificity: later layers beat earlier ones, and unlayered
+    // rules beat every layer (reversed for `!important`).
+    void noteLayer(const std::string& name);
+    int layerIndex(const std::string& name) const;
+    int layerRank(const std::string& layer, bool important) const;
+    void sortRulesNormal();
+    void rebuildImportantOrder();
+
     // Runs every transition and keyframe animation for `element` into `style`,
     // which must still hold the raw computed values. Called at the end of
     // resolveWithParent so layout and paint always see the interpolated picture.
@@ -142,6 +151,12 @@ private:
 
     // Kept sorted weakest-first so resolve() can apply rules in order.
     std::vector<Rule> rules_;
+    // The same rules weakest-first for `!important`, which reverses layer
+    // order: unlayered first, then layers latest-declared first. Stored as
+    // indices because erasing reorders nothing else.
+    std::vector<std::size_t> importantOrder_;
+    // `@layer` names in first-declared order, from statements and first use.
+    std::vector<std::string> layerOrder_;
     std::map<std::string, std::vector<KeyframeBlock::Keyframe>, std::less<>> keyframes_;
     mutable std::map<const Element*, ElementAnim> animations_;
     mutable double (*timeSource_)() = nullptr;

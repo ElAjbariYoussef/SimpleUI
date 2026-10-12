@@ -95,6 +95,13 @@ struct Rule {
     // (`var(...)`). Computed by the resolver when the rule is registered, so a
     // rule built by hand does not silently miss the custom-property path.
     bool usesCustom = false;
+    // The `@layer` this rule was written in, dotted for nesting (`outer.inner`),
+    // empty when unlayered. Unlayered author rules beat layered ones; among
+    // layers the later-declared wins (reversed for `!important`).
+    std::string layer;
+    // A `@layer a, b;` statement arrives as one marker rule per name: it orders
+    // the layers but styles nothing, so the resolver skips it when applying.
+    bool layerStatement = false;
 };
 
 // One `@keyframes` block: a name plus the stops on the animation timeline,
