@@ -283,6 +283,25 @@ void applyInputTypeStyle(ComputedStyle& style, std::string_view type) {
         style.backgroundColor = {0, 0, 0, 0};
         return;
     }
+    // Date/time pickers keep the text-field chrome and edit as text; the wider
+    // right padding leaves room for the calendar or clock glyph the box paints.
+    if (type == "date" || type == "time" || type == "datetime-local" ||
+        type == "month" || type == "week") {
+        style.padding.right = Length(24.0f);
+        return;
+    }
+    // A color swatch edits as hex text; the padding leaves room for the swatch
+    // the box paints from the value.
+    if (type == "color") {
+        style.padding.right = Length(32.0f);
+        return;
+    }
+    // A file control shows a Browse button on the left of the file name; the
+    // padding leaves room for the button the box paints.
+    if (type == "file") {
+        style.padding.left = Length(80.0f);
+        return;
+    }
     if (type != "checkbox" && type != "radio") {
         return;
     }

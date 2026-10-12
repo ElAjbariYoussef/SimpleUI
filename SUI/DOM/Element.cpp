@@ -353,6 +353,12 @@ Element* Element::selectedOption() const {
     return options.empty() ? nullptr : options[0];
 }
 
+std::string Element::fileName() const {
+    const std::string value(attribute("value"));
+    const std::size_t slash = value.find_last_of("/\\");
+    return slash == std::string::npos ? value : value.substr(slash + 1);
+}
+
 InlineStyle::InlineStyle(Element& owner) noexcept : owner_(owner) {}
 
 void InlineStyle::setProperty(std::string property, std::string value, bool important) {

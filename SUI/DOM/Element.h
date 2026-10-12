@@ -113,6 +113,9 @@ public:
     // whitespace with internal runs collapsed to one space, the way a browser
     // reads it (so indented markup still measures and shows cleanly).
     std::string optionLabel() const;
+    // A file input shows only the file name, not the path: the text after the
+    // last slash or backslash, or the whole value when neither appears.
+    std::string fileName() const;
 
     // Tags outside the visual set (meta, title, script, link, #text) are
     // retained so they stay reachable by the linker, but layout and paint skip

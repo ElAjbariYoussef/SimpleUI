@@ -1636,6 +1636,59 @@ void testSelectDefaults() {
           "the stripped label sizes the select");
 }
 
+// Date/time/color inputs keep the text-field chrome, edit as text, and paint
+// an indicator the UA padding leaves room for; a file control shows a Browse
+// button and the file name without its path.
+void testDateTimeColorFile() {
+    auto document = parseOrNull(
+        "<sui><body><input id=\"dt\" type=\"date\" value=\"2026-10-12\"/>"
+        "<input id=\"tm\" type=\"time\" value=\"14:30\"/>"
+        "<input id=\"cl\" type=\"color\" value=\"#ff0000\"/>"
+        "<input id=\"fl\" type=\"file\" value=\"C:\\fakepath\\report.pdf\"/>"
+        "<input id=\"fl2\" type=\"file\" value=\"/home/u/notes.txt\"/></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* dt = document->getElementById("dt");
+    Element* tm = document->getElementById("tm");
+    Element* cl = document->getElementById("cl");
+    Element* fl = document->getElementById("fl");
+    Element* fl2 = document->getElementById("fl2");
+    check(dt && tm && cl && fl && fl2, "picker elements found");
+    if (!dt || !tm || !cl || !fl || !fl2) {
+        return;
+    }
+
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+    check(resolver.resolve(*dt).padding.right.value == 24.0f,
+          "a date leaves room for its calendar glyph");
+    check(resolver.resolve(*tm).padding.right.value == 24.0f,
+          "a time leaves room for its clock glyph");
+    check(resolver.resolve(*cl).padding.right.value == 32.0f,
+          "a color leaves room for its swatch");
+    check(resolver.resolve(*fl).padding.left.value == 80.0f,
+          "a file leaves room for its Browse button");
+
+    // The value flows as normal text runs, so the controls auto-size; a file
+    // run holds only the name.
+    sui::StyleResolver layout;
+    layout.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+    layoutRoot(*document, layout, 400.0f);
+    check(!dt->textRuns().empty() && dt->textRuns()[0].text == "2026-10-12",
+          "a date value lays out as text");
+    check(dt->layoutWidth() > 100.0f, "a date auto-sizes past its indicator room");
+    check(!tm->textRuns().empty() && tm->textRuns()[0].text == "14:30",
+          "a time value lays out as text");
+    check(!cl->textRuns().empty() && cl->textRuns()[0].text == "#ff0000",
+          "a color value lays out as text");
+    check(!fl->textRuns().empty() && fl->textRuns()[0].text == "report.pdf",
+          "a file run shows the name without its path");
+    check(fl->fileName() == "report.pdf", "fileName strips backslash paths");
+    check(fl2->fileName() == "notes.txt", "fileName strips slash paths");
+    check(fl->layoutWidth() > 100.0f, "a file auto-sizes past its button room");
+}
+
 // Phrasing tags that defaulted to block. Each one forced a line break, and the text
 // either side of it laid out into no run at all, so it was never drawn -- correct
 // markup lost its content rather than simply missing its decoration.
@@ -5423,6 +5476,7 @@ int main() {
     testFormControlDefaults();
     testRangeDefaults();
     testSelectDefaults();
+    testDateTimeColorFile();
     testPhrasingTagsStayInline();
     testUnknownPropertyIsReported();
     testCursorProperty();

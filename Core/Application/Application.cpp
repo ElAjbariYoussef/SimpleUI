@@ -389,7 +389,8 @@ void paintTextShadow(const ComputedStyle::TextShadow& shadow, const Element::Tex
 
 // A focused text field (an <input> or <textarea>) edits its value. Textareas
 // are always textual; an input is textual unless its type names a control such
-// as checkbox, radio, button, range, file, or color.
+// as checkbox, radio, button, range, or file. Date/time pickers and color
+// swatches edit as text (the value reads back verbatim, like type=number).
 bool isEditableField(const Element* el) {
     if (!el) {
         return false;
@@ -403,7 +404,9 @@ bool isEditableField(const Element* el) {
     const std::string_view type = el->attribute("type");
     return type.empty() || type == "text" || type == "password" ||
            type == "search" || type == "email" || type == "url" ||
-           type == "tel" || type == "number";
+           type == "tel" || type == "number" || type == "date" ||
+           type == "time" || type == "datetime-local" || type == "month" ||
+           type == "week" || type == "color";
 }
 
 // A checkbox/radio keeps its state as a boolean `checked` attribute.
@@ -1272,6 +1275,82 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         }
     }
 
+    // Date/time/color/file inputs paint their own indicator: a calendar or
+    // clock glyph, a swatch of the value, or a Browse button. The value (or
+    // file name) flows as normal text runs, and the UA padding keeps it clear
+    // of the indicator. All shapes paint without a font; only the button label
+    // needs one.
+    if (el.tag() == "input") {
+        const std::string_view type = el.attribute("type");
+        const bool calendar = type == "date" || type == "month" || type == "week" ||
+                              type == "datetime-local";
+        if (calendar || type == "time" || type == "color" || type == "file") {
+            const SDL_FRect content{el.contentX() - offX, el.contentY() - offY,
+                                    el.contentWidth(), el.contentHeight()};
+            if (content.w > 0.0f && content.h > 0.0f) {
+                const sui::Color ink = multiplyAlpha(toColor(s.color), opacity);
+                if (calendar) {
+                    const float gx = content.x + content.w - 15.0f;
+                    const float gy = content.y + (content.h - 14.0f) * 0.5f;
+                    renderer.strokeRect(SDL_FRect{gx, gy, 14.0f, 14.0f}, ink, 1.0f);
+                    renderer.line(gx, gy + 4.0f, gx + 14.0f, gy + 4.0f, ink, 1.0f);
+                    renderer.line(gx + 3.5f, gy - 2.5f, gx + 3.5f, gy + 2.5f, ink, 1.5f);
+                    renderer.line(gx + 10.5f, gy - 2.5f, gx + 10.5f, gy + 2.5f, ink, 1.5f);
+                } else if (type == "time") {
+                    const float cx = content.x + content.w - 8.0f;
+                    const float cy = content.y + content.h * 0.5f;
+                    std::vector<SDL_FPoint> ring;
+                    ring.reserve(16);
+                    for (int k = 0; k < 16; ++k) {
+                        const float a = 2.0f * 3.14159265f * static_cast<float>(k) / 16.0f;
+                        ring.push_back(
+                            SDL_FPoint{cx + 7.0f * std::cos(a), cy + 7.0f * std::sin(a)});
+                    }
+                    renderer.strokePath(ring, ink, 1.0f, true);
+                    renderer.line(cx, cy, cx, cy - 4.5f, ink, 1.5f);
+                    renderer.line(cx, cy, cx + 3.5f, cy, ink, 1.5f);
+                } else if (type == "color") {
+                    const float sw = 22.0f;
+                    const float sh = std::min(14.0f, content.h);
+                    const SDL_FRect swatch{content.x + content.w - sw - 2.0f,
+                                           content.y + (content.h - sh) * 0.5f, sw, sh};
+                    SDL_Color parsed{0, 0, 0, 255};
+                    if (!parseColor(el.value(), parsed)) {
+                        parsed = SDL_Color{0, 0, 0, 255};
+                    }
+                    renderer.fillRect(swatch, multiplyAlpha(toColor(parsed), opacity));
+                    renderer.strokeRect(swatch, multiplyAlpha(toColor(s.borderColor), opacity),
+                                        1.0f);
+                } else {
+                    // A Browse button hangs in the left padding room.
+                    const SDL_FRect button{content.x - 78.0f, content.y - 4.0f, 72.0f,
+                                           content.h + 8.0f};
+                    renderer.fillRect(button,
+                                      multiplyAlpha(sui::Color{39, 39, 42, 255}, opacity));
+                    renderer.strokeRect(button,
+                                        multiplyAlpha(sui::Color{63, 63, 70, 255}, opacity),
+                                        1.0f);
+                    if (font.hasFont()) {
+                        SDL_Texture* texture = font.renderText(
+                            sdlRenderer, "Browse...", s.fontSize,
+                            SDL_Color{s.color.r, s.color.g, s.color.b,
+                                      static_cast<Uint8>(static_cast<float>(s.color.a) *
+                                                         opacity)});
+                        if (texture) {
+                            float texW = 0.0f, texH = 0.0f;
+                            SDL_GetTextureSize(texture, &texW, &texH);
+                            const SDL_FRect dst{button.x + (button.w - texW) * 0.5f,
+                                                button.y + (button.h - texH) * 0.5f, texW,
+                                                texH};
+                            SDL_RenderTexture(sdlRenderer, texture, nullptr, &dst);
+                            SDL_DestroyTexture(texture);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if (!font.hasFont()) {
         return;
     }
@@ -1918,11 +1997,14 @@ void Application::dispatch(const InputEvent& event) {
         const bool readOnly = target->hasAttribute("readonly") || target->hasAttribute("disabled");
         const std::string_view type = target->attribute("type");
         // A textarea is always a multiline text editor; an input is textual
-        // unless its type is a control such as button or submit.
+        // unless its type is a control such as button or submit. This mirrors
+        // isEditableField above: both lists name the same textual types.
         const bool isTextual = target->tag() == "textarea" ||
                                (type.empty() || type == "text" || type == "password" ||
                                 type == "search" || type == "email" || type == "url" ||
-                                type == "tel" || type == "number");
+                                type == "tel" || type == "number" || type == "date" ||
+                                type == "time" || type == "datetime-local" || type == "month" ||
+                                type == "week" || type == "color");
         if (isTextual) {
             std::string value = target->value();
             if (target != lastFocused_) {

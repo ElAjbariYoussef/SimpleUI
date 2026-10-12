@@ -2485,11 +2485,15 @@ private:
         void inlineBox(Element& el, const ComputedStyle& container) {
             // A control draws its current value where a normal element would
             // draw its children, so its text takes part in the same line context.
-            // Password fields mask the value with bullet characters. A textarea
+            // Password fields mask the value with bullet characters. A file
+            // control shows only the file name, never the path. A textarea
             // uses its own `white-space`, which defaults to pre-wrap, so its
             // newlines survive into the line grid.
             if (el.tag() == "input" || el.tag() == "textarea") {
-                const std::string value = el.value();
+                std::string value = el.value();
+                if (el.tag() == "input" && el.attribute("type") == "file") {
+                    value = el.fileName();
+                }
                 if (!value.empty()) {
                     if (el.attribute("type") == "password") {
                         std::size_t chars = 0;

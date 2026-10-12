@@ -777,6 +777,63 @@ int main() {
         }
     }
 
+    // Date/time/color inputs edit as text (the value reads back verbatim); a
+    // file control is display-only, showing the name without its path, and a
+    // click focuses it like any control.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<input id=\"dt\" type=\"date\" value=\"2026-10-12\"/>"
+            "<input id=\"cl\" type=\"color\" value=\"#ff0000\"/>"
+            "<input id=\"fl\" type=\"file\" value=\"report.pdf\"/>"
+            "</body></sui>", err);
+        check(doc != nullptr, "picker test document parsed");
+        if (doc) {
+            sui::Element* dt = doc->getElementById("dt");
+            sui::Element* cl = doc->getElementById("cl");
+            sui::Element* fl = doc->getElementById("fl");
+            check(dt && cl && fl, "picker elements found");
+            if (dt && cl && fl) {
+                app.setDocument(std::move(doc));
+                sui::Document& appDoc = app.document();
+
+                sui::StyleResolver layoutResolver;
+                layoutResolver.setRules(sui::CSSParser::parse("input{display:block}"));
+                sui::LayoutInput input;
+                input.resolver = &layoutResolver;
+                input.viewportWidth = 400.0f;
+                input.viewportHeight = 300.0f;
+                sui::BlockLayout().layout(app.document().root(), input);
+
+                // A date edits like a text field, caret included.
+                appDoc.setFocused(dt);
+                app.dispatch(sui::InputEvent(sui::InputKind::TextInput, 0, 0, 0, 0, 0, 0, "X"));
+                check(dt->value() == "2026-10-12X", "typing appends to a date value");
+                check(app.caretPosition() == 11, "the caret advances past the insert");
+                sui::InputEvent leftEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x40000050);
+                app.dispatch(leftEv);
+                check(app.caretPosition() == 10, "arrows move a date caret");
+
+                // A color edits its hex text; the swatch follows the value.
+                appDoc.setFocused(cl);
+                app.dispatch(sui::InputEvent(sui::InputKind::TextInput, 0, 0, 0, 0, 0, 0, "0"));
+                check(cl->value() == "#ff00000", "typing appends to a color value");
+
+                // A file ignores typing, and a click focuses it.
+                appDoc.setFocused(fl);
+                app.dispatch(sui::InputEvent(sui::InputKind::TextInput, 0, 0, 0, 0, 0, 0, "x"));
+                check(fl->value() == "report.pdf", "a file ignores text input");
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerDown,
+                                             fl->layoutX() + fl->layoutWidth() * 0.5f,
+                                             fl->layoutY() + fl->layoutHeight() * 0.5f, 1));
+                check(appDoc.focused() == fl, "clicking a file focuses it");
+                check(fl->value() == "report.pdf", "clicking a file keeps its value");
+            }
+        }
+    }
+
     // A `<textarea>` edits its text content as a multiline value: typing works at
     // any caret position, Return starts a new line, Home/End bound the caret to
     // the line instead of the value, and Up/Down keep the column while changing
