@@ -4880,6 +4880,23 @@ bool hasMatches(std::string_view argument, const Element& element,
     return false;
 }
 
+// Element siblings for the structural pseudo-classes: text nodes and
+// generated boxes never count, so mixed content and `::before`/`::after`
+// leave indices alone. Empty when the element has no parent.
+std::vector<const Element*> elementSiblings(const Element& element) {
+    std::vector<const Element*> siblings;
+    const Element* parent = element.parent();
+    if (!parent) {
+        return siblings;
+    }
+    for (const auto& child : parent->children()) {
+        if (child && !child->isTextNode() && !child->isPseudoElement()) {
+            siblings.push_back(child.get());
+        }
+    }
+    return siblings;
+}
+
 bool selectorMatches(const SimpleSelector& selector, const Element& element,
                      const PseudoState* state) {
     if (selector.unsupported) {
@@ -4887,12 +4904,14 @@ bool selectorMatches(const SimpleSelector& selector, const Element& element,
     }
     // Interactive and structural pseudo-classes
     for (const PseudoClass pseudo : selector.pseudoClasses) {
-        if (pseudo == PseudoClass::Hover || pseudo == PseudoClass::Active || pseudo == PseudoClass::Focus) {
+        if (pseudo == PseudoClass::Hover || pseudo == PseudoClass::Active ||
+            pseudo == PseudoClass::Focus || pseudo == PseudoClass::FocusWithin) {
             const Element* target = nullptr;
             switch (pseudo) {
                 case PseudoClass::Hover: target = state ? state->hovered : nullptr; break;
                 case PseudoClass::Active: target = state ? state->active : nullptr; break;
-                case PseudoClass::Focus: target = state ? state->focused : nullptr; break;
+                case PseudoClass::Focus:
+                case PseudoClass::FocusWithin: target = state ? state->focused : nullptr; break;
                 default: break;
             }
             if (!target) {
@@ -4933,37 +4952,76 @@ bool selectorMatches(const SimpleSelector& selector, const Element& element,
             }
             continue;
         }
-        if (pseudo == PseudoClass::FirstChild || pseudo == PseudoClass::LastChild) {
-            const Element* p = element.parent();
-            if (!p) {
+        if (pseudo == PseudoClass::Disabled || pseudo == PseudoClass::Enabled) {
+            // Only form controls take `disabled`: anything else matches
+            // neither. An option in a disabled optgroup counts as disabled.
+            const std::string_view tag = element.tag();
+            const bool disableable =
+                tag == "input" || tag == "button" || tag == "select" ||
+                tag == "textarea" || tag == "optgroup" || tag == "option";
+            if (!disableable) {
                 return false;
             }
-            const auto& c = p->children();
-            if (c.empty()) {
-                return false;
+            bool disabled = element.hasAttribute("disabled");
+            if (!disabled && tag == "option") {
+                if (const Element* parent = element.parent()) {
+                    disabled = parent->tag() == "optgroup" &&
+                               parent->hasAttribute("disabled");
+                }
             }
-            if (pseudo == PseudoClass::FirstChild) {
-                if (c[0].get() != &element) {
-                    return false;
-                }
-            } else {
-                if (c.back().get() != &element) {
-                    return false;
-                }
+            if ((pseudo == PseudoClass::Disabled) != disabled) {
+                return false;
             }
             continue;
         }
-        if (pseudo == PseudoClass::NthChild) {
-            const Element* p = element.parent();
-            if (!p) {
+        if (pseudo == PseudoClass::FirstChild || pseudo == PseudoClass::LastChild ||
+            pseudo == PseudoClass::OnlyChild) {
+            const std::vector<const Element*> siblings = elementSiblings(element);
+            if (siblings.empty()) {
                 return false;
             }
-            const auto& c = p->children();
-            int index = 0;
-            for (std::size_t i = 0; i < c.size(); ++i) {
-                if (c[i].get() == &element) {
-                    index = static_cast<int>(i) + 1;
+            if (pseudo == PseudoClass::FirstChild) {
+                if (siblings.front() != &element) {
+                    return false;
+                }
+            } else if (pseudo == PseudoClass::LastChild) {
+                if (siblings.back() != &element) {
+                    return false;
+                }
+            } else if (siblings.size() != 1 || siblings.front() != &element) {
+                return false;
+            }
+            continue;
+        }
+        if (pseudo == PseudoClass::NthChild || pseudo == PseudoClass::NthLastChild) {
+            const std::vector<const Element*> siblings = elementSiblings(element);
+            std::size_t at = siblings.size();
+            for (std::size_t i = 0; i < siblings.size(); ++i) {
+                if (siblings[i] == &element) {
+                    at = i;
                     break;
+                }
+            }
+            if (at >= siblings.size()) {
+                return false;
+            }
+            const int index = pseudo == PseudoClass::NthChild
+                                  ? static_cast<int>(at) + 1
+                                  : static_cast<int>(siblings.size() - at);
+            if (!nthChildMatches(selector.pseudoArgument, index)) {
+                return false;
+            }
+            continue;
+        }
+        if (pseudo == PseudoClass::NthOfType) {
+            int index = 0;
+            int seen = 0;
+            for (const Element* sibling : elementSiblings(element)) {
+                if (sibling->tag() == element.tag()) {
+                    ++seen;
+                    if (sibling == &element) {
+                        index = seen;
+                    }
                 }
             }
             if (index == 0) {

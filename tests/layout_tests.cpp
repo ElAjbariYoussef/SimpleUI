@@ -243,6 +243,126 @@ void testInteractivePseudoClasses() {
           "a descendant selector lights up from a child being hovered");
 }
 
+// The structural pseudo-classes count elements: text nodes and generated
+// boxes never shift an index. Plus `:disabled`/`:enabled` on form controls
+// and `:focus-within` on the focused element's ancestors.
+void testStructuralPseudoClasses() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"mix\">text<span id=\"sp\">b</span></div>"
+        "<div id=\"row\"><p id=\"p1\">a</p><span id=\"mid\">b</span><p id=\"p2\">c</p></div>"
+        "<div id=\"solo\"><p id=\"only\">one</p></div>"
+        "<input id=\"en\" type=\"text\"/>"
+        "<input id=\"dis\" type=\"text\" disabled/>"
+        "<button id=\"btn\">go</button>"
+        "<select id=\"sel\"><optgroup id=\"og\" label=\"g\" disabled>"
+        "<option id=\"o1\">a</option></optgroup><option id=\"o2\">b</option></select>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* sp = document->getElementById("sp");
+    Element* p1 = document->getElementById("p1");
+    Element* mid = document->getElementById("mid");
+    Element* p2 = document->getElementById("p2");
+    Element* only = document->getElementById("only");
+    Element* en = document->getElementById("en");
+    Element* dis = document->getElementById("dis");
+    Element* btn = document->getElementById("btn");
+    Element* dropdown = document->getElementById("sel");
+    Element* o1 = document->getElementById("o1");
+    Element* o2 = document->getElementById("o2");
+    check(sp && p1 && mid && p2 && only && en && dis && btn && dropdown && o1 && o2,
+          "structural elements found");
+    if (!sp || !p1 || !mid || !p2 || !only || !en || !dis || !btn || !dropdown || !o1 ||
+        !o2) {
+        return;
+    }
+    const auto sel = [](const char* text) { return sui::CSSParser::parseSelector(text); };
+    const auto on = [&](const char* text, Element& e) {
+        return selectorMatches(sel(text), e);
+    };
+
+    // Mixed content: the leading text node does not move the span.
+    check(on("span:first-child", *sp), "text before a span keeps it first");
+    check(on("span:last-child", *sp), "a lone element child is also last");
+    check(on("p:nth-child(1)", *p1), "nth-child(1) matches the first child");
+    check(on("span:nth-child(2)", *mid), "nth-child numbers element siblings");
+
+    // Type-restricted and from-the-end counting, plus the lone child.
+    check(on("p:nth-of-type(2)", *p2), "nth-of-type(2) matches the second paragraph");
+    check(!on("p:nth-of-type(2)", *p1), "nth-of-type(2) misses the first");
+    check(on("span:nth-of-type(1)", *mid), "nth-of-type counts within the tag");
+    check(on("p:nth-last-child(1)", *p2), "nth-last-child(1) matches the last child");
+    check(on("span:nth-last-child(2)", *mid), "nth-last-child counts back from the end");
+    check(!on("p:nth-last-child(1)", *p1), "nth-last-child(1) misses the first");
+    check(on("p:only-child", *only), "only-child matches a lone child");
+    check(!on("p:only-child", *p1), "only-child misses among siblings");
+
+    // Generated boxes never count either: a `::before` on the parent must not
+    // shift the paragraphs it precedes.
+    {
+        auto gdoc = parseOrNull(
+            "<sui><body><div id=\"g\"><p id=\"q1\">a</p><p id=\"q2\">b</p></div></body></sui>");
+        if (gdoc) {
+            Element* q1 = gdoc->getElementById("q1");
+            Element* q2 = gdoc->getElementById("q2");
+            check(q1 && q2, "generated-box elements found");
+            if (q1 && q2) {
+                sui::StyleResolver presolver;
+                presolver.setRules(sui::CSSParser::parse("#g::before{content:\"x\"}"));
+                sui::generatePseudoElements(*gdoc, presolver);
+                check(on("p:first-child", *q1), "::before does not take first-child");
+                check(on("p:nth-child(2)", *q2), "::before does not shift nth-child");
+            }
+        }
+    }
+
+    // Form-control states, including an option disabled through its group.
+    check(on("input:enabled", *en), "an enabled input matches :enabled");
+    check(!on("input:disabled", *en), "an enabled input misses :disabled");
+    check(on("input:disabled", *dis), "a disabled input matches :disabled");
+    check(!on("input:enabled", *dis), "a disabled input misses :enabled");
+    check(on("button:enabled", *btn), "a button is enableable");
+    check(on("select:enabled", *dropdown), "a select is enableable");
+    check(on("option:disabled", *o1), "an option inherits its optgroup's disabled");
+    check(!on("option:enabled", *o1), "a grouped-disabled option misses :enabled");
+    check(on("option:enabled", *o2), "a plain option matches :enabled");
+    check(!on("div:disabled", *p1->parent()), "a div matches neither state");
+    check(!on("div:enabled", *p1->parent()), "a div is not enableable");
+
+    // `:focus-within` belongs to the focused element and its ancestors.
+    sui::PseudoState focused;
+    focused.focused = mid;
+    check(selectorMatches(sel("span:focus-within"), *mid, &focused),
+          ":focus-within matches the focused element");
+    check(selectorMatches(sel("div:focus-within"), *p1->parent(), &focused),
+          ":focus-within matches an ancestor of the focused element");
+    check(!selectorMatches(sel("div:focus-within"), *sp->parent(), &focused),
+          ":focus-within misses a subtree without focus");
+    check(!selectorMatches(sel("p:focus-within"), *p1, &focused),
+          ":focus-within misses a sibling of the focused element");
+
+    // The state drives the cascade, like `:hover` does for descendants.
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body{margin:0} #row p{color:#ff0000} #row p:nth-of-type(2){color:#00ff00}"
+        " #dis{background-color:#ff0000} #dis:disabled{background-color:#0000ff}"
+        " #row{color:#ff0000} #row:focus-within{color:#00ff00}"));
+    check(resolver.resolve(*p2).color.g == 0xff,
+          "a matching nth-of-type rule restyles its paragraph");
+    check(resolver.resolve(*dis).backgroundColor.b == 0xff,
+          ":disabled applies over the plain id rule");
+    check(resolver.resolve(*p1).color.r == 0xff, "the first paragraph stays red");
+    check(resolver.resolve(*mid->parent()).color.r == 0xff,
+          "the row is red without focus");
+    resolver.setFocused(mid);
+    check(resolver.resolve(*mid->parent()).color.g == 0xff,
+          "focusing a child lights the :focus-within ancestor");
+    resolver.setFocused(nullptr);
+    check(resolver.resolve(*mid->parent()).color.r == 0xff,
+          "clearing focus drops the :focus-within rule");
+}
+
 void testAttributeSelectors() {
     auto document = parseOrNull(
         "<sui><body><div id=\"a\" data-role=\"panel aside\" data-lang=\"en-GB\""
@@ -6016,6 +6136,7 @@ int main() {
     testRuleParsing();
     testSelectorMatching();
     testInteractivePseudoClasses();
+    testStructuralPseudoClasses();
     testAttributeSelectors();
     testPositioning();
     testWhiteSpace();
