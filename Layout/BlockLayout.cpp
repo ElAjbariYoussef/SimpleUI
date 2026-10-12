@@ -352,7 +352,10 @@ public:
             s.width = Length(text + kArrowRoom);
         }
         if (s.height.isAuto()) {
-            s.height = Length(metricsFor(font_, s).lineHeight);
+            // An open list is as tall as its visible rows; a dropdown is one
+            // line tall.
+            const int rows = std::max(el.listboxRows(), 1);
+            s.height = Length(static_cast<float>(rows) * metricsFor(font_, s).lineHeight);
         }
     }
 

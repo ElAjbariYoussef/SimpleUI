@@ -1636,6 +1636,51 @@ void testSelectDefaults() {
           "the stripped label sizes the select");
 }
 
+// A select with `size` or `multiple` is an open list: options lay out as rows,
+// the box is as tall as its visible rows, and it scrolls what does not fit.
+void testSelectListbox() {
+    auto document = parseOrNull(
+        "<sui><body><select id=\"lb\" size=\"3\">"
+        "<option>one</option><option>two</option><option>three</option>"
+        "<option>four</option><option>five</option></select>"
+        "<select id=\"ml\" multiple>"
+        "<option>one</option><option>two</option></select>"
+        "<select id=\"m2\" multiple size=\"2\"><option>one</option></select>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* lb = document->getElementById("lb");
+    Element* ml = document->getElementById("ml");
+    Element* m2 = document->getElementById("m2");
+    check(lb && ml && m2, "listbox elements found");
+    if (!lb || !ml || !m2) {
+        return;
+    }
+    check(lb->listboxRows() == 3, "size=3 shows three rows");
+    check(ml->listboxRows() == 4, "a bare multiple shows four rows");
+    check(m2->listboxRows() == 2, "multiple size=2 shows two rows");
+
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+    Element* row = lb->children()[0].get();
+    check(resolver.resolve(*row).display == sui::ComputedStyle::Block,
+          "a listbox option lays out as a row");
+    check(resolver.resolve(*lb).overflowY == sui::ComputedStyle::Auto,
+          "an open list clips and scrolls");
+
+    // One line is 16px; the chrome adds 8px of padding and a 1px border.
+    sui::StyleResolver layout;
+    layout.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+    layoutRoot(*document, layout, 400.0f);
+    check(lb->layoutHeight() == 3.0f * 16.0f + 10.0f,
+          "a size=3 list is three rows tall");
+    check(ml->layoutHeight() == 4.0f * 16.0f + 10.0f,
+          "a bare multiple is four rows tall");
+    check(row->layoutHeight() == 16.0f, "each option row is one line tall");
+    check(row->layoutY() == lb->contentY(), "rows start at the content top");
+}
+
 // Date/time/color inputs keep the text-field chrome, edit as text, and paint
 // an indicator the UA padding leaves room for; a file control shows a Browse
 // button and the file name without its path.
@@ -5476,6 +5521,7 @@ int main() {
     testFormControlDefaults();
     testRangeDefaults();
     testSelectDefaults();
+    testSelectListbox();
     testDateTimeColorFile();
     testPhrasingTagsStayInline();
     testUnknownPropertyIsReported();

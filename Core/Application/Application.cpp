@@ -571,6 +571,55 @@ bool selectOption(Element& select, std::size_t index) {
     return true;
 }
 
+// Flips one option's mark, leaving the rest alone. Disabled options and
+// out-of-range indexes change nothing.
+void toggleOptionSelect(Element& select, std::size_t index) {
+    const std::vector<Element*> options = select.selectOptions();
+    if (index >= options.size() || options[index]->hasAttribute("disabled")) {
+        return;
+    }
+    if (options[index]->hasAttribute("selected")) {
+        options[index]->removeAttribute("selected");
+    } else {
+        options[index]->setAttribute("selected", "");
+    }
+}
+
+// Marks exactly the options from `a` to `b`, skipping disabled ones. Writes
+// land only where the mark actually changes, so re-clicking a range stays
+// quiet.
+void rangeOptionSelect(Element& select, std::size_t a, std::size_t b) {
+    const std::vector<Element*> options = select.selectOptions();
+    if (options.empty()) {
+        return;
+    }
+    const std::size_t lo = std::min(a, b);
+    const std::size_t hi = std::min(std::max(a, b), options.size() - 1);
+    for (std::size_t i = 0; i < options.size(); ++i) {
+        const bool want =
+            i >= lo && i <= hi && !options[i]->hasAttribute("disabled");
+        if (want && !options[i]->hasAttribute("selected")) {
+            options[i]->setAttribute("selected", "");
+        } else if (!want && options[i]->hasAttribute("selected")) {
+            options[i]->removeAttribute("selected");
+        }
+    }
+}
+
+// Scrolls an open list so the option is visible, clamped by the select's own
+// scroll range. Both boxes are layout-static, so ancestor scrolls cancel out.
+void revealSelectOption(Element& select, const Element& option) {
+    const float top = option.layoutY();
+    const float bottom = top + option.layoutHeight();
+    const float viewTop = select.contentY() + select.scrollTop();
+    const float viewBottom = viewTop + select.clientHeight();
+    if (top < viewTop) {
+        select.setScrollTop(select.scrollTop() - (viewTop - top));
+    } else if (bottom > viewBottom) {
+        select.setScrollTop(select.scrollTop() + (bottom - viewBottom));
+    }
+}
+
 // Moves an option index by `delta`, skipping disabled options and clamping at
 // the ends. Closed-select arrows move the selection with this; open-popup
 // arrows move the highlight.
@@ -1351,6 +1400,16 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         }
     }
 
+    // A listbox option shows its selection: dropdown options never paint a box,
+    // so any option box belongs to an open list.
+    if (el.tag() == "option" && el.hasAttribute("selected")) {
+        const SDL_FRect box{el.layoutX() - offX, el.layoutY() - offY, el.layoutWidth(),
+                            el.layoutHeight()};
+        if (box.w > 0.0f && box.h > 0.0f) {
+            renderer.fillRect(box, multiplyAlpha(sui::Color{59, 130, 246, 255}, opacity));
+        }
+    }
+
     if (!font.hasFont()) {
         return;
     }
@@ -1632,6 +1691,8 @@ void Application::setDocument(std::unique_ptr<Document> document) {
     // The open popup points into the old tree.
     openSelect_ = nullptr;
     selectHighlight_ = 0;
+    selectAnchor_ = 0;
+    selectEdge_ = 0;
 }
 
 WindowConfig Application::windowConfigFrom(Document& document) {
@@ -1904,14 +1965,53 @@ void Application::dispatch(const InputEvent& event) {
             }
             // A select opens its popup on click, or closes an open one, before
             // any `onclick` handler so the handler observes the new state. A
-            // pick or a toggle-off on the same press suppresses reopening.
-            if (target && target->tag() == "select" && !target->hasAttribute("disabled") &&
-                !suppressSelectToggle) {
+            // pick or a toggle-off on the same press suppresses reopening. An
+            // open list never pops up: its rows handle the click below.
+            if (target && target->tag() == "select" && target->listboxRows() == 0 &&
+                !target->hasAttribute("disabled") && !suppressSelectToggle) {
                 if (openSelect_ == target) {
                     openSelect_ = nullptr;
                 } else {
                     openSelect_ = target;
                     selectHighlight_ = selectSelectedIndex(*target);
+                }
+            }
+            // An open list picks its clicked row: a plain click selects,
+            // Ctrl/Cmd toggles, Shift extends from the anchor (all only when
+            // `multiple`; otherwise every click selects). Focus moves to the
+            // select itself so arrows keep working.
+            if (target && target->tag() == "option") {
+                Element* owner = target->owningSelect();
+                if (owner && owner->listboxRows() > 0 &&
+                    !owner->hasAttribute("disabled") &&
+                    !target->hasAttribute("disabled")) {
+                    document_->setFocused(owner);
+                    resolver_.setFocused(owner);
+                    lastFocused_ = owner;
+                    const std::vector<Element*> options = owner->selectOptions();
+                    std::size_t index = options.size();
+                    for (std::size_t i = 0; i < options.size(); ++i) {
+                        if (options[i] == target) {
+                            index = i;
+                            break;
+                        }
+                    }
+                    const bool multi = owner->hasAttribute("multiple");
+                    if (index < options.size()) {
+                        if (multi && shiftDown_) {
+                            selectEdge_ = index;
+                            rangeOptionSelect(*owner, selectAnchor_, selectEdge_);
+                        } else if (multi && ctrlDown_) {
+                            toggleOptionSelect(*owner, index);
+                            selectAnchor_ = index;
+                            selectEdge_ = index;
+                        } else {
+                            if (selectOption(*owner, index)) {
+                                selectAnchor_ = index;
+                                selectEdge_ = index;
+                            }
+                        }
+                    }
                 }
             }
             break;
@@ -2232,6 +2332,8 @@ void Application::dispatch(const InputEvent& event) {
         const bool up = event.key == kUp || event.key == kLeft;
         const bool down = event.key == kDown || event.key == kRight;
         const bool open = openSelect_ == target;
+        const bool listbox = target->listboxRows() > 0;
+        const bool multi = target->hasAttribute("multiple");
         if (event.key == kEscape) {
             // Closing works with no options at all.
             if (open) {
@@ -2247,12 +2349,24 @@ void Application::dispatch(const InputEvent& event) {
                     }
                 }
             } else if (up || down) {
-                const std::size_t to =
-                    stepOptionIndex(options, selectSelectedIndex(*target), up ? -1 : 1);
-                if (to != selectSelectedIndex(*target)) {
-                    selectOption(*target, to);
+                if (listbox && multi && shiftDown_) {
+                    // Extend the range from the anchor through the moved edge.
+                    selectEdge_ = stepOptionIndex(options, selectEdge_, up ? -1 : 1);
+                    rangeOptionSelect(*target, selectAnchor_, selectEdge_);
+                    revealSelectOption(*target, *options[selectEdge_]);
+                } else {
+                    const std::size_t to =
+                        stepOptionIndex(options, selectSelectedIndex(*target), up ? -1 : 1);
+                    if (to != selectSelectedIndex(*target)) {
+                        selectOption(*target, to);
+                        selectAnchor_ = to;
+                        selectEdge_ = to;
+                    }
+                    if (listbox) {
+                        revealSelectOption(*target, *options[to]);
+                    }
                 }
-            } else if (event.key == kReturn || event.key == kSpace) {
+            } else if ((event.key == kReturn || event.key == kSpace) && !listbox) {
                 openSelect_ = target;
                 selectHighlight_ = selectSelectedIndex(*target);
             }
@@ -2825,6 +2939,8 @@ void Application::shutdown() {
     lastFocused_ = nullptr;
     openSelect_ = nullptr;
     selectHighlight_ = 0;
+    selectAnchor_ = 0;
+    selectEdge_ = 0;
     caretBytePos_ = 0;
     selectionAnchor_ = 0;
     compositionText_.clear();

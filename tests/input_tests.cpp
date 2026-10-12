@@ -777,6 +777,139 @@ int main() {
         }
     }
 
+    // An open list (`size`/`multiple`) picks its clicked row: plain clicks
+    // select, Ctrl toggles, Shift extends from the anchor. Arrows move the
+    // selection and scroll it into view; clicking the chrome never pops up.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<select id=\"lb\" size=\"5\"><option>a1</option><option>a2</option>"
+            "<option>a3</option><option>a4</option><option>a5</option></select>"
+            "<select id=\"sc\" size=\"2\"><option>c1</option><option>c2</option>"
+            "<option>c3</option><option>c4</option><option>c5</option></select>"
+            "<select id=\"m\" multiple><option>b1</option><option>b2</option>"
+            "<option>b3</option><option>b4</option><option>b5</option></select>"
+            "<select id=\"ds\" size=\"2\"><option>z1</option>"
+            "<option disabled>z2</option><option>z3</option></select>"
+            "</body></sui>", err);
+        check(doc != nullptr, "listbox test document parsed");
+        if (doc) {
+            sui::Element* lb = doc->getElementById("lb");
+            sui::Element* sc = doc->getElementById("sc");
+            sui::Element* m = doc->getElementById("m");
+            sui::Element* ds = doc->getElementById("ds");
+            check(lb && sc && m && ds, "listbox elements found");
+            if (lb && sc && m && ds) {
+                app.setDocument(std::move(doc));
+                sui::Document& appDoc = app.document();
+
+                sui::StyleResolver layoutResolver;
+                layoutResolver.setRules(sui::CSSParser::parse("select{display:block}"));
+                sui::LayoutInput input;
+                input.resolver = &layoutResolver;
+                input.viewportWidth = 400.0f;
+                input.viewportHeight = 300.0f;
+                sui::BlockLayout().layout(app.document().root(), input);
+
+                // Rows tile the content box one line (16px) each.
+                constexpr float kRowH = 16.0f;
+                const auto cell = [&](sui::Element* sel, int index) {
+                    return sui::InputEvent(sui::InputKind::PointerDown,
+                                           sel->contentX() + 5.0f,
+                                           sel->contentY() + (index + 0.5f) * kRowH, 1);
+                };
+                const auto marks = [&](sui::Element* sel) {
+                    std::string out;
+                    for (sui::Element* o : sel->selectOptions()) {
+                        out += o->hasAttribute("selected") ? '1' : '0';
+                    }
+                    return out;
+                };
+                sui::InputEvent upEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x40000052);
+                sui::InputEvent downEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x40000051);
+
+                // Clicking a row selects it and focuses the select.
+                app.dispatch(cell(lb, 3));
+                check(lb->value() == "a4", "clicking a list row selects it");
+                check(appDoc.focused() == lb, "clicking a row focuses the list");
+                check(app.openSelect() == nullptr, "a list never pops up");
+                app.dispatch(downEv);
+                check(lb->value() == "a5", "Down moves a list selection");
+                app.dispatch(downEv);
+                check(lb->value() == "a5", "Down clamps at the last row");
+                app.dispatch(upEv);
+                app.dispatch(upEv);
+                app.dispatch(upEv);
+                app.dispatch(upEv);
+                check(lb->value() == "a1", "Up walks back to the first row");
+
+                // A short list scrolls: walking past the fold moves the offset,
+                // walking back restores it.
+                appDoc.setFocused(sc);
+                app.dispatch(downEv);
+                app.dispatch(downEv);
+                app.dispatch(downEv);
+                app.dispatch(downEv);
+                check(sc->value() == "c5", "Down reaches the last row");
+                check(sc->scrollTop() > 0.0f, "moving past the fold scrolls the list");
+                app.dispatch(upEv);
+                app.dispatch(upEv);
+                app.dispatch(upEv);
+                app.dispatch(upEv);
+                check(sc->value() == "c1", "Up walks back to the first row");
+                check(sc->scrollTop() == 0.0f, "walking back unscrolled the list");
+
+                // Clicking the chrome (padding, not a row) opens nothing.
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerDown,
+                                             lb->layoutX() + 2.0f,
+                                             lb->layoutY() + lb->layoutHeight() * 0.5f, 1));
+                check(app.openSelect() == nullptr, "list chrome never pops up");
+
+                // Multiple: plain clicks select one, Ctrl toggles, Shift ranges.
+                sui::InputEvent ctrlDown(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x400000e0);
+                sui::InputEvent ctrlUp(sui::InputKind::KeyUp, 0, 0, 0, 0, 0, 0x400000e0);
+                sui::InputEvent shiftDown(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x400000e1);
+                sui::InputEvent shiftUp(sui::InputKind::KeyUp, 0, 0, 0, 0, 0, 0x400000e1);
+                app.dispatch(cell(m, 1));
+                check(marks(m) == "01000", "a multiple click selects one row");
+                check(m->value() == "b2", "a multiple value reads the first mark");
+                app.dispatch(ctrlDown);
+                app.dispatch(cell(m, 3));
+                app.dispatch(ctrlUp);
+                check(marks(m) == "01010", "Ctrl+click adds to the marks");
+                app.dispatch(ctrlDown);
+                app.dispatch(cell(m, 1));
+                app.dispatch(ctrlUp);
+                check(marks(m) == "00010", "Ctrl+click again clears that mark");
+                app.dispatch(cell(m, 0));
+                app.dispatch(shiftDown);
+                app.dispatch(cell(m, 2));
+                app.dispatch(shiftUp);
+                check(marks(m) == "11100", "Shift+click marks the anchor range");
+                check(m->value() == "b1", "the ranged value reads its first mark");
+
+                // Shift+arrows extend from the anchor without clicking.
+                app.dispatch(shiftDown);
+                app.dispatch(downEv);
+                app.dispatch(shiftUp);
+                check(marks(m) == "11110", "Shift+Down extends the range");
+                app.dispatch(shiftDown);
+                app.dispatch(upEv);
+                app.dispatch(shiftUp);
+                check(marks(m) == "11100", "Shift+Up shrinks it back");
+
+                // Disabled options neither pick nor break the stride.
+                appDoc.setFocused(ds);
+                app.dispatch(downEv);
+                check(ds->value() == "z3", "arrows skip a disabled option");
+                app.dispatch(cell(ds, 1));
+                check(ds->value() == "z3", "clicking a disabled option keeps the value");
+            }
+        }
+    }
+
     // Date/time/color inputs edit as text (the value reads back verbatim); a
     // file control is display-only, showing the name without its path, and a
     // click focuses it like any control.

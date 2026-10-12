@@ -359,6 +359,47 @@ std::string Element::fileName() const {
     return slash == std::string::npos ? value : value.substr(slash + 1);
 }
 
+int Element::listboxRows() const {
+    if (tag_ != "select") {
+        return 0;
+    }
+    const bool multi = hasAttribute("multiple");
+    int size = multi ? 4 : 1;
+    const std::string_view raw = attribute("size");
+    if (!raw.empty()) {
+        int parsed = 0;
+        bool ok = true;
+        for (char c : raw) {
+            if (c < '0' || c > '9') {
+                ok = false;
+                break;
+            }
+            parsed = parsed * 10 + (c - '0');
+            if (parsed > 1000) {
+                break;
+            }
+        }
+        if (ok && parsed > 0) {
+            size = parsed > 1000 ? 1000 : parsed;
+        } else if (!ok) {
+            size = multi ? 4 : 1;
+        }
+    }
+    if (multi) {
+        return size < 1 ? 1 : size;
+    }
+    return size > 1 ? size : 0;
+}
+
+Element* Element::owningSelect() const {
+    const Element* ancestor = parent_;
+    if (ancestor && ancestor->tag_ == "optgroup") {
+        ancestor = ancestor->parent_;
+    }
+    return ancestor && ancestor->tag_ == "select" ? const_cast<Element*>(ancestor)
+                                                 : nullptr;
+}
+
 InlineStyle::InlineStyle(Element& owner) noexcept : owner_(owner) {}
 
 void InlineStyle::setProperty(std::string property, std::string value, bool important) {

@@ -116,6 +116,12 @@ public:
     // A file input shows only the file name, not the path: the text after the
     // last slash or backslash, or the whole value when neither appears.
     std::string fileName() const;
+    // Rows visible without scrolling: 0 for a dropdown (no `multiple` and
+    // `size` of 1 or less), else `size`, or 4 for a bare `multiple`.
+    int listboxRows() const;
+    // The select this option/optgroup nests in: the parent, or the grandparent
+    // through an <optgroup>. Null for anything else.
+    Element* owningSelect() const;
 
     // Tags outside the visual set (meta, title, script, link, #text) are
     // retained so they stay reachable by the linker, but layout and paint skip

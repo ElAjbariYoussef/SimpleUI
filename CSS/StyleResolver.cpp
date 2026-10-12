@@ -4516,6 +4516,18 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
     if (element.tag() == "input") {
         applyInputTypeStyle(style, element.attribute("type"));
     }
+    if (element.tag() == "select" && element.listboxRows() > 0) {
+        // An open list scrolls its rows: the UA default clips and scrolls,
+        // which author overflow still overrides below.
+        style.overflowX = ComputedStyle::Auto;
+        style.overflowY = ComputedStyle::Auto;
+    }
+    if ((element.tag() == "option" || element.tag() == "optgroup") &&
+        element.owningSelect() && element.owningSelect()->listboxRows() > 0) {
+        // Options lay out as rows only inside an open list; a dropdown's
+        // options paint from the popup instead and take no space.
+        style.display = ComputedStyle::Block;
+    }
     inheritInto(style, parent);
 
     // `!important` is a cascade level of its own, not a tiebreak: it outranks a

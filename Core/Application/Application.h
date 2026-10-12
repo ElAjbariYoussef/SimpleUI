@@ -149,6 +149,11 @@ private:
     // events already mark the frame stale).
     Element* openSelect_ = nullptr;
     std::size_t selectHighlight_ = 0;
+    // Where a Shift+click or Shift+arrow range starts in an open list.
+    std::size_t selectAnchor_ = 0;
+    // Where the range currently ends: clicks and arrows move it, Shift+click
+    // jumps it, and the marks always span anchor..edge.
+    std::size_t selectEdge_ = 0;
 };
 
 }  // namespace sui
