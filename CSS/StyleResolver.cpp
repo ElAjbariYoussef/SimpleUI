@@ -2399,16 +2399,16 @@ bool parsePositionPair(std::string_view value, ComputedStyle::BackgroundPosition
     return true;
 }
 
-// `transform-origin` is one or two box-relative offsets -- a length, a
-// percentage, or a keyword edge (`left`/`center`/`right` for x,
+// `transform-origin` is two box-relative offsets plus an optional z length --
+// a length, a percentage, or a keyword edge (`left`/`center`/`right` for x,
 // `top`/`center`/`bottom` for y). One value leaves the other axis centred, and
 // a lone vertical keyword still belongs to y rather than being pressed into x.
 // Percentages and keywords are kept symbolic and resolved against the border
-// box when the transform is applied. Anything unparsable keeps the 50% 50%
-// default.
+// box when the transform is applied. A third value resolves as a plain length
+// (never a percentage). Anything unparsable keeps the 50% 50% default.
 void applyTransformOrigin(std::string_view value, ComputedStyle& s) {
     const std::vector<std::string_view> parts = splitTokens(value);
-    if (parts.empty() || parts.size() > 2) {
+    if (parts.empty() || parts.size() > 3) {
         return;
     }
     const auto axisValue = [](std::string_view token, bool vertical) -> Length {
@@ -2424,6 +2424,15 @@ void applyTransformOrigin(std::string_view value, ComputedStyle& s) {
         const Length length = parseLength(token);
         return length.isAuto() ? Length{Length::Percent, 50.0f} : length;
     };
+    // The z offset is a plain length; anything else (including a percentage)
+    // drops the whole declaration, leaving even x and y alone.
+    Length z;
+    if (parts.size() == 3) {
+        z = parseLength(parts[2]);
+        if (z.isAuto() || z.unit == Length::Percent) {
+            return;
+        }
+    }
     if (parts.size() == 1 && (parts[0] == "top" || parts[0] == "bottom")) {
         // A lone vertical keyword moves the origin up the box, x staying centred.
         s.transformOrigin.x = Length{Length::Percent, 50.0f};
@@ -2432,6 +2441,9 @@ void applyTransformOrigin(std::string_view value, ComputedStyle& s) {
         s.transformOrigin.x = axisValue(parts[0], false);
         s.transformOrigin.y = parts.size() > 1 ? axisValue(parts[1], true)
                                                : Length{Length::Percent, 50.0f};
+    }
+    if (parts.size() == 3) {
+        s.transformOrigin.z = z;
     }
     s.specified |= ComputedStyle::SpecifiedTransformOrigin;
 }
@@ -4188,6 +4200,32 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         s.specified |= ComputedStyle::SpecifiedTransform;
     } else if (property == "transform-origin") {
         applyTransformOrigin(value, s);
+    } else if (property == "perspective") {
+        // `none` (or garbage) means no viewer distance; a positive length sets
+        // one, anything else keeps the previous cascade winner.
+        if (value == "none") {
+            s.perspective = 0.0f;
+        } else {
+            const Length distance = parseLength(value);
+            if (!distance.isAuto() && distance.unit != Length::Percent &&
+                distance.resolve(0.0f, s.fontSize, rootFontSize) > 0.0f) {
+                s.perspective = distance.resolve(0.0f, s.fontSize, rootFontSize);
+            }
+        }
+    } else if (property == "transform-style") {
+        // Parsed and stored; the flat compositor cannot share 3D space, so
+        // `preserve-3d` still flattens.
+        if (value == "preserve-3d") {
+            s.transformStyle = ComputedStyle::TransformStyle::Preserve3d;
+        } else if (value == "flat") {
+            s.transformStyle = ComputedStyle::TransformStyle::Flat;
+        }
+    } else if (property == "backface-visibility") {
+        if (value == "hidden") {
+            s.backfaceHidden = true;
+        } else if (value == "visible") {
+            s.backfaceHidden = false;
+        }
     } else if (property == "filter") {
         s.filter = std::string(value);
         s.specified |= ComputedStyle::SpecifiedFilter;
@@ -5199,7 +5237,24 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         if (second != "50%") {
             result += " " + second;
         }
+        if (!style.transformOrigin.z.isAuto() && style.transformOrigin.z.value != 0.0f) {
+            result += " " + length(style.transformOrigin.z, "0px");
+        }
         return result;
+    }
+    if (property == "perspective") {
+        if (style.perspective <= 0.0f) {
+            return "none";
+        }
+        return number(style.perspective);
+    }
+    if (property == "transform-style") {
+        return style.transformStyle == ComputedStyle::TransformStyle::Preserve3d
+                   ? "preserve-3d"
+                   : "flat";
+    }
+    if (property == "backface-visibility") {
+        return style.backfaceHidden ? "hidden" : "visible";
     }
     if (property == "text-align") {
         switch (style.textAlign) {

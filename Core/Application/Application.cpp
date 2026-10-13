@@ -51,6 +51,15 @@ struct GroupFrame {
     bool transformed = false;
     float m[6] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
     SDL_FPoint origin{};
+    // A flattened 3D transform: the surface quad is projected with this matrix
+    // and viewer distance about the origin (plus its z) instead of mapped by
+    // the affine above. UVs interpolate affinely across the quad, which reads
+    // as true perspective for mild tilts.
+    bool projective = false;
+    float mat3d[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                       0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    float persp3d = 0.0f;
+    float originZ = 0.0f;
     // A `filter: blur()` radius to diffuse the finished surface with before the
     // blit; 0 leaves it sharp.
     float blur = 0.0f;
@@ -2764,6 +2773,12 @@ void Application::run() {
                         frame.alpha = op.alpha;
                         frame.transformed = op.transformed;
                         frame.origin = op.origin;
+                        frame.projective = op.projective;
+                        for (int i = 0; i < 16; ++i) {
+                            frame.mat3d[i] = op.mat3d[i];
+                        }
+                        frame.persp3d = op.persp3d;
+                        frame.originZ = op.originZ;
                         frame.blur = op.blur;
                         frame.shift = op.shift;
                         frame.dropShadow = op.dropShadow;
@@ -2978,7 +2993,41 @@ void Application::run() {
                                 SDL_SetTextureAlphaMod(shadow, static_cast<Uint8>(
                                     std::lround(frame.alpha * 255.0f)));
                             }
-                            if (frame.transformed) {
+                            if (frame.projective) {
+                                // A flattened 3D group: project the surface quad
+                                // about the origin and draw it textured. The
+                                // shadow projects its own offset silhouette.
+                                const float bx = frame.bounds.x - ox;
+                                const float by = frame.bounds.y - oy;
+                                const float ox2 = frame.origin.x - ox;
+                                const float oy2 = frame.origin.y - oy;
+                                const sui::ProjectedQuad quad = sui::projectQuad(
+                                    frame.mat3d, frame.persp3d, ox2, oy2,
+                                    frame.originZ, bx, by, frame.bounds.w,
+                                    frame.bounds.h);
+                                const auto blitQuad = [&](SDL_Texture* tex,
+                                                          const SDL_FPoint* corners) {
+                                    const SDL_Vertex verts[4] = {
+                                        {corners[0], {255, 255, 255, 255}, {0.0f, 0.0f}},
+                                        {corners[1], {255, 255, 255, 255}, {1.0f, 0.0f}},
+                                        {corners[2], {255, 255, 255, 255}, {1.0f, 1.0f}},
+                                        {corners[3], {255, 255, 255, 255}, {0.0f, 1.0f}}};
+                                    const int indices[6] = {0, 1, 2, 0, 2, 3};
+                                    SDL_RenderGeometry(sdlRenderer, tex, verts, 4,
+                                                       indices, 6);
+                                };
+                                if (shadow) {
+                                    // The shadow rides the same projection,
+                                    // reached from its own offset silhouette.
+                                    const sui::ProjectedQuad shade = sui::projectQuad(
+                                        frame.mat3d, frame.persp3d, ox2, oy2,
+                                        frame.originZ, bx + frame.dropShadow.dx,
+                                        by + frame.dropShadow.dy, frame.bounds.w,
+                                        frame.bounds.h);
+                                    blitQuad(shadow, shade.corners);
+                                }
+                                blitQuad(texture, quad.corners);
+                            } else if (frame.transformed) {
                                 // The surface covers the group's pre-transform
                                 // position; the affine maps it to the screen about
                                 // the resolved transform-origin point, all rebased

@@ -1203,6 +1203,207 @@ void testPointerEventsNone() {
 
 }  // namespace
 
+// Flattened 3D transforms: the list parses to a 4x4, the quad projects with
+// a viewer distance, facing follows the winding, and backface-hidden groups
+// facing away vanish from the ops outright.
+void testTransform3D() {
+    // Identity maps the rect onto itself, facing front.
+    {
+        const float identity[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                    0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+        const sui::ProjectedQuad quad =
+            sui::projectQuad(identity, 0.0f, 50.0f, 50.0f, 0.0f, 0.0f, 0.0f, 100.0f, 100.0f);
+        check(quad.corners[0].x == 0.0f && quad.corners[0].y == 0.0f &&
+                  quad.corners[2].x == 100.0f && quad.corners[2].y == 100.0f &&
+                  !quad.facesAway,
+              "an identity 3D list keeps its rect");
+    }
+    // A viewer nearer than the box scales it up about the origin, while an
+    // identity list maps onto itself whatever the origin holds.
+    {
+        const float identity[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                    0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+        const sui::ProjectedQuad still = sui::projectQuad(identity, 800.0f, 50.0f,
+                                                          50.0f, 100.0f, 0.0f, 0.0f,
+                                                          100.0f, 100.0f);
+        check(still.corners[0].x == 0.0f && still.corners[2].x == 100.0f &&
+                  !still.facesAway,
+              "an identity list ignores viewer and origin alike");
+        float pushed[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                            0.0f, 0.0f, 1.0f, 100.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+        const sui::ProjectedQuad quad =
+            sui::projectQuad(pushed, 800.0f, 50.0f, 50.0f, 0.0f, 0.0f, 0.0f,
+                             100.0f, 100.0f);
+        // The plane rides 100 toward the viewer: 800/700 wider about (50, 50).
+        checkNear(quad.corners[0].x, 50.0f - 50.0f * 800.0f / 700.0f, 0.05f,
+                  "a nearer plane looms under perspective");
+        check(!quad.facesAway, "a nearer plane still faces front");
+    }
+    // Projection inverts: corners round-trip through the homography.
+    {
+        auto document = parseOrNull(R"HTML(<sui><body>
+            <div id="tilt" style="width:100px;height:100px;transform:rotateY(30deg)"></div>
+        </body></sui>)HTML");
+        if (document) {
+            sui::StyleResolver resolver;
+            resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+            layoutRoot(*document, resolver);
+            Element* tilt = document->getElementById("tilt");
+            if (tilt) {
+                const auto items = orderOf(*document, resolver);
+                const PaintItem* item = paintOf(items, tilt);
+                check(item && item->projective, "a 3D list rides the projective path");
+                if (item && item->projective) {
+                    checkNear(item->mat3d[0], 0.8660f, 0.001f,
+                              "rotateY parses its cosine");
+                    checkNear(item->mat3d[2], 0.5f, 0.001f,
+                              "rotateY parses its sine");
+                    const sui::ProjectedQuad quad = sui::projectQuad(
+                        item->mat3d, 0.0f, 50.0f, 50.0f, 0.0f, 0.0f, 0.0f, 100.0f,
+                        100.0f);
+                    check(!quad.facesAway, "a slight tilt still faces front");
+                    float lx = 0.0f, ly = 0.0f;
+                    check(sui::unprojectPoint(quad, 0.0f, 0.0f, 100.0f, 100.0f,
+                                              quad.corners[2].x, quad.corners[2].y,
+                                              lx, ly) &&
+                              std::fabs(lx - 100.0f) < 0.05f &&
+                              std::fabs(ly - 100.0f) < 0.05f,
+                          "a projected corner unprojects home");
+                    float dx = 0.0f, dy = 0.0f;
+                    check(!sui::unprojectPoint(quad, 0.0f, 0.0f, 0.0f, 0.0f,
+                                               quad.corners[0].x, quad.corners[0].y,
+                                               dx, dy),
+                          "a degenerate rect never unprojects");
+                }
+            } else {
+                check(false, "tilted element found");
+            }
+        }
+    }
+    // Matrices ride through: translateZ lands in m[11], perspective() in
+    // m[14], matrix3d transposes from column-major, and a bad perspective
+    // drops the whole list off the projective path.
+    {
+        auto document = parseOrNull(R"HTML(<sui><body>
+            <div id="tz" style="width:10px;height:10px;transform:translateZ(50px)"></div>
+            <div id="pp" style="width:10px;height:10px;transform:perspective(800px)"></div>
+            <div id="m3" style="width:10px;height:10px;transform:matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,10,20,0,1)"></div>
+            <div id="rx" style="width:10px;height:10px;transform:rotateX(45deg)"></div>
+            <div id="sz" style="width:10px;height:10px;transform:scaleZ(2)"></div>
+            <div id="bad" style="width:10px;height:10px;transform:perspective(0) rotate(45deg)"></div>
+        </body></sui>)HTML");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+        layoutRoot(*document, resolver);
+        const auto items = orderOf(*document, resolver);
+        const auto at = [&](const char* id) { return paintOf(items, document->getElementById(id)); };
+        const PaintItem* tz = at("tz");
+        const PaintItem* pp = at("pp");
+        const PaintItem* m3 = at("m3");
+        const PaintItem* rx = at("rx");
+        const PaintItem* sz = at("sz");
+        const PaintItem* bad = at("bad");
+        check(tz && pp && m3 && rx && sz && bad, "3D elements paint");
+        if (!tz || !pp || !m3 || !rx || !sz || !bad) {
+            return;
+        }
+        check(tz->projective && tz->mat3d[11] == 50.0f, "translateZ lands in m[11]");
+        check(pp->projective && pp->mat3d[14] < 0.0f, "perspective() lands in m[14]");
+        checkNear(pp->mat3d[14], -1.0f / 800.0f, 1e-7f, "perspective() reads one over d");
+        check(m3->projective && m3->mat3d[3] == 10.0f && m3->mat3d[7] == 20.0f,
+              "matrix3d transposes into row-major");
+        check(rx->projective, "rotateX takes the projective path");
+        checkNear(rx->mat3d[5], 0.7071f, 0.001f, "rotateX parses its cosine");
+        check(sz->projective && sz->mat3d[10] == 2.0f, "scaleZ takes the projective path");
+        check(!bad->projective, "a bad perspective drops the whole list");
+    }
+    // Backface-hidden groups facing away vanish; facing ones stay, and the
+    // properties parse and serialize.
+    {
+        auto document = parseOrNull(R"HTML(<sui><body>
+            <div id="back" style="width:100px;height:100px;transform:rotateY(180deg);backface-visibility:hidden"></div>
+            <div id="front" style="width:100px;height:100px;transform:rotateY(30deg);backface-visibility:hidden"></div>
+            <div id="shown" style="width:100px;height:100px;transform:rotateY(180deg)"></div>
+        </body></sui>)HTML");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+        layoutRoot(*document, resolver);
+        const auto ops = sui::computePaintOps(*document->root(), resolver);
+        const auto seen = [&](const char* id) {
+            Element* el = document->getElementById(id);
+            for (const auto& op : ops) {
+                if (op.kind == sui::PaintOp::Kind::Box && op.item.el == el) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        check(!seen("back"), "a hidden back face paints nothing");
+        check(seen("front"), "a hidden front face still paints");
+        check(seen("shown"), "a shown back face still paints");
+
+        // A 3D-only group brackets its box for the offscreen surface, carrying
+        // the matrix for the projective blit.
+        {
+            auto bracketed = parseOrNull(R"HTML(<sui><body>
+                <div id="tilt" style="width:100px;height:100px;transform:rotateY(30deg)"></div>
+            </body></sui>)HTML");
+            if (bracketed) {
+                sui::StyleResolver resolver;
+                resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+                layoutRoot(*bracketed, resolver);
+                const auto ops = sui::computePaintOps(*bracketed->root(), resolver);
+                Element* tilt = bracketed->getElementById("tilt");
+                bool sawBracket = false;
+                int depth = 0;
+                for (std::size_t i = 0; i < ops.size(); ++i) {
+                    if (ops[i].kind == sui::PaintOp::Kind::BeginGroup) {
+                        if (ops[i].item.el == tilt) {
+                            sawBracket = true;
+                            check(ops[i].projective,
+                                  "the bracket takes the projective path");
+                        }
+                        ++depth;
+                    } else if (ops[i].kind == sui::PaintOp::Kind::EndGroup) {
+                        --depth;
+                    } else if (ops[i].item.el == tilt) {
+                        check(depth > 0, "a tilted box paints inside its group");
+                    }
+                }
+                check(sawBracket, "a 3D transform alone brackets its box");
+            }
+        }
+
+        auto properties = parseOrNull("<sui><body><div id=\"x\">hi</div></body></sui>");
+        if (properties) {
+            Element* x = properties->getElementById("x");
+            if (x) {
+                sui::StyleResolver rhythmic;
+                rhythmic.setRules(sui::CSSParser::parse(
+                    "#x{perspective:800px;transform-style:preserve-3d;backface-visibility:hidden;"
+                    "transform-origin:10px 20px 30px}"));
+                const ComputedStyle style = rhythmic.resolve(*x);
+                check(style.perspective == 800.0f, "a perspective length stores");
+                check(sui::StyleResolver::propertyValue(style, "perspective") == "800px",
+                      "perspective serializes");
+                check(style.transformStyle ==
+                          ComputedStyle::TransformStyle::Preserve3d,
+                      "preserve-3d stores");
+                check(style.backfaceHidden, "hidden backfaces store");
+                check(style.transformOrigin.z.value == 30.0f,
+                      "a transform-origin z stores");
+            } else {
+                check(false, "property element found");
+            }
+        }
+    }
+}
 int main() {
     testPlainOrder();
     testPositionedGroupsInFlow();
@@ -1213,6 +1414,7 @@ int main() {
     testClipComposites();
     testMaskShapeInOps();
     testMaskBorderInOps();
+    testTransform3D();
     testEffectsDontCompound();
     testGroupBecomesOffscreenBlit();
     testNestedGroupAlphas();

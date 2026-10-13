@@ -23,11 +23,19 @@ inline HitAffine hitCompose(const HitAffine& o, const HitAffine& i) {
 struct HitCtx {
     SDL_FRect clip{0,0,0,0};
     HitAffine transform{1,0,0,1,0,0};
+    // Under a flattened-3D group the affine above maps window points into the
+    // group's parent frame, `quad`/`quadRect` map that frame back onto the
+    // surface rect, and `inner` maps onward through any 2D groups below.
+    bool proj = false;
+    ProjectedQuad quad{};
+    SDL_FRect quadRect{0.0f, 0.0f, 0.0f, 0.0f};
+    HitAffine inner{1,0,0,1,0,0};
 };
 inline HitCtx hitBase() { return HitCtx{{0,0,0,0},{1,0,0,1,0,0}}; }
 inline bool hitPointIn(const SDL_FRect& r,float x,float y){ if(r.w<=0||r.h<=0)return true; return x>=r.x&&x<r.x+r.w&&y>=r.y&&y<r.y+r.h; }
 inline bool hitToLocal(const HitAffine& m,float x,float y,float* lx,float* ly){ float det=m.a*m.d-m.b*m.c; if(std::fabs(det)<1e-18f)return false; float dx=x-m.e,dy=y-m.f; *lx=(m.d*dx-m.c*dy)/det; *ly=(-m.b*dx+m.a*dy)/det; return true; }
-inline bool hitBox(const HitCtx& ctx,const PaintItem& item,float x,float y){ if(!hitPointIn(item.clip,x,y))return false; float lx,ly; if(!hitToLocal(ctx.transform,x,y,&lx,&ly))return false; float bx=item.el->layoutX()-item.dx,by=item.el->layoutY()-item.dy,bw=item.el->layoutWidth(),bh=item.el->layoutHeight(); if(lx<bx||lx>=bx+bw||ly<by||ly>=by+bh)return false; if(item.clipShape.kind!=ResolvedClip::Kind::None&&!clipContains(item.clipShape,x,y))return false; return true; }
+inline void hitApply(const HitAffine& m,float x,float y,float* px,float* py){ *px=m.a*x+m.c*y+m.e; *py=m.b*x+m.d*y+m.f; }
+inline bool hitBox(const HitCtx& ctx,const PaintItem& item,float x,float y){ if(!hitPointIn(item.clip,x,y))return false; float lx,ly; if(ctx.proj){ if(!unprojectPoint(ctx.quad,ctx.quadRect.x,ctx.quadRect.y,ctx.quadRect.w,ctx.quadRect.h,x,y,lx,ly))return false; if(!hitToLocal(ctx.inner,lx,ly,&lx,&ly))return false; } else if(!hitToLocal(ctx.transform,x,y,&lx,&ly))return false; float bx=item.el->layoutX()-item.dx,by=item.el->layoutY()-item.dy,bw=item.el->layoutWidth(),bh=item.el->layoutHeight(); if(lx<bx||lx>=bx+bw||ly<by||ly>=by+bh)return false; if(item.clipShape.kind!=ResolvedClip::Kind::None&&!clipContains(item.clipShape,x,y))return false; return true; }
 } // namespace
 
 namespace {
@@ -40,6 +48,9 @@ struct PaintEnv {
     float dx = 0.0f;
     float dy = 0.0f;
     float opacity = 1.0f;
+    // The `perspective` length funnelling children's 3D through a viewer;
+    // 0 is `none`.
+    float perspective = 0.0f;
 };
 
 // How an element's descendants are ordered relative to its own box. CSS splits
@@ -65,9 +76,15 @@ struct PaintEntry {
     float groupAlpha = 1.0f;
     // When the group root carries a scale() or rotate(), the surface is mapped
     // to the screen by the affine `m[6]` about the resolved transform-origin
-    // point `origin` (in window coordinates).
+    // point `origin` (in window coordinates). A flattened 3D transform rides
+    // `mat3d`/`persp3d`/`originZ` instead (see `projectQuad`).
     bool transformed = false;
     float m[6] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+    bool projective = false;
+    float mat3d[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                       0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    float persp3d = 0.0f;
+    float originZ = 0.0f;
     SDL_FPoint origin{0.0f, 0.0f};
     // A `filter: blur(x)` radius in px; forces a surface so the executor can
     // blur the readback.
@@ -396,6 +413,522 @@ bool transformEffects(std::string_view transform, Affine& affine, float& tx, flo
            std::fabs(affine.e) > kEps || std::fabs(affine.f) > kEps;
 }
 
+// A 4x4 row-major matrix: p' = M . p on column vectors. Only `transform`
+// lists that use 3D functions take this path; pure-2D lists stay on the
+// affine one above, bit for bit.
+struct Mat4 {
+    float m[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                   0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+};
+
+// `outer` carried out after `inner`: the matrix product outer . inner.
+Mat4 combine4(const Mat4& outer, const Mat4& inner) {
+    Mat4 out;
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            out.m[r * 4 + c] = outer.m[r * 4] * inner.m[c] +
+                               outer.m[r * 4 + 1] * inner.m[4 + c] +
+                               outer.m[r * 4 + 2] * inner.m[8 + c] +
+                               outer.m[r * 4 + 3] * inner.m[12 + c];
+        }
+    }
+    return out;
+}
+
+Mat4 translate4(float x, float y, float z) {
+    Mat4 out;
+    out.m[3] = x;
+    out.m[7] = y;
+    out.m[11] = z;
+    return out;
+}
+
+Mat4 scale4(float x, float y, float z) {
+    Mat4 out;
+    out.m[0] = x;
+    out.m[5] = y;
+    out.m[10] = z;
+    return out;
+}
+
+Mat4 rotateX4(float rad) {
+    Mat4 out;
+    const float c = std::cos(rad), s = std::sin(rad);
+    out.m[5] = c;
+    out.m[6] = -s;
+    out.m[9] = s;
+    out.m[10] = c;
+    return out;
+}
+
+Mat4 rotateY4(float rad) {
+    Mat4 out;
+    const float c = std::cos(rad), s = std::sin(rad);
+    out.m[0] = c;
+    out.m[2] = s;
+    out.m[8] = -s;
+    out.m[10] = c;
+    return out;
+}
+
+Mat4 rotateZ4(float rad) {
+    Mat4 out;
+    const float c = std::cos(rad), s = std::sin(rad);
+    out.m[0] = c;
+    out.m[1] = -s;
+    out.m[4] = s;
+    out.m[5] = c;
+    return out;
+}
+
+// Axis-angle rotation (CSS `rotate3d`): a zero axis is the identity.
+Mat4 rotateAxis4(float x, float y, float z, float rad) {
+    Mat4 out;
+    const float len = std::sqrt(x * x + y * y + z * z);
+    if (len <= 0.0f) {
+        return out;
+    }
+    x /= len;
+    y /= len;
+    z /= len;
+    const float c = std::cos(rad), s = std::sin(rad), t = 1.0f - c;
+    out.m[0] = t * x * x + c;
+    out.m[1] = t * x * y - s * z;
+    out.m[2] = t * x * z + s * y;
+    out.m[4] = t * x * y + s * z;
+    out.m[5] = t * y * y + c;
+    out.m[6] = t * y * z - s * x;
+    out.m[8] = t * x * z - s * y;
+    out.m[9] = t * y * z + s * x;
+    out.m[10] = t * z * z + c;
+    return out;
+}
+
+// CSS `perspective(d)`: points divide by 1 - z/d, so nearer z looms larger.
+Mat4 perspective4(float d) {
+    Mat4 out;
+    out.m[14] = -1.0f / d;
+    return out;
+}
+
+float angleRad(std::string_view piece) {
+    constexpr float kPi = 3.14159265f;
+    const std::string owned(piece);
+    char* stop = nullptr;
+    const float value = std::strtof(owned.c_str(), &stop);
+    if (stop == owned.c_str()) {
+        return 0.0f;
+    }
+    while (*stop && std::isspace(static_cast<unsigned char>(*stop))) {
+        ++stop;
+    }
+    const std::string_view unit(stop);
+    if (unit.find("rad") != std::string_view::npos) {
+        return value;
+    }
+    if (unit.find("turn") != std::string_view::npos) {
+        return value * 2.0f * kPi;
+    }
+    if (unit.find("grad") != std::string_view::npos) {
+        return value * kPi / 200.0f;
+    }
+    return value * kPi / 180.0f;
+}
+
+bool numberPiece(std::string_view piece, float& out) {
+    const std::string owned(piece);
+    char* stop = nullptr;
+    const float value = std::strtof(owned.c_str(), &stop);
+    if (stop == owned.c_str()) {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
+// Comma-separated floats, trimmed; false unless exactly `count` parse.
+bool numberList(std::string_view body, float* out, std::size_t count) {
+    std::size_t found = 0;
+    std::size_t start = 0;
+    for (std::size_t i = 0; i <= body.size(); ++i) {
+        if (i == body.size() || body[i] == ',') {
+            if (found >= count) {
+                return false;
+            }
+            std::string_view piece = body.substr(start, i - start);
+            while (!piece.empty() &&
+                   std::isspace(static_cast<unsigned char>(piece.front()))) {
+                piece.remove_prefix(1);
+            }
+            while (!piece.empty() &&
+                   std::isspace(static_cast<unsigned char>(piece.back()))) {
+                piece.remove_suffix(1);
+            }
+            if (!numberPiece(piece, out[found])) {
+                return false;
+            }
+            ++found;
+            start = i + 1;
+        }
+    }
+    return found == count;
+}
+
+// The comma parts of a function body, trimmed. Units stay attached: lengths
+// like `10px` keep their suffix, which is what tells a z length from a number.
+std::vector<std::string_view> commaParts(std::string_view body) {
+    std::vector<std::string_view> parts;
+    std::size_t start = 0;
+    for (std::size_t i = 0; i <= body.size(); ++i) {
+        if (i == body.size() || body[i] == ',') {
+            std::string_view piece = body.substr(start, i - start);
+            while (!piece.empty() &&
+                   std::isspace(static_cast<unsigned char>(piece.front()))) {
+                piece.remove_prefix(1);
+            }
+            while (!piece.empty() &&
+                   std::isspace(static_cast<unsigned char>(piece.back()))) {
+                piece.remove_suffix(1);
+            }
+            parts.push_back(piece);
+            start = i + 1;
+        }
+    }
+    return parts;
+}
+
+// A bare number that may trail a length unit (`10px` reads 10): the 2D list's
+// leniency, for the slots where CSS wants a plain number but authors write px.
+bool looseNumber(std::string_view piece, float& out) {
+    const std::string owned(piece);
+    char* stop = nullptr;
+    const float value = std::strtof(owned.c_str(), &stop);
+    if (stop == owned.c_str() || *stop == '%') {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
+// Parses a CSS `transform` list into a 4x4, handling the 2D functions as
+// z=0-plane matrices too. Returns true when the list needs the projective
+// path: any 3D function or `perspective()`. A non-positive `perspective()`
+// invalidates the whole list (identity, false, invalid set): pure-2D lists
+// stay on the affine path even under a parent perspective, whose z=0 plane
+// they never leave.
+bool transformEffects3D(std::string_view transform, Mat4& mat, float boxW, float boxH,
+                        bool& invalid) {
+    Mat4 acc;
+    bool dimensional = false;
+    invalid = false;
+    std::size_t at = 0;
+    const auto lengthOrPercent = [](std::string_view piece, float ref) {
+        const std::string owned(piece);
+        char* stop = nullptr;
+        const float value = std::strtof(owned.c_str(), &stop);
+        if (stop == owned.c_str()) {
+            return 0.0f;
+        }
+        return stop[0] == '%' ? value * 0.01f * ref : value;
+    };
+    while (at < transform.size()) {
+        const std::size_t open = transform.find('(', at);
+        if (open == std::string_view::npos) {
+            break;
+        }
+        const std::size_t close = transform.find(')', open);
+        if (close == std::string_view::npos) {
+            break;
+        }
+        std::size_t nameStart = open;
+        while (nameStart > 0 &&
+               (std::isalnum(static_cast<unsigned char>(transform[nameStart - 1])) ||
+                transform[nameStart - 1] == '-')) {
+            --nameStart;
+        }
+        const std::string_view name = transform.substr(nameStart, open - nameStart);
+        const std::string_view body = transform.substr(open + 1, close - open - 1);
+        const std::size_t comma = body.find(',');
+        const std::string_view first = body.substr(0, comma);
+        const std::string_view second =
+            comma == std::string_view::npos ? std::string_view() : body.substr(comma + 1);
+        if (name == "translate" || name == "translateX" || name == "translateY") {
+            float x = lengthOrPercent(first, boxW);
+            float y = comma == std::string_view::npos ? 0.0f : lengthOrPercent(second, boxH);
+            if (name == "translateY") {
+                y = x;
+                x = 0.0f;
+            } else if (name == "translateX") {
+                y = 0.0f;
+            }
+            acc = combine4(acc, translate4(x, y, 0.0f));
+        } else if (name == "translateZ") {
+            float z = 0.0f;
+            looseNumber(body, z);
+            acc = combine4(acc, translate4(0.0f, 0.0f, z));
+            dimensional = true;
+        } else if (name == "translate3d") {
+            const std::vector<std::string_view> parts = commaParts(body);
+            if (parts.size() == 3) {
+                // Percentages in x/y resolve against the box, like the 2D path.
+                float z = 0.0f;
+                looseNumber(parts[2], z);
+                acc = combine4(acc, translate4(lengthOrPercent(parts[0], boxW),
+                                               lengthOrPercent(parts[1], boxH), z));
+                dimensional = true;
+            }
+        } else if (name == "scale" || name == "scaleX" || name == "scaleY") {
+            float sx = 1.0f, sy = 1.0f;
+            if (name == "scaleX") {
+                looseNumber(body, sx);
+            } else if (name == "scaleY") {
+                looseNumber(body, sy);
+            } else {
+                looseNumber(first, sx);
+                if (comma != std::string_view::npos) {
+                    looseNumber(second, sy);
+                } else {
+                    sy = sx;
+                }
+            }
+            acc = combine4(acc, scale4(sx, sy, 1.0f));
+        } else if (name == "scaleZ") {
+            float sz = 1.0f;
+            looseNumber(body, sz);
+            acc = combine4(acc, scale4(1.0f, 1.0f, sz));
+            dimensional = true;
+        } else if (name == "scale3d") {
+            const std::vector<std::string_view> parts = commaParts(body);
+            if (parts.size() == 3) {
+                float sx = 1.0f, sy = 1.0f, sz = 1.0f;
+                looseNumber(parts[0], sx);
+                looseNumber(parts[1], sy);
+                looseNumber(parts[2], sz);
+                acc = combine4(acc, scale4(sx, sy, sz));
+                dimensional = true;
+            }
+        } else if (name == "rotate" || name == "rotateZ") {
+            acc = combine4(acc, rotateZ4(angleRad(body)));
+        } else if (name == "rotateX") {
+            acc = combine4(acc, rotateX4(angleRad(body)));
+            dimensional = true;
+        } else if (name == "rotateY") {
+            acc = combine4(acc, rotateY4(angleRad(body)));
+            dimensional = true;
+        } else if (name == "rotate3d") {
+            // The angle carries a unit, so only the axis goes through the
+            // comma reader; the tail parses as an angle.
+            std::size_t splits[3] = {0, 0, 0};
+            std::size_t found = 0;
+            for (std::size_t i = 0; i < body.size() && found < 3; ++i) {
+                if (body[i] == ',') {
+                    splits[found++] = i;
+                }
+            }
+            if (found == 3) {
+                float x = 0.0f, y = 0.0f, z = 0.0f;
+                if (numberPiece(body.substr(0, splits[0]), x) &&
+                    numberPiece(body.substr(splits[0] + 1, splits[1] - splits[0] - 1), y) &&
+                    numberPiece(body.substr(splits[1] + 1, splits[2] - splits[1] - 1), z)) {
+                    acc = combine4(acc, rotateAxis4(x, y, z,
+                                                    angleRad(body.substr(splits[2] + 1))));
+                    dimensional = true;
+                }
+            }
+        } else if (name == "skew" || name == "skewX" || name == "skewY") {
+            float ax = 0.0f, ay = 0.0f;
+            if (name == "skewX") {
+                ax = angleRad(body);
+            } else if (name == "skewY") {
+                ay = angleRad(body);
+            } else {
+                ax = angleRad(first);
+                if (comma != std::string_view::npos) {
+                    ay = angleRad(second);
+                }
+            }
+            Mat4 skew;
+            skew.m[1] = std::tan(ax);
+            skew.m[4] = std::tan(ay);
+            acc = combine4(acc, skew);
+        } else if (name == "matrix") {
+            // The 2D leniency: a-f read bare numbers, e/f resolve percentages.
+            const std::vector<std::string_view> parts = commaParts(body);
+            if (parts.size() == 6) {
+                float a = 1.0f, b = 0.0f, c = 0.0f, d = 1.0f;
+                looseNumber(parts[0], a);
+                looseNumber(parts[1], b);
+                looseNumber(parts[2], c);
+                looseNumber(parts[3], d);
+                const float e = lengthOrPercent(parts[4], boxW);
+                const float f = lengthOrPercent(parts[5], boxH);
+                Mat4 item;
+                item.m[0] = a;
+                item.m[1] = c;
+                item.m[3] = e;
+                item.m[4] = b;
+                item.m[5] = d;
+                item.m[7] = f;
+                acc = combine4(acc, item);
+            }
+        } else if (name == "matrix3d") {
+            float column[16];
+            if (numberList(body, column, 16)) {
+                Mat4 item;
+                for (int r = 0; r < 4; ++r) {
+                    for (int c = 0; c < 4; ++c) {
+                        item.m[r * 4 + c] = column[c * 4 + r];
+                    }
+                }
+                acc = combine4(acc, item);
+                dimensional = true;
+            }
+        } else if (name == "perspective") {
+            float d = 0.0f;
+            looseNumber(body, d);
+            if (!(d > 0.0f)) {
+                invalid = true;
+                mat = Mat4();
+                return false;
+            }
+            acc = combine4(acc, perspective4(d));
+            dimensional = true;
+        }
+        at = close + 1;
+    }
+    mat = acc;
+    return dimensional;
+}
+
+// Projects one surface point through a flattened 3D transform: q = M . (p - O)
+// + O, w-divided, then scaled about the origin's x/y by the viewer distance.
+// Returns the screen point and whether it fell behind the viewer. Identity
+// matrices map every point onto itself whatever the origin holds.
+SDL_FPoint projectPoint(const float mat[16], float perspective, float ox, float oy,
+                        float oz, float x, float y, bool& behind) {
+    const float px = x - ox, py = y - oy, pz = -oz;
+    const float vx = mat[0] * px + mat[1] * py + mat[2] * pz + mat[3];
+    const float vy = mat[4] * px + mat[5] * py + mat[6] * pz + mat[7];
+    const float vz = mat[8] * px + mat[9] * py + mat[10] * pz + mat[11];
+    const float vw = mat[12] * px + mat[13] * py + mat[14] * pz + mat[15];
+    behind = false;
+    if (!(vw > 1e-6f)) {
+        // Behind the camera (or edge-on): visible, collapsed onto the origin.
+        behind = true;
+        return SDL_FPoint{ox, oy};
+    }
+    const float qx = vx / vw + ox;
+    const float qy = vy / vw + oy;
+    const float qz = vz / vw + oz;
+    if (perspective > 0.0f) {
+        const float denom = perspective - qz;
+        if (!(denom > 1e-6f)) {
+            behind = true;
+            return SDL_FPoint{ox, oy};
+        }
+        // A point rushing at the viewer looms, but never past a sane bound.
+        float scale = perspective / denom;
+        scale = std::min(std::max(scale, -64.0f), 64.0f);
+        return SDL_FPoint{ox + scale * (qx - ox), oy + scale * (qy - oy)};
+    }
+    return SDL_FPoint{qx, qy};
+}
+
+// Solves the rect-to-quad homography by direct linear transform (8 equations,
+// h[8] = 1), for hit-testing back through a projected group.
+bool rectToQuadHomo(float rectX, float rectY, float rectW, float rectH,
+                    const SDL_FPoint quad[4], float h[9]) {
+    if (rectW <= 0.0f || rectH <= 0.0f) {
+        return false;
+    }
+    // Source corners in unit space pair with quad corners in order.
+    const float u[4] = {0.0f, 1.0f, 1.0f, 0.0f};
+    const float v[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+    float a[8][9] = {};
+    for (int i = 0; i < 4; ++i) {
+        const float x = quad[i].x, y = quad[i].y;
+        a[2 * i][0] = -u[i];
+        a[2 * i][1] = -v[i];
+        a[2 * i][2] = -1.0f;
+        a[2 * i][6] = x * u[i];
+        a[2 * i][7] = x * v[i];
+        a[2 * i][8] = -x;
+        a[2 * i + 1][3] = -u[i];
+        a[2 * i + 1][4] = -v[i];
+        a[2 * i + 1][5] = -1.0f;
+        a[2 * i + 1][6] = y * u[i];
+        a[2 * i + 1][7] = y * v[i];
+        a[2 * i + 1][8] = -y;
+    }
+    // Partial-pivot Gauss on 8 equations in h[0..7].
+    for (int col = 0; col < 8; ++col) {
+        int pivot = col;
+        for (int row = col + 1; row < 8; ++row) {
+            if (std::fabs(a[row][col]) > std::fabs(a[pivot][col])) {
+                pivot = row;
+            }
+        }
+        if (std::fabs(a[pivot][col]) < 1e-12f) {
+            return false;
+        }
+        if (pivot != col) {
+            for (int k = col; k < 9; ++k) {
+                std::swap(a[col][k], a[pivot][k]);
+            }
+        }
+        for (int row = 0; row < 8; ++row) {
+            if (row == col) {
+                continue;
+            }
+            const float factor = a[row][col] / a[col][col];
+            for (int k = col; k < 9; ++k) {
+                a[row][k] -= factor * a[col][k];
+            }
+        }
+    }
+    for (int i = 0; i < 8; ++i) {
+        if (std::fabs(a[i][i]) < 1e-12f) {
+            return false;
+        }
+        h[i] = a[i][8] / a[i][i];
+    }
+    h[8] = 1.0f;
+    // From rect space back to unit space, then through the solved quad map.
+    float s[9] = {1.0f / rectW, 0.0f,         -rectX / rectW,
+                  0.0f,         1.0f / rectH, -rectY / rectH,
+                  0.0f,         0.0f,         1.0f};
+    float out[9] = {};
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            out[r * 3 + c] =
+                h[r * 3] * s[c] + h[r * 3 + 1] * s[3 + c] + h[r * 3 + 2] * s[6 + c];
+        }
+    }
+    for (int i = 0; i < 9; ++i) {
+        h[i] = out[i];
+    }
+    return true;
+}
+
+bool homoInverse(const float h[9], float inv[9]) {
+    const float det = h[0] * (h[4] * h[8] - h[5] * h[7]) -
+                      h[1] * (h[3] * h[8] - h[5] * h[6]) +
+                      h[2] * (h[3] * h[7] - h[4] * h[6]);
+    if (std::fabs(det) < 1e-18f) {
+        return false;
+    }
+    inv[0] = (h[4] * h[8] - h[5] * h[7]) / det;
+    inv[1] = (h[2] * h[7] - h[1] * h[8]) / det;
+    inv[2] = (h[1] * h[5] - h[2] * h[4]) / det;
+    inv[3] = (h[5] * h[6] - h[3] * h[8]) / det;
+    inv[4] = (h[0] * h[8] - h[2] * h[6]) / det;
+    inv[5] = (h[2] * h[3] - h[0] * h[5]) / det;
+    inv[6] = (h[3] * h[7] - h[4] * h[6]) / det;
+    inv[7] = (h[1] * h[6] - h[0] * h[7]) / det;
+    inv[8] = (h[0] * h[4] - h[1] * h[3]) / det;
+    return true;
+}
+
 // An element's value is "set" when it says something other than the initial
 // `none`. `transform` and `filter` default to the empty string, but a rule may
 // name `none` explicitly, which must not open a group.
@@ -446,6 +979,12 @@ PaintOp groupStart(const PaintItem& item, float alpha, bool transformed, const f
     op.alpha = alpha;
     op.transformed = transformed;
     op.origin = origin;
+    op.projective = item.projective;
+    for (int i = 0; i < 16; ++i) {
+        op.mat3d[i] = item.mat3d[i];
+    }
+    op.persp3d = item.persp3d;
+    op.originZ = item.originZ;
     op.blur = blur;
     op.shift = shift;
     op.dropShadow = dropShadow;
@@ -680,6 +1219,15 @@ struct Collector {
         float groupAlpha = 1.0f;
         bool transformed = false;
         float m[6] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+        // A flattened 3D transform takes the projective path instead: the full
+        // list matrix, the viewer distance, and the origin's z. `culled` drops
+        // a backface-hidden subtree outright.
+        bool projective = false;
+        float mat3d[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                           0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+        float persp3d = 0.0f;
+        float originZ = 0.0f;
+        bool culled = false;
         SDL_FPoint origin{0.0f, 0.0f};
         float blur = 0.0f;
         bool shift = false;
@@ -700,14 +1248,35 @@ struct Collector {
         const ComputedStyle s = resolver.resolve(el);
         const bool drawable = s.display != ComputedStyle::None && s.visible;
         const float groupAlpha = s.opacity * filterOpacity(s.filter);
+        // A parent's `perspective` funnels every descendant's 3D through its
+        // viewer, display or no display.
+        box.child.perspective = s.perspective;
         // A scale() or rotate() cannot be folded into offsets the way translate
         // can, so its context composites offscreen just like an alpha under 1
         // does, and the whole group is mapped to the screen by the matrix at the
         // surface blit.
         Affine matrix;
         float tx = 0.0f, ty = 0.0f;
-        const bool hasMatrix = transformEffects(s.transform, matrix, tx, ty,
-                                                el.layoutWidth(), el.layoutHeight());
+        // A list with 3D functions takes the projective path instead; a
+        // non-positive `perspective()` invalidates the whole list. Pure-2D
+        // lists never leave the affine path below, bit for bit.
+        Mat4 mat4;
+        bool invalid3d = false;
+        bool hasProjective = false;
+        if (s.transform.find("3d") != std::string_view::npos ||
+            s.transform.find("rotateX") != std::string_view::npos ||
+            s.transform.find("rotateY") != std::string_view::npos ||
+            s.transform.find("translateZ") != std::string_view::npos ||
+            s.transform.find("scaleZ") != std::string_view::npos ||
+            s.transform.find("perspective") != std::string_view::npos) {
+            hasProjective = transformEffects3D(s.transform, mat4, el.layoutWidth(),
+                                               el.layoutHeight(), invalid3d);
+        }
+        bool hasMatrix = false;
+        if (!invalid3d && !hasProjective) {
+            hasMatrix = transformEffects(s.transform, matrix, tx, ty,
+                                         el.layoutWidth(), el.layoutHeight());
+        }
         // A `filter: blur()` has to diffuse the box's rendered surface, which
         // only an offscreen texture can provide, so it too forces a surface; the
         // radius rides the BeginGroup op for the executor to apply.
@@ -727,16 +1296,17 @@ struct Collector {
         // they hold paint at full strength into that surface. A box that never
         // paints (say `display:none`) still hands its alpha on, as it always did,
         // since there is no surface for it.
-        const bool composited = drawable && (groupAlpha < 1.0f || hasMatrix || blur > 0.0f ||
-                                             hasShift || dropShadow.present);
+        const bool composited = drawable && (groupAlpha < 1.0f || hasMatrix || hasProjective ||
+                                             blur > 0.0f || hasShift || dropShadow.present);
         if (!composited) {
             box.child.opacity *= groupAlpha;
         }
         // The group alpha and the translation land on the box as well as on what
         // it contains, so both are folded in before the item is taken. A matrix
         // group leaves its translate in the matrix instead -- folded twice, it
-        // would move the group twice over.
-        if (!hasMatrix) {
+        // would move the group twice over. A projective group keeps the whole
+        // list in its matrix for the same reason.
+        if (!hasMatrix && !hasProjective) {
             box.child.dx += tx;
             box.child.dy += ty;
         }
@@ -757,6 +1327,7 @@ struct Collector {
         box.kind = classifyGroup(s);
         box.groupAlpha = composited ? groupAlpha : 1.0f;
         box.transformed = hasMatrix;
+        box.projective = hasProjective;
         box.blur = composited ? blur : 0.0f;
         box.dropShadow = composited ? dropShadow : DropShadowFilter{};
         box.m[0] = matrix.a;
@@ -765,6 +1336,14 @@ struct Collector {
         box.m[3] = matrix.d;
         box.m[4] = matrix.e;
         box.m[5] = matrix.f;
+        if (hasProjective) {
+            for (int i = 0; i < 16; ++i) {
+                box.mat3d[i] = mat4.m[i];
+            }
+            box.persp3d = env.perspective;
+            const float rootFontSize = resolver.rootFontSize();
+            box.originZ = s.transformOrigin.z.resolve(0.0f, s.fontSize, rootFontSize);
+        }
         PaintItem& item = box.item;
         item.el = &el;
         item.zIndex = s.positioned ? s.zIndex : 0;
@@ -807,6 +1386,26 @@ struct Collector {
                                                           rootFontSize);
         box.origin = {item.el->layoutX() - item.dx + originX,
                       item.el->layoutY() - item.dy + originY};
+        if (hasProjective) {
+            // The projective payload rides the item for the executor and the
+            // hit test. A backface-hidden group facing away culls its whole
+            // subtree here, so paint and hit-testing agree by construction.
+            item.projective = true;
+            for (int i = 0; i < 16; ++i) {
+                item.mat3d[i] = box.mat3d[i];
+            }
+            item.persp3d = box.persp3d;
+            item.originZ = box.originZ;
+            const float bx = item.el->layoutX() - item.dx;
+            const float by = item.el->layoutY() - item.dy;
+            const ProjectedQuad facing = projectQuad(
+                box.mat3d, box.persp3d, box.origin.x, box.origin.y, box.originZ, bx,
+                by, item.el->layoutWidth(), item.el->layoutHeight());
+            if (s.backfaceHidden && facing.facesAway) {
+                box.culled = true;
+                return box;
+            }
+        }
         if (clips) {
             // What the clip keeps is shifted by this box's own scroll offsets, and
             // only its contents move; the box itself stays where layout put it.
@@ -831,6 +1430,11 @@ struct Collector {
     void walk(Element& el, const PaintEnv& env, std::vector<PaintEntry>& target,
               std::vector<PaintEntry>* escape) {
         BoxState box = resolve(el, env);
+        if (box.culled) {
+            // A backface-hidden group facing away paints nothing, children
+            // included: the plane turned its back on the viewer.
+            return;
+        }
         if (!box.paints) {
             walkChildren(el, box.child, target, escape);
             return;
@@ -854,6 +1458,12 @@ struct Collector {
         entry.groupAlpha = box.groupAlpha;
         entry.transformed = box.transformed;
         entry.origin = box.origin;
+        entry.projective = box.projective;
+        for (int i = 0; i < 16; ++i) {
+            entry.mat3d[i] = box.mat3d[i];
+        }
+        entry.persp3d = box.persp3d;
+        entry.originZ = box.originZ;
         entry.blur = box.blur;
         entry.shift = box.shift;
         entry.dropShadow = box.dropShadow;
@@ -891,8 +1501,8 @@ struct Collector {
                          });
         for (PaintEntry& entry : entries) {
             if (entry.group &&
-                (entry.groupAlpha < 1.0f || entry.transformed || entry.blur > 0.0f ||
-                 entry.shift || entry.dropShadow.present ||
+                (entry.groupAlpha < 1.0f || entry.transformed || entry.projective ||
+                 entry.blur > 0.0f || entry.shift || entry.dropShadow.present ||
                  entry.item.clipShape.kind != ResolvedClip::Kind::None ||
                  hasMaskSurface(entry.item.maskImages) ||
                  hasMaskBorderSurface(entry.item.maskBorder))) {
@@ -928,6 +1538,53 @@ bool hasMaskSurface(const std::vector<ComputedStyle::MaskImage>& layers) {
 
 bool hasMaskBorderSurface(const ComputedStyle::MaskBorder& border) {
     return border.source.kind != ComputedStyle::MaskImage::Kind::None;
+}
+
+ProjectedQuad projectQuad(const float mat[16], float perspective, float ox, float oy,
+                          float oz, float rectX, float rectY, float rectW, float rectH) {
+    ProjectedQuad quad;
+    bool behind = false;
+    quad.corners[0] = projectPoint(mat, perspective, ox, oy, oz, rectX, rectY, behind);
+    quad.facesAway = behind;
+    quad.corners[1] =
+        projectPoint(mat, perspective, ox, oy, oz, rectX + rectW, rectY, behind);
+    quad.facesAway = quad.facesAway || behind;
+    quad.corners[2] = projectPoint(mat, perspective, ox, oy, oz, rectX + rectW,
+                                   rectY + rectH, behind);
+    quad.facesAway = quad.facesAway || behind;
+    quad.corners[3] =
+        projectPoint(mat, perspective, ox, oy, oz, rectX, rectY + rectH, behind);
+    quad.facesAway = quad.facesAway || behind;
+    if (!quad.facesAway) {
+        // A flipped winding faces away: the plane turned its back.
+        const float before = rectW * rectH;
+        float after = 0.0f;
+        for (int i = 0; i < 4; ++i) {
+            const SDL_FPoint& a = quad.corners[i];
+            const SDL_FPoint& b = quad.corners[(i + 1) % 4];
+            after += a.x * b.y - b.x * a.y;
+        }
+        quad.facesAway = (before > 0.0f) != (after > 0.0f);
+    }
+    return quad;
+}
+bool unprojectPoint(const ProjectedQuad& quad, float rectX, float rectY, float rectW,
+                    float rectH, float x, float y, float& lx, float& ly) {
+    float h[9];
+    if (!rectToQuadHomo(rectX, rectY, rectW, rectH, quad.corners, h)) {
+        return false;
+    }
+    float inv[9];
+    if (!homoInverse(h, inv)) {
+        return false;
+    }
+    const float w = inv[6] * x + inv[7] * y + inv[8];
+    if (std::fabs(w) < 1e-12f) {
+        return false;
+    }
+    lx = (inv[0] * x + inv[1] * y + inv[2]) / w;
+    ly = (inv[3] * x + inv[4] * y + inv[5]) / w;
+    return true;
 }
 
 // A `filter: blur(x)` asks for the group's rendered surface to be diffused by
@@ -974,8 +1631,8 @@ std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolve
     // root that composites (say `opacity` on the whole document) brackets the
     // whole frame.
     const Collector::BoxState box = collector.resolve(root, PaintEnv{});
-    if (box.paints && (box.groupAlpha < 1.0f || box.transformed || box.blur > 0.0f ||
-                       box.shift || box.dropShadow.present ||
+    if (box.paints && (box.groupAlpha < 1.0f || box.transformed || box.projective ||
+                       box.blur > 0.0f || box.shift || box.dropShadow.present ||
                        box.item.clipShape.kind != ResolvedClip::Kind::None ||
                        hasMaskSurface(box.item.maskImages) ||
                        hasMaskBorderSurface(box.item.maskBorder))) {
@@ -988,8 +1645,8 @@ std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolve
     std::vector<PaintEntry> entries;
     collector.walkChildren(root, box.child, entries, nullptr);
     collector.emit(entries, out);
-    if (box.paints && (box.groupAlpha < 1.0f || box.transformed || box.blur > 0.0f ||
-                       box.shift || box.dropShadow.present)) {
+    if (box.paints && (box.groupAlpha < 1.0f || box.transformed || box.projective ||
+                       box.blur > 0.0f || box.shift || box.dropShadow.present)) {
         out.push_back(PaintOp{PaintOp::Kind::EndGroup, box.item, {}, 1.0f});
     }
     computeGroupBounds(out, resolver);
@@ -1007,7 +1664,21 @@ Element* hitTestPaintOrder(const std::vector<PaintOp>& ops, float x, float y) {
         if (op.kind == PaintOp::Kind::BeginGroup) {
             HitAffine g{op.m[0],op.m[1],op.m[2],op.m[3],op.m[4],op.m[5]};
             HitCtx inner = stack.back();
-            inner.transform = hitCompose(stack.back().transform, g);
+            if (op.projective && !stack.back().proj) {
+                // A flattened-3D group maps its window-space bounds through
+                // its own quad; anything projective deeper rides along
+                // unwarped, and 2D groups below compose inward as usual.
+                inner.proj = true;
+                inner.quad = projectQuad(op.mat3d, op.persp3d, op.origin.x, op.origin.y,
+                                         op.originZ, op.bounds.x, op.bounds.y,
+                                         op.bounds.w, op.bounds.h);
+                inner.quadRect = op.bounds;
+                inner.inner = HitAffine{1,0,0,1,0,0};
+            } else if (inner.proj) {
+                inner.inner = hitCompose(inner.inner, g);
+            } else {
+                inner.transform = hitCompose(stack.back().transform, g);
+            }
             stack.push_back(inner);
         } else if (op.kind == PaintOp::Kind::EndGroup) {
             if (stack.size() > 1) stack.pop_back(); else stack.back() = hitBase();

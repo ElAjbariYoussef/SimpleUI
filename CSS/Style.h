@@ -572,12 +572,22 @@ struct ComputedStyle {
     // Where scale/rotate turn about: two box-relative offsets, in the same
     // length/percentage terms CSS allows for `transform-origin` (a keyword edge
     // or a percentage, resolved against the border box when the transform is
-    // applied). Defaults to the box centre, CSS's initial `50% 50%`.
+    // applied), plus a z length for 3D (percentages never resolve there).
+    // Defaults to the box centre, CSS's initial `50% 50%`.
     struct TransformOrigin {
         Length x{Length::Percent, 50.0f};
         Length y{Length::Percent, 50.0f};
+        Length z;
     };
     TransformOrigin transformOrigin;
+    // A `perspective` length funnels children's 3D through a viewer this far
+    // in front of their plane; 0 is `none`. `transform-style` asks children to
+    // share 3D space, which the flat compositor cannot do, so it only parses.
+    // `backface-visibility: hidden` culls groups whose plane faces away.
+    float perspective = 0.0f;
+    enum class TransformStyle : std::uint8_t { Flat, Preserve3d };
+    TransformStyle transformStyle = TransformStyle::Flat;
+    bool backfaceHidden = false;
 
     // Grid track sizing from `grid-template-columns` / `grid-template-rows`. A
     // track is a fixed length, an `fr` share of the leftover space, or `auto`

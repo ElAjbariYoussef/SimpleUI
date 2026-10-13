@@ -64,6 +64,15 @@ struct PaintItem {
     std::vector<ComputedStyle::BackgroundBox> maskClips;
     // A 9-patch border mask, evaluated by the executor after the layers.
     ComputedStyle::MaskBorder maskBorder;
+    // A flattened 3D transform: the full 4x4 list matrix, the viewer distance
+    // (own `perspective()` or the parent's `perspective`), and the origin's z.
+    // The executor projects the surface quad with these; `projective` marks a
+    // group that takes that path instead of the affine one.
+    bool projective = false;
+    float mat3d[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                       0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    float persp3d = 0.0f;
+    float originZ = 0.0f;
     // Scroll offsets accumulated from clipping ancestors. Content moves up and
     // left by them, so this element's box is drawn at layout minus the offset;
     // its own scroll only shifts what is inside it.
@@ -100,6 +109,10 @@ struct DropShadowFilter {
 // surface is mapped to the screen by the affine `m` -- x' = m[0]x + m[2]y + m[4],
 // y' = m[1]x + m[3]y + m[5] -- about `origin`, the resolved `transform-origin`
 // point (a window-coordinate position), instead of being blitted axis-aligned.
+// When the root carries 3D functions, `projective` is set instead and the
+// surface quad is projected with `mat3d`/`persp3d`/`originZ` (see
+// `projectQuad`); `transform-style` stays flat, so children are already
+// flattened into the surface.
 // `blur` is a `filter: blur()` radius in pixels; when a BeginGroup carries one,
 // the executor reads the finished surface back, blurs it, and blits the result.
 // `shift` is a `filter:` colour-shift chain (brightness/contrast/saturate/
@@ -117,6 +130,11 @@ struct PaintOp {
     float alpha = 1.0f;
     bool transformed = false;
     float m[6] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+    bool projective = false;
+    float mat3d[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                       0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    float persp3d = 0.0f;
+    float originZ = 0.0f;
     SDL_FPoint origin{0.0f, 0.0f};
     float blur = 0.0f;
     bool shift = false;
@@ -148,6 +166,27 @@ bool hasMaskSurface(const std::vector<ComputedStyle::MaskImage>& layers);
 // Whether a 9-patch border mask needs the same compositing surface: anything
 // but a `none` source evaluates against it.
 bool hasMaskBorderSurface(const ComputedStyle::MaskBorder& border);
+
+// Projects a group's pre-transform surface rect through a flattened 3D
+// transform: the 4x4 list matrix `mat` (row-major), the viewer distance
+// `perspective` (0 for none), and the transform-origin (ox, oy, oz, already
+// in the surface's own coordinates, with the rect at rectX/rectY). Corners
+// come back in surface coordinates in top-left, top-right, bottom-right,
+// bottom-left order; `facesAway` reports a flipped winding (nothing behind
+// the viewer ever culls: those stay visible). Pure math, shared by the
+// executor blit and hit-testing so both read one answer. Also backs the
+// `transform-style: flat` contract: children are already in the surface.
+struct ProjectedQuad {
+    SDL_FPoint corners[4];
+    bool facesAway = false;
+};
+ProjectedQuad projectQuad(const float mat[16], float perspective, float ox, float oy,
+                          float oz, float rectX, float rectY, float rectW, float rectH);
+
+// Inverts a rect-to-quad homography for hit-testing: maps a window point back
+// into the surface rect. Returns false when the quad is degenerate.
+bool unprojectPoint(const ProjectedQuad& quad, float rectX, float rectY, float rectW,
+                    float rectH, float x, float y, float& lx, float& ly);
 
 // The operations a frame is painted from, back to front. Elements that do not
 // paint (hidden, non-visual wrappers) are absent. The walk needs no device or

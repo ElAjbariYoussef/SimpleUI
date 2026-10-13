@@ -563,6 +563,44 @@ int main() {
         }
     }
 
+    // A tilted 3D box is hit through its projected quad: its centre catches,
+    // but a point inside the flat box yet outside the warp misses.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<div id=\"tilt\" style=\"width:100px;height:100px;transform:rotateY(60deg)\"></div>"
+            "</body></sui>", err);
+        check(doc != nullptr, "hit test document parsed");
+        if (doc) {
+            sui::Element* tilt = doc->getElementById("tilt");
+            check(tilt, "hit element found");
+            if (tilt) {
+                app.setDocument(std::move(doc));
+
+                sui::StyleResolver layoutResolver;
+                sui::LayoutInput input;
+                input.resolver = &layoutResolver;
+                input.viewportWidth = 400.0f;
+                input.viewportHeight = 300.0f;
+                sui::BlockLayout().layout(app.document().root(), input);
+
+                const float cx = tilt->layoutX() + tilt->layoutWidth() * 0.5f;
+                const float cy = tilt->layoutY() + tilt->layoutHeight() * 0.5f;
+                // cos60 halves the box about its centre: the flat left edge
+                // falls outside the quad.
+                const float outside = tilt->layoutX() + tilt->layoutWidth() * 0.1f;
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerDown, cx, cy, 1));
+                check(app.document().focused() == tilt, "a tilted box catches its centre");
+                app.dispatch(
+                    sui::InputEvent(sui::InputKind::PointerDown, outside, cy, 1));
+                check(app.document().focused() != tilt,
+                      "a point outside the warped quad misses");
+            }
+        }
+    }
+
     // A range jumps to the value under the pointer, drags with the pointer
     // held, and steps on arrows/Home/End. A disabled range ignores everything.
     {
