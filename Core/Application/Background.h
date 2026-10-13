@@ -69,4 +69,17 @@ void applyMaskImage(std::uint8_t* pixels, int width, int height,
                     const ComputedStyle::MaskImage& mask, const SDL_FRect& destination,
                     float fontSize, float rootFontSize);
 
+// Multiplies surface alpha by a `mask-border` 9-patch painted into `boxes`
+// (already in surface coordinates). Pure pixels and math: no device, so tests
+// drive it directly. The source is sliced into corners, edges, and a middle;
+// corners stretch, edges stretch across and tile along per `mask-border-repeat`
+// (`stretch`/`repeat`/`round`/`space`), and the middle tiles only with `fill`
+// (otherwise it is transparent). Widths size the bands, outsets grow the area;
+// outside the outset area pixels keep their alpha. A missing url source hides
+// everything, like a missing `mask-image` url.
+void applyMaskBorder(std::uint8_t* pixels, int width, int height,
+                     const ComputedStyle::MaskBorder& border,
+                     const BackgroundBoxes& boxes, float fontSize, float rootFontSize,
+                     FetchMaskBytes fetch);
+
 }  // namespace sui

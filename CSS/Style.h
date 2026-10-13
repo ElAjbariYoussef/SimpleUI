@@ -489,6 +489,50 @@ struct ComputedStyle {
     std::vector<BackgroundBox> maskOrigins;
     std::vector<BackgroundBox> maskClips;
 
+    // Which component of a `<mask>` element's content masks: brightness or the
+    // channel. Stored and serialized; nothing reads it yet, because SVG mask
+    // elements do not render.
+    enum class MaskType : std::uint8_t { Luminance, Alpha };
+    MaskType maskType = MaskType::Luminance;
+
+    // A 9-patch border mask: the source is sliced into corners, edges, and a
+    // middle, and each zone paints its own destination band. Slice insets are
+    // numbers (source px) or percentages of the source; widths are lengths,
+    // numbers (multiples of the border thickness), or auto (the slice's own
+    // size); outsets are lengths or border multiples, never negative. Repeat
+    // is per axis; mode reads the sample as brightness or channel.
+    struct MaskBorder {
+        MaskImage source;
+        struct Slice {
+            Length top;
+            Length right;
+            Length bottom;
+            Length left;
+            bool fill = false;
+        };
+        Slice slice;
+        struct Width {
+            Length top;
+            Length right;
+            Length bottom;
+            Length left;
+        };
+        Width width;
+        struct Outset {
+            Length top;
+            Length right;
+            Length bottom;
+            Length left;
+        };
+        Outset outset;
+        enum class Repeat : std::uint8_t { Stretch, Repeat, Round, Space };
+        Repeat repeatX = Repeat::Stretch;
+        Repeat repeatY = Repeat::Stretch;
+        enum class Mode : std::uint8_t { Luminance, Alpha };
+        Mode mode = Mode::Luminance;
+    };
+    MaskBorder maskBorder;
+
     // Typography
     float fontSize = 16.0f;  // px
     std::string fontFamily;   // empty = default

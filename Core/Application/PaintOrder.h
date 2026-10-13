@@ -62,6 +62,8 @@ struct PaintItem {
     std::vector<ComputedStyle::RepeatPair> maskRepeats;
     std::vector<ComputedStyle::BackgroundBox> maskOrigins;
     std::vector<ComputedStyle::BackgroundBox> maskClips;
+    // A 9-patch border mask, evaluated by the executor after the layers.
+    ComputedStyle::MaskBorder maskBorder;
     // Scroll offsets accumulated from clipping ancestors. Content moves up and
     // left by them, so this element's box is drawn at layout minus the offset;
     // its own scroll only shifts what is inside it.
@@ -142,6 +144,10 @@ float filterBlur(std::string_view filter);
 // against it and url() sources sample decoded bytes. Shared with the
 // executor, which copies the layers onto its group frame.
 bool hasMaskSurface(const std::vector<ComputedStyle::MaskImage>& layers);
+
+// Whether a 9-patch border mask needs the same compositing surface: anything
+// but a `none` source evaluates against it.
+bool hasMaskBorderSurface(const ComputedStyle::MaskBorder& border);
 
 // The operations a frame is painted from, back to front. Elements that do not
 // paint (hidden, non-visual wrappers) are absent. The walk needs no device or

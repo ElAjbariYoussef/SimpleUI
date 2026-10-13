@@ -416,8 +416,9 @@ GroupKind classifyGroup(const ComputedStyle& s) {
     }
     // A `clip-path` composites its subtree through a surface to mask it, so it
     // groups for real: descendants must not escape above the mask. A mask with
-    // applicable layers does the same for its own alpha pass.
-    if (s.clipPath.shape != ComputedStyle::ClipPath::Shape::None || hasMaskSurface(s.maskImages)) {
+    // applicable layers, or a border mask, does the same for its own alpha pass.
+    if (s.clipPath.shape != ComputedStyle::ClipPath::Shape::None ||
+        hasMaskSurface(s.maskImages) || hasMaskBorderSurface(s.maskBorder)) {
         return GroupKind::Real;
     }
     if (s.positioned) {
@@ -783,9 +784,9 @@ struct Collector {
                                              resolver.rootFontSize());
         }
         // Mask layers ride along untouched: the executor evaluates them
-        // against the surface. Modes, composites, and geometry ride too,
-        // matched by position at apply time.
-        if (hasMaskSurface(s.maskImages)) {
+        // against the surface. Modes, composites, geometry, and the border
+        // mask ride too, matched by position at apply time.
+        if (hasMaskSurface(s.maskImages) || hasMaskBorderSurface(s.maskBorder)) {
             item.maskImages = s.maskImages;
             item.maskModes = s.maskModes;
             item.maskComposites = s.maskComposites;
@@ -794,6 +795,7 @@ struct Collector {
             item.maskRepeats = s.maskRepeats;
             item.maskOrigins = s.maskOrigins;
             item.maskClips = s.maskClips;
+            item.maskBorder = s.maskBorder;
         }
         // The point the transform turns about: the resolved transform-origin,
         // measured from the box's own top-left (which scroll offsets have already
@@ -892,7 +894,8 @@ struct Collector {
                 (entry.groupAlpha < 1.0f || entry.transformed || entry.blur > 0.0f ||
                  entry.shift || entry.dropShadow.present ||
                  entry.item.clipShape.kind != ResolvedClip::Kind::None ||
-                 hasMaskSurface(entry.item.maskImages))) {
+                 hasMaskSurface(entry.item.maskImages) ||
+                 hasMaskBorderSurface(entry.item.maskBorder))) {
                 out.push_back(groupStart(entry.item, entry.groupAlpha, entry.transformed, entry.m,
                                         entry.origin, entry.blur, entry.shift, entry.filter,
                                         entry.dropShadow));
@@ -921,6 +924,10 @@ bool hasMaskSurface(const std::vector<ComputedStyle::MaskImage>& layers) {
         }
     }
     return false;
+}
+
+bool hasMaskBorderSurface(const ComputedStyle::MaskBorder& border) {
+    return border.source.kind != ComputedStyle::MaskImage::Kind::None;
 }
 
 // A `filter: blur(x)` asks for the group's rendered surface to be diffused by
@@ -970,7 +977,8 @@ std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolve
     if (box.paints && (box.groupAlpha < 1.0f || box.transformed || box.blur > 0.0f ||
                        box.shift || box.dropShadow.present ||
                        box.item.clipShape.kind != ResolvedClip::Kind::None ||
-                       hasMaskSurface(box.item.maskImages))) {
+                       hasMaskSurface(box.item.maskImages) ||
+                       hasMaskBorderSurface(box.item.maskBorder))) {
         out.push_back(groupStart(box.item, box.groupAlpha, box.transformed, box.m, box.origin,
                                 box.blur, box.shift, box.filter, box.dropShadow));
     }

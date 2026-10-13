@@ -80,6 +80,7 @@ struct GroupFrame {
     std::vector<ComputedStyle::RepeatPair> maskRepeats;
     std::vector<ComputedStyle::BackgroundBox> maskOrigins;
     std::vector<ComputedStyle::BackgroundBox> maskClips;
+    ComputedStyle::MaskBorder maskBorder;
     BackgroundBoxes maskBoxes{};
     float maskFontSize = 16.0f;
 };
@@ -2712,7 +2713,8 @@ void Application::run() {
                         frame.dropShadow = op.dropShadow;
                         frame.clip = op.item.clipShape.kind != ResolvedClip::Kind::None;
                         frame.clipShape = op.item.clipShape;
-                        frame.mask = hasMaskSurface(op.item.maskImages);
+                        frame.mask = hasMaskSurface(op.item.maskImages) ||
+                                     hasMaskBorderSurface(op.item.maskBorder);
                         if (frame.mask && op.item.el) {
                             frame.maskLayers = op.item.maskImages;
                             frame.maskModes = op.item.maskModes;
@@ -2722,6 +2724,7 @@ void Application::run() {
                             frame.maskRepeats = op.item.maskRepeats;
                             frame.maskOrigins = op.item.maskOrigins;
                             frame.maskClips = op.item.maskClips;
+                            frame.maskBorder = op.item.maskBorder;
                             frame.maskFontSize = resolver_.resolve(*op.item.el).fontSize;
                             // Boxes in surface coords: layout minus the
                             // offsets paint uses, rebased to the surface origin.
@@ -2827,7 +2830,9 @@ void Application::run() {
                                             // Mask layers multiply what the clip
                                             // left, in the same surface space;
                                             // url() layers sample decoded bytes
-                                            // through the image cache.
+                                            // through the image cache. The
+                                            // border mask multiplies after
+                                            // them, from the same boxes.
                                             sui::applyMaskLayers(
                                                 pixels, conv->w, conv->h, frame.maskLayers,
                                                 frame.maskModes, frame.maskComposites,
@@ -2841,6 +2846,18 @@ void Application::run() {
                                                     return images_ ? images_->decoded(href)
                                                                    : nullptr;
                                                 });
+                                            if (hasMaskBorderSurface(frame.maskBorder)) {
+                                                sui::applyMaskBorder(
+                                                    pixels, conv->w, conv->h,
+                                                    frame.maskBorder, frame.maskBoxes,
+                                                    frame.maskFontSize,
+                                                    resolver_.rootFontSize(),
+                                                    [&](std::string_view href)
+                                                        -> const DecodedImage* {
+                                                        return images_ ? images_->decoded(href)
+                                                                       : nullptr;
+                                                    });
+                                            }
                                         }
                                         if (frame.dropShadow.present) {
                                             // The silhouette: the content's own

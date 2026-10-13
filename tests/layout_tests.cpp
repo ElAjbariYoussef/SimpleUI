@@ -4985,6 +4985,112 @@ void testMaskShorthand() {
     check(styles[8].maskImages.empty(), "a dangling slash drops the shorthand");
 }
 
+// `mask-type` stores which component of a mask element masks (nothing reads it
+// yet), and the six `mask-border` longhands plus the shorthand describe a
+// 9-patch border mask. One bad value keeps the previous cascade winner.
+void testMaskBorder() {
+    const auto rules = sui::CSSParser::parse(R"(
+        .a { mask-type: alpha }
+        .b { mask-type: banana }
+        .c { mask-border-source: url(b.png) }
+        .d { mask-border-source: linear-gradient(black, white) }
+        .e { mask-border-source: none }
+        .f { mask-border-source: banana }
+        .g { mask-border-mode: alpha }
+        .h { mask-border-mode: banana }
+        .i { mask-border-slice: 30 fill }
+        .j { mask-border-slice: 10% 20% 30% 40% }
+        .k { mask-border-slice: 10px }
+        .l { mask-border-slice: -1 }
+        .m { mask-border-width: 2 3px auto }
+        .n { mask-border-width: 50% }
+        .o { mask-border-outset: 4 5 }
+        .p { mask-border-outset: -2px }
+        .q { mask-border-repeat: repeat round }
+        .r { mask-border-repeat: stretch stretch stretch }
+        .s { mask-border: url(b.png) 30 / 4px / 2px round luminance }
+        .t { mask-border: none }
+        .u { mask-border: url(b.png) 10px }
+        .v { mask-border: url(b.png) 30 / }
+    )");
+    sui::StyleResolver resolver;
+    resolver.setRules(rules);
+    static const char* kClasses =
+        "<div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div>"
+        "<div class=\"d\"></div><div class=\"e\"></div><div class=\"f\"></div>"
+        "<div class=\"g\"></div><div class=\"h\"></div><div class=\"i\"></div>"
+        "<div class=\"j\"></div><div class=\"k\"></div><div class=\"l\"></div>"
+        "<div class=\"m\"></div><div class=\"n\"></div><div class=\"o\"></div>"
+        "<div class=\"p\"></div><div class=\"q\"></div><div class=\"r\"></div>"
+        "<div class=\"s\"></div><div class=\"t\"></div><div class=\"u\"></div>"
+        "<div class=\"v\"></div>";
+    auto body = parseOrNull((std::string("<sui><body>") + kClasses + "</body></sui>").c_str());
+    if (!body) {
+        return;
+    }
+    const std::vector<ComputedStyle> styles = bodyStyles(*body, resolver);
+    if (styles.size() < 22) {
+        check(false, "mask border elements found");
+        return;
+    }
+    using Kind = sui::ComputedStyle::MaskImage::Kind;
+    using Border = sui::ComputedStyle::MaskBorder;
+    check(styles[0].maskType == sui::ComputedStyle::MaskType::Alpha,
+          "alpha mask-type stores");
+    check(sui::StyleResolver::propertyValue(styles[0], "mask-type") == "alpha",
+          "mask-type serializes");
+    check(styles[1].maskType == sui::ComputedStyle::MaskType::Luminance,
+          "a bad mask-type keeps luminance");
+    check(styles[2].maskBorder.source.kind == Kind::Url &&
+              styles[2].maskBorder.source.href == "b.png",
+          "a url border source records its href");
+    check(styles[3].maskBorder.source.kind == Kind::LinearGradient,
+          "a gradient border source parses");
+    check(styles[4].maskBorder.source.kind == Kind::None, "none clears the source");
+    check(styles[5].maskBorder.source.kind == Kind::None, "garbage keeps no source");
+    check(styles[6].maskBorder.mode == Border::Mode::Alpha, "alpha border mode stores");
+    check(styles[7].maskBorder.mode == Border::Mode::Luminance,
+          "a bad border mode keeps luminance");
+    check(styles[8].maskBorder.slice.top.value == 30.0f && styles[8].maskBorder.slice.fill,
+          "a slice number parses with fill");
+    check(styles[9].maskBorder.slice.top.value == 10.0f &&
+              styles[9].maskBorder.slice.right.value == 20.0f &&
+              styles[9].maskBorder.slice.bottom.value == 30.0f &&
+              styles[9].maskBorder.slice.left.value == 40.0f,
+          "four slice percentages expand clockwise");
+    check(styles[10].maskBorder.slice.top.value == 0.0f,
+          "a length never slices");
+    check(styles[11].maskBorder.slice.top.value == 0.0f, "a negative slice drops");
+    check(styles[12].maskBorder.width.top.unit == sui::Length::Number &&
+              styles[12].maskBorder.width.top.value == 2.0f &&
+              styles[12].maskBorder.width.right.value == 3.0f &&
+              styles[12].maskBorder.width.bottom.isAuto(),
+          "width mixes multiples, lengths, and auto");
+    check(styles[13].maskBorder.width.top.value == 0.0f, "a percentage width drops");
+    check(styles[14].maskBorder.outset.top.value == 4.0f &&
+              styles[14].maskBorder.outset.bottom.value == 4.0f &&
+              styles[14].maskBorder.outset.right.value == 5.0f,
+          "two outsets expand vertical and horizontal");
+    check(styles[15].maskBorder.outset.top.value == 0.0f, "a negative outset drops");
+    check(styles[16].maskBorder.repeatX == Border::Repeat::Repeat &&
+              styles[16].maskBorder.repeatY == Border::Repeat::Round,
+          "a repeat pair parses per axis");
+    check(styles[17].maskBorder.repeatX == Border::Repeat::Stretch,
+          "a triple repeat drops");
+    check(styles[18].maskBorder.source.kind == Kind::Url &&
+              styles[18].maskBorder.slice.top.value == 30.0f &&
+              styles[18].maskBorder.width.top.value == 4.0f &&
+              styles[18].maskBorder.outset.top.value == 2.0f &&
+              styles[18].maskBorder.repeatX == Border::Repeat::Round &&
+              styles[18].maskBorder.mode == Border::Mode::Luminance,
+          "the shorthand expands every part");
+    check(styles[19].maskBorder.source.kind == Kind::None, "a none shorthand resets");
+    check(styles[20].maskBorder.source.kind == Kind::None,
+          "a length in the shorthand drops it all");
+    check(styles[21].maskBorder.source.kind == Kind::None,
+          "a dangling slash drops the shorthand");
+}
+
 void testBackdropFilter() {
     auto document = parseOrNull("<sui><body><div id=\"x\">hi</div></body></sui>");
     if (!document) {
@@ -6582,6 +6688,7 @@ int main() {
     testMaskModeComposite();
     testMaskGeometry();
     testMaskShorthand();
+    testMaskBorder();
     testBackdropFilter();
     testBackgroundListsAreParallel();
     testBackgroundSizeAndPositionKeywords();

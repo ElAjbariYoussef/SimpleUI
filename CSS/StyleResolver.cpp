@@ -2735,6 +2735,320 @@ bool parseMask(std::string_view value, ComputedStyle& s) {
     return true;
 }
 
+// A bare number with no unit, for the border-slice/width/outset values that
+// count source px or border multiples instead of lengths. `parseLength` reads
+// the same text as px, so this re-tags it.
+bool parseBorderNumber(std::string_view token, Length& out) {
+    const std::string_view text = trim(token);
+    if (text.empty()) {
+        return false;
+    }
+    std::size_t i = 0;
+    if (i < text.size() && (text[i] == '+' || text[i] == '-')) {
+        ++i;
+    }
+    std::size_t digits = 0;
+    while (i < text.size() &&
+           (std::isdigit(static_cast<unsigned char>(text[i])) || text[i] == '.')) {
+        ++i;
+        ++digits;
+    }
+    if (digits == 0 || i != text.size()) {
+        return false;
+    }
+    const float number =
+        std::strtof(std::string(text.substr(0, i)).c_str(), nullptr);
+    out = Length{Length::Number, number};
+    return true;
+}
+
+// One-to-four side expansion: one value sets all four, two set vertical and
+// horizontal, three add the bottom, four go clockwise from the top.
+template <typename T>
+void expandSides(const std::vector<T>& parts, T& top, T& right, T& bottom, T& left) {
+    switch (parts.size()) {
+        case 1:
+            top = right = bottom = left = parts[0];
+            break;
+        case 2:
+            top = bottom = parts[0];
+            right = left = parts[1];
+            break;
+        case 3:
+            top = parts[0];
+            right = left = parts[1];
+            bottom = parts[2];
+            break;
+        default:
+            top = parts[0];
+            right = parts[1];
+            bottom = parts[2];
+            left = parts[3];
+            break;
+    }
+}
+
+// `mask-border-slice`: 1-4 numbers/percentages plus an optional `fill`.
+// Lengths are not slices, so anything else fails the declaration.
+bool parseMaskBorderSlice(std::string_view value, ComputedStyle::MaskBorder::Slice& slice) {
+    using Slice = ComputedStyle::MaskBorder::Slice;
+    Slice out;
+    std::vector<Length> parts;
+    for (std::string_view token : splitTokens(value)) {
+        if (token.empty()) {
+            continue;
+        }
+        if (token == "fill") {
+            out.fill = true;
+            continue;
+        }
+        Length length;
+        if (parseBorderNumber(token, length)) {
+            // A bare number counts source px.
+        } else {
+            length = parseLength(token);
+            if (length.unit != Length::Percent) {
+                return false;
+            }
+        }
+        if (length.unit == Length::Number && length.value < 0.0f) {
+            return false;
+        }
+        if (length.unit == Length::Percent &&
+            (length.value < 0.0f || length.value > 100.0f)) {
+            return false;
+        }
+        parts.push_back(length);
+    }
+    if (parts.empty() || parts.size() > 4) {
+        return false;
+    }
+    expandSides(parts, out.top, out.right, out.bottom, out.left);
+    slice = out;
+    return true;
+}
+
+// `mask-border-width`: 1-4 lengths, border multiples, or `auto`.
+bool parseMaskBorderWidth(std::string_view value, ComputedStyle::MaskBorder::Width& width) {
+    using Width = ComputedStyle::MaskBorder::Width;
+    Width out;
+    std::vector<Length> parts;
+    for (std::string_view token : splitTokens(value)) {
+        if (token.empty()) {
+            continue;
+        }
+        Length length;
+        if (token == "auto") {
+            length = Length{};
+        } else if (parseBorderNumber(token, length)) {
+            // A bare number multiplies the border thickness.
+        } else {
+            length = parseLength(token);
+            if (length.unit != Length::Px && length.unit != Length::Em &&
+                length.unit != Length::Rem && length.unit != Length::Calc) {
+                return false;
+            }
+        }
+        if ((length.unit == Length::Px || length.unit == Length::Number) &&
+            length.value < 0.0f) {
+            return false;
+        }
+        parts.push_back(length);
+    }
+    if (parts.empty() || parts.size() > 4) {
+        return false;
+    }
+    expandSides(parts, out.top, out.right, out.bottom, out.left);
+    width = out;
+    return true;
+}
+
+// `mask-border-outset`: 1-4 lengths or border multiples, never negative.
+bool parseMaskBorderOutset(std::string_view value,
+                           ComputedStyle::MaskBorder::Outset& outset) {
+    using Outset = ComputedStyle::MaskBorder::Outset;
+    Outset out;
+    std::vector<Length> parts;
+    for (std::string_view token : splitTokens(value)) {
+        if (token.empty()) {
+            continue;
+        }
+        Length length;
+        if (parseBorderNumber(token, length)) {
+            // A bare number multiplies the border thickness.
+        } else {
+            length = parseLength(token);
+            if (length.unit != Length::Px && length.unit != Length::Em &&
+                length.unit != Length::Rem && length.unit != Length::Calc) {
+                return false;
+            }
+        }
+        if ((length.unit == Length::Px || length.unit == Length::Number) &&
+            length.value < 0.0f) {
+            return false;
+        }
+        parts.push_back(length);
+    }
+    if (parts.empty() || parts.size() > 4) {
+        return false;
+    }
+    expandSides(parts, out.top, out.right, out.bottom, out.left);
+    outset = out;
+    return true;
+}
+
+// `mask-border-repeat`: one or two of stretch/repeat/round/space.
+bool parseMaskBorderRepeat(std::string_view value, ComputedStyle::MaskBorder& border) {
+    using Repeat = ComputedStyle::MaskBorder::Repeat;
+    const auto word = [](std::string_view token, Repeat& out) {
+        if (token == "stretch") {
+            out = Repeat::Stretch;
+        } else if (token == "repeat") {
+            out = Repeat::Repeat;
+        } else if (token == "round") {
+            out = Repeat::Round;
+        } else if (token == "space") {
+            out = Repeat::Space;
+        } else {
+            return false;
+        }
+        return true;
+    };
+    std::vector<std::string_view> tokens;
+    for (std::string_view token : splitTokens(value)) {
+        if (!token.empty()) {
+            tokens.push_back(token);
+        }
+    }
+    if (tokens.empty() || tokens.size() > 2) {
+        return false;
+    }
+    Repeat first = Repeat::Stretch;
+    Repeat second = Repeat::Stretch;
+    if (!word(tokens[0], first)) {
+        return false;
+    }
+    second = first;
+    if (tokens.size() == 2 && !word(tokens[1], second)) {
+        return false;
+    }
+    border.repeatX = first;
+    border.repeatY = second;
+    return true;
+}
+
+// `mask-border`: source || slice [ / width [ / outset ] ]? || repeat || mode.
+// A single declaration; one bad token drops it all.
+bool parseMaskBorder(std::string_view value, ComputedStyle& s) {
+    using Border = ComputedStyle::MaskBorder;
+    Border border;
+    bool hasSource = false;
+    std::string sliceText;
+    std::string widthText;
+    std::string outsetText;
+    std::string repeatText;
+    bool hasMode = false;
+    // Slashes separate slice from width from outset, paren-aware so a url's
+    // own slashes never cut.
+    const std::vector<std::string_view> sections = splitTopLevel(value, '/');
+    if (sections.empty() || sections.size() > 3) {
+        return false;
+    }
+    bool seenSlashWidth = false;
+    for (std::size_t section = 0; section < sections.size(); ++section) {
+        for (std::string_view token : splitTokens(sections[section])) {
+            if (token.empty()) {
+                continue;
+            }
+            ComputedStyle::MaskImage source;
+            if (parseMaskImage(token, source) &&
+                (source.kind != ComputedStyle::MaskImage::Kind::None || token == "none")) {
+                if (section != 0 || hasSource) {
+                    return false;
+                }
+                border.source = source;
+                hasSource = true;
+            } else if (token == "stretch" || token == "repeat" || token == "round" ||
+                       token == "space") {
+                if (!repeatText.empty()) {
+                    repeatText += ' ';
+                }
+                repeatText += std::string(token);
+            } else if (token == "luminance" || token == "alpha") {
+                if (hasMode) {
+                    return false;
+                }
+                border.mode = token == "luminance" ? Border::Mode::Luminance
+                                                  : Border::Mode::Alpha;
+                hasMode = true;
+            } else if (section == 0 && token == "fill") {
+                if (!sliceText.empty()) {
+                    sliceText += ' ';
+                }
+                sliceText += "fill";
+            } else if (section == 0) {
+                Length number;
+                const Length length = parseLength(token);
+                if (parseBorderNumber(token, number)) {
+                    // A bare number slices source px.
+                    if (!sliceText.empty()) {
+                        sliceText += ' ';
+                    }
+                    sliceText += std::string(token);
+                } else if (length.unit == Length::Percent) {
+                    if (!sliceText.empty()) {
+                        sliceText += ' ';
+                    }
+                    sliceText += std::string(token);
+                } else {
+                    // Lengths never slice, and nothing else belongs here.
+                    return false;
+                }
+            } else if (section == 1) {
+                if (!widthText.empty()) {
+                    widthText += ' ';
+                }
+                widthText += std::string(token);
+                seenSlashWidth = true;
+            } else if (section == 2) {
+                if (!outsetText.empty()) {
+                    outsetText += ' ';
+                }
+                outsetText += std::string(token);
+            } else {
+                return false;
+            }
+        }
+    }
+    if (!sliceText.empty() && !parseMaskBorderSlice(sliceText, border.slice)) {
+        return false;
+    }
+    if (sections.size() >= 2 && widthText.empty()) {
+        // A slash with nothing after it widths nothing.
+        return false;
+    }
+    if (seenSlashWidth && !parseMaskBorderWidth(widthText, border.width)) {
+        return false;
+    }
+    if (sections.size() == 3) {
+        if (outsetText.empty()) {
+            return false;
+        }
+        if (!parseMaskBorderOutset(outsetText, border.outset)) {
+            return false;
+        }
+    }
+    if (!repeatText.empty() && !parseMaskBorderRepeat(repeatText, border)) {
+        return false;
+    }
+    if (!hasSource && sliceText.empty() && !seenSlashWidth && sections.size() < 3 &&
+        repeatText.empty() && !hasMode) {
+        return false;
+    }
+    s.maskBorder = border;
+    return true;
+}
+
 
 // A property the engine does not implement is dropped by CSS anyway, but saying so
 // here is what makes the gap debuggable: it turns a hover rule with an unsupported
@@ -4241,6 +4555,49 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
                 }
             }
         }
+    } else if (property == "mask-type") {
+        // Only `<mask>` elements read this, and SVG does not render yet, but
+        // the value is stored and serialized all the same.
+        if (value == "luminance") {
+            s.maskType = ComputedStyle::MaskType::Luminance;
+        } else if (value == "alpha") {
+            s.maskType = ComputedStyle::MaskType::Alpha;
+        }
+    } else if (property == "mask-border-source") {
+        // A single image; a list is not a source.
+        if (splitTopLevel(value).size() == 1) {
+            ComputedStyle::MaskImage source;
+            if (parseMaskImage(value, source)) {
+                s.maskBorder.source = source;
+            }
+        }
+    } else if (property == "mask-border-mode") {
+        if (value == "luminance") {
+            s.maskBorder.mode = ComputedStyle::MaskBorder::Mode::Luminance;
+        } else if (value == "alpha") {
+            s.maskBorder.mode = ComputedStyle::MaskBorder::Mode::Alpha;
+        }
+    } else if (property == "mask-border-slice") {
+        ComputedStyle::MaskBorder::Slice slice;
+        if (parseMaskBorderSlice(value, slice)) {
+            s.maskBorder.slice = slice;
+        }
+    } else if (property == "mask-border-width") {
+        ComputedStyle::MaskBorder::Width width;
+        if (parseMaskBorderWidth(value, width)) {
+            s.maskBorder.width = width;
+        }
+    } else if (property == "mask-border-outset") {
+        ComputedStyle::MaskBorder::Outset outset;
+        if (parseMaskBorderOutset(value, outset)) {
+            s.maskBorder.outset = outset;
+        }
+    } else if (property == "mask-border-repeat") {
+        parseMaskBorderRepeat(value, s.maskBorder);
+    } else if (property == "mask-border") {
+        // Shorthand: source, slice, width, outset, repeat, and mode in one
+        // declaration. One bad token drops it all.
+        parseMaskBorder(value, s);
     } else if (property == "clip-path") {
         // Shapes clip the element and its subtree; anything else keeps the
         // previous cascade winner, like any failed parse.
@@ -4832,6 +5189,9 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "transform") return style.transform;
     if (property == "filter") return style.filter;
     if (property == "backdrop-filter") return style.backdropFilter;
+    if (property == "mask-type") {
+        return style.maskType == ComputedStyle::MaskType::Alpha ? "alpha" : "luminance";
+    }
     if (property == "transform-origin") {
         std::string result = length(style.transformOrigin.x, "50%");
         const std::string second = length(style.transformOrigin.y, "50%");

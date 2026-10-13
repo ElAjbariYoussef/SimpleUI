@@ -270,6 +270,8 @@ void testGroupDetection() {
         <div id="mask" style="mask-image:linear-gradient(black, transparent)"></div>
         <div id="masknone" style="mask-image:none"></div>
         <div id="maskurl" style="mask-image:url(m.png)"></div>
+        <div id="maskborder" style="mask-border-source:url(b.png)"></div>
+        <div id="maskbordernone" style="mask-border-source:none"></div>
     </body></sui>)HTML");
     if (!document) {
         return;
@@ -297,6 +299,8 @@ void testGroupDetection() {
         {"mask", true, "a gradient mask opens a group"},
         {"masknone", false, "mask-image:none opens no group"},
         {"maskurl", true, "a url mask opens a group for sampling"},
+        {"maskborder", true, "a border mask opens a group"},
+        {"maskbordernone", false, "mask-border-source:none opens no group"},
     };
     for (const Case& c : cases) {
         Element* el = document->getElementById(c.id);
@@ -435,6 +439,54 @@ void testMaskShapeInOps() {
         }
     }
     check(sawMask, "a gradient mask alone brackets its box");
+}
+
+// A border mask rides its box's paint op for the executor, and brackets it
+// for compositing; a `none` source paints flat.
+void testMaskBorderInOps() {
+    auto document = parseOrNull(R"HTML(<sui><body>
+        <div id="border" style="width:100px;height:100px;mask-border-source:url(b.png)"></div>
+        <div id="plain" style="width:100px;height:100px"></div>
+        <div id="none" style="width:100px;height:100px;mask-border-source:none"></div>
+    </body></sui>)HTML");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    const auto items = orderOf(*document, resolver);
+    const PaintItem* border = paintOf(items, document->getElementById("border"));
+    const PaintItem* plain = paintOf(items, document->getElementById("plain"));
+    const PaintItem* none = paintOf(items, document->getElementById("none"));
+    check(border && plain && none, "border-masked boxes paint");
+    if (!border || !plain || !none) {
+        return;
+    }
+    using MaskKind = sui::ComputedStyle::MaskImage::Kind;
+    check(border->maskBorder.source.kind == MaskKind::Url,
+          "a border mask rides its paint op");
+    check(plain->maskBorder.source.kind == MaskKind::None,
+          "an unmasked box carries no border mask");
+    check(none->maskBorder.source.kind == MaskKind::None,
+          "a none source rides nothing");
+
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+    Element* bordered = document->getElementById("border");
+    bool sawBorder = false;
+    int depth = 0;
+    for (std::size_t i = 0; i < ops.size(); ++i) {
+        if (ops[i].kind == sui::PaintOp::Kind::BeginGroup) {
+            if (ops[i].item.el == bordered) {
+                sawBorder = true;
+            }
+            ++depth;
+        } else if (ops[i].kind == sui::PaintOp::Kind::EndGroup) {
+            --depth;
+        } else if (ops[i].item.el == bordered) {
+            check(depth > 0, "a border-masked box paints inside its group");
+        }
+    }
+    check(sawBorder, "a border mask alone brackets its box");
 }
 
 // transform and filter are properties of the box they are declared on: a
@@ -1160,6 +1212,7 @@ int main() {
     testClipShapeInOps();
     testClipComposites();
     testMaskShapeInOps();
+    testMaskBorderInOps();
     testEffectsDontCompound();
     testGroupBecomesOffscreenBlit();
     testNestedGroupAlphas();

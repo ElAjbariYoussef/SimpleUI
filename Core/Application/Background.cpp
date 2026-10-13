@@ -371,6 +371,62 @@ float wrapAxis(float p, float lo, float extent) {
     return lo + rel;
 }
 
+// Maps p within [dstLo, dstLo + dstLen) to [0, srcLen) per a border repeat
+// mode, given one tile's dst width. Stretch covers the span in one tile;
+// repeat clips the last tile; round rescales to whole tiles; space leaves
+// even gaps (false) around whole tiles.
+bool mapBorderAxis(float p, float dstLo, float dstLen, float srcLen, float tileDst,
+                   ComputedStyle::MaskBorder::Repeat mode, float& q) {
+    using Repeat = ComputedStyle::MaskBorder::Repeat;
+    if (dstLen <= 0.0f || srcLen <= 0.0f) {
+        return false;
+    }
+    const float rel = p - dstLo;
+    if (mode == Repeat::Stretch) {
+        if (rel < 0.0f || rel >= dstLen) {
+            return false;
+        }
+        q = rel / dstLen * srcLen;
+        return true;
+    }
+    if (tileDst <= 0.0f) {
+        return false;
+    }
+    if (mode == Repeat::Round) {
+        const int n = std::max(1, static_cast<int>(std::lround(dstLen / tileDst)));
+        const float t = dstLen / static_cast<float>(n);
+        float r = std::fmod(rel, t);
+        if (r < 0.0f) {
+            r += t;
+        }
+        q = r / t * srcLen;
+        return true;
+    }
+    if (mode == Repeat::Space) {
+        const int n = static_cast<int>(dstLen / tileDst);
+        if (n >= 1) {
+            const float slot = dstLen / static_cast<float>(n);
+            const float off = (slot - tileDst) * 0.5f;
+            float r = std::fmod(rel, slot);
+            if (r < 0.0f) {
+                r += slot;
+            }
+            if (r < off || r >= off + tileDst) {
+                return false;
+            }
+            q = (r - off) / tileDst * srcLen;
+            return true;
+        }
+        // Smaller than one tile: a single clipped tile, like repeat.
+    }
+    float r = std::fmod(rel, tileDst);
+    if (r < 0.0f) {
+        r += tileDst;
+    }
+    q = r / tileDst * srcLen;
+    return true;
+}
+
 // Whether a surface point lands inside a rect, right/bottom-exclusive like the
 // hit test, so a layer edge never bleeds into the next pixel.
 bool insideBox(float px, float py, const SDL_FRect& box) {
@@ -777,6 +833,275 @@ void applyMaskLayers(std::uint8_t* pixels, int width, int height,
             }
             std::uint8_t* alpha = pixels + 4 * (row * width + col) + 3;
             *alpha = static_cast<std::uint8_t>(static_cast<float>(*alpha) * acc + 0.5f);
+        }
+    }
+}
+
+void applyMaskBorder(std::uint8_t* pixels, int width, int height,
+                     const ComputedStyle::MaskBorder& border,
+                     const BackgroundBoxes& boxes, float fontSize, float rootFontSize,
+                     FetchMaskBytes fetch) {
+    using Mask = ComputedStyle::MaskImage;
+    using BorderRepeat = ComputedStyle::MaskBorder::Repeat;
+    using BorderMode = ComputedStyle::MaskBorder::Mode;
+    if (!pixels || width <= 0 || height <= 0) {
+        return;
+    }
+    if (border.source.kind == Mask::Kind::None) {
+        return;
+    }
+    // Outsets grow the border box into the area the border paints.
+    const auto outsetPx = [&](const Length& l, float thickness) {
+        if (l.unit == Length::Number) {
+            return std::max(0.0f, l.value * thickness);
+        }
+        return std::max(0.0f, l.resolve(0.0f, fontSize, rootFontSize));
+    };
+    const float thickTop = std::max(0.0f, boxes.padding.y - boxes.border.y);
+    const float thickLeft = std::max(0.0f, boxes.padding.x - boxes.border.x);
+    const float thickBottom = std::max(
+        0.0f, boxes.border.y + boxes.border.h - (boxes.padding.y + boxes.padding.h));
+    const float thickRight = std::max(
+        0.0f, boxes.border.x + boxes.border.w - (boxes.padding.x + boxes.padding.w));
+    const SDL_FRect area{
+        boxes.border.x - outsetPx(border.outset.left, thickLeft),
+        boxes.border.y - outsetPx(border.outset.top, thickTop),
+        boxes.border.w + outsetPx(border.outset.left, thickLeft) +
+            outsetPx(border.outset.right, thickRight),
+        boxes.border.h + outsetPx(border.outset.top, thickTop) +
+            outsetPx(border.outset.bottom, thickBottom)};
+    if (area.w <= 0.0f || area.h <= 0.0f) {
+        return;
+    }
+
+    // Source raster: decoded bytes, or a gradient rendered over the area.
+    DecodedImage raster;
+    const DecodedImage* src = nullptr;
+    if (border.source.kind == Mask::Kind::Url) {
+        if (fetch) {
+            src = fetch(border.source.href);
+        }
+        if (!src || src->width <= 0 || src->height <= 0 || src->rgba.empty()) {
+            // A missing source hides everything, like a missing mask-image.
+            for (int i = 0; i < width * height; ++i) {
+                pixels[4 * i + 3] = 0;
+            }
+            return;
+        }
+    } else {
+        const int rasterW = std::max(1, static_cast<int>(std::lround(area.w)));
+        const int rasterH = std::max(1, static_cast<int>(std::lround(area.h)));
+        const SDL_FRect rasterBox{0.0f, 0.0f, static_cast<float>(rasterW),
+                                  static_cast<float>(rasterH)};
+        Shader shader = Shader::solid(Color{0, 0, 0, 0});
+        bool ready = false;
+        if (border.source.kind == Mask::Kind::LinearGradient) {
+            LinearGradient gradient;
+            const float lineLength =
+                gradientLine(border.source.linear.angle, rasterBox, gradient);
+            gradient.stops = toGradientStops(border.source.linear.stops, lineLength,
+                                             fontSize, rootFontSize, 1.0f);
+            if (!gradient.stops.empty()) {
+                shader = Shader::linear(gradient);
+                ready = true;
+            }
+        } else if (border.source.kind == Mask::Kind::RadialGradient) {
+            RadialGradient gradient;
+            radialRadii(border.source.radial, rasterBox, fontSize, rootFontSize, gradient);
+            gradient.stops = toGradientStops(
+                border.source.radial.stops,
+                std::max(gradient.radiusX, gradient.radiusY), fontSize, rootFontSize, 1.0f);
+            if (!gradient.stops.empty()) {
+                shader = Shader::radial(gradient);
+                ready = true;
+            }
+        } else if (border.source.kind == Mask::Kind::ConicalGradient) {
+            ConicalGradient gradient;
+            gradient.cx = border.source.conical.centreX.resolve(
+                              rasterBox.w, fontSize, rootFontSize);
+            gradient.cy = border.source.conical.centreY.resolve(
+                              rasterBox.h, fontSize, rootFontSize);
+            gradient.fromAngle = border.source.conical.angle;
+            gradient.radius = std::max(rasterBox.w, rasterBox.h) * 0.5f;
+            gradient.stops = toGradientStops(border.source.conical.stops, 1.0f,
+                                             fontSize, rootFontSize, 1.0f);
+            if (!gradient.stops.empty()) {
+                shader = Shader::conical(gradient);
+                ready = true;
+            }
+        }
+        if (!ready) {
+            // An unresolvable gradient stays quiet.
+            return;
+        }
+        raster.width = rasterW;
+        raster.height = rasterH;
+        raster.rgba.resize(static_cast<std::size_t>(rasterW) *
+                           static_cast<std::size_t>(rasterH) * 4u);
+        for (int y = 0; y < rasterH; ++y) {
+            for (int x = 0; x < rasterW; ++x) {
+                const Color color =
+                    shader.colorAt(static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f);
+                std::uint8_t* texel =
+                    raster.rgba.data() + 4 * (y * rasterW + x);
+                texel[0] = color.r;
+                texel[1] = color.g;
+                texel[2] = color.b;
+                texel[3] = color.a;
+            }
+        }
+        src = &raster;
+    }
+    const float srcW = static_cast<float>(src->width);
+    const float srcH = static_cast<float>(src->height);
+
+    // Slice insets in source px, clamped and overlap-scaled like a border image.
+    const auto slicePx = [&](const Length& l, float dim) {
+        float v = 0.0f;
+        if (l.unit == Length::Percent) {
+            v = l.value * 0.01f * dim;
+        } else if (l.unit == Length::Number || l.unit == Length::Px) {
+            v = l.value;
+        }
+        return std::min(std::max(v, 0.0f), dim);
+    };
+    float sliceTop = slicePx(border.slice.top, srcH);
+    float sliceRight = slicePx(border.slice.right, srcW);
+    float sliceBottom = slicePx(border.slice.bottom, srcH);
+    float sliceLeft = slicePx(border.slice.left, srcW);
+    if (sliceLeft + sliceRight > srcW && sliceLeft + sliceRight > 0.0f) {
+        const float scale = srcW / (sliceLeft + sliceRight);
+        sliceLeft *= scale;
+        sliceRight *= scale;
+    }
+    if (sliceTop + sliceBottom > srcH && sliceTop + sliceBottom > 0.0f) {
+        const float scale = srcH / (sliceTop + sliceBottom);
+        sliceTop *= scale;
+        sliceBottom *= scale;
+    }
+
+    // Band thicknesses: auto is the slice's own size, numbers multiply the
+    // border thickness, lengths resolve.
+    const auto widthPx = [&](const Length& l, float slice, float thickness) {
+        if (l.isAuto()) {
+            return slice;
+        }
+        if (l.unit == Length::Number) {
+            return std::max(0.0f, l.value * thickness);
+        }
+        return std::max(0.0f, l.resolve(0.0f, fontSize, rootFontSize));
+    };
+    const float bandTop = widthPx(border.width.top, sliceTop, thickTop);
+    const float bandRight = widthPx(border.width.right, sliceRight, thickRight);
+    const float bandBottom = widthPx(border.width.bottom, sliceBottom, thickBottom);
+    const float bandLeft = widthPx(border.width.left, sliceLeft, thickLeft);
+
+    const float x0 = area.x;
+    const float x1 = area.x + bandLeft;
+    const float x2 = area.x + area.w - bandRight;
+    const float x3 = area.x + area.w;
+    const float y0 = area.y;
+    const float y1 = area.y + bandTop;
+    const float y2 = area.y + area.h - bandBottom;
+    const float y3 = area.y + area.h;
+    // Source regions in source px: corners, edges, middle.
+    const float sx0 = 0.0f;
+    const float sx1 = sliceLeft;
+    const float sx2 = srcW - sliceRight;
+    const float sx3 = srcW;
+    const float sy0 = 0.0f;
+    const float sy1 = sliceTop;
+    const float sy2 = srcH - sliceBottom;
+    const float sy3 = srcH;
+
+    for (int row = 0; row < height; ++row) {
+        for (int col = 0; col < width; ++col) {
+            const float px = static_cast<float>(col) + 0.5f;
+            const float py = static_cast<float>(row) + 0.5f;
+            if (!insideBox(px, py, area)) {
+                continue;
+            }
+            const int zoneX = px < x1 ? 0 : (px < x2 ? 1 : 2);
+            const int zoneY = py < y1 ? 0 : (py < y2 ? 1 : 2);
+            if (zoneX == 1 && zoneY == 1 && !border.slice.fill) {
+                // An unfilled middle is transparent.
+                pixels[4 * (row * width + col) + 3] = 0;
+                continue;
+            }
+            // Destination rect, source region, and per-axis tiling for the zone.
+            SDL_FRect dst{0.0f, 0.0f, 0.0f, 0.0f};
+            SDL_FRect region{0.0f, 0.0f, 0.0f, 0.0f};
+            BorderRepeat modeX = BorderRepeat::Stretch;
+            BorderRepeat modeY = BorderRepeat::Stretch;
+            float tileX = 0.0f;
+            float tileY = 0.0f;
+            if (zoneX == 0) {
+                dst.x = x0;
+                dst.w = x1 - x0;
+                region.x = sx0;
+                region.w = sx1 - sx0;
+            } else if (zoneX == 1) {
+                dst.x = x1;
+                dst.w = x2 - x1;
+                region.x = sx1;
+                region.w = sx2 - sx1;
+                modeX = border.repeatX;
+            } else {
+                dst.x = x2;
+                dst.w = x3 - x2;
+                region.x = sx2;
+                region.w = sx3 - sx2;
+            }
+            if (zoneY == 0) {
+                dst.y = y0;
+                dst.h = y1 - y0;
+                region.y = sy0;
+                region.h = sy1 - sy0;
+            } else if (zoneY == 1) {
+                dst.y = y1;
+                dst.h = y2 - y1;
+                region.y = sy1;
+                region.h = sy2 - sy1;
+                modeY = border.repeatY;
+            } else {
+                dst.y = y2;
+                dst.h = y3 - y2;
+                region.y = sy2;
+                region.h = sy3 - sy2;
+            }
+            // Edge tiles scale so their cross axis matches the band, then tile
+            // along it; the middle tiles at source scale.
+            if (zoneX == 1 && zoneY != 1) {
+                const float bandH = dst.h;
+                const float srcHRegion = region.h;
+                tileX = srcHRegion > 0.0f ? region.w * (bandH / srcHRegion) : 0.0f;
+            } else if (zoneY == 1 && zoneX != 1) {
+                const float bandW = dst.w;
+                const float srcWRegion = region.w;
+                tileY = srcWRegion > 0.0f ? region.h * (bandW / srcWRegion) : 0.0f;
+            } else if (zoneX == 1 && zoneY == 1) {
+                tileX = region.w;
+                tileY = region.h;
+            }
+            float qx = 0.0f, qy = 0.0f;
+            if (!mapBorderAxis(px, dst.x, dst.w, region.w, tileX, modeX, qx) ||
+                !mapBorderAxis(py, dst.y, dst.h, region.h, tileY, modeY, qy)) {
+                // A `space` gap is transparent.
+                pixels[4 * (row * width + col) + 3] = 0;
+                continue;
+            }
+            const float u = (region.x + qx) / srcW;
+            const float v = (region.y + qy) / srcH;
+            const Color color = sampleBilinear(*src, u, v);
+            float value = 0.0f;
+            if (border.mode == BorderMode::Alpha) {
+                value = static_cast<float>(color.a) / 255.0f;
+            } else {
+                value = (0.2126f * color.r + 0.7152f * color.g + 0.0722f * color.b) /
+                        255.0f;
+            }
+            std::uint8_t* alpha = pixels + 4 * (row * width + col) + 3;
+            *alpha = static_cast<std::uint8_t>(static_cast<float>(*alpha) * value + 0.5f);
         }
     }
 }

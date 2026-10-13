@@ -569,6 +569,213 @@ void testMaskGeometry() {
           "a sized gradient keeps only its slice");
 }
 
+// A `mask-border` 9-patch slices its source into corners, edges, and a middle:
+// corners stretch, edges tile along, and the middle shows only with `fill`.
+// Small exact images pin every zone.
+void testMaskBorder() {
+    using Mask = sui::ComputedStyle::MaskImage;
+    using Border = sui::ComputedStyle::MaskBorder;
+    using Repeat = Border::Repeat;
+    const auto num = [](float v) { return sui::Length(sui::Length::Number, v); };
+    const auto px = [](float v) { return sui::Length(v); };
+    const auto white = []() { return std::array<std::uint8_t, 4>{255, 255, 255, 255}; };
+    const auto black = []() { return std::array<std::uint8_t, 4>{0, 0, 0, 255}; };
+    auto imageOf = [](int w, int h,
+                      const std::vector<std::array<std::uint8_t, 4>>& cells) {
+        sui::DecodedImage img;
+        img.width = w;
+        img.height = h;
+        for (const auto& cell : cells) {
+            img.rgba.insert(img.rgba.end(), cell.begin(), cell.end());
+        }
+        return img;
+    };
+    const auto alphas = [&](const sui::DecodedImage& img, const Border& border,
+                            const sui::BackgroundBoxes& boxes, int w, int h) {
+        std::vector<std::uint8_t> pixels(static_cast<std::size_t>(4 * w * h), 0);
+        for (int i = 0; i < w * h; ++i) {
+            pixels[4 * i + 3] = 200;
+        }
+        sui::FetchMaskBytes fetch{[&](std::string_view)
+                                      -> const sui::DecodedImage* { return &img; }};
+        sui::applyMaskBorder(pixels.data(), w, h, border, boxes, 16.0f, 16.0f, fetch);
+        std::vector<std::uint8_t> out;
+        for (int i = 0; i < w * h; ++i) {
+            out.push_back(pixels[4 * i + 3]);
+        }
+        return out;
+    };
+    auto urlBorder = []() {
+        Border border;
+        border.source.kind = Mask::Kind::Url;
+        border.source.href = "b.png";
+        return border;
+    };
+    // A 6x6 white frame around a 2x2 black centre: 2px bands keep every sample
+    // inside uniform texels, so corners and edges keep exactly and the
+    // unfilled middle drops exactly.
+    sui::DecodedImage frame6;
+    frame6.width = 6;
+    frame6.height = 6;
+    frame6.rgba.assign(6 * 6 * 4, 255);
+    for (int y = 2; y < 4; ++y) {
+        for (int x = 2; x < 4; ++x) {
+            std::uint8_t* texel = frame6.rgba.data() + 4 * (y * 6 + x);
+            texel[0] = texel[1] = texel[2] = 0;
+        }
+    }
+    sui::DecodedImage solidWhite6;
+    solidWhite6.width = 6;
+    solidWhite6.height = 6;
+    solidWhite6.rgba.assign(6 * 6 * 4, 255);
+    const SDL_FRect area6{0.0f, 0.0f, 6.0f, 6.0f};
+    const sui::BackgroundBoxes boxes6{area6, area6, area6};
+
+    // Corners and edges keep the white frame; the unfilled middle drops.
+    Border frame = urlBorder();
+    frame.slice.top = frame.slice.right = frame.slice.bottom = frame.slice.left =
+        num(2.0f);
+    {
+        // Only pixels whose bilinear footprint stays inside uniform texels
+        // assert exactly: the outer rows and columns plus the black centre.
+        // (Band pixels touching the centre blend by design.)
+        const std::vector<std::uint8_t> result = alphas(frame6, frame, boxes6, 6, 6);
+        bool outer = true;
+        for (int x = 0; x < 6; ++x) {
+            outer = outer && result[x] == 200 && result[5 * 6 + x] == 200;
+        }
+        for (int y = 0; y < 6; ++y) {
+            outer = outer && result[y * 6] == 200 && result[y * 6 + 5] == 200;
+        }
+        check(outer, "a sliced frame keeps its outer border");
+        check(result[2 * 6 + 2] == 0 && result[2 * 6 + 3] == 0 &&
+                  result[3 * 6 + 2] == 0 && result[3 * 6 + 3] == 0,
+              "a sliced frame drops its middle");
+    }
+    // `fill` tiles the middle; without it the middle stays transparent even
+    // for an all-white source.
+    Border filled = frame;
+    filled.slice.fill = true;
+    check(alphas(solidWhite6, filled, boxes6, 6, 6) == std::vector<std::uint8_t>(36, 200),
+          "fill paints the middle too");
+    {
+        std::vector<std::uint8_t> expect(36, 200);
+        expect[2 * 6 + 2] = expect[2 * 6 + 3] = expect[3 * 6 + 2] = expect[3 * 6 + 3] = 0;
+        check(alphas(solidWhite6, frame, boxes6, 6, 6) == expect,
+              "an unfilled middle stays transparent");
+    }
+    // Explicit widths matching the slice paint the same frame.
+    Border wide = frame;
+    wide.width.top = wide.width.right = wide.width.bottom = wide.width.left = px(2.0f);
+    {
+        const std::vector<std::uint8_t> result = alphas(frame6, wide, boxes6, 6, 6);
+        check(result[0] == 200 && result[2 * 6 + 2] == 0,
+              "explicit widths size the bands");
+    }
+
+    // An outset grows the painted area: the outer pixel is untouched without
+    // it and masked once the outset reaches it. The 2x2 black corner keeps the
+    // samples exact.
+    sui::DecodedImage darkCorner;
+    darkCorner.width = 3;
+    darkCorner.height = 3;
+    darkCorner.rgba.assign(3 * 3 * 4, 255);
+    for (int y = 0; y < 2; ++y) {
+        for (int x = 0; x < 2; ++x) {
+            std::uint8_t* texel = darkCorner.rgba.data() + 4 * (y * 3 + x);
+            texel[0] = texel[1] = texel[2] = 0;
+        }
+    }
+
+
+    // Edge tiling: a 2px white-black strip over a 4px edge repeats its pair,
+    // rounds to whole tiles, and leaves gaps with space.
+    const sui::DecodedImage strip =
+        imageOf(2, 1, {white(), black()});
+    auto edgeBorder = [&](Repeat mode) {
+        Border border = urlBorder();
+        border.slice.top = num(1.0f);
+        border.width.top = px(1.0f);
+        border.width.right = border.width.bottom = border.width.left = px(0.0f);
+        border.repeatX = mode;
+        return border;
+    };
+    const SDL_FRect strip4{0.0f, 0.0f, 4.0f, 1.0f};
+    const sui::BackgroundBoxes stripBoxes{strip4, strip4, strip4};
+    check(alphas(strip, edgeBorder(Repeat::Repeat), stripBoxes, 4, 1) ==
+              std::vector<std::uint8_t>({150, 50, 150, 50}),
+          "repeat clips the last tile");
+    const SDL_FRect strip3{0.0f, 0.0f, 3.0f, 1.0f};
+    const sui::BackgroundBoxes strip3Boxes{strip3, strip3, strip3};
+    check(alphas(strip, edgeBorder(Repeat::Round), strip3Boxes, 3, 1)[1] == 200,
+          "round rescales to whole tiles");
+    const SDL_FRect strip5{0.0f, 0.0f, 5.0f, 1.0f};
+    const sui::BackgroundBoxes strip5Boxes{strip5, strip5, strip5};
+    {
+        const std::vector<std::uint8_t> result =
+            alphas(strip, edgeBorder(Repeat::Space), strip5Boxes, 5, 1);
+        check(result[2] == 0, "space leaves gaps between tiles");
+        check(result[0] > 0, "space still paints its tiles");
+    }
+
+    // Modes read the same texel either way: half-red is dim by luminance and
+    // half by alpha.
+    sui::DecodedImage halfRed;
+    halfRed.width = 1;
+    halfRed.height = 1;
+    halfRed.rgba = {255, 0, 0, 128};
+    Border lum = urlBorder();
+    lum.slice.fill = true;
+    const SDL_FRect area2{0.0f, 0.0f, 2.0f, 2.0f};
+    const sui::BackgroundBoxes boxes2{area2, area2, area2};
+    check(alphas(halfRed, lum, boxes2, 2, 2) == std::vector<std::uint8_t>(4, 43),
+          "luminance masks by brightness");
+    Border alp = lum;
+    alp.mode = Border::Mode::Alpha;
+    check(alphas(halfRed, alp, boxes2, 2, 2) == std::vector<std::uint8_t>(4, 100),
+          "alpha masks by the channel");
+
+    // A solid gradient borders like an image; a missing source hides; none is
+    // a no-op.
+    Border gradient;
+    gradient.source.kind = Mask::Kind::LinearGradient;
+    gradient.source.linear.angle = 90.0f;
+    gradient.source.linear.stops = {
+        sui::ComputedStyle::GradientStop{sui::Length(sui::Length::Percent, 0.0f),
+                                         SDL_Color{255, 255, 255, 255}},
+        sui::ComputedStyle::GradientStop{sui::Length(sui::Length::Percent, 100.0f),
+                                         SDL_Color{255, 255, 255, 255}}};
+    gradient.slice.top = gradient.slice.right = gradient.slice.bottom =
+        gradient.slice.left = num(1.0f);
+    gradient.slice.fill = true;
+    gradient.width.top = gradient.width.right = gradient.width.bottom =
+        gradient.width.left = px(1.0f);
+    check(alphas(solidWhite6, gradient, boxes6, 6, 6) ==
+              std::vector<std::uint8_t>(36, 200),
+          "a solid gradient border keeps");
+    Border missing = urlBorder();
+    missing.slice.fill = true;
+    {
+        sui::DecodedImage nothing;
+        std::vector<std::uint8_t> pixels(16, 0);
+        for (int i = 0; i < 4; ++i) {
+            pixels[4 * i + 3] = 200;
+        }
+        sui::FetchMaskBytes noFetch{
+            [&](std::string_view) -> const sui::DecodedImage* { return nullptr; }};
+        sui::applyMaskBorder(pixels.data(), 2, 2, missing, boxes2, 16.0f, 16.0f,
+                             noFetch);
+        check(pixels[3] == 0 && pixels[15] == 0, "a missing border source hides");
+    }
+    {
+        Border none;
+        std::vector<std::uint8_t> pixels(16, 200);
+        sui::applyMaskBorder(pixels.data(), 2, 2, none, boxes2, 16.0f, 16.0f,
+                             sui::FetchMaskBytes{});
+        check(pixels == std::vector<std::uint8_t>(16, 200), "no border leaves pixels");
+    }
+}
+
 // The CPU box blur `filter: blur()` hands the executor. The kernel averages a
 // 2r+1 window with the border pixels replicating, so these values are exact
 // hand-checkable fractions of 255 across a 5x5 image with an opaque red block
@@ -834,6 +1041,7 @@ int main() {
     testMaskImage();
     testMaskLayers();
     testMaskGeometry();
+    testMaskBorder();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }
