@@ -26,6 +26,7 @@
 #include <filesystem>
 
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_dialog.h>
 
 #include <charconv>
 #include <cstdio>
@@ -474,7 +475,6 @@ void collectFocusable(Element& root, std::vector<Element*>& out) {
     }
 }
 
-// A checkbox/radio keeps its state as a boolean `checked` attribute.
 void setChecked(Element& el, bool checked) {
     if (checked) {
         el.setAttribute("checked", "");
@@ -1906,6 +1906,67 @@ std::vector<std::string> splitOnSemicolons(std::string_view text) {
 
 }  // namespace
 
+// A file dialog resolves off-thread, so its callback only queues the first
+// pick for the main loop; a null list means error or cancel, and an empty
+// first path means nothing chosen. The pending input is read under the same
+// lock that the opener writes it with.
+void Application::fileDialogCallback(void* userdata,
+                                       const char* const* filelist,
+                                       int filter) {
+    (void)filter;
+    auto* app = static_cast<Application*>(userdata);
+    if (!app || !filelist || !filelist[0] || !filelist[0][0]) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(app->fileMutex_);
+    if (!app->pendingFileInput_) {
+        return;
+    }
+    app->pendingFiles_.emplace_back(app->pendingFileInput_, std::string(filelist[0]));
+}
+
+void Application::applyPickedFile(Element* el, const char* path) {
+    if (!el || !path || !path[0] || !document_ || !document_->root()) {
+        return;
+    }
+    // A pick for a dropped tree, or for something no longer a file control,
+    // lands nowhere.
+    if (!isReachable(*document_->root(), el) || el->tag() != "input" ||
+        el->attribute("type") != "file") {
+        return;
+    }
+    el->setValue(path);
+}
+
+// Opens the OS file picker for a file input's Browse button. Headless or
+// windowless runs log and move on; the callback queues the pick for the loop.
+void Application::openFileDialog(Element& input) {
+    if (!platform_ || !platform_->window()) {
+        SDL_Log("file picker needs a window; ignoring the Browse press");
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(fileMutex_);
+        pendingFileInput_ = &input;
+    }
+    SDL_ShowOpenFileDialog(fileDialogCallback, this, platform_->window(), nullptr, 0,
+                           nullptr, input.hasAttribute("multiple"));
+}
+
+// Applies queued file picks where their inputs still live. Runs on the main
+// thread before layout so a new value measures and paints the same frame.
+void Application::applyPendingFiles() {
+    std::vector<std::pair<Element*, std::string>> picks;
+    {
+        std::lock_guard<std::mutex> lock(fileMutex_);
+        picks.swap(pendingFiles_);
+        pendingFileInput_ = nullptr;
+    }
+    for (const auto& [el, path] : picks) {
+        applyPickedFile(el, path.c_str());
+    }
+}
+
 Application::Application() = default;
 
 Application::~Application() {
@@ -1938,6 +1999,12 @@ void Application::setDocument(std::unique_ptr<Document> document) {
     selectHighlight_ = 0;
     selectAnchor_ = 0;
     selectEdge_ = 0;
+    openDatalist_ = nullptr;
+    datalistHighlight_ = 0;
+    // A picked file for the old tree must never land in the new one.
+    std::lock_guard<std::mutex> lock(fileMutex_);
+    pendingFileInput_ = nullptr;
+    pendingFiles_.clear();
 }
 
 WindowConfig Application::windowConfigFrom(Document& document) {
@@ -2300,6 +2367,25 @@ void Application::dispatch(const InputEvent& event) {
                     openSelect_ = target;
                     selectHighlight_ = selectSelectedIndex(*target);
                     openDatalist_ = nullptr;
+                }
+            }
+            // A file input's Browse button opens the OS picker on click, before
+            // any `onclick` handler. The press point is tested against the same
+            // button rect the box paints.
+            if (target && target->tag() == "input" &&
+                target->attribute("type") == "file" &&
+                !target->hasAttribute("disabled")) {
+                const auto boxOps = computePaintOps(*document_->root(), resolver_);
+                float offX = 0.0f, offY = 0.0f;
+                selectBoxOffset(boxOps, target, offX, offY);
+                const float cx = target->contentX() - offX;
+                const float cy = target->contentY() - offY;
+                const float cw = target->contentWidth();
+                const float ch = target->contentHeight();
+                if (event.x >= cx - 78.0f && event.x < cx - 6.0f &&
+                    event.y >= cy - 4.0f && event.y < cy + ch + 4.0f && cw > 0.0f &&
+                    ch > 0.0f) {
+                    openFileDialog(*target);
                 }
             }
             // An open list picks its clicked row: a plain click selects,
@@ -2973,6 +3059,10 @@ void Application::run() {
                 input.font = font_.get();
                 input.viewportWidth = static_cast<float>(width);
                 input.viewportHeight = static_cast<float>(height);
+
+                // Queued file picks land before generated content rebuilds, so a
+                // new value measures and paints the same frame.
+                applyPendingFiles();
 
                 // Generated content becomes real boxes, so it has to exist before
                 // layout measures anything. Rebuilding it notes no mutation, which

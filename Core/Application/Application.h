@@ -10,9 +10,11 @@
 #include "SUI/Script/Script.h"
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <cstdint>
+#include <vector>
 
 namespace sui {
 
@@ -84,6 +86,12 @@ public:
     Element* openDatalist() const noexcept { return openDatalist_; }
     std::size_t datalistHighlight() const noexcept { return datalistHighlight_; }
 
+    // Writes a picked file path into a file input, dropping it when the
+    // element is gone, replaced, or no file control. The dialog callback runs
+    // off-thread, so it only queues; this applies on the main thread and is
+    // what tests drive directly.
+    void applyPickedFile(Element* el, const char* path);
+
 private:
     static WindowConfig windowConfigFrom(Document& document);
 
@@ -97,6 +105,14 @@ private:
     // Restarts the caret blink cycle and notes it, so a test can tell a key that
     // moved the caret apart from a modifier key that only repeated.
     void resetCaretBlink();
+
+    // Opens the OS file picker for a file input, and applies queued picks on
+    // the main thread. See the public applyPickedFile for the testable half.
+    void openFileDialog(Element& input);
+    void applyPendingFiles();
+    // The SDL dialog callback: queues the first pick, never touches the tree.
+    static void fileDialogCallback(void* userdata, const char* const* filelist,
+                                   int filter);
 
     std::unique_ptr<Resources> resources_;
     std::unique_ptr<Platform> platform_;
@@ -166,6 +182,12 @@ private:
     // out; picking writes the input's `value`.
     Element* openDatalist_ = nullptr;
     std::size_t datalistHighlight_ = 0;
+    // A file dialog resolves off-thread, so its callback only queues picks;
+    // the run loop applies them where the element still lives. Guarded because
+    // the callback may run on another thread.
+    std::mutex fileMutex_;
+    Element* pendingFileInput_ = nullptr;
+    std::vector<std::pair<Element*, std::string>> pendingFiles_;
     // Where a Shift+click or Shift+arrow range starts in an open list.
     std::size_t selectAnchor_ = 0;
     // Where the range currently ends: clicks and arrows move it, Shift+click

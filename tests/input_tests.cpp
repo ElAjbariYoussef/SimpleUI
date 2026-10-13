@@ -715,6 +715,61 @@ int main() {
         }
     }
 
+    // A file input's Browse button asks the OS picker; the pick lands through
+    // applyPickedFile, which drops paths for dropped trees and non-controls.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<input id=\"f\" type=\"file\"/>"
+            "<div id=\"d\">x</div>"
+            "</body></sui>", err);
+        check(doc != nullptr, "file test document parsed");
+        if (doc) {
+            sui::Element* f = doc->getElementById("f");
+            sui::Element* d = doc->getElementById("d");
+            check(f && d, "file elements found");
+            if (f && d) {
+                app.setDocument(std::move(doc));
+
+                sui::StyleResolver layoutResolver;
+                sui::LayoutInput input;
+                input.resolver = &layoutResolver;
+                input.viewportWidth = 400.0f;
+                input.viewportHeight = 300.0f;
+                sui::BlockLayout().layout(app.document().root(), input);
+
+                // The Browse button hangs in the left padding room, where the
+                // box paints it.
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerDown,
+                                             f->contentX() - 42.0f,
+                                             f->contentY() + f->contentHeight() * 0.5f,
+                                             1));
+                check(f->value().empty(), "a headless picker picks nothing");
+
+                app.applyPickedFile(f, "/tmp/photo.png");
+                check(f->value() == "/tmp/photo.png", "a picked path fills the value");
+                check(f->fileName() == "photo.png", "the control shows the file name");
+
+                app.applyPickedFile(d, "/tmp/other.png");
+                check(d->value().empty(), "a pick for a div lands nowhere");
+                app.applyPickedFile(nullptr, "/tmp/null.png");
+
+                // A pick for an element of a replaced document is dropped.
+                sui::Element* stale = f;
+                auto doc2 = sui::MarkupParser::parse("<sui><body></body></sui>", err);
+                check(doc2 != nullptr, "second document parsed");
+                if (doc2) {
+                    app.setDocument(std::move(doc2));
+                    app.applyPickedFile(stale, "/tmp/stale.png");
+                    check(stale->value() == "/tmp/photo.png",
+                          "a pick for a dropped tree lands nowhere");
+                }
+            }
+        }
+    }
+
     // A tilted 3D box is hit through its projected quad: its centre catches,
     // but a point inside the flat box yet outside the warp misses.
     {
