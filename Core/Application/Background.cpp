@@ -1106,4 +1106,310 @@ void applyMaskBorder(std::uint8_t* pixels, int width, int height,
     }
 }
 
+// The outset area a border image paints: the border box grown per side. Shared
+// by the tile builder and the gradient raster so both agree on the extent.
+SDL_FRect borderImageArea(const ComputedStyle::BorderImage& image,
+                          const BackgroundBoxes& boxes, float fontSize, float rootFontSize) {
+    const auto outsetPx = [&](const Length& l, float thickness) {
+        if (l.unit == Length::Number) {
+            return std::max(0.0f, l.value * thickness);
+        }
+        return std::max(0.0f, l.resolve(0.0f, fontSize, rootFontSize));
+    };
+    const float thickTop = std::max(0.0f, boxes.padding.y - boxes.border.y);
+    const float thickLeft = std::max(0.0f, boxes.padding.x - boxes.border.x);
+    const float thickBottom = std::max(
+        0.0f, boxes.border.y + boxes.border.h - (boxes.padding.y + boxes.padding.h));
+    const float thickRight = std::max(
+        0.0f, boxes.border.x + boxes.border.w - (boxes.padding.x + boxes.padding.w));
+    const float top = outsetPx(image.outset.top, thickTop);
+    const float right = outsetPx(image.outset.right, thickRight);
+    const float bottom = outsetPx(image.outset.bottom, thickBottom);
+    const float left = outsetPx(image.outset.left, thickLeft);
+    return SDL_FRect{boxes.border.x - left, boxes.border.y - top,
+                     boxes.border.w + left + right, boxes.border.h + top + bottom};
+}
+
+// One axis of tile spans: (dst start, dst length, src start, src length).
+struct TileSpan {
+    float dst = 0.0f;
+    float dstLen = 0.0f;
+    float src = 0.0f;
+    float srcLen = 0.0f;
+};
+
+std::vector<TileSpan> tileSpans(float dstLo, float dstLen, float srcLo, float srcLen,
+                                float tileDst, ComputedStyle::BorderImage::Repeat mode) {
+    using Repeat = ComputedStyle::BorderImage::Repeat;
+    std::vector<TileSpan> spans;
+    if (dstLen <= 0.0f || srcLen <= 0.0f) {
+        return spans;
+    }
+    if (mode == Repeat::Stretch || tileDst <= 0.0f) {
+        spans.push_back({dstLo, dstLen, srcLo, srcLen});
+        return spans;
+    }
+    float step = tileDst;
+    if (mode == Repeat::Round) {
+        const int n = std::max(1, static_cast<int>(std::lround(dstLen / tileDst)));
+        step = dstLen / static_cast<float>(n);
+    }
+    if (mode == Repeat::Space) {
+        const int n = static_cast<int>(dstLen / tileDst);
+        if (n >= 1) {
+            // Whole tiles with even gaps; the gaps simply emit no tile.
+            const float slot = dstLen / static_cast<float>(n);
+            const float off = (slot - tileDst) * 0.5f;
+            for (int i = 0; i < n; ++i) {
+                spans.push_back({dstLo + i * slot + off, tileDst, srcLo, srcLen});
+            }
+            return spans;
+        }
+        // Smaller than one tile: a single clipped tile, like repeat.
+    }
+    const int n = std::max(1, static_cast<int>(std::ceil(dstLen / step)));
+    for (int i = 0; i < n; ++i) {
+        const float start = i * step;
+        const float kept = std::min(step, dstLen - start);
+        if (kept <= 0.0f) {
+            break;
+        }
+        spans.push_back({dstLo + start, kept, srcLo + start / step * srcLen,
+                         kept / step * srcLen});
+    }
+    return spans;
+}
+
+std::vector<BorderTile> borderImageTiles(const ComputedStyle::BorderImage& image,
+                                         float srcW, float srcH,
+                                         const BackgroundBoxes& boxes, float fontSize,
+                                         float rootFontSize) {
+    using Repeat = ComputedStyle::BorderImage::Repeat;
+    std::vector<BorderTile> tiles;
+    if (image.source.kind == ComputedStyle::BackgroundImage::None || srcW <= 0.0f ||
+        srcH <= 0.0f) {
+        return tiles;
+    }
+    // Slice insets in source px, clamped and overlap-scaled.
+    const auto slicePx = [&](const Length& l, float dim) {
+        float v = 0.0f;
+        if (l.unit == Length::Percent) {
+            v = l.value * 0.01f * dim;
+        } else if (l.unit == Length::Number || l.unit == Length::Px) {
+            v = l.value;
+        }
+        return std::min(std::max(v, 0.0f), dim);
+    };
+    float sliceTop = slicePx(image.slice.top, srcH);
+    float sliceRight = slicePx(image.slice.right, srcW);
+    float sliceBottom = slicePx(image.slice.bottom, srcH);
+    float sliceLeft = slicePx(image.slice.left, srcW);
+    if (sliceLeft + sliceRight > srcW && sliceLeft + sliceRight > 0.0f) {
+        const float scale = srcW / (sliceLeft + sliceRight);
+        sliceLeft *= scale;
+        sliceRight *= scale;
+    }
+    if (sliceTop + sliceBottom > srcH && sliceTop + sliceBottom > 0.0f) {
+        const float scale = srcH / (sliceTop + sliceBottom);
+        sliceTop *= scale;
+        sliceBottom *= scale;
+    }
+    // Band thicknesses: auto is the slice's own size, numbers multiply the
+    // border thickness, lengths resolve.
+    const float thickTop = std::max(0.0f, boxes.padding.y - boxes.border.y);
+    const float thickLeft = std::max(0.0f, boxes.padding.x - boxes.border.x);
+    const float thickBottom = std::max(
+        0.0f, boxes.border.y + boxes.border.h - (boxes.padding.y + boxes.padding.h));
+    const float thickRight = std::max(
+        0.0f, boxes.border.x + boxes.border.w - (boxes.padding.x + boxes.padding.w));
+    const auto widthPx = [&](const Length& l, float slice, float thickness) {
+        if (l.isAuto()) {
+            return slice;
+        }
+        if (l.unit == Length::Number) {
+            return std::max(0.0f, l.value * thickness);
+        }
+        return std::max(0.0f, l.resolve(0.0f, fontSize, rootFontSize));
+    };
+    const float bandTop = widthPx(image.width.top, sliceTop, thickTop);
+    const float bandRight = widthPx(image.width.right, sliceRight, thickRight);
+    const float bandBottom = widthPx(image.width.bottom, sliceBottom, thickBottom);
+    const float bandLeft = widthPx(image.width.left, sliceLeft, thickLeft);
+    const SDL_FRect area = borderImageArea(image, boxes, fontSize, rootFontSize);
+    if (area.w <= 0.0f || area.h <= 0.0f) {
+        return tiles;
+    }
+    const float x0 = area.x;
+    const float x1 = area.x + bandLeft;
+    const float x2 = area.x + area.w - bandRight;
+    const float x3 = area.x + area.w;
+    const float y0 = area.y;
+    const float y1 = area.y + bandTop;
+    const float y2 = area.y + area.h - bandBottom;
+    const float y3 = area.y + area.h;
+    const float sx0 = 0.0f;
+    const float sx1 = sliceLeft;
+    const float sx2 = srcW - sliceRight;
+    const float sx3 = srcW;
+    const float sy0 = 0.0f;
+    const float sy1 = sliceTop;
+    const float sy2 = srcH - sliceBottom;
+    const float sy3 = srcH;
+    // One zone: a dst rect, a source region, per-axis tiling, and each tile's
+    // dst length in source scale.
+    const auto zone = [&](float dx, float dw, float sx, float sw, float dy, float dh,
+                          float sy, float sh, Repeat modeX, Repeat modeY, float tileX,
+                          float tileY) {
+        for (const TileSpan& spanX : tileSpans(dx, dw, sx, sw, tileX, modeX)) {
+            for (const TileSpan& spanY : tileSpans(dy, dh, sy, sh, tileY, modeY)) {
+                tiles.push_back(BorderTile{SDL_FRect{spanX.src, spanY.src, spanX.srcLen,
+                                                     spanY.srcLen},
+                                           SDL_FRect{spanX.dst, spanY.dst, spanX.dstLen,
+                                                     spanY.dstLen}});
+            }
+        }
+    };
+    const float midX = x2 - x1, midY = y2 - y1;
+    const float midSX = sx2 - sx1, midSY = sy2 - sy1;
+    // Corners stretch.
+    zone(x0, x1 - x0, sx0, sx1 - sx0, y0, y1 - y0, sy0, sy1 - sy0, Repeat::Stretch,
+         Repeat::Stretch, 0.0f, 0.0f);
+    zone(x2, x3 - x2, sx2, sx3 - sx2, y0, y1 - y0, sy0, sy1 - sy0, Repeat::Stretch,
+         Repeat::Stretch, 0.0f, 0.0f);
+    zone(x0, x1 - x0, sx0, sx1 - sx0, y2, y3 - y2, sy2, sy3 - sy2, Repeat::Stretch,
+         Repeat::Stretch, 0.0f, 0.0f);
+    zone(x2, x3 - x2, sx2, sx3 - sx2, y2, y3 - y2, sy2, sy3 - sy2, Repeat::Stretch,
+         Repeat::Stretch, 0.0f, 0.0f);
+    // Edges stretch across and tile along, scaled so the cross axis matches.
+    const float topTile = sy1 - sy0 > 0.0f ? midSX * ((y1 - y0) / (sy1 - sy0)) : 0.0f;
+    const float bottomTile =
+        sy3 - sy2 > 0.0f ? midSX * ((y3 - y2) / (sy3 - sy2)) : 0.0f;
+    const float leftTile = sx1 - sx0 > 0.0f ? midSY * ((x1 - x0) / (sx1 - sx0)) : 0.0f;
+    const float rightTile =
+        sx3 - sx2 > 0.0f ? midSY * ((x3 - x2) / (sx3 - sx2)) : 0.0f;
+    zone(x1, midX, sx1, midSX, y0, y1 - y0, sy0, sy1 - sy0, image.repeatX,
+         Repeat::Stretch, topTile, 0.0f);
+    zone(x1, midX, sx1, midSX, y2, y3 - y2, sy2, sy3 - sy2, image.repeatX,
+         Repeat::Stretch, bottomTile, 0.0f);
+    zone(x0, x1 - x0, sx0, sx1 - sx0, y1, midY, sy1, midSY, Repeat::Stretch,
+         image.repeatY, 0.0f, leftTile);
+    zone(x2, x3 - x2, sx2, sx3 - sx2, y1, midY, sy1, midSY, Repeat::Stretch,
+         image.repeatY, 0.0f, rightTile);
+    // The middle tiles both ways, but only with `fill`.
+    if (image.slice.fill) {
+        zone(x1, midX, sx1, midSX, y1, midY, sy1, midSY, image.repeatX, image.repeatY,
+             midSX, midSY);
+    }
+    return tiles;
+}
+
+void paintBorderImage(const ComputedStyle::BorderImage& image,
+                      const BackgroundBoxes& boxes, float fontSize, float rootFontSize,
+                      float opacity, Renderer& renderer, ImageCache& images) {
+    using Kind = ComputedStyle::BackgroundImage::Kind;
+    if (image.source.kind == Kind::None) {
+        return;
+    }
+    const Uint8 tint =
+        static_cast<Uint8>(std::lround(std::min(std::max(opacity, 0.0f), 1.0f) * 255.0f));
+    if (image.source.kind == Kind::Url) {
+        SDL_Texture* texture = images.texture(renderer.sdl(), image.source.href);
+        if (!texture) {
+            return;
+        }
+        float srcW = 0.0f, srcH = 0.0f;
+        SDL_GetTextureSize(texture, &srcW, &srcH);
+        if (srcW <= 0.0f || srcH <= 0.0f) {
+            return;
+        }
+        for (const BorderTile& tile :
+             borderImageTiles(image, srcW, srcH, boxes, fontSize, rootFontSize)) {
+            renderer.fillRect(tile.dst, Shader::image(texture, tile.src, tile.dst,
+                                                      Repeat::No,
+                                                      Color{255, 255, 255, tint}));
+        }
+        return;
+    }
+    // A gradient renders once over the outset area, then slices and tiles like
+    // an image.
+    const SDL_FRect area = borderImageArea(image, boxes, fontSize, rootFontSize);
+    const int rasterW = std::max(1, static_cast<int>(std::lround(area.w)));
+    const int rasterH = std::max(1, static_cast<int>(std::lround(area.h)));
+    const SDL_FRect rasterBox{0.0f, 0.0f, static_cast<float>(rasterW),
+                              static_cast<float>(rasterH)};
+    Shader shader = Shader::solid(Color{0, 0, 0, 0});
+    bool ready = false;
+    if (image.source.kind == Kind::LinearGradientImage) {
+        LinearGradient gradient;
+        const float lineLength =
+            gradientLine(image.source.linear.angle, rasterBox, gradient);
+        gradient.stops = toGradientStops(image.source.linear.stops, lineLength,
+                                         fontSize, rootFontSize, 1.0f);
+        if (!gradient.stops.empty()) {
+            shader = Shader::linear(gradient);
+            ready = true;
+        }
+    } else if (image.source.kind == Kind::RadialGradientImage) {
+        RadialGradient gradient;
+        radialRadii(image.source.radial, rasterBox, fontSize, rootFontSize, gradient);
+        gradient.stops = toGradientStops(
+            image.source.radial.stops, std::max(gradient.radiusX, gradient.radiusY),
+            fontSize, rootFontSize, 1.0f);
+        if (!gradient.stops.empty()) {
+            shader = Shader::radial(gradient);
+            ready = true;
+        }
+    } else if (image.source.kind == Kind::ConicalGradientImage) {
+        ConicalGradient gradient;
+        gradient.cx = image.source.conical.centreX.resolve(rasterBox.w, fontSize,
+                                                           rootFontSize);
+        gradient.cy = image.source.conical.centreY.resolve(rasterBox.h, fontSize,
+                                                           rootFontSize);
+        gradient.fromAngle = image.source.conical.angle;
+        gradient.radius = std::max(rasterBox.w, rasterBox.h) * 0.5f;
+        gradient.stops = toGradientStops(image.source.conical.stops, 1.0f, fontSize,
+                                         rootFontSize, 1.0f);
+        if (!gradient.stops.empty()) {
+            shader = Shader::conical(gradient);
+            ready = true;
+        }
+    }
+    if (!ready) {
+        return;
+    }
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(rasterW) *
+                                    static_cast<std::size_t>(rasterH) * 4u);
+    for (int y = 0; y < rasterH; ++y) {
+        for (int x = 0; x < rasterW; ++x) {
+            const Color color = shader.colorAt(static_cast<float>(x) + 0.5f,
+                                               static_cast<float>(y) + 0.5f);
+            std::uint8_t* texel = bytes.data() + 4 * (y * rasterW + x);
+            texel[0] = color.r;
+            texel[1] = color.g;
+            texel[2] = color.b;
+            texel[3] = color.a;
+        }
+    }
+    SDL_Surface* surface = SDL_CreateSurfaceFrom(
+        rasterW, rasterH, SDL_PIXELFORMAT_RGBA32, bytes.data(), rasterW * 4);
+    if (!surface) {
+        return;
+    }
+    SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer.sdl(), surface);
+    SDL_DestroySurface(surface);
+    if (!texture) {
+        return;
+    }
+    SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+    // Tile sources address the raster from its own origin; destinations
+    // address the window.
+    for (const BorderTile& tile : borderImageTiles(
+             image, static_cast<float>(rasterW), static_cast<float>(rasterH), boxes,
+             fontSize, rootFontSize)) {
+        renderer.fillRect(tile.dst, Shader::image(texture, tile.src, tile.dst, Repeat::No,
+                                                  Color{255, 255, 255, tint}));
+    }
+    SDL_DestroyTexture(texture);
+}
+
 }  // namespace sui

@@ -2471,7 +2471,7 @@ void testUnknownPropertyIsReported() {
     auto document = parseOrNull("<sui><body><div id=\"x\">x</div></body></sui>");
     if (document) {
         sui::StyleResolver resolver;
-        resolver.setRules(sui::CSSParser::parse("div { border-image: none; width: 10px }"));
+        resolver.setRules(sui::CSSParser::parse("div { mix-blend-mode: multiply; width: 10px }"));
         resolver.resolve(*document->getElementById("x"));
         resolvedLog = capturedLog;
         const std::size_t afterFirst = capturedLog.size();
@@ -2492,7 +2492,7 @@ void testUnknownPropertyIsReported() {
         }
         return false;
     };
-    check(mentions("border-image"), "an unsupported property is logged by name");
+    check(mentions("mix-blend-mode"), "an unsupported property is logged by name");
     check(!mentions("width"), "a supported property is not reported");
 
     // A different unsupported property is its own report; dedupe is per name.
@@ -5091,6 +5091,87 @@ void testMaskBorder() {
           "a dangling slash drops the shorthand");
 }
 
+// `border-image` describes a 9-patch like the mask border but paints it:
+// source, slice, width, outset, repeat, and the shorthand. One bad value
+// keeps the previous cascade winner.
+void testBorderImage() {
+    const auto rules = sui::CSSParser::parse(R"(
+        .a { border-image-source: url(f.png) }
+        .b { border-image-source: linear-gradient(red, blue) }
+        .c { border-image-source: none }
+        .d { border-image-source: banana }
+        .e { border-image-slice: 30 fill }
+        .f { border-image-slice: 10% 20% }
+        .g { border-image-slice: 10px }
+        .h { border-image-width: 2 3px auto }
+        .i { border-image-width: 50% }
+        .j { border-image-outset: 4 }
+        .k { border-image-outset: -1 }
+        .l { border-image-repeat: round space }
+        .m { border-image-repeat: banana }
+        .n { border-image: url(f.png) 30 / 4px / 2px round }
+        .o { border-image: none }
+        .p { border-image: url(f.png) 10px }
+    )");
+    sui::StyleResolver resolver;
+    resolver.setRules(rules);
+    static const char* kClasses =
+        "<div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div>"
+        "<div class=\"d\"></div><div class=\"e\"></div><div class=\"f\"></div>"
+        "<div class=\"g\"></div><div class=\"h\"></div><div class=\"i\"></div>"
+        "<div class=\"j\"></div><div class=\"k\"></div><div class=\"l\"></div>"
+        "<div class=\"m\"></div><div class=\"n\"></div><div class=\"o\"></div>"
+        "<div class=\"p\"></div>";
+    auto body = parseOrNull((std::string("<sui><body>") + kClasses + "</body></sui>").c_str());
+    if (!body) {
+        return;
+    }
+    const std::vector<ComputedStyle> styles = bodyStyles(*body, resolver);
+    if (styles.size() < 16) {
+        check(false, "border image elements found");
+        return;
+    }
+    using Kind = sui::ComputedStyle::BackgroundImage::Kind;
+    using Border = sui::ComputedStyle::BorderImage;
+    check(styles[0].borderImage.source.kind == Kind::Url &&
+              styles[0].borderImage.source.href == "f.png",
+          "a url border source records its href");
+    check(styles[1].borderImage.source.kind == Kind::LinearGradientImage,
+          "a gradient border source parses");
+    check(styles[2].borderImage.source.kind == Kind::None, "none clears the source");
+    check(styles[3].borderImage.source.kind == Kind::None, "garbage keeps no source");
+    check(styles[4].borderImage.slice.top.value == 30.0f &&
+              styles[4].borderImage.slice.fill,
+          "a slice number parses with fill");
+    check(styles[5].borderImage.slice.top.value == 10.0f &&
+              styles[5].borderImage.slice.right.value == 20.0f &&
+              styles[5].borderImage.slice.bottom.value == 10.0f &&
+              styles[5].borderImage.slice.left.value == 20.0f,
+          "two slice percentages expand vertical and horizontal");
+    check(styles[6].borderImage.slice.top.value == 0.0f, "a length never slices");
+    check(styles[7].borderImage.width.top.unit == sui::Length::Number &&
+              styles[7].borderImage.width.right.value == 3.0f &&
+              styles[7].borderImage.width.bottom.isAuto(),
+          "width mixes multiples, lengths, and auto");
+    check(styles[8].borderImage.width.top.value == 0.0f, "a percentage width drops");
+    check(styles[9].borderImage.outset.top.value == 4.0f, "an outset parses");
+    check(styles[10].borderImage.outset.top.value == 0.0f, "a negative outset drops");
+    check(styles[11].borderImage.repeatX == Border::Repeat::Round &&
+              styles[11].borderImage.repeatY == Border::Repeat::Space,
+          "a repeat pair parses per axis");
+    check(styles[12].borderImage.repeatX == Border::Repeat::Stretch,
+          "a bad repeat drops");
+    check(styles[13].borderImage.source.kind == Kind::Url &&
+              styles[13].borderImage.slice.top.value == 30.0f &&
+              styles[13].borderImage.width.top.value == 4.0f &&
+              styles[13].borderImage.outset.top.value == 2.0f &&
+              styles[13].borderImage.repeatX == Border::Repeat::Round,
+          "the shorthand expands every part");
+    check(styles[14].borderImage.source.kind == Kind::None, "a none shorthand resets");
+    check(styles[15].borderImage.source.kind == Kind::None,
+          "a length in the shorthand drops it all");
+}
+
 // `:required`/`:optional` read the attribute on inputs, selects, and
 // textareas; `:valid`/`:invalid` judge candidates (no disabled, hidden, or
 // buttons) by required emptiness, checkable state, numeric shape and min/max,
@@ -7019,6 +7100,7 @@ int main() {
     testMaskGeometry();
     testMaskShorthand();
     testMaskBorder();
+    testBorderImage();
     testValidationPseudos();
     testGaugeDefaults();
     testFocusVisible();

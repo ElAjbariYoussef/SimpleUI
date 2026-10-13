@@ -68,7 +68,6 @@ void applyMaskLayers(std::uint8_t* pixels, int width, int height,
 void applyMaskImage(std::uint8_t* pixels, int width, int height,
                     const ComputedStyle::MaskImage& mask, const SDL_FRect& destination,
                     float fontSize, float rootFontSize);
-
 // Multiplies surface alpha by a `mask-border` 9-patch painted into `boxes`
 // (already in surface coordinates). Pure pixels and math: no device, so tests
 // drive it directly. The source is sliced into corners, edges, and a middle;
@@ -81,5 +80,25 @@ void applyMaskBorder(std::uint8_t* pixels, int width, int height,
                      const ComputedStyle::MaskBorder& border,
                      const BackgroundBoxes& boxes, float fontSize, float rootFontSize,
                      FetchMaskBytes fetch);
+
+// One blit of a 9-patch border image: a source-px rect onto a paint-coords
+// rect. Pure geometry, so tests pin the tiling without a device.
+struct BorderTile {
+    SDL_FRect src;
+    SDL_FRect dst;
+};
+std::vector<BorderTile> borderImageTiles(const ComputedStyle::BorderImage& image,
+                                         float srcW, float srcH,
+                                         const BackgroundBoxes& boxes, float fontSize,
+                                         float rootFontSize);
+
+// Paints a `border-image` 9-patch over `boxes` (window coordinates): corners
+// stretch, edges tile per the repeat modes, and the middle paints only with
+// `fill`. Gradients render once over the outset area and slice from there;
+// repeat modes behave as stretch for gradient sources. A missing url source
+// paints nothing.
+void paintBorderImage(const ComputedStyle::BorderImage& image,
+                      const BackgroundBoxes& boxes, float fontSize, float rootFontSize,
+                      float opacity, Renderer& renderer, ImageCache& images);
 
 }  // namespace sui

@@ -3063,6 +3063,291 @@ bool parseMaskBorder(std::string_view value, ComputedStyle& s) {
     return true;
 }
 
+// `border-image-slice`: like the mask slice, but the middle `fill` keeps the
+// centre painted instead of masking it.
+bool parseBorderImageSlice(std::string_view value,
+                           ComputedStyle::BorderImage::Slice& slice) {
+    using Slice = ComputedStyle::BorderImage::Slice;
+    Slice out;
+    std::vector<Length> parts;
+    for (std::string_view token : splitTokens(value)) {
+        if (token.empty()) {
+            continue;
+        }
+        if (token == "fill") {
+            out.fill = true;
+            continue;
+        }
+        Length length;
+        if (parseBorderNumber(token, length)) {
+            // A bare number counts source px.
+        } else {
+            length = parseLength(token);
+            if (length.unit != Length::Percent) {
+                return false;
+            }
+        }
+        if (length.unit == Length::Number && length.value < 0.0f) {
+            return false;
+        }
+        if (length.unit == Length::Percent &&
+            (length.value < 0.0f || length.value > 100.0f)) {
+            return false;
+        }
+        parts.push_back(length);
+    }
+    if (parts.empty() || parts.size() > 4) {
+        return false;
+    }
+    expandSides(parts, out.top, out.right, out.bottom, out.left);
+    slice = out;
+    return true;
+}
+
+// `border-image-width`: lengths, border multiples, or `auto` for the slice's
+// own size.
+bool parseBorderImageWidth(std::string_view value,
+                           ComputedStyle::BorderImage::Width& width) {
+    using Width = ComputedStyle::BorderImage::Width;
+    Width out;
+    std::vector<Length> parts;
+    for (std::string_view token : splitTokens(value)) {
+        if (token.empty()) {
+            continue;
+        }
+        Length length;
+        if (token == "auto") {
+            length = Length{};
+        } else if (parseBorderNumber(token, length)) {
+            // A bare number multiplies the border thickness.
+        } else {
+            length = parseLength(token);
+            if (length.unit != Length::Px && length.unit != Length::Em &&
+                length.unit != Length::Rem && length.unit != Length::Calc) {
+                return false;
+            }
+        }
+        if ((length.unit == Length::Px || length.unit == Length::Number) &&
+            length.value < 0.0f) {
+            return false;
+        }
+        parts.push_back(length);
+    }
+    if (parts.empty() || parts.size() > 4) {
+        return false;
+    }
+    expandSides(parts, out.top, out.right, out.bottom, out.left);
+    width = out;
+    return true;
+}
+
+// `border-image-outset`: lengths or border multiples, never negative.
+bool parseBorderImageOutset(std::string_view value,
+                            ComputedStyle::BorderImage::Outset& outset) {
+    using Outset = ComputedStyle::BorderImage::Outset;
+    Outset out;
+    std::vector<Length> parts;
+    for (std::string_view token : splitTokens(value)) {
+        if (token.empty()) {
+            continue;
+        }
+        Length length;
+        if (parseBorderNumber(token, length)) {
+            // A bare number multiplies the border thickness.
+        } else {
+            length = parseLength(token);
+            if (length.unit != Length::Px && length.unit != Length::Em &&
+                length.unit != Length::Rem && length.unit != Length::Calc) {
+                return false;
+            }
+        }
+        if ((length.unit == Length::Px || length.unit == Length::Number) &&
+            length.value < 0.0f) {
+            return false;
+        }
+        parts.push_back(length);
+    }
+    if (parts.empty() || parts.size() > 4) {
+        return false;
+    }
+    expandSides(parts, out.top, out.right, out.bottom, out.left);
+    outset = out;
+    return true;
+}
+
+// `border-image-repeat`: one or two of stretch/repeat/round/space.
+bool parseBorderImageRepeat(std::string_view value, ComputedStyle::BorderImage& image) {
+    using Repeat = ComputedStyle::BorderImage::Repeat;
+    const auto word = [](std::string_view token, Repeat& out) {
+        if (token == "stretch") {
+            out = Repeat::Stretch;
+        } else if (token == "repeat") {
+            out = Repeat::Repeat;
+        } else if (token == "round") {
+            out = Repeat::Round;
+        } else if (token == "space") {
+            out = Repeat::Space;
+        } else {
+            return false;
+        }
+        return true;
+    };
+    std::vector<std::string_view> tokens;
+    for (std::string_view token : splitTokens(value)) {
+        if (!token.empty()) {
+            tokens.push_back(token);
+        }
+    }
+    if (tokens.empty() || tokens.size() > 2) {
+        return false;
+    }
+    Repeat first = Repeat::Stretch;
+    Repeat second = Repeat::Stretch;
+    if (!word(tokens[0], first)) {
+        return false;
+    }
+    second = first;
+    if (tokens.size() == 2 && !word(tokens[1], second)) {
+        return false;
+    }
+    image.repeatX = first;
+    image.repeatY = second;
+    return true;
+}
+
+// One `border-image-source`: a url, a gradient, or `none`.
+bool parseBorderImageSource(std::string_view value,
+                            ComputedStyle::BackgroundImage& source) {
+    using Image = ComputedStyle::BackgroundImage;
+    const std::string_view text = trim(value);
+    if (text.empty() || text == "none") {
+        source = Image();
+        return true;
+    }
+    Image parsed;
+    if (const std::string_view href = unwrapUrl(text); !href.empty()) {
+        parsed.kind = Image::Url;
+        parsed.href = std::string(href);
+    } else if (std::string_view args; functionArgs(text, "linear-gradient", args)) {
+        if (!parseLinearGradient(args, parsed.linear)) {
+            return false;
+        }
+        parsed.kind = Image::LinearGradientImage;
+    } else if (functionArgs(text, "radial-gradient", args)) {
+        if (!parseRadialGradient(args, parsed.radial)) {
+            return false;
+        }
+        parsed.kind = Image::RadialGradientImage;
+    } else if (functionArgs(text, "conic-gradient", args)) {
+        if (!parseConicalGradient(args, parsed.conical)) {
+            return false;
+        }
+        parsed.kind = Image::ConicalGradientImage;
+    } else {
+        return false;
+    }
+    source = parsed;
+    return true;
+}
+
+// `border-image`: source || slice [ / width [ / outset ] ]? || repeat. A
+// single declaration; one bad token drops it all.
+bool parseBorderImage(std::string_view value, ComputedStyle& s) {
+    using Image = ComputedStyle::BorderImage;
+    Image image;
+    bool hasSource = false;
+    std::string sliceText;
+    std::string widthText;
+    std::string outsetText;
+    std::string repeatText;
+    // Slashes separate slice from width from outset, paren-aware so a url's
+    // own slashes never cut.
+    const std::vector<std::string_view> sections = splitTopLevel(value, '/');
+    if (sections.empty() || sections.size() > 3) {
+        return false;
+    }
+    bool seenSlashWidth = false;
+    for (std::size_t section = 0; section < sections.size(); ++section) {
+        for (std::string_view token : splitTokens(sections[section])) {
+            if (token.empty()) {
+                continue;
+            }
+            ComputedStyle::BackgroundImage source;
+            if (parseBorderImageSource(token, source) &&
+                (source.kind != ComputedStyle::BackgroundImage::None || token == "none")) {
+                if (section != 0 || hasSource) {
+                    return false;
+                }
+                image.source = source;
+                hasSource = true;
+            } else if (token == "stretch" || token == "repeat" || token == "round" ||
+                       token == "space") {
+                if (!repeatText.empty()) {
+                    repeatText += ' ';
+                }
+                repeatText += std::string(token);
+            } else if (section == 0 && token == "fill") {
+                if (!sliceText.empty()) {
+                    sliceText += ' ';
+                }
+                sliceText += "fill";
+            } else if (section == 0) {
+                Length number;
+                const Length length = parseLength(token);
+                if (parseBorderNumber(token, number) || length.unit == Length::Percent) {
+                    if (!sliceText.empty()) {
+                        sliceText += ' ';
+                    }
+                    sliceText += std::string(token);
+                } else {
+                    // Lengths never slice, and nothing else belongs here.
+                    return false;
+                }
+            } else if (section == 1) {
+                if (!widthText.empty()) {
+                    widthText += ' ';
+                }
+                widthText += std::string(token);
+                seenSlashWidth = true;
+            } else if (section == 2) {
+                if (!outsetText.empty()) {
+                    outsetText += ' ';
+                }
+                outsetText += std::string(token);
+            } else {
+                return false;
+            }
+        }
+    }
+    if (!sliceText.empty() && !parseBorderImageSlice(sliceText, image.slice)) {
+        return false;
+    }
+    if (sections.size() >= 2 && widthText.empty()) {
+        // A slash with nothing after it widths nothing.
+        return false;
+    }
+    if (seenSlashWidth && !parseBorderImageWidth(widthText, image.width)) {
+        return false;
+    }
+    if (sections.size() == 3) {
+        if (outsetText.empty()) {
+            return false;
+        }
+        if (!parseBorderImageOutset(outsetText, image.outset)) {
+            return false;
+        }
+    }
+    if (!repeatText.empty() && !parseBorderImageRepeat(repeatText, image)) {
+        return false;
+    }
+    if (!hasSource && sliceText.empty() && !seenSlashWidth && sections.size() < 3 &&
+        repeatText.empty()) {
+        return false;
+    }
+    s.borderImage = image;
+    return true;
+}
+
 
 // A property the engine does not implement is dropped by CSS anyway, but saying so
 // here is what makes the gap debuggable: it turns a hover rule with an unsupported
@@ -4638,6 +4923,35 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         // Shorthand: source, slice, width, outset, repeat, and mode in one
         // declaration. One bad token drops it all.
         parseMaskBorder(value, s);
+    } else if (property == "border-image-source") {
+        // A single image; a list is not a source.
+        if (splitTopLevel(value).size() == 1) {
+            ComputedStyle::BackgroundImage source;
+            if (parseBorderImageSource(value, source)) {
+                s.borderImage.source = source;
+            }
+        }
+    } else if (property == "border-image-slice") {
+        ComputedStyle::BorderImage::Slice slice;
+        if (parseBorderImageSlice(value, slice)) {
+            s.borderImage.slice = slice;
+        }
+    } else if (property == "border-image-width") {
+        ComputedStyle::BorderImage::Width width;
+        if (parseBorderImageWidth(value, width)) {
+            s.borderImage.width = width;
+        }
+    } else if (property == "border-image-outset") {
+        ComputedStyle::BorderImage::Outset outset;
+        if (parseBorderImageOutset(value, outset)) {
+            s.borderImage.outset = outset;
+        }
+    } else if (property == "border-image-repeat") {
+        parseBorderImageRepeat(value, s.borderImage);
+    } else if (property == "border-image") {
+        // Shorthand: source, slice, width, outset, and repeat in one
+        // declaration. One bad token drops it all.
+        parseBorderImage(value, s);
     } else if (property == "clip-path") {
         // Shapes clip the element and its subtree; anything else keeps the
         // previous cascade winner, like any failed parse.

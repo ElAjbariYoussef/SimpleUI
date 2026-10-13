@@ -776,6 +776,100 @@ void testMaskBorder() {
     }
 }
 
+// A `border-image` tiles its 9-patch into blits: corners stretch once, edges
+// tile along, gaps stay empty, and the middle needs `fill`. The builder is
+// pure geometry, so every count and rect asserts exactly.
+void testBorderImageTiles() {
+    using Image = sui::ComputedStyle::BorderImage;
+    using Repeat = Image::Repeat;
+    const auto num = [](float v) { return sui::Length(sui::Length::Number, v); };
+    const auto px = [](float v) { return sui::Length(v); };
+    auto urlImage = []() {
+        Image image;
+        image.source.kind = sui::ComputedStyle::BackgroundImage::Url;
+        image.source.href = "f.png";
+        return image;
+    };
+    const auto boxes = [](float w, float h) {
+        const SDL_FRect area{0.0f, 0.0f, w, h};
+        return sui::BackgroundBoxes{area, area, area};
+    };
+    const auto tilesOf = [&](Image image, float srcW, float srcH, float w, float h) {
+        return sui::borderImageTiles(image, srcW, srcH, boxes(w, h), 16.0f, 16.0f);
+    };
+
+    // A 6x6 source sliced 2 with auto widths on a 6x6 box: four 2x2 corners,
+    // four 2x2 edges, no middle without fill.
+    Image frame = urlImage();
+    frame.slice.top = frame.slice.right = frame.slice.bottom = frame.slice.left =
+        num(2.0f);
+    {
+        const std::vector<sui::BorderTile> tiles = tilesOf(frame, 6.0f, 6.0f, 6.0f, 6.0f);
+        check(tiles.size() == 8, "corners and edges tile once each");
+        check(tiles[0].src.w == 2.0f && tiles[0].dst.w == 2.0f,
+              "a corner stretches its slice");
+    }
+    Image filled = frame;
+    filled.slice.fill = true;
+    {
+        const std::vector<sui::BorderTile> tiles = tilesOf(filled, 6.0f, 6.0f, 6.0f, 6.0f);
+        check(tiles.size() == 9, "fill adds the middle tile");
+        check(tiles.back().dst.x == 2.0f && tiles.back().dst.y == 2.0f,
+              "the middle tile sits centred");
+    }
+    // An outset grows the painted area past the border box.
+    Image grown = frame;
+    grown.outset.top = grown.outset.right = grown.outset.bottom = grown.outset.left =
+        px(1.0f);
+    check(tilesOf(grown, 6.0f, 6.0f, 6.0f, 6.0f)[0].dst.x == -1.0f,
+          "an outset reaches past the box");
+
+    // A 2px strip tiled over an 8px edge repeats four pairs: slice the sides
+    // away so only the top edge band paints.
+    auto stripImage = [&](Repeat mode) {
+        Image image = urlImage();
+        image.slice.top = num(1.0f);
+        image.slice.left = num(1.0f);
+        image.slice.right = num(1.0f);
+        image.width.top = px(1.0f);
+        image.width.right = image.width.bottom = image.width.left = px(0.0f);
+        image.repeatX = mode;
+        return image;
+    };
+    {
+        const std::vector<sui::BorderTile> tiles =
+            tilesOf(stripImage(Repeat::Repeat), 4.0f, 2.0f, 8.0f, 1.0f);
+        // Slice 1 of a 4x2 source: corners empty (zero bands), one edge band
+        // with a 2px middle; tile pairs at 0, 2, 4, 6.
+        check(tiles.size() == 4, "repeat clips the last tile");
+        check(tiles[0].dst.x == 0.0f && tiles[0].src.x == 1.0f,
+              "tiles start at the edge region");
+        check(tiles[3].dst.x == 6.0f, "the last tile starts on time");
+    }
+    // Round rescales to whole tiles: four 1.75px tiles over 7px.
+    {
+        const std::vector<sui::BorderTile> tiles =
+            tilesOf(stripImage(Repeat::Round), 4.0f, 2.0f, 7.0f, 1.0f);
+        check(tiles.size() == 4, "round keeps whole tiles");
+        check(tiles.back().dst.w == 1.75f, "round rescales the tile width");
+    }
+    // Space leaves even gaps: two tiles at 0.25 and 2.75 over 5px.
+    {
+        const std::vector<sui::BorderTile> tiles =
+            tilesOf(stripImage(Repeat::Space), 4.0f, 2.0f, 5.0f, 1.0f);
+        check(tiles.size() == 2, "space skips its gaps");
+        check(tiles[0].dst.x == 0.25f && tiles[1].dst.x == 2.75f,
+              "space centres whole tiles with gaps");
+    }
+    // Degenerate inputs tile nothing.
+    {
+        Image none;
+        check(tilesOf(none, 4.0f, 4.0f, 6.0f, 6.0f).empty(), "no source tiles nothing");
+        check(tilesOf(frame, 0.0f, 4.0f, 6.0f, 6.0f).empty(),
+              "no source size tiles nothing");
+    }
+}
+
 // HarfBuzz shaping: ligatures fuse codepoints into single glyphs, marks ride
 // with zero advance, and clusters map glyphs back to source bytes. ASCII
 // stays on the fast path; anything past it shapes. Needs a real font, so the
@@ -1084,6 +1178,7 @@ int main() {
     testMaskLayers();
     testMaskGeometry();
     testMaskBorder();
+    testBorderImageTiles();
     testShaping();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

@@ -1338,7 +1338,12 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
 
         paintInsetShadow(s, box, radii, renderer, rootFontSize, opacity);
 
-        if (border.a > 0) {
+        // A border image replaces the border rings: it paints the sliced
+        // source over the border area instead of stroking it.
+        if (s.borderImage.source.kind != ComputedStyle::BackgroundImage::None) {
+            paintBorderImage(s.borderImage, boxes, s.fontSize, rootFontSize, opacity,
+                             renderer, images);
+        } else if (border.a > 0) {
             // A side CSS leaves invisible is dropped outright rather than drawn with a
             // zero width, and four sides that disagree about width or pattern are drawn
             // one at a time so they are not forced into a single ring.

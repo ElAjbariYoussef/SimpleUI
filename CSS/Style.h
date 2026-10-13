@@ -533,6 +533,40 @@ struct ComputedStyle {
     };
     MaskBorder maskBorder;
 
+    // A 9-patch border image: like the mask border but painted instead of
+    // masking. Slice insets are numbers (source px) or percentages; widths
+    // are lengths, border multiples, or auto (the slice's own size); outsets
+    // are lengths or multiples, never negative. Repeat is per axis.
+    struct BorderImage {
+        BackgroundImage source;
+        struct Slice {
+            Length top;
+            Length right;
+            Length bottom;
+            Length left;
+            bool fill = false;
+        };
+        Slice slice;
+        struct Width {
+            Length top;
+            Length right;
+            Length bottom;
+            Length left;
+        };
+        Width width;
+        struct Outset {
+            Length top;
+            Length right;
+            Length bottom;
+            Length left;
+        };
+        Outset outset;
+        enum class Repeat : std::uint8_t { Stretch, Repeat, Round, Space };
+        Repeat repeatX = Repeat::Stretch;
+        Repeat repeatY = Repeat::Stretch;
+    };
+    BorderImage borderImage;
+
     // Typography
     float fontSize = 16.0f;  // px
     std::string fontFamily;   // empty = default
