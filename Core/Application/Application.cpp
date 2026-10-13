@@ -750,6 +750,48 @@ int selectPopupRowAt(const SelectPopupGeom& geom, float x, float y) {
     return row < geom.rows ? static_cast<int>(row) : -1;
 }
 
+// An option's pick value: its `value`, or its text when the attribute is
+// absent. Shared by selects and datalists.
+std::string optionValue(const Element& option) {
+    if (option.hasAttribute("value")) {
+        return std::string(option.attribute("value"));
+    }
+    return option.optionLabel();
+}
+
+// The suggestions for a datalist input: its list's options whose label holds
+// the current value (case-insensitive), or all of them while empty. Disabled
+// options show but never pick.
+std::vector<Element*> datalistSuggestions(Element& input) {
+    std::vector<Element*> out;
+    Element* list = input.datalistFor();
+    if (!list) {
+        return out;
+    }
+    const std::string value = input.value();
+    std::string needle = value;
+    for (char& c : needle) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    for (Element* option : list->selectOptions()) {
+        if (!option) {
+            continue;
+        }
+        if (needle.empty()) {
+            out.push_back(option);
+            continue;
+        }
+        std::string label = optionValue(*option);
+        for (char& c : label) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        if (label.find(needle) != std::string::npos) {
+            out.push_back(option);
+        }
+    }
+    return out;
+}
+
 // The select's paint offsets (ancestor scrolls) from a paint-op sequence, for
 // positioning its popup the way hit-testing positions the select itself.
 // False when the select paints no box (author `display:none`, say).
@@ -814,6 +856,57 @@ void paintSelectPopup(Element& select, Renderer& renderer, SDL_Renderer* sdlRend
         }
         const SDL_Color base =
             hot ? SDL_Color{255, 255, 255, 255}
+                : SDL_Color{style.color.r, style.color.g, style.color.b, style.color.a};
+        SDL_Texture* texture = font.renderText(
+            sdlRenderer, label, style.fontSize,
+            SDL_Color{base.r, base.g, base.b,
+                      static_cast<Uint8>(static_cast<float>(base.a) * opacity)});
+        if (!texture) {
+            continue;
+        }
+        float texW = 0.0f, texH = 0.0f;
+        SDL_GetTextureSize(texture, &texW, &texH);
+        const SDL_FRect dst{std::floor(geom.x + 8.0f),
+                            std::floor(geom.y + geom.rowH * static_cast<float>(i)), texW,
+                            texH};
+        SDL_RenderTexture(sdlRenderer, texture, nullptr, &dst);
+        SDL_DestroyTexture(texture);
+    }
+    renderer.strokeRect(
+        SDL_FRect{geom.x, geom.y, geom.w, geom.rowH * static_cast<float>(geom.rows)},
+        multiplyAlpha(toColor(style.borderColor), opacity), 1.0f);
+}
+
+// Paints an open datalist's suggestions: a bordered list below the input's
+// border box, one row per filtered option with the highlighted row accented.
+// Like the select popup it runs after the whole frame with no ancestor clip.
+void paintDatalistPopup(Element& input, const std::vector<Element*>& suggestions,
+                        Renderer& renderer, SDL_Renderer* sdlRenderer,
+                        const ComputedStyle& style, TextFont& font, float offX, float offY,
+                        std::size_t highlight, float opacity) {
+    if (suggestions.empty()) {
+        return;
+    }
+    const SelectPopupGeom geom =
+        selectPopupGeom(input, offX, offY, style, suggestions.size());
+    renderer.fillRect(SDL_FRect{geom.x, geom.y, geom.w, geom.rowH * static_cast<float>(geom.rows)},
+                      multiplyAlpha(toColor(style.backgroundColor), opacity));
+    for (std::size_t i = 0; i < suggestions.size(); ++i) {
+        const SDL_FRect row{geom.x, geom.y + geom.rowH * static_cast<float>(i), geom.w,
+                            geom.rowH};
+        if (i == highlight) {
+            renderer.fillRect(row, multiplyAlpha(sui::Color{59, 130, 246, 255}, opacity));
+        }
+        if (!font.hasFont()) {
+            continue;
+        }
+        const std::string label = optionValue(*suggestions[i]);
+        if (label.empty()) {
+            continue;
+        }
+        const SDL_Color base =
+            i == highlight
+                ? SDL_Color{255, 255, 255, 255}
                 : SDL_Color{style.color.r, style.color.g, style.color.b, style.color.a};
         SDL_Texture* texture = font.renderText(
             sdlRenderer, label, style.fontSize,
@@ -1990,6 +2083,9 @@ void Application::dispatch(const InputEvent& event) {
     // click on its own open box only closes it, so the toggle below must not
     // reopen it on the same press.
     bool suppressSelectToggle = false;
+    // A datalist pick refocuses its input, which must not reopen suggestions
+    // on the same press.
+    bool suppressDatalistOpen = false;
     if (keyboard) {
         target = document_->focused();
     } else {
@@ -1997,6 +2093,9 @@ void Application::dispatch(const InputEvent& event) {
         target = hitTestPaintOrder(ops, event.x, event.y);
         if (openSelect_ && !isReachable(*document_->root(), openSelect_)) {
             openSelect_ = nullptr;
+        }
+        if (openDatalist_ && !isReachable(*document_->root(), openDatalist_)) {
+            openDatalist_ = nullptr;
         }
         if (openSelect_ && event.kind == InputKind::PointerDown) {
             // The popup is an overlay, not an element, so it never wins the hit
@@ -2027,6 +2126,37 @@ void Application::dispatch(const InputEvent& event) {
                 } else {
                     // Anywhere else closes; normal handling continues.
                     openSelect_ = nullptr;
+                }
+            }
+        }
+        if (openDatalist_ && event.kind == InputKind::PointerDown) {
+            // The suggestions are an overlay like the select popup: rows pick
+            // first, a press on the input itself only refocuses, and anywhere
+            // else closes with normal handling continuing.
+            float offX = 0.0f, offY = 0.0f;
+            if (!selectBoxOffset(ops, openDatalist_, offX, offY)) {
+                openDatalist_ = nullptr;
+            } else {
+                const std::vector<Element*> suggestions = datalistSuggestions(*openDatalist_);
+                const ComputedStyle style = resolver_.resolve(*openDatalist_);
+                const SelectPopupGeom geom = selectPopupGeom(
+                    *openDatalist_, offX, offY, style, suggestions.size());
+                const int row = selectPopupRowAt(geom, event.x, event.y);
+                if (row >= 0 &&
+                    static_cast<std::size_t>(row) < suggestions.size()) {
+                    // A pick lands before any `onclick` handler so the handler
+                    // observes the control's new value. Disabled options never
+                    // pick, and the popup stays open for another try.
+                    Element* picked = openDatalist_;
+                    Element* option = suggestions[static_cast<std::size_t>(row)];
+                    if (!option->hasAttribute("disabled")) {
+                        picked->setValue(optionValue(*option));
+                        openDatalist_ = nullptr;
+                        suppressDatalistOpen = true;
+                    }
+                    target = picked;
+                } else if (target != openDatalist_) {
+                    openDatalist_ = nullptr;
                 }
             }
         }
@@ -2082,6 +2212,22 @@ void Application::dispatch(const InputEvent& event) {
                     }
                 }
             }
+            if (openDatalist_ && document_->root() &&
+                isReachable(*document_->root(), openDatalist_)) {
+                const auto hoverOps = computePaintOps(*document_->root(), resolver_);
+                float offX = 0.0f, offY = 0.0f;
+                if (selectBoxOffset(hoverOps, openDatalist_, offX, offY)) {
+                    const std::vector<Element*> suggestions =
+                        datalistSuggestions(*openDatalist_);
+                    const ComputedStyle style = resolver_.resolve(*openDatalist_);
+                    const SelectPopupGeom geom = selectPopupGeom(
+                        *openDatalist_, offX, offY, style, suggestions.size());
+                    const int row = selectPopupRowAt(geom, event.x, event.y);
+                    if (row >= 0 && static_cast<std::size_t>(row) < suggestions.size()) {
+                        datalistHighlight_ = static_cast<std::size_t>(row);
+                    }
+                }
+            }
             return;
         case InputKind::PointerDown:
             resolver_.setActive(target);
@@ -2096,6 +2242,18 @@ void Application::dispatch(const InputEvent& event) {
                 resolver_.setFocused(target);
                 resolver_.setFocusVisible(focusShowsOnClick(*target));
                 lastFocused_ = target;
+                // Focusing a listed input opens its suggestions; anything else
+                // closes. A press on the open input itself keeps its popup.
+                if (!suppressDatalistOpen && target->datalistFor() &&
+                    !datalistSuggestions(*target).empty()) {
+                    if (openDatalist_ != target) {
+                        openDatalist_ = target;
+                        datalistHighlight_ = 0;
+                        openSelect_ = nullptr;
+                    }
+                } else if (openDatalist_ && openDatalist_ != target) {
+                    openDatalist_ = nullptr;
+                }
                 if (isEditableField(target)) {
                     resetCaretBlink();
                     caretBytePos_ = target->value().size();
@@ -2113,6 +2271,7 @@ void Application::dispatch(const InputEvent& event) {
                 document_->setFocused(nullptr);
                 resolver_.setFocused(nullptr);
                 resolver_.setFocusVisible(false);
+                openDatalist_ = nullptr;
                 lastFocused_ = nullptr;
                 caretBytePos_ = 0;
                 selectionAnchor_ = 0;
@@ -2140,6 +2299,7 @@ void Application::dispatch(const InputEvent& event) {
                 } else {
                     openSelect_ = target;
                     selectHighlight_ = selectSelectedIndex(*target);
+                    openDatalist_ = nullptr;
                 }
             }
             // An open list picks its clicked row: a plain click selects,
@@ -2155,6 +2315,7 @@ void Application::dispatch(const InputEvent& event) {
                     resolver_.setFocused(owner);
                     resolver_.setFocusVisible(keyboardModality_ ||
                                               focusShowsOnClick(*owner));
+                    openDatalist_ = nullptr;
                     lastFocused_ = owner;
                     const std::vector<Element*> options = owner->selectOptions();
                     std::size_t index = options.size();
@@ -2256,6 +2417,13 @@ void Application::dispatch(const InputEvent& event) {
                     resolver_.setFocused(next);
                     resolver_.setFocusVisible(true);
                     lastFocused_ = next;
+                    if (next->datalistFor() && !datalistSuggestions(*next).empty()) {
+                        openDatalist_ = next;
+                        datalistHighlight_ = 0;
+                        openSelect_ = nullptr;
+                    } else if (openDatalist_ && openDatalist_ != next) {
+                        openDatalist_ = nullptr;
+                    }
                     if (isEditableField(next)) {
                         resetCaretBlink();
                         caretBytePos_ = next->value().size();
@@ -2583,6 +2751,36 @@ void Application::dispatch(const InputEvent& event) {
                 openSelect_ = target;
                 selectHighlight_ = selectSelectedIndex(*target);
             }
+        }
+    }
+
+    // An open datalist popup eats arrows, Enter, and Escape: arrows move the
+    // highlight through enabled suggestions, Enter picks into the value, and
+    // Escape closes. Left/Right keep editing the field.
+    if (target && event.kind == InputKind::KeyDown && openDatalist_ == target &&
+        !target->hasAttribute("disabled")) {
+        constexpr int kReturn = 0x0D;
+        constexpr int kEscape = 0x1B;
+        constexpr int kUp = 0x40000052;
+        constexpr int kDown = 0x40000051;
+        const std::vector<Element*> suggestions = datalistSuggestions(*target);
+        if (event.key == kEscape) {
+            openDatalist_ = nullptr;
+        } else if (!suggestions.empty()) {
+            if (event.key == kUp || event.key == kDown) {
+                datalistHighlight_ = stepOptionIndex(
+                    suggestions, std::min(datalistHighlight_, suggestions.size() - 1),
+                    event.key == kUp ? -1 : 1);
+            } else if (event.key == kReturn) {
+                Element* option = suggestions[std::min(datalistHighlight_,
+                                                       suggestions.size() - 1)];
+                if (!option->hasAttribute("disabled")) {
+                    target->setValue(optionValue(*option));
+                    openDatalist_ = nullptr;
+                }
+            }
+        } else {
+            openDatalist_ = nullptr;
         }
     }
 
@@ -3171,6 +3369,12 @@ void Application::run() {
                         popupOpacity = groupOpacity;
                         popupFound = true;
                     }
+                    if (openDatalist_ && item.el == openDatalist_) {
+                        popupOffX = item.dx + ox;
+                        popupOffY = item.dy + oy;
+                        popupOpacity = groupOpacity;
+                        popupFound = true;
+                    }
                     if (item.clip.w > 0.0f && item.clip.h > 0.0f) {
                         const SDL_Rect rect{static_cast<int>(std::floor(item.clip.x - ox)),
                                             static_cast<int>(std::floor(item.clip.y - oy)),
@@ -3210,6 +3414,10 @@ void Application::run() {
                     !isReachable(*document_->root(), openSelect_)) {
                     openSelect_ = nullptr;
                 }
+                if (openDatalist_ && document_->root() &&
+                    !isReachable(*document_->root(), openDatalist_)) {
+                    openDatalist_ = nullptr;
+                }
                 if (openSelect_ && popupFound) {
                     SDL_SetRenderClipRect(sdlRenderer, nullptr);
                     paintSelectPopup(*openSelect_, renderer, sdlRenderer,
@@ -3217,6 +3425,20 @@ void Application::run() {
                                      popupOffY, selectHighlight_, popupOpacity);
                 } else if (openSelect_) {
                     openSelect_ = nullptr;
+                }
+                // Suggestions float the same way; an input that painted no box
+                // was hidden while open, and empty suggestions paint nothing.
+                if (openDatalist_ && popupFound) {
+                    const std::vector<Element*> suggestions =
+                        datalistSuggestions(*openDatalist_);
+                    if (!suggestions.empty()) {
+                        SDL_SetRenderClipRect(sdlRenderer, nullptr);
+                        paintDatalistPopup(*openDatalist_, suggestions, renderer,
+                                           sdlRenderer,
+                                           resolver_.resolve(*openDatalist_), *font_,
+                                           popupOffX, popupOffY, datalistHighlight_,
+                                           popupOpacity);
+                    }
                 }
             } else {
                 SDL_FRect panel{40.0f, 40.0f, static_cast<float>(width) - 80.0f,

@@ -480,6 +480,25 @@ Element* Element::owningSelect() const {
                                                  : nullptr;
 }
 
+Element* Element::datalistFor() const {
+    // Only text-like inputs take suggestions; buttons, checkboxes, and hidden
+    // fields never pop one up.
+    if (tag_ != "input") {
+        return nullptr;
+    }
+    const std::string_view type = attribute("type");
+    if (!type.empty() && type != "text" && type != "search" && type != "url" &&
+        type != "tel" && type != "email") {
+        return nullptr;
+    }
+    const std::string_view id = attribute("list");
+    if (id.empty() || !document_) {
+        return nullptr;
+    }
+    Element* named = document_->getElementById(id);
+    return named && named->tag_ == "datalist" ? named : nullptr;
+}
+
 InlineStyle::InlineStyle(Element& owner) noexcept : owner_(owner) {}
 
 void InlineStyle::setProperty(std::string property, std::string value, bool important) {

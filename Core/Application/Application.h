@@ -79,6 +79,10 @@ public:
     // The highlighted option row while a popup is open. Hover and arrows move
     // it without touching the tree; picking writes `selected`.
     std::size_t selectHighlight() const noexcept { return selectHighlight_; }
+    // The input whose datalist popup is open, if any, with its highlighted
+    // suggestion row. Picking writes the input's `value`.
+    Element* openDatalist() const noexcept { return openDatalist_; }
+    std::size_t datalistHighlight() const noexcept { return datalistHighlight_; }
 
 private:
     static WindowConfig windowConfigFrom(Document& document);
@@ -157,6 +161,11 @@ private:
     // events already mark the frame stale).
     Element* openSelect_ = nullptr;
     std::size_t selectHighlight_ = 0;
+    // The input whose datalist popup is open, and the highlighted suggestion
+    // row. Like the select popup it paints after the frame and never lays
+    // out; picking writes the input's `value`.
+    Element* openDatalist_ = nullptr;
+    std::size_t datalistHighlight_ = 0;
     // Where a Shift+click or Shift+arrow range starts in an open list.
     std::size_t selectAnchor_ = 0;
     // Where the range currently ends: clicks and arrows move it, Shift+click

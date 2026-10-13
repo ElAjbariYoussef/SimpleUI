@@ -132,6 +132,9 @@ public:
     // The select this option/optgroup nests in: the parent, or the grandparent
     // through an <optgroup>. Null for anything else.
     Element* owningSelect() const;
+    // The datalist a text-like input names with `list`, or null when the
+    // attribute is missing, empty, or names nothing (or nothing list-like).
+    Element* datalistFor() const;
 
     // Tags outside the visual set (meta, title, script, link, #text) are
     // retained so they stay reachable by the linker, but layout and paint skip

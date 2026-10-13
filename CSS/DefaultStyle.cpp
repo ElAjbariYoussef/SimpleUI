@@ -185,8 +185,9 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
 
     // An option never lays out as a box of its own: the closed select paints
     // the selected text itself and the open popup is an overlay, so option and
-    // optgroup children take no space.
-    if (tag == "option" || tag == "optgroup") {
+    // optgroup children take no space. A datalist only feeds suggestions to
+    // its inputs, so it takes no space either.
+    if (tag == "option" || tag == "optgroup" || tag == "datalist") {
         Style s;
         s.display = Style::None;
         return s;

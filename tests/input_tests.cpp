@@ -613,6 +613,108 @@ int main() {
         }
     }
 
+    // A datalist pops suggestions for a listed input: focusing opens, typing
+    // filters, rows and arrows/Enter pick, Escape and outside clicks close.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<input id=\"t\" type=\"text\" list=\"fruits\"/>"
+            "<datalist id=\"fruits\">"
+            "<option value=\"apple\"></option>"
+            "<option value=\"apricot\"></option>"
+            "<option value=\"banana\" disabled=\"\"></option>"
+            "<option value=\"cherry\"></option>"
+            "</datalist>"
+            "<input id=\"plain\" type=\"text\"/>"
+            "<input id=\"missing\" type=\"text\" list=\"nope\"/>"
+            "</body></sui>", err);
+        check(doc != nullptr, "datalist document parsed");
+        if (doc) {
+            sui::Element* t = doc->getElementById("t");
+            sui::Element* plain = doc->getElementById("plain");
+            sui::Element* missing = doc->getElementById("missing");
+            check(t && plain && missing, "datalist elements found");
+            if (t && plain && missing) {
+                app.setDocument(std::move(doc));
+
+                sui::StyleResolver layoutResolver;
+                layoutResolver.setRules(sui::CSSParser::parse("input{display:block}"));
+                sui::LayoutInput input;
+                input.resolver = &layoutResolver;
+                input.viewportWidth = 400.0f;
+                input.viewportHeight = 300.0f;
+                sui::BlockLayout().layout(app.document().root(), input);
+
+                constexpr float kRowH = 16.0f;
+                const auto box = [&](sui::Element* el) {
+                    return sui::InputEvent(sui::InputKind::PointerDown,
+                                           el->layoutX() + el->layoutWidth() * 0.5f,
+                                           el->layoutY() + el->layoutHeight() * 0.5f, 1);
+                };
+                const auto row = [&](sui::Element* el, int index) {
+                    return sui::InputEvent(sui::InputKind::PointerDown,
+                                           el->layoutX() + 5.0f,
+                                           el->layoutY() + el->layoutHeight() +
+                                               (static_cast<float>(index) + 0.5f) * kRowH,
+                                           1);
+                };
+                const auto type = [&](const char* text) {
+                    app.dispatch(sui::InputEvent(sui::InputKind::TextInput, 0, 0, 0, 0,
+                                                 0, 0, text));
+                };
+                const auto key = [&](int code) {
+                    app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0,
+                                                 0, code));
+                };
+
+                check(app.openDatalist() == nullptr, "no suggestions start open");
+                app.dispatch(box(t));
+                check(app.openDatalist() == t, "focusing a listed input opens");
+                // Clicking the fourth row picks cherry over the disabled banana.
+                app.dispatch(row(t, 3));
+                check(t->value() == "cherry", "clicking a row picks that suggestion");
+                check(app.openDatalist() == nullptr, "a pick closes the popup");
+
+                // Typing filters to matches; Enter picks the first.
+                t->setValue("");
+                app.dispatch(box(t));
+                type("ap");
+                check(app.openDatalist() == t, "typing keeps matches open");
+                key(0x0D);
+                check(t->value() == "apple", "enter picks the first match");
+                check(app.openDatalist() == nullptr, "picking closes the popup");
+
+                // Arrows skip the disabled banana for cherry.
+                t->setValue("");
+                app.dispatch(box(t));
+                key(0x40000051);
+                key(0x40000051);
+                check(app.datalistHighlight() == 3, "arrows skip disabled options");
+                key(0x0D);
+                check(t->value() == "cherry", "enter picks the highlight");
+
+                // Escape closes; typing past every match hides the popup.
+                app.dispatch(box(t));
+                key(0x1B);
+                check(app.openDatalist() == nullptr, "escape closes the popup");
+                t->setValue("");
+                app.dispatch(box(t));
+                type("zzz");
+                app.dispatch(box(plain));
+                check(app.openDatalist() == nullptr, "leaving closes the popup");
+                check(t->value() == "zzz", "unmatched typing stays put");
+
+                // Plain and dangling inputs never pop up.
+                app.dispatch(box(plain));
+                check(app.openDatalist() == nullptr, "an unlisted input stays shut");
+                app.dispatch(box(missing));
+                check(app.openDatalist() == nullptr, "a dangling list stays shut");
+            }
+        }
+    }
+
     // A tilted 3D box is hit through its projected quad: its centre catches,
     // but a point inside the flat box yet outside the warp misses.
     {
