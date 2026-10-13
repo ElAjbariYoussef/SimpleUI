@@ -5875,6 +5875,14 @@ bool selectorMatches(const SimpleSelector& selector, const Element& element,
             }
             continue;
         }
+        if (pseudo == PseudoClass::FocusVisible) {
+            // The focused element, but only when it wants visible focus UI:
+            // keyboard-driven focus, or a control that takes text entry.
+            if (!state || state->focused != &element || !state->focusVisible) {
+                return false;
+            }
+            continue;
+        }
         if (pseudo == PseudoClass::Root) {
             if (element.parent()) {
                 return false;
@@ -6716,6 +6724,10 @@ bool StyleResolver::setActive(const Element* element) {
 
 bool StyleResolver::setFocused(const Element* element) {
     SUI_SET_PSEUDO(focused, element);
+}
+
+bool StyleResolver::setFocusVisible(bool visible) {
+    SUI_SET_PSEUDO(focusVisible, visible);
 }
 
 #undef SUI_SET_PSEUDO

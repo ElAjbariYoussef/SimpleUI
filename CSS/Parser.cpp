@@ -365,6 +365,8 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
                 out.pseudoClasses.push_back(PseudoClass::Focus);
             } else if (name == "focus-within") {
                 out.pseudoClasses.push_back(PseudoClass::FocusWithin);
+            } else if (name == "focus-visible") {
+                out.pseudoClasses.push_back(PseudoClass::FocusVisible);
             } else if (name == "checked") {
                 out.pseudoClasses.push_back(PseudoClass::Checked);
             } else if (name == "disabled") {
@@ -466,6 +468,8 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
                 // skip args
             } else if (name == "focus-within") {
                 out.pseudoClasses.push_back(PseudoClass::FocusWithin);
+            } else if (name == "focus-visible") {
+                out.pseudoClasses.push_back(PseudoClass::FocusVisible);
             } else if (name == "disabled") {
                 out.pseudoClasses.push_back(PseudoClass::Disabled);
             } else if (name == "enabled") {

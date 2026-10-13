@@ -50,6 +50,10 @@ public:
     // edits that touch the field reset it, modifier keys must not.
     std::uint64_t caretBlinkResets() const noexcept { return caretBlinkResets_; }
 
+    // Whether the focused element wants visible focus UI, for `:focus-visible`.
+    // Exposed so the modality plumbing can be checked without a window.
+    bool focusVisible() const noexcept { return resolver_.focusVisible(); }
+
     std::size_t selectionStart() const noexcept { return std::min(selectionAnchor_, caretBytePos_); }
     std::size_t selectionEnd() const noexcept { return std::max(selectionAnchor_, caretBytePos_); }
     bool hasSelection() const noexcept { return selectionAnchor_ != caretBytePos_; }
@@ -130,6 +134,10 @@ private:
     // cycle was last reset; the caret is visible while
     // (SDL_GetTicks() - caretBlinkStart_) / 500 is even.
     Element* lastFocused_ = nullptr;
+    // Whether the last interaction was keyboard-driven. Starts true (the page
+    // loads keyboard-ready); any pointer press clears it, any key sets it.
+    // Focus taken while set, or on a text-entry control, wants visible UI.
+    bool keyboardModality_ = true;
     std::size_t caretBytePos_ = 0;
     std::size_t selectionAnchor_ = 0;
     std::uint64_t caretBlinkStart_ = 0;

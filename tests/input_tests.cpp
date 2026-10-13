@@ -523,6 +523,46 @@ int main() {
         }
     }
 
+    // `:focus-visible` follows modality: a clicked text field shows its ring,
+    // a clicked button does not, and focus leaving clears the flag.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<input id=\"t\" type=\"text\"/>"
+            "<button id=\"b\">go</button>"
+            "</body></sui>", err);
+        check(doc != nullptr, "focus test document parsed");
+        if (doc) {
+            sui::Element* t = doc->getElementById("t");
+            sui::Element* b = doc->getElementById("b");
+            check(t && b, "focus elements found");
+            if (t && b) {
+                app.setDocument(std::move(doc));
+
+                sui::StyleResolver layoutResolver;
+                sui::LayoutInput input;
+                input.resolver = &layoutResolver;
+                input.viewportWidth = 400.0f;
+                input.viewportHeight = 300.0f;
+                sui::BlockLayout().layout(app.document().root(), input);
+
+                const auto click = [&](sui::Element* el) {
+                    app.dispatch(sui::InputEvent(sui::InputKind::PointerDown,
+                                                 el->layoutX() + el->layoutWidth() * 0.5f,
+                                                 el->layoutY() + el->layoutHeight() * 0.5f, 1));
+                };
+
+                check(!app.focusVisible(), "nothing focused shows nothing");
+                click(t);
+                check(app.focusVisible(), "a clicked text field shows its ring");
+                click(b);
+                check(!app.focusVisible(), "a clicked button hides its ring");
+            }
+        }
+    }
+
     // A range jumps to the value under the pointer, drags with the pointer
     // held, and steps on arrows/Home/End. A disabled range ignores everything.
     {

@@ -22,6 +22,9 @@ struct PseudoState {
     const Element* hovered = nullptr;
     const Element* active = nullptr;
     const Element* focused = nullptr;
+    // Whether the focused element wants visible focus UI: set on keyboard
+    // interaction, or on focusing a control that takes text entry.
+    bool focusVisible = false;
 };
 
 // Per-element animation state, kept between resolves. `target` is the previous
@@ -131,6 +134,8 @@ public:
     bool setHovered(const Element* element);
     bool setActive(const Element* element);
     bool setFocused(const Element* element);
+    bool setFocusVisible(bool visible);
+    bool focusVisible() const noexcept { return state_.focusVisible; }
     const PseudoState& pseudoState() const noexcept { return state_; }
 
 private:

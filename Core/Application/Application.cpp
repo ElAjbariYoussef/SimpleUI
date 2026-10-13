@@ -430,6 +430,22 @@ bool isEditableField(const Element* el) {
            type == "week" || type == "color";
 }
 
+// Whether focusing `el` with the pointer still wants visible focus UI: text
+// entry controls show their keyboard UI however they are focused, while
+// buttons and boxes wait for keyboard modality.
+bool focusShowsOnClick(const Element& el) {
+    if (el.tag() == "textarea") {
+        return true;
+    }
+    if (el.tag() != "input") {
+        return false;
+    }
+    const std::string_view type = el.attribute("type");
+    return type.empty() || type == "text" || type == "password" ||
+           type == "search" || type == "email" || type == "url" ||
+           type == "tel" || type == "number";
+}
+
 // A checkbox/radio keeps its state as a boolean `checked` attribute.
 void setChecked(Element& el, bool checked) {
     if (checked) {
@@ -1990,6 +2006,8 @@ void Application::dispatch(const InputEvent& event) {
     // treat the frame as stale.
     switch (event.kind) {
         case InputKind::PointerMove:
+            // A move is pointer modality, like a press.
+            keyboardModality_ = false;
             resolver_.setHovered(target);
             // The pointer shape follows whatever is under it. Resolved here, after
             // the hover state is set, so a `:hover` rule that changes `cursor` is
@@ -2036,11 +2054,14 @@ void Application::dispatch(const InputEvent& event) {
             resolver_.setActive(target);
             compositionText_.clear();
             compositionCursor_ = 0;
+            // A press is pointer modality from here on, until a key lands.
+            keyboardModality_ = false;
             // Clicking anywhere, including on nothing, moves focus. Disabled elements
             // cannot take focus.
             if (target && !target->hasAttribute("disabled")) {
                 document_->setFocused(target);
                 resolver_.setFocused(target);
+                resolver_.setFocusVisible(focusShowsOnClick(*target));
                 lastFocused_ = target;
                 if (isEditableField(target)) {
                     resetCaretBlink();
@@ -2058,6 +2079,7 @@ void Application::dispatch(const InputEvent& event) {
             } else {
                 document_->setFocused(nullptr);
                 resolver_.setFocused(nullptr);
+                resolver_.setFocusVisible(false);
                 lastFocused_ = nullptr;
                 caretBytePos_ = 0;
                 selectionAnchor_ = 0;
@@ -2098,6 +2120,8 @@ void Application::dispatch(const InputEvent& event) {
                     !target->hasAttribute("disabled")) {
                     document_->setFocused(owner);
                     resolver_.setFocused(owner);
+                    resolver_.setFocusVisible(keyboardModality_ ||
+                                              focusShowsOnClick(*owner));
                     lastFocused_ = owner;
                     const std::vector<Element*> options = owner->selectOptions();
                     std::size_t index = options.size();
@@ -2169,6 +2193,8 @@ void Application::dispatch(const InputEvent& event) {
             return;
         }
         case InputKind::KeyDown:
+            // Any key marks keyboard modality, so the next focus shows its ring.
+            keyboardModality_ = true;
             if (event.key == 0x400000e1 || event.key == 0x400000e5) {
                 shiftDown_ = true;
             } else if (event.key == 0x400000e0 || event.key == 0x400000e4 ||

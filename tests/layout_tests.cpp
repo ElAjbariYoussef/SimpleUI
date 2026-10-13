@@ -5183,6 +5183,42 @@ void testValidationPseudos() {
     check(on("textarea:valid", *s), "a filled required textarea is valid");
 }
 
+// `:focus-visible` matches the focused element only when it wants visible
+// focus UI: the state flag set on keyboard interaction, or on focusing a
+// control that takes text entry.
+void testFocusVisible() {
+    auto document = parseOrNull(
+        "<sui><body><input id=\"t\" type=\"text\"/><button id=\"b\">go</button>"
+        "<div id=\"d\"></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* t = document->getElementById("t");
+    Element* b = document->getElementById("b");
+    Element* d = document->getElementById("d");
+    check(t && b && d, "focus elements found");
+    if (!t || !b || !d) {
+        return;
+    }
+    const auto sel = [](const char* text) { return sui::CSSParser::parseSelector(text); };
+    sui::PseudoState hidden;
+    hidden.focused = t;
+    hidden.focusVisible = false;
+    sui::PseudoState shown;
+    shown.focused = t;
+    shown.focusVisible = true;
+    check(selectorMatches(sel("input:focus-visible"), *t, &shown),
+          "a flagged focus matches");
+    check(!selectorMatches(sel("input:focus-visible"), *t, &hidden),
+          "an unflagged focus misses");
+    check(!selectorMatches(sel("input:focus-visible"), *t, nullptr),
+          "no state never matches");
+    check(!selectorMatches(sel("button:focus-visible"), *t, &shown),
+          "the flag does not leak across elements");
+    check(!selectorMatches(sel("div:focus-visible"), *d, &shown),
+          "an unfocused element misses");
+}
+
 // Meters and progress bars size like replaced elements (10em by 1em), paint
 // their fill from value/min/max, and never lay out fallback text. Fractions
 // clamp; garbage falls back; colour zones follow low/high/optimum.
@@ -6875,6 +6911,7 @@ int main() {
     testMaskBorder();
     testValidationPseudos();
     testGaugeDefaults();
+    testFocusVisible();
     testBackdropFilter();
     testBackgroundListsAreParallel();
     testBackgroundSizeAndPositionKeywords();
