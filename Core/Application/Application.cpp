@@ -483,8 +483,17 @@ void setChecked(Element& el, bool checked) {
     }
 }
 
-// Clears `checked` from every radio under `root` that shares `name` with
-// `except`. The engine has no form scoping, so the group is document-wide.
+// Every descendant box that can catch a snap, in document order.
+void collectSnapAreas(Element& root, std::vector<Element*>& out) {
+    for (const auto& child : root.children()) {
+        if (!child || child->isTextNode()) {
+            continue;
+        }
+        out.push_back(child.get());
+        collectSnapAreas(*child, out);
+    }
+}
+
 void clearRadioGroup(Element& root, const Element& except, std::string_view name) {
     for (const auto& child : root.children()) {
         if (!child || child->isTextNode()) {
@@ -1910,10 +1919,88 @@ std::vector<std::string> splitOnSemicolons(std::string_view text) {
 // pick for the main loop; a null list means error or cancel, and an empty
 // first path means nothing chosen. The pending input is read under the same
 // lock that the opener writes it with.
+// Settles a scroller on its snap points after a gesture moved it: mandatory
+// always takes the nearest point on each enabled axis, proximity only within
+// half a viewport. Points come from descendants' own `scroll-snap-align`,
+// measured against the content box and clamped to the scroll range.
+void Application::snapScroll(Element& scroller, const ComputedStyle& scrolled,
+                             bool movedX, bool movedY) {
+    using Axis = ComputedStyle::ScrollSnapAxis;
+    using Strict = ComputedStyle::ScrollSnapStrictness;
+    using Align = ComputedStyle::ScrollSnapAlign;
+    if (scrolled.snapAxis == Axis::None || (!movedX && !movedY)) {
+        return;
+    }
+    std::vector<Element*> areas;
+    collectSnapAreas(scroller, areas);
+    const float contentX = scroller.contentX();
+    const float contentY = scroller.contentY();
+    const auto alignX = [&](Element* area) {
+        return resolver_.resolve(*area).snapAlignX;
+    };
+    const auto alignY = [&](Element* area) {
+        return resolver_.resolve(*area).snapAlignY;
+    };
+    const auto settle = [&](bool enabled, float at, float client, float max,
+                            auto alignOf, auto startOf, auto endOf) {
+        if (!enabled || max <= 0.0f) {
+            return at;
+        }
+        float best = at;
+        float bestDist = std::numeric_limits<float>::max();
+        for (Element* area : areas) {
+            const Align align = alignOf(area);
+            if (align == Align::None) {
+                continue;
+            }
+            float point = at;
+            if (align == Align::Start) {
+                point = startOf(area);
+            } else if (align == Align::End) {
+                point = endOf(area);
+            } else {
+                point = (startOf(area) + endOf(area)) * 0.5f;
+            }
+            point = std::min(std::max(point, 0.0f), max);
+            const float dist = std::fabs(point - at);
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = point;
+            }
+        }
+        if (bestDist == std::numeric_limits<float>::max()) {
+            return at;
+        }
+        if (scrolled.snapStrictness == Strict::Mandatory || bestDist <= client * 0.5f) {
+            return best;
+        }
+        return at;
+    };
+    if ((scrolled.snapAxis == Axis::X || scrolled.snapAxis == Axis::Both) && movedX) {
+        const float max = scroller.scrollWidth() - scroller.clientWidth();
+        scroller.setScrollLeft(settle(
+            true, scroller.scrollLeft(), scroller.clientWidth(), max, alignX,
+            [&](Element* area) { return area->layoutX() - contentX; },
+            [&](Element* area) {
+                return area->layoutX() + area->layoutWidth() -
+                       (contentX + scroller.clientWidth());
+            }));
+    }
+    if ((scrolled.snapAxis == Axis::Y || scrolled.snapAxis == Axis::Both) && movedY) {
+        const float max = scroller.scrollHeight() - scroller.clientHeight();
+        scroller.setScrollTop(settle(
+            true, scroller.scrollTop(), scroller.clientHeight(), max, alignY,
+            [&](Element* area) { return area->layoutY() - contentY; },
+            [&](Element* area) {
+                return area->layoutY() + area->layoutHeight() -
+                       (contentY + scroller.clientHeight());
+            }));
+    }
+}
+
 void Application::fileDialogCallback(void* userdata,
                                        const char* const* filelist,
-                                       int filter) {
-    (void)filter;
+                                       int filter) {    (void)filter;
     auto* app = static_cast<Application*>(userdata);
     if (!app || !filelist || !filelist[0] || !filelist[0][0]) {
         return;
@@ -2467,6 +2554,8 @@ void Application::dispatch(const InputEvent& event) {
                     if (scrolled.overflowX != ComputedStyle::Visible) {
                         current->setScrollLeft(current->scrollLeft() + event.dx * pitch);
                     }
+                    // A snap container settles on its points after the notch.
+                    snapScroll(*current, scrolled, event.dx != 0.0f, event.dy != 0.0f);
                     break;
                 }
             }

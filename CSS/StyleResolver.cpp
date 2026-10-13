@@ -4512,6 +4512,81 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         } else if (value == "visible") {
             s.backfaceHidden = false;
         }
+    } else if (property == "scroll-snap-type") {
+        // `none`, or an axis with an optional strictness (proximity when the
+        // strictness is absent). Anything else keeps the previous winner.
+        using Axis = ComputedStyle::ScrollSnapAxis;
+        using Strict = ComputedStyle::ScrollSnapStrictness;
+        std::vector<std::string_view> tokens;
+        for (std::string_view token : splitTokens(value)) {
+            if (!token.empty()) {
+                tokens.push_back(token);
+            }
+        }
+        if (tokens.size() == 1 && tokens[0] == "none") {
+            s.snapAxis = Axis::None;
+        } else if (!tokens.empty() && tokens.size() <= 2) {
+            Axis axis = Axis::None;
+            if (tokens[0] == "x" || tokens[0] == "inline") {
+                axis = Axis::X;
+            } else if (tokens[0] == "y" || tokens[0] == "block") {
+                axis = Axis::Y;
+            } else if (tokens[0] == "both") {
+                axis = Axis::Both;
+            }
+            Strict strict = Strict::Proximity;
+            bool ok = axis != Axis::None;
+            if (tokens.size() == 2) {
+                if (tokens[1] == "mandatory") {
+                    strict = Strict::Mandatory;
+                } else if (tokens[1] == "proximity") {
+                    strict = Strict::Proximity;
+                } else {
+                    ok = false;
+                }
+            }
+            if (ok) {
+                s.snapAxis = axis;
+                s.snapStrictness = strict;
+            }
+        }
+    } else if (property == "scroll-snap-align") {
+        // One value sets both axes; two set block (y) then inline (x).
+        using Align = ComputedStyle::ScrollSnapAlign;
+        const auto word = [](std::string_view token, Align& out) {
+            if (token == "none") {
+                out = Align::None;
+            } else if (token == "start") {
+                out = Align::Start;
+            } else if (token == "end") {
+                out = Align::End;
+            } else if (token == "center") {
+                out = Align::Center;
+            } else {
+                return false;
+            }
+            return true;
+        };
+        std::vector<std::string_view> tokens;
+        for (std::string_view token : splitTokens(value)) {
+            if (!token.empty()) {
+                tokens.push_back(token);
+            }
+        }
+        if (tokens.size() == 1) {
+            Align align = Align::None;
+            if (word(tokens[0], align)) {
+                s.snapAlignX = align;
+                s.snapAlignY = align;
+            }
+        } else if (tokens.size() == 2) {
+            Align vertical = Align::None;
+            Align horizontal = Align::None;
+            if (word(tokens[0], vertical) && word(tokens[1], horizontal)) {
+                s.snapAlignY = vertical;
+                s.snapAlignX = horizontal;
+            }
+        }
     } else if (property == "filter") {
         s.filter = std::string(value);
         s.specified |= ComputedStyle::SpecifiedFilter;

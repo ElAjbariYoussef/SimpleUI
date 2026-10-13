@@ -110,6 +110,9 @@ private:
     // the main thread. See the public applyPickedFile for the testable half.
     void openFileDialog(Element& input);
     void applyPendingFiles();
+    // Settles a scroller on its snap points after a gesture moved it.
+    void snapScroll(Element& scroller, const ComputedStyle& scrolled, bool movedX,
+                    bool movedY);
     // The SDL dialog callback: queues the first pick, never touches the tree.
     static void fileDialogCallback(void* userdata, const char* const* filelist,
                                    int filter);

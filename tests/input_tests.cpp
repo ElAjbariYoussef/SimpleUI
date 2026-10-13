@@ -715,6 +715,71 @@ int main() {
         }
     }
 
+    // Scroll snapping settles a wheel notch on child snap points: mandatory
+    // always takes the nearest, proximity only within half a viewport.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<div id=\"m\" style=\"height:100px;overflow-y:auto;scroll-snap-type:y "
+            "mandatory\">"
+            "<div style=\"height:60px;scroll-snap-align:start\"></div>"
+            "<div style=\"height:60px;scroll-snap-align:start\"></div>"
+            "<div style=\"height:60px;scroll-snap-align:start\"></div>"
+            "</div>"
+            "<div id=\"p\" style=\"height:100px;overflow-y:auto;scroll-snap-type:y "
+            "proximity\">"
+            "<div style=\"height:200px;scroll-snap-align:start\"></div>"
+            "<div style=\"height:200px;scroll-snap-align:start\"></div>"
+            "<div style=\"height:200px;scroll-snap-align:start\"></div>"
+            "</div>"
+            "<div id=\"n\" style=\"height:100px;overflow-y:auto\">"
+            "<div style=\"height:60px\"></div>"
+            "<div style=\"height:60px\"></div>"
+            "<div style=\"height:60px\"></div>"
+            "</div>"
+            "</body></sui>", err);
+        check(doc != nullptr, "snap document parsed");
+        if (doc) {
+            sui::Element* m = doc->getElementById("m");
+            sui::Element* p = doc->getElementById("p");
+            sui::Element* n = doc->getElementById("n");
+            check(m && p && n, "snap elements found");
+            if (m && p && n) {
+                app.setDocument(std::move(doc));
+
+                sui::StyleResolver layoutResolver;
+                sui::LayoutInput input;
+                input.resolver = &layoutResolver;
+                input.viewportWidth = 400.0f;
+                input.viewportHeight = 600.0f;
+                sui::BlockLayout().layout(app.document().root(), input);
+
+                const auto wheel = [&](sui::Element* el, float dx, float dy) {
+                    app.dispatch(sui::InputEvent(sui::InputKind::Wheel,
+                                                 el->layoutX() + 10.0f,
+                                                 el->layoutY() + 10.0f, 0, dx, dy));
+                };
+                // One notch down lands at 40, then snaps to the 60px start.
+                wheel(m, 0.0f, -1.0f);
+                check(m->scrollTop() == 60.0f, "mandatory snap takes the nearest start");
+                // Without a type the notch rests where it lands.
+                wheel(n, 0.0f, -1.0f);
+                check(n->scrollTop() == 40.0f, "no snap type means no snap");
+                // Proximity far from every point rests too: 100 + 40 lands at
+                // 140, sixty from the 200px start.
+                p->setScrollTop(100.0f);
+                wheel(p, 0.0f, -1.0f);
+                check(p->scrollTop() == 140.0f, "proximity skips distant points");
+                // Near one it settles: 165 + 40 lands five from 200.
+                p->setScrollTop(165.0f);
+                wheel(p, 0.0f, -1.0f);
+                check(p->scrollTop() == 200.0f, "proximity takes near points");
+            }
+        }
+    }
+
     // A file input's Browse button asks the OS picker; the pick lands through
     // applyPickedFile, which drops paths for dropped trees and non-controls.
     {

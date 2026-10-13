@@ -5091,6 +5091,59 @@ void testMaskBorder() {
           "a dangling slash drops the shorthand");
 }
 
+// `scroll-snap-type` names axes with an optional strictness (proximity when
+// absent); `scroll-snap-align` sets both axes, or block (y) then inline (x).
+// Anything else keeps the previous cascade winner.
+void testScrollSnap() {
+    const auto rules = sui::CSSParser::parse(R"(
+        .a { scroll-snap-type: y mandatory }
+        .b { scroll-snap-type: x }
+        .c { scroll-snap-type: both proximity }
+        .d { scroll-snap-type: block }
+        .e { scroll-snap-type: none }
+        .f { scroll-snap-type: banana }
+        .g { scroll-snap-type: y sideways }
+        .h { scroll-snap-align: start }
+        .i { scroll-snap-align: center end }
+        .j { scroll-snap-align: banana }
+    )");
+    sui::StyleResolver resolver;
+    resolver.setRules(rules);
+    static const char* kClasses =
+        "<div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div>"
+        "<div class=\"d\"></div><div class=\"e\"></div><div class=\"f\"></div>"
+        "<div class=\"g\"></div><div class=\"h\"></div><div class=\"i\"></div>"
+        "<div class=\"j\"></div>";
+    auto body = parseOrNull((std::string("<sui><body>") + kClasses + "</body></sui>").c_str());
+    if (!body) {
+        return;
+    }
+    const std::vector<ComputedStyle> styles = bodyStyles(*body, resolver);
+    if (styles.size() < 10) {
+        check(false, "snap elements found");
+        return;
+    }
+    using Axis = sui::ComputedStyle::ScrollSnapAxis;
+    using Strict = sui::ComputedStyle::ScrollSnapStrictness;
+    using Align = sui::ComputedStyle::ScrollSnapAlign;
+    check(styles[0].snapAxis == Axis::Y &&
+              styles[0].snapStrictness == Strict::Mandatory,
+          "an axis with mandatory parses");
+    check(styles[1].snapAxis == Axis::X &&
+              styles[1].snapStrictness == Strict::Proximity,
+          "a bare axis defaults to proximity");
+    check(styles[2].snapAxis == Axis::Both, "both axes parse");
+    check(styles[3].snapAxis == Axis::Y, "block maps to the vertical axis");
+    check(styles[4].snapAxis == Axis::None, "none disables");
+    check(styles[5].snapAxis == Axis::None, "garbage keeps none");
+    check(styles[6].snapAxis == Axis::None, "a bad strictness drops the type");
+    check(styles[7].snapAlignX == Align::Start && styles[7].snapAlignY == Align::Start,
+          "one alignment sets both axes");
+    check(styles[8].snapAlignY == Align::Center && styles[8].snapAlignX == Align::End,
+          "two alignments set block then inline");
+    check(styles[9].snapAlignX == Align::None, "a bad alignment drops");
+}
+
 // `border-image` describes a 9-patch like the mask border but paints it:
 // source, slice, width, outset, repeat, and the shorthand. One bad value
 // keeps the previous cascade winner.
@@ -7101,6 +7154,7 @@ int main() {
     testMaskShorthand();
     testMaskBorder();
     testBorderImage();
+    testScrollSnap();
     testValidationPseudos();
     testGaugeDefaults();
     testFocusVisible();

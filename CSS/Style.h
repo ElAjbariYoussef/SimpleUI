@@ -623,6 +623,16 @@ struct ComputedStyle {
     TransformStyle transformStyle = TransformStyle::Flat;
     bool backfaceHidden = false;
 
+    // Scroll snapping: which axes snap and how strictly, plus each child's
+    // alignment within the snapport. `none` disables everywhere.
+    enum class ScrollSnapAxis : std::uint8_t { None, X, Y, Both };
+    ScrollSnapAxis snapAxis = ScrollSnapAxis::None;
+    enum class ScrollSnapStrictness : std::uint8_t { Proximity, Mandatory };
+    ScrollSnapStrictness snapStrictness = ScrollSnapStrictness::Proximity;
+    enum class ScrollSnapAlign : std::uint8_t { None, Start, End, Center };
+    ScrollSnapAlign snapAlignX = ScrollSnapAlign::None;
+    ScrollSnapAlign snapAlignY = ScrollSnapAlign::None;
+
     // Grid track sizing from `grid-template-columns` / `grid-template-rows`. A
     // track is a fixed length, an `fr` share of the leftover space, or `auto`
     // (content-sized). Kept as a list so several tracks can be described; a
