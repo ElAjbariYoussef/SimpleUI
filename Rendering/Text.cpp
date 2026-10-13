@@ -3,6 +3,9 @@
 
 #include <stb/stb_truetype.h>
 
+#include <hb-ot.h>
+#include <hb.h>
+
 #include <SDL3/SDL.h>
 
 #include <algorithm>
@@ -76,6 +79,7 @@ float emScale(const stbtt_fontinfo* info, float size) {
 TextFont::TextFont() = default;
 
 TextFont::~TextFont() {
+    clearHarfBuzz();
     if (font_) {
         delete static_cast<stbtt_fontinfo*>(font_);
         font_ = nullptr;
@@ -83,6 +87,41 @@ TextFont::~TextFont() {
     delete[] fontData_;
     fontData_ = nullptr;
     fontDataSize_ = 0;
+}
+
+void TextFont::clearHarfBuzz() {
+    if (hbFont_) {
+        hb_font_destroy(static_cast<hb_font_t*>(hbFont_));
+        hbFont_ = nullptr;
+    }
+    if (hbFace_) {
+        hb_face_destroy(static_cast<hb_face_t*>(hbFace_));
+        hbFace_ = nullptr;
+    }
+    if (hbBlob_) {
+        hb_blob_destroy(static_cast<hb_blob_t*>(hbBlob_));
+        hbBlob_ = nullptr;
+    }
+}
+
+// The shaper reads the same bytes stb_truetype rasterizes: the blob borrows
+// our copy (kept alive as long), the face parses its OpenType tables, and the
+// OpenType metric funcs answer from those tables, so shaping needs no
+// FreeType and can never disagree with stb about a glyph id.
+void TextFont::initHarfBuzz() {
+    clearHarfBuzz();
+    if (!fontData_ || fontDataSize_ == 0) {
+        return;
+    }
+    hb_blob_t* blob = hb_blob_create(
+        reinterpret_cast<const char*>(fontData_), static_cast<unsigned int>(fontDataSize_),
+        HB_MEMORY_MODE_READONLY, nullptr, nullptr);
+    hb_face_t* face = hb_face_create(blob, 0);
+    hb_font_t* font = hb_font_create(face);
+    hb_ot_font_set_funcs(font);
+    hbBlob_ = blob;
+    hbFace_ = face;
+    hbFont_ = font;
 }
 
 bool TextFont::loadFromFile(const std::string& path) {
@@ -121,6 +160,7 @@ bool TextFont::loadFromMemory(const unsigned char* data, int size) {
     fontData_ = copy.release();
     fontDataSize_ = static_cast<std::size_t>(size);
     cache_.clear();
+    initHarfBuzz();
     return true;
 }
 
@@ -177,6 +217,13 @@ float TextFont::measureText(std::string_view text, float size) const {
     if (!font_ || size <= 0.0f) {
         return 0.0f;
     }
+    if (needsShaping(text) && hbFont_) {
+        float total = 0.0f;
+        for (const ShapedGlyph& glyph : shapeText(text, size)) {
+            total += glyph.advance;
+        }
+        return total;
+    }
     float total = 0.0f;
     std::size_t i = 0;
     while (i < text.size()) {
@@ -184,6 +231,58 @@ float TextFont::measureText(std::string_view text, float size) const {
         total += metrics(cp, size).advance;
     }
     return total;
+}
+
+bool TextFont::needsShaping(std::string_view text) {
+    for (unsigned char c : text) {
+        if (c >= 0x80) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::size_t TextFont::glyphCount(std::string_view text) const {
+    if (needsShaping(text) && hbFont_) {
+        return shapeText(text, 16.0f).size();
+    }
+    std::size_t count = 0;
+    for (unsigned char c : text) {
+        if ((c & 0xC0) != 0x80) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+std::vector<ShapedGlyph> TextFont::shapeText(std::string_view text, float size) const {
+    std::vector<ShapedGlyph> out;
+    if (!hbFont_ || text.empty() || size <= 0.0f) {
+        return out;
+    }
+    hb_font_t* font = static_cast<hb_font_t*>(hbFont_);
+    // 26.6 fixed point: advances come back in px after one divide.
+    const int scaled = static_cast<int>(size * 64.0f);
+    hb_font_set_scale(font, scaled, scaled);
+    hb_buffer_t* buffer = hb_buffer_create();
+    hb_buffer_add_utf8(buffer, text.data(), static_cast<int>(text.size()), 0,
+                       static_cast<int>(text.size()));
+    hb_buffer_guess_segment_properties(buffer);
+    hb_shape(font, buffer, nullptr, 0);
+    unsigned int count = 0;
+    const hb_glyph_info_t* infos = hb_buffer_get_glyph_infos(buffer, &count);
+    const hb_glyph_position_t* positions = hb_buffer_get_glyph_positions(buffer, &count);
+    for (unsigned int i = 0; i < count; ++i) {
+        ShapedGlyph glyph;
+        glyph.glyph = infos[i].codepoint;
+        glyph.cluster = infos[i].cluster;
+        glyph.advance = static_cast<float>(positions[i].x_advance) / 64.0f;
+        glyph.xOffset = static_cast<float>(positions[i].x_offset) / 64.0f;
+        glyph.yOffset = static_cast<float>(positions[i].y_offset) / 64.0f;
+        out.push_back(glyph);
+    }
+    hb_buffer_destroy(buffer);
+    return out;
 }
 
 SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
@@ -238,8 +337,49 @@ SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
     };
 
     float penX = 0.0f;
-    std::size_t i = 0;
-    while (i < text.size()) {
+    const bool shaped = needsShaping(text) && hbFont_;
+    const std::vector<ShapedGlyph> glyphs =
+        shaped ? shapeText(text, size) : std::vector<ShapedGlyph>{};
+    if (shaped && !glyphs.empty()) {
+        // Shaped blit: glyph ids with advances and mark offsets from the
+        // shaper, rasterized by stb from the same font bytes.
+        for (const ShapedGlyph& glyph : glyphs) {
+            int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+            stbtt_GetGlyphBitmapBox(info, static_cast<int>(glyph.glyph), scale, scale,
+                                    &x0, &y0, &x1, &y1);
+            const int gw = x1 - x0;
+            const int gh = y1 - y0;
+            if (gw > 0 && gh > 0) {
+                std::vector<unsigned char> bmp(static_cast<std::size_t>(gw) *
+                                               static_cast<std::size_t>(gh));
+                stbtt_MakeGlyphBitmap(info, bmp.data(), gw, gh, gw, scale, scale,
+                                       static_cast<int>(glyph.glyph));
+                for (int gy = 0; gy < gh; ++gy) {
+                    const int destY = ascentPx + y0 + gy -
+                                      static_cast<int>(std::lround(glyph.yOffset));
+                    const float above = static_cast<float>(-(y0 + gy));
+                    const int shear =
+                        italic ? static_cast<int>(std::lround(kItalicSlant * above)) : 0;
+                    for (int gx = 0; gx < gw; ++gx) {
+                        const unsigned char a = bmp[static_cast<std::size_t>(gy) * gw + gx];
+                        if (a == 0) {
+                            continue;
+                        }
+                        const int px = italicLeft +
+                                       static_cast<int>(std::floor(penX + glyph.xOffset)) +
+                                       x0 + gx + shear;
+                        put(px, destY, a);
+                        if (bold) {
+                            put(px + 1, destY, a);
+                        }
+                    }
+                }
+            }
+            penX += glyph.advance;
+        }
+    } else {
+        std::size_t i = 0;
+        while (i < text.size()) {
         const unsigned int cp = decodeUtf8(text, i);
         const GlyphMetrics gm = metrics(cp, size);
         const int x0 = gm.x0;
@@ -269,6 +409,7 @@ SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
             }
         }
         penX += gm.advance;
+        }
     }
 
     SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, surf);

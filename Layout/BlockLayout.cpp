@@ -123,6 +123,8 @@ float textWidth(const TextFont* font, const ComputedStyle& s, std::string_view t
     }
     if (font && font->hasFont() && s.fontSize > 0.0f) {
         w = font->measureText(tt, s.fontSize);
+        // Letter-spacing applies per rendered glyph: ligatures render fewer.
+        glyphCount = font->glyphCount(tt);
     } else {
         w = static_cast<float>(glyphCount) * s.fontSize * 0.5f;
     }

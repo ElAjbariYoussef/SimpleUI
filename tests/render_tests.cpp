@@ -776,6 +776,48 @@ void testMaskBorder() {
     }
 }
 
+// HarfBuzz shaping: ligatures fuse codepoints into single glyphs, marks ride
+// with zero advance, and clusters map glyphs back to source bytes. ASCII
+// stays on the fast path; anything past it shapes. Needs a real font, so the
+// suite skips quietly when DejaVu is absent.
+void testShaping() {
+    check(!sui::TextFont::needsShaping("hello"), "ascii stays on the fast path");
+    check(sui::TextFont::needsShaping("fi\xCC\x81"), "a mark needs shaping");
+    sui::TextFont font;
+    if (!font.loadFromFile("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")) {
+        std::printf("(skipping shaping: no DejaVu Sans)\n");
+        return;
+    }
+    const std::vector<sui::ShapedGlyph> fi = font.shapeText("fi", 16.0f);
+    check(fi.size() == 1, "fi fuses into one ligature");
+    if (!fi.empty()) {
+        check(fi[0].cluster == 0, "a ligature clusters at its first byte");
+        check(fi[0].advance > 0.0f, "a ligature advances");
+    }
+    // Lam plus alef fuses the same way (U+0644 U+0627).
+    const std::vector<sui::ShapedGlyph> lamAlef =
+        font.shapeText("\xD9\x84\xD8\xA7", 16.0f);
+    check(lamAlef.size() == 1, "lam-alef fuses into one glyph");
+    // A base plus a combining mark that never precomposes stays two glyphs,
+    // the mark spaceless (U+0332 combining low line).
+    const std::vector<sui::ShapedGlyph> marked = font.shapeText("e\xCC\xB2", 16.0f);
+    check(marked.size() == 2, "a mark does not fuse with its base");
+    if (marked.size() == 2) {
+        check(marked[1].advance == 0.0f, "a mark takes no advance");
+        check(marked[1].cluster == 0, "a mark clusters with its base");
+    }
+    // Measurement matches the shaped advances, and counts rendered glyphs.
+    float shaped = 0.0f;
+    for (const auto& glyph : lamAlef) {
+        shaped += glyph.advance;
+    }
+    check(font.measureText("\xD9\x84\xD8\xA7", 16.0f) == shaped,
+          "measurement matches the shaped advances");
+    check(font.glyphCount("fi") == 2, "ascii counts codepoints");
+    check(font.glyphCount("\xD9\x84\xD8\xA7") == lamAlef.size(),
+          "shaped text counts glyphs");
+}
+
 // The CPU box blur `filter: blur()` hands the executor. The kernel averages a
 // 2r+1 window with the border pixels replicating, so these values are exact
 // hand-checkable fractions of 255 across a 5x5 image with an opaque red block
@@ -1042,6 +1084,7 @@ int main() {
     testMaskLayers();
     testMaskGeometry();
     testMaskBorder();
+    testShaping();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }
