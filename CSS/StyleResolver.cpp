@@ -3968,6 +3968,52 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         if (ok && !ops.empty()) {
             s.maskComposites = std::move(ops);
         }
+    } else if (property == "mask-size" || property == "-webkit-mask-size" ||
+               property == "mask-position" || property == "-webkit-mask-position" ||
+               property == "mask-repeat" || property == "-webkit-mask-repeat" ||
+               property == "mask-origin" || property == "-webkit-mask-origin" ||
+               property == "mask-clip" || property == "-webkit-mask-clip") {
+        // Parallel lists matched to the image layers by position, like the
+        // background longhands: an entry that does not parse becomes the
+        // initial value so later layers stay lined up with their images.
+        const bool isSize = property == "mask-size" || property == "-webkit-mask-size";
+        const bool isPosition =
+            property == "mask-position" || property == "-webkit-mask-position";
+        const bool isRepeat =
+            property == "mask-repeat" || property == "-webkit-mask-repeat";
+        const bool isOrigin =
+            property == "mask-origin" || property == "-webkit-mask-origin";
+        for (std::string_view entry : splitTopLevel(value)) {
+            if (isSize) {
+                ComputedStyle::BackgroundSize size;
+                if (!parseBackgroundSize(entry, size)) {
+                    size = ComputedStyle::BackgroundSize{};
+                }
+                s.maskSizes.push_back(size);
+            } else if (isPosition) {
+                ComputedStyle::BackgroundPosition position;
+                if (!parsePositionPair(entry, position)) {
+                    position = ComputedStyle::BackgroundPosition{};
+                }
+                s.maskPositions.push_back(position);
+            } else if (isRepeat) {
+                ComputedStyle::RepeatPair repeat;
+                if (!parseRepeatValue(entry, repeat)) {
+                    repeat = ComputedStyle::RepeatPair{};
+                }
+                s.maskRepeats.push_back(repeat);
+            } else {
+                ComputedStyle::BackgroundBox box = ComputedStyle::BackgroundBorderBox;
+                if (!parseBackgroundBox(entry, box)) {
+                    box = ComputedStyle::BackgroundBorderBox;
+                }
+                if (isOrigin) {
+                    s.maskOrigins.push_back(box);
+                } else {
+                    s.maskClips.push_back(box);
+                }
+            }
+        }
     } else if (property == "clip-path") {
         // Shapes clip the element and its subtree; anything else keeps the
         // previous cascade winner, like any failed parse.

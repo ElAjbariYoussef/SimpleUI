@@ -398,6 +398,7 @@ void testMaskLayers() {
     using Mode = sui::ComputedStyle::MaskMode;
     using Composite = sui::ComputedStyle::MaskComposite;
     const SDL_FRect dest{0.0f, 0.0f, 2.0f, 2.0f};
+    const sui::BackgroundBoxes boxes{dest, dest, dest};
     sui::DecodedImage white{1, 1, {255, 255, 255, 255}};
     sui::DecodedImage black{1, 1, {0, 0, 0, 255}};
     sui::DecodedImage whiteClear{1, 1, {255, 255, 255, 0}};
@@ -418,8 +419,8 @@ void testMaskLayers() {
         for (int i = 0; i < 4; ++i) {
             pixels[4 * i + 3] = 200;
         }
-        sui::applyMaskLayers(pixels.data(), 2, 2, {urlLayer("m.png")}, modes, {},
-                             dest, 16.0f, 16.0f, fetchFor(img));
+        sui::applyMaskLayers(pixels.data(), 2, 2, {urlLayer("m.png")}, modes, {}, {}, {},
+                             {}, {}, {}, boxes, 16.0f, 16.0f, fetchFor(img));
         return alphaOf(pixels);
     };
 
@@ -449,7 +450,8 @@ void testMaskLayers() {
             return found == byHref.end() ? nullptr : found->second;
         }};
         sui::applyMaskLayers(pixels.data(), 2, 2, {urlLayer("a.png"), urlLayer("b.png")},
-                             {}, {op}, dest, 16.0f, 16.0f, std::move(fetch));
+                             {}, {op}, {}, {}, {}, {}, {}, boxes, 16.0f, 16.0f,
+                             std::move(fetch));
         return alphaOf(pixels);
     };
     check(compositeOf(&white, &black, Composite::Add) == 200, "add unions");
@@ -462,6 +464,109 @@ void testMaskLayers() {
     check(compositeOf(&white, &black, Composite::Exclude) == 200, "exclude xors");
     check(compositeOf(&white, &white, Composite::Exclude) == 0,
           "exclude drops twice-kept");
+}
+
+// Each mask layer paints into its own sized/placed destination: `mask-size`
+// shrinks it, `mask-position` moves it within the origin box, `mask-repeat`
+// tiles it, and `mask-clip` cuts it. Outside the painted area the mask is
+// transparent. A 1px white url on a 2px box makes every case exact.
+void testMaskGeometry() {
+    using Mask = sui::ComputedStyle::MaskImage;
+    using Size = sui::ComputedStyle::BackgroundSize;
+    using Position = sui::ComputedStyle::BackgroundPosition;
+    using Repeat = sui::ComputedStyle::RepeatPair;
+    using Box = sui::ComputedStyle::BackgroundBox;
+    const SDL_FRect area{0.0f, 0.0f, 2.0f, 2.0f};
+    const sui::BackgroundBoxes boxes{area, area, area};
+    sui::DecodedImage white{1, 1, {255, 255, 255, 255}};
+    sui::FetchMaskBytes fetch{[&](std::string_view)
+                                  -> const sui::DecodedImage* { return &white; }};
+    auto urlLayer = []() {
+        Mask layer;
+        layer.kind = Mask::Kind::Url;
+        layer.href = "m.png";
+        return layer;
+    };
+    const auto pxSize = [](float w, float h) {
+        Size size;
+        size.mode = Size::Explicit;
+        size.width = sui::Length(w);
+        size.height = sui::Length(h);
+        return size;
+    };
+    const auto alphasOf = [&](const std::vector<Size>& sizes,
+                              const std::vector<Position>& positions,
+                              const std::vector<Repeat>& repeats,
+                              const std::vector<Box>& origins,
+                              const std::vector<Box>& clips,
+                              const sui::BackgroundBoxes& useBoxes) {
+        std::vector<std::uint8_t> pixels(16, 0);
+        for (int i = 0; i < 4; ++i) {
+            pixels[4 * i + 3] = 200;
+        }
+        sui::applyMaskLayers(pixels.data(), 2, 2, {urlLayer()}, {}, {}, sizes,
+                             positions, repeats, origins, clips, useBoxes, 16.0f,
+                             16.0f, fetch);
+        return std::array<std::uint8_t, 4>{pixels[3], pixels[7], pixels[11],
+                                           pixels[15]};
+    };
+    const Repeat noRepeat{false, false};
+    const Repeat repeatX{true, false};
+    const Repeat tile{true, true};
+    const Position topLeft{Position::Start, Position::Start};
+    const Position bottomRight{Position::End, Position::End};
+
+    // A 1px tile on a 2px box covers everything; no-repeat keeps only its cell.
+    check(alphasOf({}, {}, {}, {}, {}, boxes) ==
+              std::array<std::uint8_t, 4>{200, 200, 200, 200},
+          "a default tile covers the box");
+    check(alphasOf({pxSize(1.0f, 1.0f)}, {topLeft}, {tile}, {}, {}, boxes) ==
+              std::array<std::uint8_t, 4>{200, 200, 200, 200},
+          "an explicit tile covers the box");
+    check(alphasOf({pxSize(1.0f, 1.0f)}, {topLeft}, {noRepeat}, {}, {}, boxes) ==
+              std::array<std::uint8_t, 4>{200, 0, 0, 0},
+          "no-repeat keeps only its own cell");
+    // Repeat-x tiles the top row and drops the bottom one.
+    check(alphasOf({pxSize(1.0f, 1.0f)}, {topLeft}, {repeatX}, {}, {}, boxes) ==
+              std::array<std::uint8_t, 4>{200, 200, 0, 0},
+          "repeat-x tiles one row");
+    // An end position moves the cell to the bottom-right corner.
+    check(alphasOf({pxSize(1.0f, 1.0f)}, {bottomRight}, {noRepeat}, {}, {}, boxes) ==
+              std::array<std::uint8_t, 4>{0, 0, 0, 200},
+          "an end position moves the cell");
+    // A 1px clip box keeps only the pixel it covers.
+    const sui::BackgroundBoxes clipped{area, area, SDL_FRect{1.0f, 1.0f, 1.0f, 1.0f}};
+    check(alphasOf({}, {}, {}, {}, {Box::BackgroundContentBox}, clipped) ==
+              std::array<std::uint8_t, 4>{0, 0, 0, 200},
+          "the clip box cuts the mask");
+    // A padded origin measures the end position from the padding box instead.
+    const sui::BackgroundBoxes padded{area, SDL_FRect{0.5f, 0.5f, 1.0f, 1.0f}, area};
+    check(alphasOf({pxSize(1.0f, 1.0f)}, {bottomRight}, {noRepeat},
+                   {Box::BackgroundPaddingBox}, {}, padded) ==
+              std::array<std::uint8_t, 4>{200, 0, 0, 0},
+          "the origin box anchors the position");
+
+    // A solid gradient honours the same destination: a 1px-wide slice keeps
+    // only its own column.
+    Mask solid;
+    solid.kind = Mask::Kind::LinearGradient;
+    solid.linear.angle = 90.0f;
+    solid.linear.stops = {sui::ComputedStyle::GradientStop{
+                              sui::Length(sui::Length::Percent, 0.0f),
+                              SDL_Color{0, 0, 0, 255}},
+                          sui::ComputedStyle::GradientStop{
+                              sui::Length(sui::Length::Percent, 100.0f),
+                              SDL_Color{0, 0, 0, 255}}};
+    std::vector<std::uint8_t> pixels(16, 0);
+    for (int i = 0; i < 4; ++i) {
+        pixels[4 * i + 3] = 200;
+    }
+    sui::applyMaskLayers(pixels.data(), 2, 2, {solid}, {}, {}, {pxSize(1.0f, 2.0f)},
+                         {topLeft}, {noRepeat}, {}, {}, boxes, 16.0f, 16.0f,
+                         sui::FetchMaskBytes{});
+    check(std::array<std::uint8_t, 4>{pixels[3], pixels[7], pixels[11], pixels[15]} ==
+              std::array<std::uint8_t, 4>{200, 0, 200, 0},
+          "a sized gradient keeps only its slice");
 }
 
 // The CPU box blur `filter: blur()` hands the executor. The kernel averages a
@@ -728,6 +833,7 @@ int main() {
     testConicalPosition();
     testMaskImage();
     testMaskLayers();
+    testMaskGeometry();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

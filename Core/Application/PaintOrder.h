@@ -52,10 +52,16 @@ struct PaintItem {
     ResolvedClip clipShape;
     // Mask layers in the same window coordinates as the box: image specs ride
     // along untouched (gradients and urls alike); the executor evaluates them
-    // against the surface. Empty unless a mask applies.
+    // against the surface. Empty unless a mask applies. Geometry lists ride
+    // too, matched by position at apply time.
     std::vector<ComputedStyle::MaskImage> maskImages;
     std::vector<ComputedStyle::MaskMode> maskModes;
     std::vector<ComputedStyle::MaskComposite> maskComposites;
+    std::vector<ComputedStyle::BackgroundSize> maskSizes;
+    std::vector<ComputedStyle::BackgroundPosition> maskPositions;
+    std::vector<ComputedStyle::RepeatPair> maskRepeats;
+    std::vector<ComputedStyle::BackgroundBox> maskOrigins;
+    std::vector<ComputedStyle::BackgroundBox> maskClips;
     // Scroll offsets accumulated from clipping ancestors. Content moves up and
     // left by them, so this element's box is drawn at layout minus the offset;
     // its own scroll only shifts what is inside it.

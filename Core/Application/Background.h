@@ -37,21 +37,30 @@ void paintBackground(const ComputedStyle& style, const BackgroundBoxes& boxes, f
                      float rootFontSize, float opacity, Renderer& renderer, ImageCache& images,
                      const Radii& borderRadii);
 
-// Multiplies surface alpha by `mask-image` layers stretched over
-// `destination` (already in surface coordinates). Pure pixels and math: no
-// device, so tests drive it directly. Layers combine through `mask-composite`
-// (`add` unions, `subtract` cuts, `intersect` multiplies, `exclude` xors),
-// each read through its `mask-mode` (`alpha`, `luminance`, or `match-source`
-// which is alpha for gradients and luminance for urls). Shorter mode and
-// composite lists repeat their last entry; a missing fetcher leaves url()
-// layers transparent.
+// Multiplies surface alpha by `mask-image` layers painted into `boxes`
+// (already in surface coordinates). Pure pixels and math: no device, so tests
+// drive it directly. Each layer is sized by `mask-size`, placed by
+// `mask-position` within its `mask-origin` box, tiled by `mask-repeat`, and
+// clipped to its `mask-clip` box; outside a layer's painted area the mask is
+// transparent. Layers combine through `mask-composite` (`add` unions,
+// `subtract` cuts, `intersect` multiplies, `exclude` xors), each read through
+// its `mask-mode` (`alpha`, `luminance`, or `match-source` which is alpha for
+// gradients and luminance for urls). Shorter mode, composite, and geometry
+// lists repeat their last entry; an empty geometry list is the initial value
+// (`auto` size, top-left, tiling repeat, border boxes). A missing fetcher
+// leaves url() layers transparent.
 using FetchMaskBytes =
     std::function<const DecodedImage*(std::string_view href)>;
 void applyMaskLayers(std::uint8_t* pixels, int width, int height,
                      const std::vector<ComputedStyle::MaskImage>& layers,
                      const std::vector<ComputedStyle::MaskMode>& modes,
                      const std::vector<ComputedStyle::MaskComposite>& composites,
-                     const SDL_FRect& destination, float fontSize, float rootFontSize,
+                     const std::vector<ComputedStyle::BackgroundSize>& sizes,
+                     const std::vector<ComputedStyle::BackgroundPosition>& positions,
+                     const std::vector<ComputedStyle::RepeatPair>& repeats,
+                     const std::vector<ComputedStyle::BackgroundBox>& origins,
+                     const std::vector<ComputedStyle::BackgroundBox>& clips,
+                     const BackgroundBoxes& boxes, float fontSize, float rootFontSize,
                      FetchMaskBytes fetch);
 
 // Single-layer form, kept for the gradient tests: url() layers need a fetcher

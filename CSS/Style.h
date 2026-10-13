@@ -422,9 +422,11 @@ struct ComputedStyle {
     };
     std::vector<BackgroundSize> backgroundSizes;
 
-    // A single `mask-image` layer. Gradients apply as an alpha mask stretched
-    // over the border box; `url()` sources sample decoded bytes the same way.
-    // Layers combine through `mask-composite` (see below).
+    // A single `mask-image` layer. Gradients and `url()` sources paint into a
+    // per-layer destination sized by `mask-size`, placed by `mask-position`
+    // within its `mask-origin` box, and tiled by `mask-repeat`; the layer is
+    // clipped to its `mask-clip` box. Layers combine through `mask-composite`
+    // (see below).
     struct MaskImage {
         enum class Kind : std::uint8_t { None, LinearGradient, RadialGradient, ConicalGradient, Url };
         Kind kind = Kind::None;
@@ -433,7 +435,10 @@ struct ComputedStyle {
         ConicalGradient conical;
         std::string href;
     };
-    // One entry per mask layer; shorter lists repeat their last entry.
+    // One entry per mask layer; shorter lists repeat their last entry. The
+    // geometry lists reuse the background types (declared below): an unauthored
+    // size is `auto`, position starts top-left, repeat tiles, and both boxes
+    // are the border box.
     enum class MaskMode : std::uint8_t { MatchSource, Alpha, Luminance };
     enum class MaskComposite : std::uint8_t { Add, Subtract, Intersect, Exclude };
     std::vector<MaskImage> maskImages;
@@ -473,6 +478,16 @@ struct ComputedStyle {
     enum BackgroundAttachment : std::uint8_t { BackgroundScroll, BackgroundFixed,
                                                 BackgroundLocal };
     std::vector<BackgroundAttachment> backgroundAttachments;
+
+    // Per-layer mask geometry, reusing the background types above. An
+    // unauthored size is `auto` (intrinsic size, whole box for gradients),
+    // position starts top-left, repeat tiles both axes, and both boxes are the
+    // border box. Shorter lists repeat their last entry, like the background.
+    std::vector<BackgroundSize> maskSizes;
+    std::vector<BackgroundPosition> maskPositions;
+    std::vector<RepeatPair> maskRepeats;
+    std::vector<BackgroundBox> maskOrigins;
+    std::vector<BackgroundBox> maskClips;
 
     // Typography
     float fontSize = 16.0f;  // px

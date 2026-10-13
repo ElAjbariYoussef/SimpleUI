@@ -4823,6 +4823,88 @@ void testMaskModeComposite() {
     check(styles[6].maskComposites.empty(), "a bad composite keeps no ops");
 }
 
+// `mask-size`/`mask-position`/`mask-repeat`/`mask-origin`/`mask-clip` are
+// parallel comma lists reusing the background types: a bad entry falls back to
+// the initial value so later layers stay lined up with their images.
+void testMaskGeometry() {
+    const auto rules = sui::CSSParser::parse(R"(
+        .a { mask-size: 10px 20px }
+        .b { mask-size: cover }
+        .c { mask-size: 50% }
+        .d { mask-position: right bottom }
+        .e { mask-position: center }
+        .f { mask-repeat: no-repeat }
+        .g { mask-repeat: repeat-x }
+        .h { mask-origin: padding-box }
+        .i { mask-clip: content-box }
+        .j { mask-size: banana }
+        .k { mask-size: 10px, 20px }
+        .l { -webkit-mask-size: 5px }
+    )");
+    sui::StyleResolver resolver;
+    resolver.setRules(rules);
+    static const char* kClasses =
+        "<div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div>"
+        "<div class=\"d\"></div><div class=\"e\"></div><div class=\"f\"></div>"
+        "<div class=\"g\"></div><div class=\"h\"></div><div class=\"i\"></div>"
+        "<div class=\"j\"></div><div class=\"k\"></div><div class=\"l\"></div>";
+    auto body = parseOrNull((std::string("<sui><body>") + kClasses + "</body></sui>").c_str());
+    if (!body) {
+        return;
+    }
+    const std::vector<ComputedStyle> styles = bodyStyles(*body, resolver);
+    if (styles.size() < 12) {
+        check(false, "mask geometry elements found");
+        return;
+    }
+    using Size = sui::ComputedStyle::BackgroundSize;
+    using Position = sui::ComputedStyle::BackgroundPosition;
+    check(styles[0].maskSizes.size() == 1 &&
+              styles[0].maskSizes[0].mode == Size::Explicit &&
+              styles[0].maskSizes[0].width.value == 10.0f &&
+              styles[0].maskSizes[0].height.value == 20.0f,
+          "an explicit size parses both axes");
+    check(styles[1].maskSizes.size() == 1 &&
+              styles[1].maskSizes[0].mode == Size::Cover,
+          "cover parses");
+    check(styles[2].maskSizes.size() == 1 &&
+              styles[2].maskSizes[0].mode == Size::Explicit &&
+              styles[2].maskSizes[0].width.unit == sui::Length::Percent &&
+              styles[2].maskSizes[0].height.unit == sui::Length::Auto,
+          "a lone size leaves the other axis auto");
+    check(styles[3].maskPositions.size() == 1 &&
+              styles[3].maskPositions[0].horizontal == Position::End &&
+              styles[3].maskPositions[0].vertical == Position::End,
+          "edge keywords parse");
+    check(styles[4].maskPositions.size() == 1 &&
+              styles[4].maskPositions[0].horizontal == Position::Center &&
+              styles[4].maskPositions[0].vertical == Position::Center,
+          "a lone center means both axes");
+    check(styles[5].maskRepeats.size() == 1 && !styles[5].maskRepeats[0].x &&
+              !styles[5].maskRepeats[0].y,
+          "no-repeat parses");
+    check(styles[6].maskRepeats.size() == 1 && styles[6].maskRepeats[0].x &&
+              !styles[6].maskRepeats[0].y,
+          "repeat-x parses");
+    check(styles[7].maskOrigins.size() == 1 &&
+              styles[7].maskOrigins[0] == sui::ComputedStyle::BackgroundPaddingBox,
+          "an origin box parses");
+    check(styles[8].maskClips.size() == 1 &&
+              styles[8].maskClips[0] == sui::ComputedStyle::BackgroundContentBox,
+          "a clip box parses");
+    check(styles[9].maskSizes.size() == 1 &&
+              styles[9].maskSizes[0].mode == Size::Explicit &&
+              styles[9].maskSizes[0].width.unit == sui::Length::Auto,
+          "a bad size falls back to auto axes");
+    check(styles[10].maskSizes.size() == 2 &&
+              styles[10].maskSizes[0].width.value == 10.0f &&
+              styles[10].maskSizes[1].width.value == 20.0f,
+          "a size list parses in order");
+    check(styles[11].maskSizes.size() == 1 &&
+              styles[11].maskSizes[0].width.value == 5.0f,
+          "the webkit size prefix parses alike");
+}
+
 void testBackdropFilter() {
     auto document = parseOrNull("<sui><body><div id=\"x\">hi</div></body></sui>");
     if (!document) {
@@ -6418,6 +6500,7 @@ int main() {
     testConicalGradientParsing();
     testMaskImage();
     testMaskModeComposite();
+    testMaskGeometry();
     testBackdropFilter();
     testBackgroundListsAreParallel();
     testBackgroundSizeAndPositionKeywords();

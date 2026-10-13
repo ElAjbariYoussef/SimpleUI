@@ -361,6 +361,22 @@ Repeat repeatOf(const ComputedStyle::RepeatPair& pair) {
     return Repeat::No;
 }
 
+// Maps p into [lo, lo + extent) for a tiling mask axis, so a repeated layer
+// samples its tile wherever the point lands.
+float wrapAxis(float p, float lo, float extent) {
+    float rel = std::fmod(p - lo, extent);
+    if (rel < 0.0f) {
+        rel += extent;
+    }
+    return lo + rel;
+}
+
+// Whether a surface point lands inside a rect, right/bottom-exclusive like the
+// hit test, so a layer edge never bleeds into the next pixel.
+bool insideBox(float px, float py, const SDL_FRect& box) {
+    return px >= box.x && px < box.x + box.w && py >= box.y && py < box.y + box.h;
+}
+
 }  // namespace
 
 void paintBackground(const ComputedStyle& style, const BackgroundBoxes& boxes, float fontSize,
@@ -506,8 +522,10 @@ void paintBackground(const ComputedStyle& style, const BackgroundBoxes& boxes, f
 void applyMaskImage(std::uint8_t* pixels, int width, int height,
                     const ComputedStyle::MaskImage& mask, const SDL_FRect& destination,
                     float fontSize, float rootFontSize) {
+    const BackgroundBoxes boxes{destination, destination, destination};
     applyMaskLayers(pixels, width, height, std::vector<ComputedStyle::MaskImage>{mask}, {},
-                    {}, destination, fontSize, rootFontSize, FetchMaskBytes{});
+                    {}, {}, {}, {}, {}, {}, boxes, fontSize, rootFontSize,
+                    FetchMaskBytes{});
 }
 
 // Bilinear sample of decoded RGBA bytes at uv in [0,1]; edges clamp, so a
@@ -546,28 +564,47 @@ void applyMaskLayers(std::uint8_t* pixels, int width, int height,
                      const std::vector<ComputedStyle::MaskImage>& layers,
                      const std::vector<ComputedStyle::MaskMode>& modes,
                      const std::vector<ComputedStyle::MaskComposite>& composites,
-                     const SDL_FRect& destination, float fontSize, float rootFontSize,
+                     const std::vector<ComputedStyle::BackgroundSize>& sizes,
+                     const std::vector<ComputedStyle::BackgroundPosition>& positions,
+                     const std::vector<ComputedStyle::RepeatPair>& repeats,
+                     const std::vector<ComputedStyle::BackgroundBox>& origins,
+                     const std::vector<ComputedStyle::BackgroundBox>& clips,
+                     const BackgroundBoxes& boxes, float fontSize, float rootFontSize,
                      FetchMaskBytes fetch) {
     using Mask = ComputedStyle::MaskImage;
     using Mode = ComputedStyle::MaskMode;
     using Composite = ComputedStyle::MaskComposite;
-    if (!pixels || width <= 0 || height <= 0 || destination.w <= 0.0f ||
-        destination.h <= 0.0f || layers.empty()) {
+    if (!pixels || width <= 0 || height <= 0 || boxes.border.w <= 0.0f ||
+        boxes.border.h <= 0.0f || layers.empty()) {
         return;
     }
-    // Resolve each layer once: gradient shaders, decoded url bytes.
+    // Resolve each layer once: its sized/placed destination, clip box, tiling
+    // axes, gradient shader, and decoded url bytes.
     struct ResolvedLayer {
         Shader shader;
         bool hasShader = false;
         const DecodedImage* image = nullptr;
+        SDL_FRect dest{0.0f, 0.0f, 0.0f, 0.0f};
+        SDL_FRect clip{0.0f, 0.0f, 0.0f, 0.0f};
+        bool tileX = true;
+        bool tileY = true;
     };
     std::vector<ResolvedLayer> resolved;
     resolved.reserve(layers.size());
-    for (const auto& layer : layers) {
+    for (std::size_t i = 0; i < layers.size(); ++i) {
+        const auto& layer = layers[i];
         ResolvedLayer entry;
+        const SDL_FRect originBox = boxOf(boxes, listAt(origins, i));
+        entry.clip = boxOf(boxes, listAt(clips, i));
+        const ComputedStyle::RepeatPair repeat = listAt(repeats, i);
+        entry.tileX = repeat.x;
+        entry.tileY = repeat.y;
         if (layer.kind == Mask::Kind::LinearGradient) {
+            entry.dest =
+                placeLayer(listAt(sizes, i), listAt(positions, i), originBox,
+                           entry.clip.w, entry.clip.h, true, fontSize, rootFontSize);
             LinearGradient gradient;
-            const float lineLength = gradientLine(layer.linear.angle, destination, gradient);
+            const float lineLength = gradientLine(layer.linear.angle, entry.dest, gradient);
             gradient.stops = toGradientStops(layer.linear.stops, lineLength, fontSize,
                                              rootFontSize, 1.0f);
             if (!gradient.stops.empty()) {
@@ -575,8 +612,11 @@ void applyMaskLayers(std::uint8_t* pixels, int width, int height,
                 entry.hasShader = true;
             }
         } else if (layer.kind == Mask::Kind::RadialGradient) {
+            entry.dest =
+                placeLayer(listAt(sizes, i), listAt(positions, i), originBox,
+                           entry.clip.w, entry.clip.h, true, fontSize, rootFontSize);
             RadialGradient gradient;
-            radialRadii(layer.radial, destination, fontSize, rootFontSize, gradient);
+            radialRadii(layer.radial, entry.dest, fontSize, rootFontSize, gradient);
             gradient.stops = toGradientStops(
                 layer.radial.stops, std::max(gradient.radiusX, gradient.radiusY), fontSize,
                 rootFontSize, 1.0f);
@@ -585,15 +625,18 @@ void applyMaskLayers(std::uint8_t* pixels, int width, int height,
                 entry.hasShader = true;
             }
         } else if (layer.kind == Mask::Kind::ConicalGradient) {
+            entry.dest =
+                placeLayer(listAt(sizes, i), listAt(positions, i), originBox,
+                           entry.clip.w, entry.clip.h, true, fontSize, rootFontSize);
             ConicalGradient gradient;
             gradient.cx =
-                layer.conical.centreX.resolve(destination.w, fontSize, rootFontSize) +
-                destination.x;
+                layer.conical.centreX.resolve(entry.dest.w, fontSize, rootFontSize) +
+                entry.dest.x;
             gradient.cy =
-                layer.conical.centreY.resolve(destination.h, fontSize, rootFontSize) +
-                destination.y;
+                layer.conical.centreY.resolve(entry.dest.h, fontSize, rootFontSize) +
+                entry.dest.y;
             gradient.fromAngle = layer.conical.angle;
-            gradient.radius = std::max(destination.w, destination.h) * 0.5f;
+            gradient.radius = std::max(entry.dest.w, entry.dest.h) * 0.5f;
             gradient.stops = toGradientStops(layer.conical.stops, 1.0f, fontSize,
                                              rootFontSize, 1.0f);
             if (!gradient.stops.empty()) {
@@ -602,6 +645,12 @@ void applyMaskLayers(std::uint8_t* pixels, int width, int height,
             }
         } else if (layer.kind == Mask::Kind::Url && fetch) {
             entry.image = fetch(layer.href);
+            if (entry.image && entry.image->width > 0 && entry.image->height > 0) {
+                entry.dest = placeLayer(
+                    listAt(sizes, i), listAt(positions, i), originBox,
+                    static_cast<float>(entry.image->width),
+                    static_cast<float>(entry.image->height), false, fontSize, rootFontSize);
+            }
         }
         resolved.push_back(std::move(entry));
     }
@@ -617,6 +666,30 @@ void applyMaskLayers(std::uint8_t* pixels, int width, int height,
         }
         return composites[std::min(i, composites.size() - 1)];
     };
+    // A layer sample point: wraps tiling axes into the destination and reports
+    // whether a non-tiling axis lands outside it. Points outside the clip box
+    // or a degenerate destination never reach here; the caller maps those to
+    // transparent.
+    const auto locate = [&](const ResolvedLayer& entry, float px, float py, float& qx,
+                             float& qy) {
+        qx = px;
+        qy = py;
+        if (!entry.tileX) {
+            if (px < entry.dest.x || px >= entry.dest.x + entry.dest.w) {
+                return false;
+            }
+        } else {
+            qx = wrapAxis(px, entry.dest.x, entry.dest.w);
+        }
+        if (!entry.tileY) {
+            if (py < entry.dest.y || py >= entry.dest.y + entry.dest.h) {
+                return false;
+            }
+        } else {
+            qy = wrapAxis(py, entry.dest.y, entry.dest.h);
+        }
+        return true;
+    };
     for (int row = 0; row < height; ++row) {
         for (int col = 0; col < width; ++col) {
             const float px = static_cast<float>(col) + 0.5f;
@@ -628,37 +701,56 @@ void applyMaskLayers(std::uint8_t* pixels, int width, int height,
                 // `none` is opaque (no masking); a gradient that failed to
                 // resolve (empty stops) is also opaque so it stays quiet;
                 // a url that failed to load is transparent, per masking rules.
+                // Anything outside the clip box or the placed destination is
+                // transparent too: an unsized layer simply does not reach it.
                 float value = 1.0f;
                 if (layer.kind == Mask::Kind::None) {
                     value = 1.0f;
                 } else if (entry.hasShader) {
-                    const Color color = entry.shader.colorAt(px, py);
-                    const Mode mode = modeAt(i);
-                    if (mode == Mode::Alpha || mode == Mode::MatchSource) {
-                        value = static_cast<float>(color.a) / 255.0f;
+                    if (!insideBox(px, py, entry.clip) || entry.dest.w <= 0.0f ||
+                        entry.dest.h <= 0.0f) {
+                        value = 0.0f;
                     } else {
-                        value = (0.2126f * color.r + 0.7152f * color.g +
-                                 0.0722f * color.b) /
-                                255.0f;
+                        float qx = px, qy = py;
+                        if (!locate(entry, px, py, qx, qy)) {
+                            value = 0.0f;
+                        } else {
+                            const Color color = entry.shader.colorAt(qx, qy);
+                            const Mode mode = modeAt(i);
+                            if (mode == Mode::Alpha || mode == Mode::MatchSource) {
+                                value = static_cast<float>(color.a) / 255.0f;
+                            } else {
+                                value = (0.2126f * color.r + 0.7152f * color.g +
+                                         0.0722f * color.b) /
+                                        255.0f;
+                            }
+                        }
                     }
                 } else if (layer.kind == Mask::Kind::Url) {
-                    if (entry.image && entry.image->width > 0 &&
-                        entry.image->height > 0 && !entry.image->rgba.empty()) {
-                        const float u = (px - destination.x) / destination.w;
-                        const float v = (py - destination.y) / destination.h;
-                        const Color color = sampleBilinear(*entry.image, u, v);
-                        const Mode mode = modeAt(i);
-                        if (mode == Mode::Alpha) {
-                            value = static_cast<float>(color.a) / 255.0f;
-                        } else {
-                            // `match-source` is luminance for urls, so photos
-                            // mask by brightness.
-                            value = (0.2126f * color.r + 0.7152f * color.g +
-                                     0.0722f * color.b) /
-                                    255.0f;
-                        }
-                    } else {
+                    if (!entry.image || entry.image->width <= 0 ||
+                        entry.image->height <= 0 || entry.image->rgba.empty() ||
+                        !insideBox(px, py, entry.clip) || entry.dest.w <= 0.0f ||
+                        entry.dest.h <= 0.0f) {
                         value = 0.0f;
+                    } else {
+                        float qx = px, qy = py;
+                        if (!locate(entry, px, py, qx, qy)) {
+                            value = 0.0f;
+                        } else {
+                            const float u = (qx - entry.dest.x) / entry.dest.w;
+                            const float v = (qy - entry.dest.y) / entry.dest.h;
+                            const Color color = sampleBilinear(*entry.image, u, v);
+                            const Mode mode = modeAt(i);
+                            if (mode == Mode::Alpha) {
+                                value = static_cast<float>(color.a) / 255.0f;
+                            } else {
+                                // `match-source` is luminance for urls, so photos
+                                // mask by brightness.
+                                value = (0.2126f * color.r + 0.7152f * color.g +
+                                         0.0722f * color.b) /
+                                        255.0f;
+                            }
+                        }
                     }
                 } else {
                     // Unresolvable gradient: opaque so a bad layer stays quiet.

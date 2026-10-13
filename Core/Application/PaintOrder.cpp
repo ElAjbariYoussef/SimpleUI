@@ -783,12 +783,17 @@ struct Collector {
                                              resolver.rootFontSize());
         }
         // Mask layers ride along untouched: the executor evaluates them
-        // against the surface. Modes and composites ride too, matched by
-        // position at apply time.
+        // against the surface. Modes, composites, and geometry ride too,
+        // matched by position at apply time.
         if (hasMaskSurface(s.maskImages)) {
             item.maskImages = s.maskImages;
             item.maskModes = s.maskModes;
             item.maskComposites = s.maskComposites;
+            item.maskSizes = s.maskSizes;
+            item.maskPositions = s.maskPositions;
+            item.maskRepeats = s.maskRepeats;
+            item.maskOrigins = s.maskOrigins;
+            item.maskClips = s.maskClips;
         }
         // The point the transform turns about: the resolved transform-origin,
         // measured from the box's own top-left (which scroll offsets have already

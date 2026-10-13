@@ -68,14 +68,19 @@ struct GroupFrame {
     // so the shadow pass traces the clipped silhouette.
     bool clip = false;
     ResolvedClip clipShape;
-    // Mask layers: the specs, the destination border box rebased into the
+    // Mask layers: the specs and geometry, the three boxes rebased into the
     // surface, and the font size their lengths resolve against. Runs after the
     // clip mask, before the shadow, for the same filter-then-mask ordering.
     bool mask = false;
     std::vector<ComputedStyle::MaskImage> maskLayers;
     std::vector<ComputedStyle::MaskMode> maskModes;
     std::vector<ComputedStyle::MaskComposite> maskComposites;
-    SDL_FRect maskDest{};
+    std::vector<ComputedStyle::BackgroundSize> maskSizes;
+    std::vector<ComputedStyle::BackgroundPosition> maskPositions;
+    std::vector<ComputedStyle::RepeatPair> maskRepeats;
+    std::vector<ComputedStyle::BackgroundBox> maskOrigins;
+    std::vector<ComputedStyle::BackgroundBox> maskClips;
+    BackgroundBoxes maskBoxes{};
     float maskFontSize = 16.0f;
 };
 
@@ -2712,8 +2717,13 @@ void Application::run() {
                             frame.maskLayers = op.item.maskImages;
                             frame.maskModes = op.item.maskModes;
                             frame.maskComposites = op.item.maskComposites;
+                            frame.maskSizes = op.item.maskSizes;
+                            frame.maskPositions = op.item.maskPositions;
+                            frame.maskRepeats = op.item.maskRepeats;
+                            frame.maskOrigins = op.item.maskOrigins;
+                            frame.maskClips = op.item.maskClips;
                             frame.maskFontSize = resolver_.resolve(*op.item.el).fontSize;
-                            // Border box in surface coords: layout minus the
+                            // Boxes in surface coords: layout minus the
                             // offsets paint uses, rebased to the surface origin.
                             float ox = 0.0f, oy = 0.0f;
                             for (auto it = groups.rbegin(); it != groups.rend(); ++it) {
@@ -2723,10 +2733,21 @@ void Application::run() {
                                     break;
                                 }
                             }
-                            frame.maskDest = SDL_FRect{
-                                op.item.el->layoutX() - op.item.dx - ox - op.bounds.x,
-                                op.item.el->layoutY() - op.item.dy - oy - op.bounds.y,
-                                op.item.el->layoutWidth(), op.item.el->layoutHeight()};
+                            const float ex = op.item.dx + ox + op.bounds.x;
+                            const float ey = op.item.dy + oy + op.bounds.y;
+                            frame.maskBoxes = BackgroundBoxes{
+                                SDL_FRect{op.item.el->layoutX() - ex,
+                                          op.item.el->layoutY() - ey,
+                                          op.item.el->layoutWidth(),
+                                          op.item.el->layoutHeight()},
+                                SDL_FRect{op.item.el->paddingX() - ex,
+                                          op.item.el->paddingY() - ey,
+                                          op.item.el->paddingWidth(),
+                                          op.item.el->paddingHeight()},
+                                SDL_FRect{op.item.el->contentX() - ex,
+                                          op.item.el->contentY() - ey,
+                                          op.item.el->contentWidth(),
+                                          op.item.el->contentHeight()}};
                         }
                         for (int i = 0; i < 12; ++i) {
                             frame.filter[i] = op.filter[i];
@@ -2810,7 +2831,10 @@ void Application::run() {
                                             sui::applyMaskLayers(
                                                 pixels, conv->w, conv->h, frame.maskLayers,
                                                 frame.maskModes, frame.maskComposites,
-                                                frame.maskDest, frame.maskFontSize,
+                                                frame.maskSizes, frame.maskPositions,
+                                                frame.maskRepeats, frame.maskOrigins,
+                                                frame.maskClips, frame.maskBoxes,
+                                                frame.maskFontSize,
                                                 resolver_.rootFontSize(),
                                                 [&](std::string_view href)
                                                     -> const DecodedImage* {
