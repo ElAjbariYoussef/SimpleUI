@@ -5183,6 +5183,98 @@ void testValidationPseudos() {
     check(on("textarea:valid", *s), "a filled required textarea is valid");
 }
 
+// Meters and progress bars size like replaced elements (10em by 1em), paint
+// their fill from value/min/max, and never lay out fallback text. Fractions
+// clamp; garbage falls back; colour zones follow low/high/optimum.
+void testGaugeDefaults() {
+    auto document = parseOrNull(
+        "<sui><body><meter id=\"m\" value=\"0.5\"/>"
+        "<progress id=\"p\" value=\"30\" max=\"100\"/>"
+        "<progress id=\"q\"/>"
+        "<meter id=\"w\" style=\"width:200px\">fallback</meter></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* m = document->getElementById("m");
+    Element* p = document->getElementById("p");
+    Element* q = document->getElementById("q");
+    Element* w = document->getElementById("w");
+    check(m && p && q && w, "gauge elements found");
+    if (!m || !p || !q || !w) {
+        return;
+    }
+
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    const sui::ComputedStyle chrome = resolver.resolve(*m);
+    check(chrome.padding.top.value == 0.0f && chrome.padding.left.value == 0.0f,
+          "a gauge has no text padding");
+    check(chrome.borderWidth.top.value == 1.0f, "a gauge keeps a thin border");
+    check(chrome.width.isAuto(), "a gauge width starts auto");
+
+    // At the default 16px font the box is 160x16 content plus its border.
+    sui::StyleResolver layout;
+    layout.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    layoutRoot(*document, layout, 400.0f);
+    check(m->layoutWidth() == 162.0f && m->layoutHeight() == 18.0f,
+          "a gauge lays out as a 10em by 1em border box");
+    check(w->layoutWidth() == 202.0f, "an author width overrides the gauge default");
+    check(w->textRuns().empty(), "fallback text takes no runs");
+
+    check(m->gaugeFraction() == 0.5f, "a meter fraction reads value over max");
+    check(p->gaugeFraction() == 0.3f, "a progress fraction reads value over max");
+    check(!p->gaugeIndeterminate() && q->gaugeIndeterminate(),
+          "a valueless progress is indeterminate");
+    check(!m->gaugeIndeterminate(), "a meter is never indeterminate");
+
+    auto fractionOf = [](const char* markup) {
+        auto doc = parseOrNull(markup);
+        if (!doc) {
+            return -1.0f;
+        }
+        Element* body = doc->querySelector("body");
+        if (!body || body->children().empty() || !body->children()[0]) {
+            return -1.0f;
+        }
+        return body->children()[0]->gaugeFraction();
+    };
+    check(fractionOf("<sui><body><meter value=\"7\" max=\"4\"/></body></sui>") == 1.0f,
+          "a fraction clamps at one");
+    check(fractionOf("<sui><body><meter value=\"-3\"/></body></sui>") == 0.0f,
+          "a fraction clamps at zero");
+    check(fractionOf("<sui><body><progress value=\"junk\" max=\"10\"/></body></sui>") ==
+              0.0f,
+          "a garbage value falls back to empty");
+    check(fractionOf("<sui><body><meter max=\"0\" value=\"5\"/></body></sui>") == 1.0f,
+          "a degenerate scale still spans");
+
+    auto zoneOf = [](const char* markup) {
+        auto doc = parseOrNull(markup);
+        if (!doc) {
+            return -1;
+        }
+        Element* body = doc->querySelector("body");
+        if (!body || body->children().empty() || !body->children()[0]) {
+            return -1;
+        }
+        return body->children()[0]->gaugeZone();
+    };
+    check(zoneOf("<sui><body><meter value=\"0.5\"/></body></sui>") == 0,
+          "a middle value sits beside the optimum");
+    check(zoneOf("<sui><body><meter value=\"0.9\" optimum=\"0.9\" high=\"0.8\"/>"
+               "</body></sui>") == 0,
+          "a high optimum likes high values");
+    check(zoneOf("<sui><body><meter value=\"0.5\" optimum=\"0.9\" high=\"0.8\"/>"
+               "</body></sui>") == 1,
+          "the band off the optimum side is yellow");
+    check(zoneOf("<sui><body><meter value=\"0.1\" optimum=\"0.1\" low=\"0.2\"/>"
+               "</body></sui>") == 0,
+          "a low optimum likes low values");
+    check(zoneOf("<sui><body><meter value=\"0.95\" optimum=\"0.1\" low=\"0.2\" high=\"0.8\"/>"
+               "</body></sui>") == 2,
+          "past the band turns red");
+}
+
 void testBackdropFilter() {
     auto document = parseOrNull("<sui><body><div id=\"x\">hi</div></body></sui>");
     if (!document) {
@@ -6782,6 +6874,7 @@ int main() {
     testMaskShorthand();
     testMaskBorder();
     testValidationPseudos();
+    testGaugeDefaults();
     testBackdropFilter();
     testBackgroundListsAreParallel();
     testBackgroundSizeAndPositionKeywords();

@@ -119,6 +119,16 @@ public:
     // Rows visible without scrolling: 0 for a dropdown (no `multiple` and
     // `size` of 1 or less), else `size`, or 4 for a bare `multiple`.
     int listboxRows() const;
+    // A <meter> or <progress> fill fraction from value/min/max, clamped to
+    // 0..1. An indeterminate progress (no `value`) reports 0; test
+    // `gaugeIndeterminate()` for the animated case.
+    float gaugeFraction() const;
+    // A valueless <progress> shows indeterminate instead of a fraction.
+    bool gaugeIndeterminate() const;
+    // A <meter> colour zone from low/high/optimum: 0 beside the optimum, 1
+    // inside the low/high band but off the optimum side, 2 outside the band.
+    // Only meaningful for meters.
+    int gaugeZone() const;
     // The select this option/optgroup nests in: the parent, or the grandparent
     // through an <optgroup>. Null for anything else.
     Element* owningSelect() const;

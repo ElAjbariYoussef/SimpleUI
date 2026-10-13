@@ -359,12 +359,27 @@ public:
         }
     }
 
+    void applyMeterProgressSize(Element& el, ComputedStyle& s) const {
+        if (el.tag() != "meter" && el.tag() != "progress") {
+            return;
+        }
+        // Without a CSS size a gauge behaves like a replaced element: ten
+        //ems wide and one tall, measured in its own font.
+        if (s.width.isAuto()) {
+            s.width = Length(10.0f * s.fontSize);
+        }
+        if (s.height.isAuto()) {
+            s.height = Length(s.fontSize);
+        }
+    }
+
     // Lays out `el` with the given available width. Returns the outer height
     // consumed, margins included.
     float run(Element& el, float availableWidth, float originX, float originY) {
         ComputedStyle s = resolver_.resolve(el);
         applyTextAreaSize(el, s);
         applySelectSize(el, s);
+        applyMeterProgressSize(el, s);
         const UsedBox box = usedBox(s, availableWidth);
         el.clearTextRuns();
         if (s.display == ComputedStyle::None || !s.visible) {
@@ -2486,6 +2501,11 @@ private:
         // transparent here: their contents continue the same line. Anything
         // atomic (inline-block, replaced media) is placed as a unit.
         void inlineBox(Element& el, const ComputedStyle& container) {
+            // A gauge paints its bar from attributes, never its children:
+            // fallback text stays hidden, like a browser with support.
+            if (el.tag() == "meter" || el.tag() == "progress") {
+                return;
+            }
             // A control draws its current value where a normal element would
             // draw its children, so its text takes part in the same line context.
             // Password fields mask the value with bullet characters. A file

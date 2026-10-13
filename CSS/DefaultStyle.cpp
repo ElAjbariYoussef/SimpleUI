@@ -168,6 +168,21 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
         return s;
     }
 
+    // A gauge is a bar, not a text field: no padding, a thin border, and a
+    // dark track. Layout sizes it from the font when the author does not.
+    if (tag == "meter" || tag == "progress") {
+        Style s;
+        s.display = Style::InlineBlock;
+        s.specified = Style::SpecifiedColor | Style::SpecifiedLineHeight;
+        s.padding = {0.0f, 0.0f, 0.0f, 0.0f};
+        s.borderWidth = {1.0f, 1.0f, 1.0f, 1.0f};
+        s.borderColor = {82, 82, 91, 255};
+        s.backgroundColor = {39, 39, 42, 255};
+        s.color = {228, 228, 231, 255};
+        s.lineHeight = 1.0f;
+        return s;
+    }
+
     // An option never lays out as a box of its own: the closed select paints
     // the selected text itself and the open popup is an overlay, so option and
     // optgroup children take no space.

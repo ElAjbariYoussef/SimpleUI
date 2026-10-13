@@ -1397,6 +1397,36 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         }
     }
 
+    // A meter or progress paints its own bar: a fill across the content box
+    // at the value's fraction. A valueless progress shows a fixed
+    // indeterminate block instead of animating. Meters colour by zone: green
+    // beside the optimum, yellow inside the band, red outside it.
+    if (el.tag() == "meter" || el.tag() == "progress") {
+        const SDL_FRect content{el.contentX() - offX, el.contentY() - offY,
+                                el.contentWidth(), el.contentHeight()};
+        if (content.w > 0.0f && content.h > 0.0f) {
+            sui::Color fill{96, 165, 250, 255};
+            float fraction = el.gaugeFraction();
+            if (el.tag() == "meter") {
+                const int zone = el.gaugeZone();
+                fill = zone == 0 ? sui::Color{34, 197, 94, 255}
+                     : zone == 1 ? sui::Color{234, 179, 8, 255}
+                                 : sui::Color{239, 68, 68, 255};
+            } else if (el.gaugeIndeterminate()) {
+                fraction = -1.0f;
+            }
+            if (fraction < 0.0f) {
+                const float block = content.w / 3.0f;
+                renderer.fillRect(SDL_FRect{content.x, content.y, block, content.h},
+                                  multiplyAlpha(fill, opacity));
+            } else if (fraction > 0.0f) {
+                renderer.fillRect(
+                    SDL_FRect{content.x, content.y, content.w * fraction, content.h},
+                    multiplyAlpha(fill, opacity));
+            }
+        }
+    }
+
     // Date/time/color/file inputs paint their own indicator: a calendar or
     // clock glyph, a swatch of the value, or a Browse button. The value (or
     // file name) flows as normal text runs, and the UA padding keeps it clear

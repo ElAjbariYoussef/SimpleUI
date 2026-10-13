@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -357,6 +358,85 @@ std::string Element::fileName() const {
     const std::string value(attribute("value"));
     const std::size_t slash = value.find_last_of("/\\");
     return slash == std::string::npos ? value : value.substr(slash + 1);
+}
+
+// A decimal attribute or a fallback when it is missing or unparsable, so
+// markup can never smuggle a NaN into a gauge.
+float decimalAttribute(const Element& el, std::string_view key, float fallback) {
+    const std::string_view raw = el.attribute(key);
+    std::size_t first = raw.find_first_not_of(" \t\n\r\f");
+    if (first == std::string_view::npos) {
+        return fallback;
+    }
+    std::size_t last = raw.find_last_not_of(" \t\n\r\f");
+    const std::string text(raw.substr(first, last - first + 1));
+    char* stop = nullptr;
+    const double value = std::strtod(text.c_str(), &stop);
+    if (!stop || *stop != '\0') {
+        return fallback;
+    }
+    return static_cast<float>(value);
+}
+
+bool Element::gaugeIndeterminate() const {
+    return tag_ == "progress" && !hasAttribute("value");
+}
+
+float Element::gaugeFraction() const {
+    // Progress defaults to a 0..1 scale; a meter without bounds does too, and
+    // a meter without a value reads 0. A max that does not exceed its min
+    // resets both, like the constraint rules.
+    float minimum = tag_ == "meter" ? decimalAttribute(*this, "min", 0.0f) : 0.0f;
+    float maximum = tag_ == "meter" ? decimalAttribute(*this, "max", 1.0f) : 1.0f;
+    if (tag_ == "progress") {
+        minimum = 0.0f;
+        maximum = decimalAttribute(*this, "max", 1.0f);
+        if (maximum <= 0.0f) {
+            maximum = 1.0f;
+        }
+    } else if (maximum <= minimum) {
+        minimum = 0.0f;
+        maximum = 1.0f;
+    }
+    const float span = maximum - minimum;
+    if (span <= 0.0f) {
+        return 0.0f;
+    }
+    float value = minimum;
+    if (tag_ == "meter") {
+        value = decimalAttribute(*this, "value", 0.0f);
+    } else if (hasAttribute("value")) {
+        value = decimalAttribute(*this, "value", 0.0f);
+    } else {
+        return 0.0f;
+    }
+    if (value <= minimum) {
+        return 0.0f;
+    }
+    if (value >= maximum) {
+        return 1.0f;
+    }
+    return (value - minimum) / span;
+}
+
+int Element::gaugeZone() const {
+    // Green beside the optimum, yellow inside the low/high band but off the
+    // optimum side, red outside the band. An optimum under low likes low
+    // values; over high likes high ones.
+    const float value = decimalAttribute(*this, "value", 0.0f);
+    const float low = decimalAttribute(*this, "low", 0.0f);
+    const float high = decimalAttribute(*this, "high", 1.0f);
+    const float optimum = decimalAttribute(*this, "optimum", 0.5f);
+    if (optimum < low) {
+        return value <= low ? 0 : (value <= high ? 1 : 2);
+    }
+    if (optimum > high) {
+        return value >= high ? 0 : (value >= low ? 1 : 2);
+    }
+    if (value >= low && value <= high) {
+        return 0;
+    }
+    return 2;
 }
 
 int Element::listboxRows() const {
