@@ -2165,9 +2165,8 @@ bool parseConicalGradient(std::string_view args, ComputedStyle::ConicalGradient&
 }
 
 // One `mask-image` layer: a gradient applies as an alpha mask stretched over
-// the border box, while a `url()` source is accepted but stays unapplied.
-// Only the first layer counts; there is no compositing, sizing, or
-// positioning yet.
+// the border box, while a `url()` source samples decoded bytes the same way.
+// The caller splits the comma list; `none` is an opaque layer.
 bool parseMaskImage(std::string_view value, ComputedStyle::MaskImage& mask) {
     using Mask = ComputedStyle::MaskImage;
     const std::string_view text = trim(value);
@@ -2175,11 +2174,7 @@ bool parseMaskImage(std::string_view value, ComputedStyle::MaskImage& mask) {
         mask = Mask();
         return true;
     }
-    const std::vector<std::string_view> layers = splitTopLevel(text);
-    if (layers.empty()) {
-        return false;
-    }
-    const std::string_view first = trim(layers[0]);
+    const std::string_view first = text;
     Mask parsed;
     if (std::string_view args; functionArgs(first, "linear-gradient", args)) {
         if (!parseLinearGradient(args, parsed.linear)) {
@@ -3913,11 +3908,65 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
                property == "filter") {
         // Performance / compositing hints and effects: accepted and ignored.
     } else if (property == "mask-image" || property == "-webkit-mask-image") {
-        // One gradient layer applies as an alpha mask; anything else keeps the
-        // previous cascade winner, like any failed parse.
-        ComputedStyle::MaskImage mask;
-        if (parseMaskImage(value, mask)) {
-            s.maskImage = mask;
+        // Every layer parses; one bad layer drops the whole declaration, like
+        // any failed parse.
+        std::vector<ComputedStyle::MaskImage> layers;
+        bool ok = false;
+        for (std::string_view layer : splitTopLevel(value)) {
+            ComputedStyle::MaskImage mask;
+            if (!parseMaskImage(layer, mask)) {
+                ok = false;
+                break;
+            }
+            ok = true;
+            layers.push_back(std::move(mask));
+        }
+        if (ok && !layers.empty()) {
+            s.maskImages = std::move(layers);
+        }
+    } else if (property == "mask-mode") {
+        std::vector<ComputedStyle::MaskMode> modes;
+        bool ok = false;
+        for (std::string_view entry : splitTopLevel(value)) {
+            const std::string_view mode = trim(entry);
+            using Mode = ComputedStyle::MaskMode;
+            if (mode == "match-source") {
+                modes.push_back(Mode::MatchSource);
+            } else if (mode == "alpha") {
+                modes.push_back(Mode::Alpha);
+            } else if (mode == "luminance") {
+                modes.push_back(Mode::Luminance);
+            } else {
+                ok = false;
+                break;
+            }
+            ok = true;
+        }
+        if (ok && !modes.empty()) {
+            s.maskModes = std::move(modes);
+        }
+    } else if (property == "mask-composite") {
+        std::vector<ComputedStyle::MaskComposite> ops;
+        bool ok = false;
+        for (std::string_view entry : splitTopLevel(value)) {
+            const std::string_view op = trim(entry);
+            using Composite = ComputedStyle::MaskComposite;
+            if (op == "add") {
+                ops.push_back(Composite::Add);
+            } else if (op == "subtract") {
+                ops.push_back(Composite::Subtract);
+            } else if (op == "intersect") {
+                ops.push_back(Composite::Intersect);
+            } else if (op == "exclude") {
+                ops.push_back(Composite::Exclude);
+            } else {
+                ok = false;
+                break;
+            }
+            ok = true;
+        }
+        if (ok && !ops.empty()) {
+            s.maskComposites = std::move(ops);
         }
     } else if (property == "clip-path") {
         // Shapes clip the element and its subtree; anything else keeps the

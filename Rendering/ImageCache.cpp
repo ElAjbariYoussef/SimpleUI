@@ -17,15 +17,7 @@
 namespace sui {
 namespace {
 
-// Decoded pixels arrive as RGBA whatever the file's own format was, which is the only
-// layout `SDL_CreateTexture` below asks for.
-struct Decoded {
-    int width = 0;
-    int height = 0;
-    std::vector<std::uint8_t> rgba;
-};
-
-bool decode(const std::string& bytes, Decoded& out) {
+bool decode(const std::string& bytes, DecodedImage& out) {
     int w = 0, h = 0, channels = 0;
     std::uint8_t* pixels = stbi_load_from_memory(
         reinterpret_cast<const stbi_uc*>(bytes.data()), static_cast<int>(bytes.size()), &w, &h,
@@ -52,7 +44,33 @@ void ImageCache::clear() {
         SDL_DestroyTexture(texture);
     }
     textures_.clear();
+    decoded_.clear();
     failed_.clear();
+}
+
+const DecodedImage* ImageCache::decoded(std::string_view href) {
+    // std::map keeps references stable across inserts, so the borrowed
+    // pointer below survives later decodes.
+    const std::string key(href);
+    if (const auto found = decoded_.find(key); found != decoded_.end()) {
+        return &found->second;
+    }
+    if (failed_.count(key) != 0) {
+        return nullptr;
+    }
+    const auto bytes = resources_->readText(key);
+    DecodedImage image;
+    if (!bytes || !decode(*bytes, image)) {
+        // The decoder leaves a reason on its own error state, which is more useful than
+        // a bare "no image"; a missing file is reported as missing rather than corrupt.
+        if (bytes) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "cannot decode image %s: %s", key.c_str(),
+                        stbi_failure_reason() ? stbi_failure_reason() : "unknown");
+        }
+        failed_[key] = true;
+        return nullptr;
+    }
+    return &decoded_.emplace(key, std::move(image)).first->second;
 }
 
 SDL_Texture* ImageCache::texture(SDL_Renderer* renderer, std::string_view href) {
@@ -64,22 +82,14 @@ SDL_Texture* ImageCache::texture(SDL_Renderer* renderer, std::string_view href) 
         return nullptr;
     }
 
-    Decoded image;
-    const auto bytes = resources_->readText(key);
-    if (!bytes || !decode(*bytes, image)) {
-        // The decoder leaves a reason on its own error state, which is more useful than
-        // a bare "no image"; a missing file is reported as missing rather than corrupt.
-        if (bytes) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "cannot decode image %s: %s", key.c_str(),
-                        stbi_failure_reason() ? stbi_failure_reason() : "unknown");
-        }
-        failed_[key] = true;
+    const DecodedImage* image = decoded(href);
+    if (!image) {
         return nullptr;
     }
 
     SDL_Surface* surface = SDL_CreateSurfaceFrom(
-        image.width, image.height, SDL_PIXELFORMAT_RGBA32, image.rgba.data(),
-        image.width * 4);
+        image->width, image->height, SDL_PIXELFORMAT_RGBA32,
+        const_cast<std::uint8_t*>(image->rgba.data()), image->width * 4);
     if (!surface) {
         failed_[key] = true;
         return nullptr;

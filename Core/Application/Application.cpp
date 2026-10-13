@@ -68,11 +68,13 @@ struct GroupFrame {
     // so the shadow pass traces the clipped silhouette.
     bool clip = false;
     ResolvedClip clipShape;
-    // A gradient mask: the spec, the destination border box rebased into the
-    // surface, and the font size its lengths resolve against. Runs after the
+    // Mask layers: the specs, the destination border box rebased into the
+    // surface, and the font size their lengths resolve against. Runs after the
     // clip mask, before the shadow, for the same filter-then-mask ordering.
     bool mask = false;
-    ComputedStyle::MaskImage maskImage;
+    std::vector<ComputedStyle::MaskImage> maskLayers;
+    std::vector<ComputedStyle::MaskMode> maskModes;
+    std::vector<ComputedStyle::MaskComposite> maskComposites;
     SDL_FRect maskDest{};
     float maskFontSize = 16.0f;
 };
@@ -2705,12 +2707,11 @@ void Application::run() {
                         frame.dropShadow = op.dropShadow;
                         frame.clip = op.item.clipShape.kind != ResolvedClip::Kind::None;
                         frame.clipShape = op.item.clipShape;
-                        using MaskKind = ComputedStyle::MaskImage::Kind;
-                        frame.mask = op.item.maskImage.kind == MaskKind::LinearGradient ||
-                                     op.item.maskImage.kind == MaskKind::RadialGradient ||
-                                     op.item.maskImage.kind == MaskKind::ConicalGradient;
+                        frame.mask = hasMaskSurface(op.item.maskImages);
                         if (frame.mask && op.item.el) {
-                            frame.maskImage = op.item.maskImage;
+                            frame.maskLayers = op.item.maskImages;
+                            frame.maskModes = op.item.maskModes;
+                            frame.maskComposites = op.item.maskComposites;
                             frame.maskFontSize = resolver_.resolve(*op.item.el).fontSize;
                             // Border box in surface coords: layout minus the
                             // offsets paint uses, rebased to the surface origin.
@@ -2802,13 +2803,20 @@ void Application::run() {
                                                 frame.bounds.x, frame.bounds.y);
                                         }
                                         if (frame.mask) {
-                                            // A gradient mask multiplies what
-                                            // the clip left, in the same
-                                            // surface space.
-                                            sui::applyMaskImage(
-                                                pixels, conv->w, conv->h, frame.maskImage,
+                                            // Mask layers multiply what the clip
+                                            // left, in the same surface space;
+                                            // url() layers sample decoded bytes
+                                            // through the image cache.
+                                            sui::applyMaskLayers(
+                                                pixels, conv->w, conv->h, frame.maskLayers,
+                                                frame.maskModes, frame.maskComposites,
                                                 frame.maskDest, frame.maskFontSize,
-                                                resolver_.rootFontSize());
+                                                resolver_.rootFontSize(),
+                                                [&](std::string_view href)
+                                                    -> const DecodedImage* {
+                                                    return images_ ? images_->decoded(href)
+                                                                   : nullptr;
+                                                });
                                         }
                                         if (frame.dropShadow.present) {
                                             // The silhouette: the content's own

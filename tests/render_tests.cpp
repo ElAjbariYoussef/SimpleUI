@@ -11,7 +11,9 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -379,13 +381,87 @@ void testMaskImage() {
     std::vector<std::uint8_t> pic(16, 200);
     sui::applyMaskImage(pic.data(), 2, 2, url, SDL_FRect{0.0f, 0.0f, 2.0f, 2.0f},
                         16.0f, 16.0f);
-    check(pic == std::vector<std::uint8_t>(16, 200), "a url mask stays unapplied");
+    check(pic[3] == 0 && pic[7] == 0, "a missing url mask hides");
     Mask empty = linear;
     empty.linear.stops.clear();
     std::vector<std::uint8_t> bare(16, 200);
     sui::applyMaskImage(bare.data(), 2, 2, empty, SDL_FRect{0.0f, 0.0f, 2.0f, 2.0f},
                         16.0f, 16.0f);
     check(bare == std::vector<std::uint8_t>(16, 200), "an empty mask stays quiet");
+}
+
+// Url layers sample decoded bytes stretched over the border box, read through
+// `mask-mode` and combined through `mask-composite`. One-pixel images make
+// every value exact, so these checks pin the math, not the resampler.
+void testMaskLayers() {
+    using Mask = sui::ComputedStyle::MaskImage;
+    using Mode = sui::ComputedStyle::MaskMode;
+    using Composite = sui::ComputedStyle::MaskComposite;
+    const SDL_FRect dest{0.0f, 0.0f, 2.0f, 2.0f};
+    sui::DecodedImage white{1, 1, {255, 255, 255, 255}};
+    sui::DecodedImage black{1, 1, {0, 0, 0, 255}};
+    sui::DecodedImage whiteClear{1, 1, {255, 255, 255, 0}};
+    const auto fetchFor = [&](const sui::DecodedImage* img) {
+        return sui::FetchMaskBytes{
+            [img](std::string_view) -> const sui::DecodedImage* { return img; }};
+    };
+    const auto alphaOf = [](const std::vector<std::uint8_t>& img) { return img[3]; };
+    auto urlLayer = [](const char* href) {
+        Mask layer;
+        layer.kind = Mask::Kind::Url;
+        layer.href = href;
+        return layer;
+    };
+    auto opaqueOf = [&](const sui::DecodedImage* img,
+                        const std::vector<Mode>& modes = {}) {
+        std::vector<std::uint8_t> pixels(16, 0);
+        for (int i = 0; i < 4; ++i) {
+            pixels[4 * i + 3] = 200;
+        }
+        sui::applyMaskLayers(pixels.data(), 2, 2, {urlLayer("m.png")}, modes, {},
+                             dest, 16.0f, 16.0f, fetchFor(img));
+        return alphaOf(pixels);
+    };
+
+    // `match-source` (the default) is luminance for urls: white keeps, black
+    // hides, whatever the alpha channel says.
+    check(opaqueOf(&white) == 200, "a white url keeps by luminance");
+    check(opaqueOf(&black) == 0, "a black url hides by luminance");
+    check(opaqueOf(&whiteClear) == 200, "luminance ignores alpha");
+    // `alpha` reads the channel instead: the same clear white now hides.
+    check(opaqueOf(&whiteClear, {Mode::Alpha}) == 0, "alpha mode reads the channel");
+    check(opaqueOf(&white, {Mode::Alpha}) == 200, "an opaque url keeps in alpha");
+    check(opaqueOf(&black, {Mode::Luminance}) == 0, "an opaque black hides in luminance");
+
+    // Composites combine two constant layers: white (1) against black (0) and
+    // white against white.
+    const auto compositeOf = [&](const sui::DecodedImage* first,
+                                 const sui::DecodedImage* second, Composite op) {
+        std::vector<std::uint8_t> pixels(16, 0);
+        for (int i = 0; i < 4; ++i) {
+            pixels[4 * i + 3] = 200;
+        }
+        std::map<std::string, const sui::DecodedImage*> byHref{
+            {"a.png", first}, {"b.png", second}};
+        sui::FetchMaskBytes fetch{[&](std::string_view href)
+                                      -> const sui::DecodedImage* {
+            auto found = byHref.find(std::string(href));
+            return found == byHref.end() ? nullptr : found->second;
+        }};
+        sui::applyMaskLayers(pixels.data(), 2, 2, {urlLayer("a.png"), urlLayer("b.png")},
+                             {}, {op}, dest, 16.0f, 16.0f, std::move(fetch));
+        return alphaOf(pixels);
+    };
+    check(compositeOf(&white, &black, Composite::Add) == 200, "add unions");
+    check(compositeOf(&white, &black, Composite::Subtract) == 200, "subtract keeps the rest");
+    check(compositeOf(&black, &white, Composite::Subtract) == 0,
+          "subtract cuts to zero");
+    check(compositeOf(&white, &black, Composite::Intersect) == 0, "intersect multiplies");
+    check(compositeOf(&white, &white, Composite::Intersect) == 200,
+          "intersect keeps twice-kept");
+    check(compositeOf(&white, &black, Composite::Exclude) == 200, "exclude xors");
+    check(compositeOf(&white, &white, Composite::Exclude) == 0,
+          "exclude drops twice-kept");
 }
 
 // The CPU box blur `filter: blur()` hands the executor. The kernel averages a
@@ -651,6 +727,7 @@ int main() {
     testClipMask();
     testConicalPosition();
     testMaskImage();
+    testMaskLayers();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

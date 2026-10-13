@@ -52,14 +52,6 @@ enum class GroupKind {
              // but positioned descendants rejoin the context around it
 };
 
-// Whether a mask spec needs a compositing surface: gradient masks evaluate
-// against it, while `none` and unapplied `url()` sources paint flat.
-bool hasGradientMask(const ComputedStyle::MaskImage& mask) {
-    using Kind = ComputedStyle::MaskImage::Kind;
-    return mask.kind == Kind::LinearGradient || mask.kind == Kind::RadialGradient ||
-           mask.kind == Kind::ConicalGradient;
-}
-
 // One entry in a context's list: the element's own box, plus the subgroup it
 // opens when it establishes a context. Only a group root fills `inner`, and it is
 // emitted -- box first, then everything the group orders -- the moment that
@@ -423,9 +415,9 @@ GroupKind classifyGroup(const ComputedStyle& s) {
         return GroupKind::Real;
     }
     // A `clip-path` composites its subtree through a surface to mask it, so it
-    // groups for real: descendants must not escape above the mask. A gradient
-    // mask does the same for its own alpha pass.
-    if (s.clipPath.shape != ComputedStyle::ClipPath::Shape::None || hasGradientMask(s.maskImage)) {
+    // groups for real: descendants must not escape above the mask. A mask with
+    // applicable layers does the same for its own alpha pass.
+    if (s.clipPath.shape != ComputedStyle::ClipPath::Shape::None || hasMaskSurface(s.maskImages)) {
         return GroupKind::Real;
     }
     if (s.positioned) {
@@ -790,13 +782,13 @@ struct Collector {
             item.clipShape = resolveClipPath(s.clipPath, el, item.dx, item.dy, s.fontSize,
                                              resolver.rootFontSize());
         }
-        // A gradient mask rides along untouched: the executor evaluates it
-        // against the surface.
-        using MaskKind = ComputedStyle::MaskImage::Kind;
-        if (s.maskImage.kind == MaskKind::LinearGradient ||
-            s.maskImage.kind == MaskKind::RadialGradient ||
-            s.maskImage.kind == MaskKind::ConicalGradient) {
-            item.maskImage = s.maskImage;
+        // Mask layers ride along untouched: the executor evaluates them
+        // against the surface. Modes and composites ride too, matched by
+        // position at apply time.
+        if (hasMaskSurface(s.maskImages)) {
+            item.maskImages = s.maskImages;
+            item.maskModes = s.maskModes;
+            item.maskComposites = s.maskComposites;
         }
         // The point the transform turns about: the resolved transform-origin,
         // measured from the box's own top-left (which scroll offsets have already
@@ -895,7 +887,7 @@ struct Collector {
                 (entry.groupAlpha < 1.0f || entry.transformed || entry.blur > 0.0f ||
                  entry.shift || entry.dropShadow.present ||
                  entry.item.clipShape.kind != ResolvedClip::Kind::None ||
-                 hasGradientMask(entry.item.maskImage))) {
+                 hasMaskSurface(entry.item.maskImages))) {
                 out.push_back(groupStart(entry.item, entry.groupAlpha, entry.transformed, entry.m,
                                         entry.origin, entry.blur, entry.shift, entry.filter,
                                         entry.dropShadow));
@@ -911,6 +903,20 @@ struct Collector {
 };
 
 }  // namespace
+
+// Whether any mask layer needs a compositing surface: gradients evaluate
+// against it and url() sources sample decoded bytes, while `none` layers and
+// an empty list paint flat.
+bool hasMaskSurface(const std::vector<ComputedStyle::MaskImage>& layers) {
+    using Kind = ComputedStyle::MaskImage::Kind;
+    for (const auto& layer : layers) {
+        if (layer.kind == Kind::LinearGradient || layer.kind == Kind::RadialGradient ||
+            layer.kind == Kind::ConicalGradient || layer.kind == Kind::Url) {
+            return true;
+        }
+    }
+    return false;
+}
 
 // A `filter: blur(x)` asks for the group's rendered surface to be diffused by
 // x pixels. The painter cannot blur a flat box list, so it does what it can
@@ -959,7 +965,7 @@ std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolve
     if (box.paints && (box.groupAlpha < 1.0f || box.transformed || box.blur > 0.0f ||
                        box.shift || box.dropShadow.present ||
                        box.item.clipShape.kind != ResolvedClip::Kind::None ||
-                       hasGradientMask(box.item.maskImage))) {
+                       hasMaskSurface(box.item.maskImages))) {
         out.push_back(groupStart(box.item, box.groupAlpha, box.transformed, box.m, box.origin,
                                 box.blur, box.shift, box.filter, box.dropShadow));
     }

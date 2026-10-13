@@ -4744,24 +4744,83 @@ void testMaskImage() {
         return;
     }
     using Mask = sui::ComputedStyle::MaskImage;
-    check(styles[0].maskImage.kind == Mask::Kind::LinearGradient &&
-              styles[0].maskImage.linear.stops.size() == 2,
+    check(styles[0].maskImages.size() == 1 &&
+              styles[0].maskImages[0].kind == Mask::Kind::LinearGradient &&
+              styles[0].maskImages[0].linear.stops.size() == 2,
           "a linear mask parses with its stops");
-    check(styles[1].maskImage.kind == Mask::Kind::RadialGradient &&
-              styles[1].maskImage.radial.stops.size() == 2,
+    check(styles[1].maskImages.size() == 1 &&
+              styles[1].maskImages[0].kind == Mask::Kind::RadialGradient &&
+              styles[1].maskImages[0].radial.stops.size() == 2,
           "a radial mask parses with its stops");
-    check(styles[2].maskImage.kind == Mask::Kind::ConicalGradient &&
-              styles[2].maskImage.conical.stops.size() == 2,
+    check(styles[2].maskImages.size() == 1 &&
+              styles[2].maskImages[0].kind == Mask::Kind::ConicalGradient &&
+              styles[2].maskImages[0].conical.stops.size() == 2,
           "a conic mask parses with its stops");
-    check(styles[3].maskImage.kind == Mask::Kind::Url &&
-              styles[3].maskImage.href == "m.png",
+    check(styles[3].maskImages.size() == 1 &&
+              styles[3].maskImages[0].kind == Mask::Kind::Url &&
+              styles[3].maskImages[0].href == "m.png",
           "a url mask records its href");
-    check(styles[4].maskImage.kind == Mask::Kind::None, "none clears the mask");
-    check(styles[5].maskImage.kind == Mask::Kind::None, "garbage keeps no mask");
-    check(styles[6].maskImage.kind == Mask::Kind::LinearGradient,
-          "only the first mask layer counts");
-    check(styles[7].maskImage.kind == Mask::Kind::LinearGradient,
+    check(styles[4].maskImages.size() == 1 &&
+              styles[4].maskImages[0].kind == Mask::Kind::None,
+          "none clears the mask");
+    check(styles[5].maskImages.empty(), "garbage keeps no mask");
+    check(styles[6].maskImages.size() == 2 &&
+              styles[6].maskImages[0].kind == Mask::Kind::LinearGradient &&
+              styles[6].maskImages[1].kind == Mask::Kind::RadialGradient,
+          "every mask layer parses in order");
+    check(styles[7].maskImages.size() == 1 &&
+              styles[7].maskImages[0].kind == Mask::Kind::LinearGradient,
           "the webkit prefix masks alike");
+}
+
+// `mask-mode` and `mask-composite` are parallel comma lists that repeat their
+// last entry at apply time; one bad entry drops the whole declaration.
+void testMaskModeComposite() {
+    const auto rules = sui::CSSParser::parse(R"(
+        .a { mask-mode: alpha }
+        .b { mask-mode: luminance, alpha }
+        .c { mask-mode: match-source }
+        .d { mask-mode: banana }
+        .e { mask-composite: add }
+        .f { mask-composite: subtract, intersect, exclude }
+        .g { mask-composite: banana }
+    )");
+    sui::StyleResolver resolver;
+    resolver.setRules(rules);
+    static const char* kClasses =
+        "<div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div>"
+        "<div class=\"d\"></div><div class=\"e\"></div><div class=\"f\"></div>"
+        "<div class=\"g\"></div>";
+    auto body = parseOrNull((std::string("<sui><body>") + kClasses + "</body></sui>").c_str());
+    if (!body) {
+        return;
+    }
+    const std::vector<ComputedStyle> styles = bodyStyles(*body, resolver);
+    if (styles.size() < 7) {
+        check(false, "mask mode elements found");
+        return;
+    }
+    using Mode = sui::ComputedStyle::MaskMode;
+    using Composite = sui::ComputedStyle::MaskComposite;
+    check(styles[0].maskModes.size() == 1 && styles[0].maskModes[0] == Mode::Alpha,
+          "a single mode parses");
+    check(styles[1].maskModes.size() == 2 &&
+              styles[1].maskModes[0] == Mode::Luminance &&
+              styles[1].maskModes[1] == Mode::Alpha,
+          "a mode list parses in order");
+    check(styles[2].maskModes.size() == 1 &&
+              styles[2].maskModes[0] == Mode::MatchSource,
+          "match-source parses");
+    check(styles[3].maskModes.empty(), "a bad mode keeps no modes");
+    check(styles[4].maskComposites.size() == 1 &&
+              styles[4].maskComposites[0] == Composite::Add,
+          "a single composite parses");
+    check(styles[5].maskComposites.size() == 3 &&
+              styles[5].maskComposites[0] == Composite::Subtract &&
+              styles[5].maskComposites[1] == Composite::Intersect &&
+              styles[5].maskComposites[2] == Composite::Exclude,
+          "a composite list parses in order");
+    check(styles[6].maskComposites.empty(), "a bad composite keeps no ops");
 }
 
 void testBackdropFilter() {
@@ -6358,6 +6417,7 @@ int main() {
     testRadialGradientParsing();
     testConicalGradientParsing();
     testMaskImage();
+    testMaskModeComposite();
     testBackdropFilter();
     testBackgroundListsAreParallel();
     testBackgroundSizeAndPositionKeywords();

@@ -423,8 +423,8 @@ struct ComputedStyle {
     std::vector<BackgroundSize> backgroundSizes;
 
     // A single `mask-image` layer. Gradients apply as an alpha mask stretched
-    // over the border box; `url()` sources are accepted but not applied, and
-    // there is no multi-layer compositing, sizing, or positioning yet.
+    // over the border box; `url()` sources sample decoded bytes the same way.
+    // Layers combine through `mask-composite` (see below).
     struct MaskImage {
         enum class Kind : std::uint8_t { None, LinearGradient, RadialGradient, ConicalGradient, Url };
         Kind kind = Kind::None;
@@ -433,7 +433,12 @@ struct ComputedStyle {
         ConicalGradient conical;
         std::string href;
     };
-    MaskImage maskImage;
+    // One entry per mask layer; shorter lists repeat their last entry.
+    enum class MaskMode : std::uint8_t { MatchSource, Alpha, Luminance };
+    enum class MaskComposite : std::uint8_t { Add, Subtract, Intersect, Exclude };
+    std::vector<MaskImage> maskImages;
+    std::vector<MaskMode> maskModes;
+    std::vector<MaskComposite> maskComposites;
 
     // A keyword pair plus a length offset, which is what every CSS `background-position`
     // form reduces to. `right 10px` is `End` with a negative offset, because a length

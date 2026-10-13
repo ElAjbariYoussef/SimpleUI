@@ -506,62 +506,185 @@ void paintBackground(const ComputedStyle& style, const BackgroundBoxes& boxes, f
 void applyMaskImage(std::uint8_t* pixels, int width, int height,
                     const ComputedStyle::MaskImage& mask, const SDL_FRect& destination,
                     float fontSize, float rootFontSize) {
+    applyMaskLayers(pixels, width, height, std::vector<ComputedStyle::MaskImage>{mask}, {},
+                    {}, destination, fontSize, rootFontSize, FetchMaskBytes{});
+}
+
+// Bilinear sample of decoded RGBA bytes at uv in [0,1]; edges clamp, so a
+// stretched mask never reads out of bounds.
+Color sampleBilinear(const DecodedImage& image, float u, float v) {
+    if (image.width <= 0 || image.height <= 0 || image.rgba.empty()) {
+        return Color{0, 0, 0, 0};
+    }
+    const float fx = std::min(std::max(u, 0.0f), 1.0f) * (image.width - 1);
+    const float fy = std::min(std::max(v, 0.0f), 1.0f) * (image.height - 1);
+    const int x0 = static_cast<int>(fx);
+    const int y0 = static_cast<int>(fy);
+    const int x1 = std::min(x0 + 1, image.width - 1);
+    const int y1 = std::min(y0 + 1, image.height - 1);
+    const float tx = fx - x0;
+    const float ty = fy - y0;
+    const auto& bytes = image.rgba;
+    const int stride = image.width * 4;
+    std::uint8_t out[4];
+    for (int c = 0; c < 4; ++c) {
+        const float a = bytes[y0 * stride + x0 * 4 + c];
+        const float b = bytes[y0 * stride + x1 * 4 + c];
+        const float cc = bytes[y1 * stride + x0 * 4 + c];
+        const float d = bytes[y1 * stride + x1 * 4 + c];
+        out[c] = static_cast<std::uint8_t>(
+            std::lround(a + (b - a) * tx + (cc - a) * ty + (a - b - cc + d) * tx * ty));
+    }
+    return Color{out[0], out[1], out[2], out[3]};
+}
+
+// One mask layer's value at a surface point, 0..1: the painted colour read
+// through its mode. `match-source` is alpha for gradients and luminance for
+// urls, which is what makes `linear-gradient(black, transparent)` fade while
+// photos mask by brightness.
+void applyMaskLayers(std::uint8_t* pixels, int width, int height,
+                     const std::vector<ComputedStyle::MaskImage>& layers,
+                     const std::vector<ComputedStyle::MaskMode>& modes,
+                     const std::vector<ComputedStyle::MaskComposite>& composites,
+                     const SDL_FRect& destination, float fontSize, float rootFontSize,
+                     FetchMaskBytes fetch) {
     using Mask = ComputedStyle::MaskImage;
+    using Mode = ComputedStyle::MaskMode;
+    using Composite = ComputedStyle::MaskComposite;
     if (!pixels || width <= 0 || height <= 0 || destination.w <= 0.0f ||
-        destination.h <= 0.0f) {
+        destination.h <= 0.0f || layers.empty()) {
         return;
     }
-    // The mask paints the destination the way a background layer would, then
-    // each pixel keeps the resulting alpha. Stop alphas stay authored: group
-    // opacity lands later, at the blit.
-    if (mask.kind != Mask::Kind::LinearGradient &&
-        mask.kind != Mask::Kind::RadialGradient &&
-        mask.kind != Mask::Kind::ConicalGradient) {
-        return;
+    // Resolve each layer once: gradient shaders, decoded url bytes.
+    struct ResolvedLayer {
+        Shader shader;
+        bool hasShader = false;
+        const DecodedImage* image = nullptr;
+    };
+    std::vector<ResolvedLayer> resolved;
+    resolved.reserve(layers.size());
+    for (const auto& layer : layers) {
+        ResolvedLayer entry;
+        if (layer.kind == Mask::Kind::LinearGradient) {
+            LinearGradient gradient;
+            const float lineLength = gradientLine(layer.linear.angle, destination, gradient);
+            gradient.stops = toGradientStops(layer.linear.stops, lineLength, fontSize,
+                                             rootFontSize, 1.0f);
+            if (!gradient.stops.empty()) {
+                entry.shader = Shader::linear(gradient);
+                entry.hasShader = true;
+            }
+        } else if (layer.kind == Mask::Kind::RadialGradient) {
+            RadialGradient gradient;
+            radialRadii(layer.radial, destination, fontSize, rootFontSize, gradient);
+            gradient.stops = toGradientStops(
+                layer.radial.stops, std::max(gradient.radiusX, gradient.radiusY), fontSize,
+                rootFontSize, 1.0f);
+            if (!gradient.stops.empty()) {
+                entry.shader = Shader::radial(gradient);
+                entry.hasShader = true;
+            }
+        } else if (layer.kind == Mask::Kind::ConicalGradient) {
+            ConicalGradient gradient;
+            gradient.cx =
+                layer.conical.centreX.resolve(destination.w, fontSize, rootFontSize) +
+                destination.x;
+            gradient.cy =
+                layer.conical.centreY.resolve(destination.h, fontSize, rootFontSize) +
+                destination.y;
+            gradient.fromAngle = layer.conical.angle;
+            gradient.radius = std::max(destination.w, destination.h) * 0.5f;
+            gradient.stops = toGradientStops(layer.conical.stops, 1.0f, fontSize,
+                                             rootFontSize, 1.0f);
+            if (!gradient.stops.empty()) {
+                entry.shader = Shader::conical(gradient);
+                entry.hasShader = true;
+            }
+        } else if (layer.kind == Mask::Kind::Url && fetch) {
+            entry.image = fetch(layer.href);
+        }
+        resolved.push_back(std::move(entry));
     }
-    Shader shader = Shader::solid(Color{0, 0, 0, 0});
-    if (mask.kind == Mask::Kind::LinearGradient) {
-        LinearGradient gradient;
-        const float lineLength = gradientLine(mask.linear.angle, destination, gradient);
-        gradient.stops = toGradientStops(mask.linear.stops, lineLength, fontSize,
-                                         rootFontSize, 1.0f);
-        if (gradient.stops.empty()) {
-            return;
+    const auto modeAt = [&](std::size_t i) {
+        if (modes.empty()) {
+            return Mode::MatchSource;
         }
-        shader = Shader::linear(gradient);
-    } else if (mask.kind == Mask::Kind::RadialGradient) {
-        RadialGradient gradient;
-        radialRadii(mask.radial, destination, fontSize, rootFontSize, gradient);
-        gradient.stops = toGradientStops(
-            mask.radial.stops, std::max(gradient.radiusX, gradient.radiusY), fontSize,
-            rootFontSize, 1.0f);
-        if (gradient.stops.empty()) {
-            return;
+        return modes[std::min(i, modes.size() - 1)];
+    };
+    const auto compositeAt = [&](std::size_t i) {
+        if (composites.empty()) {
+            return Composite::Add;
         }
-        shader = Shader::radial(gradient);
-    } else {
-        ConicalGradient gradient;
-        gradient.cx = mask.conical.centreX.resolve(destination.w, fontSize, rootFontSize) +
-                      destination.x;
-        gradient.cy = mask.conical.centreY.resolve(destination.h, fontSize, rootFontSize) +
-                      destination.y;
-        gradient.fromAngle = mask.conical.angle;
-        gradient.radius = std::max(destination.w, destination.h) * 0.5f;
-        gradient.stops =
-            toGradientStops(mask.conical.stops, 1.0f, fontSize, rootFontSize, 1.0f);
-        if (gradient.stops.empty()) {
-            return;
-        }
-        shader = Shader::conical(gradient);
-    }
+        return composites[std::min(i, composites.size() - 1)];
+    };
     for (int row = 0; row < height; ++row) {
         for (int col = 0; col < width; ++col) {
-            const Color kept = shader.colorAt(static_cast<float>(col) + 0.5f,
-                                              static_cast<float>(row) + 0.5f);
+            const float px = static_cast<float>(col) + 0.5f;
+            const float py = static_cast<float>(row) + 0.5f;
+            float acc = 0.0f;
+            for (std::size_t i = 0; i < layers.size(); ++i) {
+                const auto& layer = layers[i];
+                const auto& entry = resolved[i];
+                // `none` is opaque (no masking); a gradient that failed to
+                // resolve (empty stops) is also opaque so it stays quiet;
+                // a url that failed to load is transparent, per masking rules.
+                float value = 1.0f;
+                if (layer.kind == Mask::Kind::None) {
+                    value = 1.0f;
+                } else if (entry.hasShader) {
+                    const Color color = entry.shader.colorAt(px, py);
+                    const Mode mode = modeAt(i);
+                    if (mode == Mode::Alpha || mode == Mode::MatchSource) {
+                        value = static_cast<float>(color.a) / 255.0f;
+                    } else {
+                        value = (0.2126f * color.r + 0.7152f * color.g +
+                                 0.0722f * color.b) /
+                                255.0f;
+                    }
+                } else if (layer.kind == Mask::Kind::Url) {
+                    if (entry.image && entry.image->width > 0 &&
+                        entry.image->height > 0 && !entry.image->rgba.empty()) {
+                        const float u = (px - destination.x) / destination.w;
+                        const float v = (py - destination.y) / destination.h;
+                        const Color color = sampleBilinear(*entry.image, u, v);
+                        const Mode mode = modeAt(i);
+                        if (mode == Mode::Alpha) {
+                            value = static_cast<float>(color.a) / 255.0f;
+                        } else {
+                            // `match-source` is luminance for urls, so photos
+                            // mask by brightness.
+                            value = (0.2126f * color.r + 0.7152f * color.g +
+                                     0.0722f * color.b) /
+                                    255.0f;
+                        }
+                    } else {
+                        value = 0.0f;
+                    }
+                } else {
+                    // Unresolvable gradient: opaque so a bad layer stays quiet.
+                    value = 1.0f;
+                }
+                if (i == 0) {
+                    acc = value;
+                    continue;
+                }
+                switch (compositeAt(i)) {
+                    case Composite::Add:
+                        acc = acc + value - acc * value;
+                        break;
+                    case Composite::Subtract:
+                        acc = std::max(0.0f, acc - value);
+                        break;
+                    case Composite::Intersect:
+                        acc = acc * value;
+                        break;
+                    case Composite::Exclude:
+                        acc = acc + value - 2.0f * acc * value;
+                        break;
+                }
+            }
             std::uint8_t* alpha = pixels + 4 * (row * width + col) + 3;
-            *alpha = static_cast<std::uint8_t>(static_cast<float>(*alpha) *
-                                                   static_cast<float>(kept.a) / 255.0f +
-                                               0.5f);
+            *alpha = static_cast<std::uint8_t>(static_cast<float>(*alpha) * acc + 0.5f);
         }
     }
 }

@@ -296,7 +296,7 @@ void testGroupDetection() {
         {"clipnone", false, "clip-path:none opens no group"},
         {"mask", true, "a gradient mask opens a group"},
         {"masknone", false, "mask-image:none opens no group"},
-        {"maskurl", false, "an unapplied url mask opens no group"},
+        {"maskurl", true, "a url mask opens a group for sampling"},
     };
     for (const Case& c : cases) {
         Element* el = document->getElementById(c.id);
@@ -410,11 +410,13 @@ void testMaskShapeInOps() {
         return;
     }
     using MaskKind = sui::ComputedStyle::MaskImage::Kind;
-    check(mask->maskImage.kind == MaskKind::LinearGradient,
+    check(!mask->maskImages.empty() &&
+              mask->maskImages[0].kind == MaskKind::LinearGradient,
           "a gradient mask rides its paint op");
-    check(mask->maskImage.linear.stops.size() == 2, "the mask keeps its stops");
-    check(plain->maskImage.kind == MaskKind::None, "an unmasked box carries no mask");
-    check(url->maskImage.kind == MaskKind::None, "an unapplied url mask rides nothing");
+    check(mask->maskImages[0].linear.stops.size() == 2, "the mask keeps its stops");
+    check(plain->maskImages.empty(), "an unmasked box carries no mask");
+    check(url->maskImages.size() == 1 && url->maskImages[0].kind == MaskKind::Url,
+          "a url mask rides for sampling");
 
     const auto ops = sui::computePaintOps(*document->root(), resolver);
     Element* masked = document->getElementById("mask");
