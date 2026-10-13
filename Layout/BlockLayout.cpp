@@ -2534,6 +2534,16 @@ private:
                     } else {
                         text(value, container);
                     }
+                } else {
+                    // An empty field shows its placeholder hint, if the rebuild
+                    // made one, in the box's own style (never password-masked).
+                    for (const auto& child : el.children()) {
+                        if (child && child->tag() == "::placeholder") {
+                            const ComputedStyle hint = owner_.resolveStyle(*child);
+                            text(child->textContent(), hint);
+                            break;
+                        }
+                    }
                 }
                 return;
             }

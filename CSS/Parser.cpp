@@ -437,9 +437,10 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
             }
             const std::string_view name = src.substr(nameStart, i - nameStart);
             // `::before` and `::after` become real boxes in the tree, so they can
-            // select those boxes and carry their own declarations. No other
+            // select those boxes and carry their own declarations. `::placeholder`
+            // works the same way: its box carries the `placeholder` text. No other
             // pseudo-element is generated.
-            if (name == "before" || name == "after") {
+            if (name == "before" || name == "after" || name == "placeholder") {
                 Selector part;
                 part.kind = Selector::Kind::PseudoElement;
                 part.value = std::string("::") + std::string(name);

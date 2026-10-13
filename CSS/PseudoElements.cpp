@@ -174,6 +174,27 @@ void addBox(Element& element, const StyleResolver& resolver, const char* tag,
     box->appendChild(Element::createText(text, document));
 }
 
+// A `::placeholder` box carries the `placeholder` attribute as its text, but
+// only while the field is empty. Stale boxes are swept with the rest, so a
+// field that gains a value loses its box on the next rebuild.
+void addPlaceholderBox(Element& element, const StyleResolver& resolver) {
+    if (element.tag() != "input" && element.tag() != "textarea") {
+        return;
+    }
+    const std::string_view hint = element.attribute("placeholder");
+    if (hint.empty() || !element.value().empty()) {
+        return;
+    }
+    Document* document = element.document();
+    element.insertChild(std::make_unique<Element>("::placeholder", document), 0);
+    Element* box = element.children()[0].get();
+    box->appendChild(Element::createText(std::string(hint), document));
+    // The box resolves for its own declarations (`input::placeholder`);
+    // everything else inherits from the field. It lays out no box of its own:
+    // the field flows the hint text itself.
+    (void)resolver.resolve(*box);
+}
+
 void build(Element& element, const StyleResolver& resolver, CounterStack& counters) {
     for (const auto& child : element.children()) {
         if (!child || child->isTextNode() || child->isPseudoElement()) {
@@ -187,6 +208,7 @@ void build(Element& element, const StyleResolver& resolver, CounterStack& counte
 
         addBox(*child, resolver, "::before", true, counters);
         addBox(*child, resolver, "::after", false, counters);
+        addPlaceholderBox(*child, resolver);
         // Recursing after the boxes exist is safe: they are skipped above, and
         // `::before::before` is not a thing CSS can express.
         build(*child, resolver, counters);

@@ -5183,6 +5183,83 @@ void testValidationPseudos() {
     check(on("textarea:valid", *s), "a filled required textarea is valid");
 }
 
+// A `::placeholder` box carries the `placeholder` attribute while its field is
+// empty, and the field flows the hint in the box's own style instead of a
+// value. Typing removes the box on the next rebuild; passwords never mask it.
+void testPlaceholder() {
+    auto document = parseOrNull(
+        "<sui><body><input id=\"e\" type=\"text\" placeholder=\"Name\"/>"
+        "<input id=\"f\" type=\"text\" placeholder=\"Name\" value=\"Ada\"/>"
+        "<input id=\"p\" type=\"password\" placeholder=\"Secret\"/>"
+        "<textarea id=\"t\" placeholder=\"Notes\"></textarea>"
+        "<div id=\"d\" placeholder=\"Nope\">x</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* e = document->getElementById("e");
+    Element* f = document->getElementById("f");
+    Element* p = document->getElementById("p");
+    Element* t = document->getElementById("t");
+    Element* d = document->getElementById("d");
+    check(e && f && p && t && d, "placeholder elements found");
+    if (!e || !f || !p || !t || !d) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } input::placeholder { color: #ff0000 }"));
+    sui::generatePseudoElements(*document, resolver);
+    const auto placeholderOf = [](Element& el) -> Element* {
+        for (const auto& child : el.children()) {
+            if (child && child->tag() == "::placeholder") {
+                return child.get();
+            }
+        }
+        return nullptr;
+    };
+    check(placeholderOf(*e) != nullptr, "an empty field gains a placeholder box");
+    check(placeholderOf(*f) == nullptr, "a filled field gains no box");
+    check(placeholderOf(*p) != nullptr, "a password field gains a box");
+    check(placeholderOf(*t) != nullptr, "a textarea gains a box");
+    check(placeholderOf(*d) == nullptr, "a div gains no box");
+
+    layoutRoot(*document, resolver, 400.0f);
+    check(!e->textRuns().empty() && e->textRuns()[0].text == "Name",
+          "the hint flows as the field's text");
+    check(!e->textRuns().empty() && e->textRuns()[0].r == 255 &&
+              e->textRuns()[0].g == 0,
+          "an author ::placeholder rule colours the hint");
+    check(!t->textRuns().empty() && t->textRuns()[0].text == "Notes",
+          "a textarea hint flows too");
+    check(!p->textRuns().empty() && p->textRuns()[0].text == "Secret",
+          "a password hint is never masked");
+
+    // Typing removes the box and shows the value on the next rebuild.
+    e->setValue("Grace");
+    sui::generatePseudoElements(*document, resolver);
+    layoutRoot(*document, resolver, 400.0f);
+    check(placeholderOf(*e) == nullptr, "typing drops the placeholder box");
+    check(!e->textRuns().empty() && e->textRuns()[0].text == "Grace",
+          "the value replaces the hint");
+
+    // Without an author rule the hint reads the muted UA gray.
+    auto bare = parseOrNull(
+        "<sui><body><input id=\"u\" type=\"text\" placeholder=\"Hint\"/></body></sui>");
+    if (bare) {
+        Element* u = bare->getElementById("u");
+        if (u) {
+            sui::StyleResolver plain;
+            plain.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+            sui::generatePseudoElements(*bare, plain);
+            layoutRoot(*bare, plain, 400.0f);
+            check(!u->textRuns().empty() && u->textRuns()[0].r == 130,
+                  "an unstyled hint reads the UA gray");
+        } else {
+            check(false, "unstyled placeholder element found");
+        }
+    }
+}
+
 // `:focus-visible` matches the focused element only when it wants visible
 // focus UI: the state flag set on keyboard interaction, or on focusing a
 // control that takes text entry.
@@ -6912,6 +6989,7 @@ int main() {
     testValidationPseudos();
     testGaugeDefaults();
     testFocusVisible();
+    testPlaceholder();
     testBackdropFilter();
     testBackgroundListsAreParallel();
     testBackgroundSizeAndPositionKeywords();

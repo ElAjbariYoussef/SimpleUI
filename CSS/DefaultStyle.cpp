@@ -284,6 +284,16 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
         return s;
     }
 
+    // Placeholder hints read dimmer than values: a muted gray over whatever
+    // the field inherits, overridable by an author `::placeholder` rule.
+    if (tag == "::placeholder") {
+        Style s;
+        s.display = Style::Inline;
+        s.specified = Style::SpecifiedColor;
+        s.color = {130, 130, 140, 255};
+        return s;
+    }
+
     return block();
 }
 
