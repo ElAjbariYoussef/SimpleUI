@@ -1113,6 +1113,58 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
     const sui::Color border = multiplyAlpha(toColor(s.borderColor), opacity);
 
     if (box.w > 0.0f && box.h > 0.0f) {
+        // A `backdrop-filter` processes what is already on the target behind
+        // this box, before the box paints anything of its own over it. Only
+        // blur() and colour operations apply; `opacity()` and `drop-shadow()`
+        // in the chain stay unapplied.
+        if (!s.backdropFilter.empty() && s.backdropFilter != "none") {
+            SDL_Rect clipRect;
+            const bool clipped = SDL_GetRenderClipRect(sdlRenderer, &clipRect);
+            int rx = static_cast<int>(std::floor(box.x));
+            int ry = static_cast<int>(std::floor(box.y));
+            int rw = static_cast<int>(std::ceil(box.w));
+            int rh = static_cast<int>(std::ceil(box.h));
+            if (clipped) {
+                const int right = std::min(rx + rw, clipRect.x + clipRect.w);
+                const int bottom = std::min(ry + rh, clipRect.y + clipRect.h);
+                rx = std::max(rx, clipRect.x);
+                ry = std::max(ry, clipRect.y);
+                rw = right - rx;
+                rh = bottom - ry;
+            }
+            if (rw > 0 && rh > 0) {
+                const SDL_Rect region{rx, ry, rw, rh};
+                SDL_Surface* read = SDL_RenderReadPixels(sdlRenderer, &region);
+                if (read) {
+                    SDL_Surface* conv =
+                        SDL_ConvertSurface(read, SDL_PIXELFORMAT_ABGR8888);
+                    SDL_DestroySurface(read);
+                    if (conv) {
+                        std::uint8_t* pixels = static_cast<std::uint8_t*>(conv->pixels);
+                        float matrix[12];
+                        if (sui::filterColorMatrix(s.backdropFilter, matrix)) {
+                            sui::applyColorMatrix(pixels, conv->w, conv->h, matrix);
+                        }
+                        const int blurRadius =
+                            std::lround(filterBlur(s.backdropFilter));
+                        if (blurRadius > 0) {
+                            sui::blurRGBA(pixels, conv->w, conv->h, blurRadius);
+                        }
+                        SDL_Texture* backdrop =
+                            SDL_CreateTextureFromSurface(sdlRenderer, conv);
+                        SDL_DestroySurface(conv);
+                        if (backdrop) {
+                            SDL_SetTextureBlendMode(backdrop, SDL_BLENDMODE_BLEND);
+                            const SDL_FRect dst{static_cast<float>(rx), static_cast<float>(ry),
+                                                static_cast<float>(rw), static_cast<float>(rh)};
+                            SDL_RenderTexture(sdlRenderer, backdrop, nullptr, &dst);
+                            SDL_DestroyTexture(backdrop);
+                        }
+                    }
+                }
+            }
+        }
+
         // An outset shadow paints behind the box, an inset one over the background
         // and below the content, which is the order CSS uses.
         paintBoxShadow(s, box, radii, renderer, rootFontSize, opacity);

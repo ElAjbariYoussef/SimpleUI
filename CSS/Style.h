@@ -500,6 +500,10 @@ struct ComputedStyle {
     VerticalAlign verticalAlign = VAlignBaseline;
     std::string transform;
     std::string filter;
+    // What is already painted behind the border box, filtered before the box
+    // paints over it. Same chain grammar as `filter:`; `opacity()` and
+    // `drop-shadow()` in the chain stay unapplied.
+    std::string backdropFilter;
 
     // Where scale/rotate turn about: two box-relative offsets, in the same
     // length/percentage terms CSS allows for `transform-origin` (a keyword edge

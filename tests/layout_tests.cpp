@@ -4764,6 +4764,36 @@ void testMaskImage() {
           "the webkit prefix masks alike");
 }
 
+void testBackdropFilter() {
+    auto document = parseOrNull("<sui><body><div id=\"x\">hi</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* x = document->getElementById("x");
+    check(x != nullptr, "backdrop element found");
+    if (!x) {
+        return;
+    }
+    const auto backdropOf = [&](const char* css) {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(css));
+        return resolver.resolve(*x).backdropFilter;
+    };
+    check(backdropOf("#x{backdrop-filter:blur(6px)}") == "blur(6px)",
+          "a blur chain stores verbatim");
+    check(backdropOf("#x{backdrop-filter:brightness(0.5) contrast(2)}") ==
+              "brightness(0.5) contrast(2)",
+          "a shift chain stores verbatim");
+    check(backdropOf("#x{backdrop-filter:none}") == "none", "none stores as none");
+
+    // Serialization round-trips the stored chain.
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("#x{backdrop-filter:blur(6px)}"));
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*x), "backdrop-filter") ==
+              "blur(6px)",
+          "backdrop-filter serializes");
+}
+
 // The seven background longhands are parallel lists that CSS matches up by
 // position, repeating whichever is shortest, so one value can serve every layer.
 void testBackgroundListsAreParallel() {
@@ -6328,6 +6358,7 @@ int main() {
     testRadialGradientParsing();
     testConicalGradientParsing();
     testMaskImage();
+    testBackdropFilter();
     testBackgroundListsAreParallel();
     testBackgroundSizeAndPositionKeywords();
     testFlexCrossSizeExcludesChrome();

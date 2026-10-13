@@ -129,32 +129,6 @@ float filterOpacity(std::string_view filter) {
     return result;
 }
 
-// A `filter: blur(x)` asks for the group's rendered surface to be diffused by
-// x pixels. The painter cannot blur a flat box list, so it does what it can
-// here: mark the box for an offscreen surface (like an opacity under 1 does)
-// and hand the radius to the executor, which reads the surface back, blurs it,
-// and blits the result. Returns 0 when the chain has no blur().
-float filterBlur(std::string_view filter) {
-    float radius = 0.0f;
-    std::size_t at = 0;
-    while ((at = filter.find("blur(", at)) != std::string_view::npos) {
-        at += 5;
-        const std::size_t end = filter.find(')', at);
-        if (end == std::string_view::npos) {
-            break;
-        }
-        const std::string_view number = filter.substr(at, end - at);
-        char* stop = nullptr;
-        const std::string owned(number);
-        const float value = std::strtof(owned.c_str(), &stop);
-        if (stop != owned.c_str()) {
-            radius = std::max(radius, value);
-        }
-        at = end + 1;
-    }
-    return radius;
-}
-
 // The `)` that closes the `(` just after `open`, letting a `drop-shadow()`'s
 // color argument -- rgba(), hsl(), color-mix() and friends -- keep its own
 // nested parentheses inside the body.
@@ -937,6 +911,33 @@ struct Collector {
 };
 
 }  // namespace
+
+// A `filter: blur(x)` asks for the group's rendered surface to be diffused by
+// x pixels. The painter cannot blur a flat box list, so it does what it can
+// here: mark the box for an offscreen surface (like an opacity under 1 does)
+// and hand the radius to the executor, which reads the surface back, blurs it,
+// and blits the result. Returns 0 when the chain has no blur(). Shared with
+// the backdrop filter, which diffuses what is behind the box instead.
+float filterBlur(std::string_view filter) {
+    float radius = 0.0f;
+    std::size_t at = 0;
+    while ((at = filter.find("blur(", at)) != std::string_view::npos) {
+        at += 5;
+        const std::size_t end = filter.find(')', at);
+        if (end == std::string_view::npos) {
+            break;
+        }
+        const std::string_view number = filter.substr(at, end - at);
+        char* stop = nullptr;
+        const std::string owned(number);
+        const float value = std::strtof(owned.c_str(), &stop);
+        if (stop != owned.c_str()) {
+            radius = std::max(radius, value);
+        }
+        at = end + 1;
+    }
+    return radius;
+}
 
 bool clipsAnything(const ComputedStyle& s) {
     return s.overflowX != ComputedStyle::Visible || s.overflowY != ComputedStyle::Visible;

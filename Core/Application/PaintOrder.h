@@ -125,6 +125,10 @@ bool clipsAnything(const ComputedStyle& s);
 // in-flow content still belongs with its box.
 bool createsPaintGroup(const ComputedStyle& s);
 
+// The largest `blur()` radius in a filter chain, or 0. Shared with the
+// backdrop filter, which diffuses what is behind the box instead of the box.
+float filterBlur(std::string_view filter);
+
 // The operations a frame is painted from, back to front. Elements that do not
 // paint (hidden, non-visual wrappers) are absent. The walk needs no device or
 // renderer, so tests can assert on the sequence, the group bounds, and the

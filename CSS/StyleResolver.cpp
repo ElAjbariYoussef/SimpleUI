@@ -3657,6 +3657,8 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
     } else if (property == "filter") {
         s.filter = std::string(value);
         s.specified |= ComputedStyle::SpecifiedFilter;
+    } else if (property == "backdrop-filter") {
+        s.backdropFilter = std::string(value);
     } else if (property == "text-align") {
         if (isCentre(value)) {
             s.textAlign = ComputedStyle::Center;
@@ -3908,7 +3910,7 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         // Accepted; these control browser chrome that this engine does not draw.
     } else if (property == "will-change" || property == "contain" ||
                property == "isolation" || property == "mask" ||
-               property == "backdrop-filter" || property == "filter") {
+               property == "filter") {
         // Performance / compositing hints and effects: accepted and ignored.
     } else if (property == "mask-image" || property == "-webkit-mask-image") {
         // One gradient layer applies as an alpha mask; anything else keeps the
@@ -4507,6 +4509,7 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "transform") return style.transform;
     if (property == "filter") return style.filter;
+    if (property == "backdrop-filter") return style.backdropFilter;
     if (property == "transform-origin") {
         std::string result = length(style.transformOrigin.x, "50%");
         const std::string second = length(style.transformOrigin.y, "50%");
