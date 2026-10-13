@@ -4905,6 +4905,86 @@ void testMaskGeometry() {
           "the webkit size prefix parses alike");
 }
 
+// The `mask` shorthand expands every layer into all eight longhands: image,
+// position/size, repeat, origin/clip, composite, and mode in any order, with
+// omitted components reset to their initials. One bad token drops the whole
+// declaration.
+void testMaskShorthand() {
+    const auto rules = sui::CSSParser::parse(R"(
+        .a { mask: url(m.png) }
+        .b { mask: none }
+        .c { mask: linear-gradient(black, transparent) center / cover no-repeat }
+        .d { mask: url(a.png) luminance, url(b.png) subtract }
+        .e { mask: url(m.png) padding-box content-box }
+        .f { mask: url(m.png) border-box }
+        .g { mask: banana }
+        .h { mask: url(m.png) repeat no-repeat }
+        .i { mask: url(m.png) center / }
+    )");
+    sui::StyleResolver resolver;
+    resolver.setRules(rules);
+    static const char* kClasses =
+        "<div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div>"
+        "<div class=\"d\"></div><div class=\"e\"></div><div class=\"f\"></div>"
+        "<div class=\"g\"></div><div class=\"h\"></div><div class=\"i\"></div>";
+    auto body = parseOrNull((std::string("<sui><body>") + kClasses + "</body></sui>").c_str());
+    if (!body) {
+        return;
+    }
+    const std::vector<ComputedStyle> styles = bodyStyles(*body, resolver);
+    if (styles.size() < 9) {
+        check(false, "mask shorthand elements found");
+        return;
+    }
+    using Kind = sui::ComputedStyle::MaskImage::Kind;
+    using Mode = sui::ComputedStyle::MaskMode;
+    using Composite = sui::ComputedStyle::MaskComposite;
+    using Size = sui::ComputedStyle::BackgroundSize;
+    using Position = sui::ComputedStyle::BackgroundPosition;
+    check(styles[0].maskImages.size() == 1 &&
+              styles[0].maskImages[0].kind == Kind::Url &&
+              styles[0].maskImages[0].href == "m.png",
+          "a bare url expands its image");
+    check(styles[0].maskRepeats.size() == 1 && styles[0].maskRepeats[0].x &&
+              styles[0].maskRepeats[0].y,
+          "omitted repeat resets to tiling");
+    check(styles[1].maskImages.size() == 1 &&
+              styles[1].maskImages[0].kind == Kind::None,
+          "none expands to no image");
+    check(styles[2].maskImages.size() == 1 &&
+              styles[2].maskImages[0].kind == Kind::LinearGradient &&
+              styles[2].maskPositions.size() == 1 &&
+              styles[2].maskPositions[0].horizontal == Position::Center &&
+              styles[2].maskSizes.size() == 1 &&
+              styles[2].maskSizes[0].mode == Size::Cover &&
+              styles[2].maskRepeats.size() == 1 &&
+              !styles[2].maskRepeats[0].x && !styles[2].maskRepeats[0].y,
+          "position, size, and repeat expand together");
+    check(styles[3].maskImages.size() == 2 &&
+              styles[3].maskModes.size() == 2 &&
+              styles[3].maskModes[0] == Mode::Luminance &&
+              styles[3].maskModes[1] == Mode::MatchSource &&
+              styles[3].maskComposites.size() == 2 &&
+              styles[3].maskComposites[1] == Composite::Subtract,
+          "layers stay lined up with omitted middles reset");
+    check(styles[4].maskOrigins.size() == 1 &&
+              styles[4].maskOrigins[0] == sui::ComputedStyle::BackgroundPaddingBox &&
+              styles[4].maskClips.size() == 1 &&
+              styles[4].maskClips[0] == sui::ComputedStyle::BackgroundContentBox,
+          "two boxes set origin then clip");
+    check(styles[5].maskOrigins.size() == 1 &&
+              styles[5].maskOrigins[0] == sui::ComputedStyle::BackgroundBorderBox &&
+              styles[5].maskClips.size() == 1 &&
+              styles[5].maskClips[0] == sui::ComputedStyle::BackgroundBorderBox,
+          "one box sets both origin and clip");
+    check(styles[6].maskImages.empty() && styles[6].maskRepeats.empty(),
+          "a bad token drops the whole shorthand");
+    check(styles[7].maskRepeats.size() == 1 && styles[7].maskRepeats[0].x &&
+              !styles[7].maskRepeats[0].y,
+          "a two-word repeat pairs its axes");
+    check(styles[8].maskImages.empty(), "a dangling slash drops the shorthand");
+}
+
 void testBackdropFilter() {
     auto document = parseOrNull("<sui><body><div id=\"x\">hi</div></body></sui>");
     if (!document) {
@@ -6501,6 +6581,7 @@ int main() {
     testMaskImage();
     testMaskModeComposite();
     testMaskGeometry();
+    testMaskShorthand();
     testBackdropFilter();
     testBackgroundListsAreParallel();
     testBackgroundSizeAndPositionKeywords();

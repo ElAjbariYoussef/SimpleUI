@@ -2511,6 +2511,230 @@ void applyBackgroundLonghand(ComputedStyle& s, std::string_view property,
     }
 }
 
+// A bare `repeat`/`no-repeat` word names one tiling axis, for the two-word
+// `mask-repeat` the shorthand pairs up. `space`/`round` only stand alone.
+bool repeatAxisValue(std::string_view token, bool& out) {
+    if (token == "repeat") {
+        out = true;
+        return true;
+    }
+    if (token == "no-repeat") {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+bool isRepeatWord(std::string_view token) {
+    return token == "repeat" || token == "no-repeat" || token == "repeat-x" ||
+           token == "repeat-y" || token == "space" || token == "round";
+}
+
+// `mask` (and `-webkit-mask`): image || position [ / size ]? || repeat ||
+// origin || clip || composite || mode, comma-separated per layer. Every layer
+// pushes one entry to each longhand; omitted components take their initial
+// values, so the shorthand resets whatever the longhands set. One box keyword
+// sets both origin and clip, two set origin then clip, like the background. A
+// size needs its position, and one bad token drops the whole declaration, like
+// any failed parse.
+bool parseMask(std::string_view value, ComputedStyle& s) {
+    using Mask = ComputedStyle::MaskImage;
+    using Mode = ComputedStyle::MaskMode;
+    using Composite = ComputedStyle::MaskComposite;
+    using Size = ComputedStyle::BackgroundSize;
+    using Position = ComputedStyle::BackgroundPosition;
+    using Repeat = ComputedStyle::RepeatPair;
+    using Box = ComputedStyle::BackgroundBox;
+    std::vector<Mask> images;
+    std::vector<Mode> modes;
+    std::vector<Composite> composites;
+    std::vector<Size> sizes;
+    std::vector<Position> positions;
+    std::vector<Repeat> repeats;
+    std::vector<Box> origins;
+    std::vector<Box> clips;
+    const auto isBox = [](std::string_view token, Box& out) {
+        return parseBackgroundBox(token, out);
+    };
+    for (std::string_view commaLayer : splitTopLevel(value)) {
+        const std::string_view text = trim(commaLayer);
+        if (text.empty()) {
+            return false;
+        }
+        // The slash separates position from size, paren-aware so a url's own
+        // slashes never cut.
+        const std::vector<std::string_view> halves = splitTopLevel(text, '/');
+        if (halves.size() > 2) {
+            return false;
+        }
+        Mask image;
+        bool hasImage = false;
+        std::string positionText;
+        Size size;
+        bool hasSize = false;
+        std::string sizeText;
+        Repeat repeat;
+        bool hasRepeat = false;
+        Mode mode = Mode::MatchSource;
+        bool hasMode = false;
+        Composite composite = Composite::Add;
+        bool hasComposite = false;
+        std::vector<Box> boxes;
+        // One token stream walk for both halves: before the slash a bare
+        // length is a position offset, after it a size. Anything else
+        // classifies the same either way.
+        for (std::size_t half = 0; half < halves.size(); ++half) {
+            const bool inSize = half == 1;
+            const std::vector<std::string_view> tokens = splitTokens(halves[half]);
+            for (std::size_t i = 0; i < tokens.size(); ++i) {
+                const std::string_view token = tokens[i];
+                if (token.empty()) {
+                    continue;
+                }
+                Mask parsed;
+                if (parseMaskImage(token, parsed) &&
+                    (parsed.kind != Mask::Kind::None || token == "none")) {
+                    // A gradient, url, or explicit `none` names the image.
+                    // (`parseMaskImage` also swallows garbage as `None`, so
+                    // only `none` counts from that path.)
+                    if (hasImage) {
+                        return false;
+                    }
+                    image = parsed;
+                    hasImage = true;
+                } else if (isRepeatWord(token)) {
+                    if (hasRepeat) {
+                        return false;
+                    }
+                    if (repeatAxisValue(token, repeat.x) && i + 1 < tokens.size() &&
+                        repeatAxisValue(tokens[i + 1], repeat.y)) {
+                        ++i;
+                    } else if (!parseRepeatValue(token, repeat)) {
+                        return false;
+                    }
+                    hasRepeat = true;
+                } else if (token == "match-source") {
+                    if (hasMode) {
+                        return false;
+                    }
+                    mode = Mode::MatchSource;
+                    hasMode = true;
+                } else if (token == "alpha") {
+                    if (hasMode) {
+                        return false;
+                    }
+                    mode = Mode::Alpha;
+                    hasMode = true;
+                } else if (token == "luminance") {
+                    if (hasMode) {
+                        return false;
+                    }
+                    mode = Mode::Luminance;
+                    hasMode = true;
+                } else if (token == "add") {
+                    if (hasComposite) {
+                        return false;
+                    }
+                    composite = Composite::Add;
+                    hasComposite = true;
+                } else if (token == "subtract") {
+                    if (hasComposite) {
+                        return false;
+                    }
+                    composite = Composite::Subtract;
+                    hasComposite = true;
+                } else if (token == "intersect") {
+                    if (hasComposite) {
+                        return false;
+                    }
+                    composite = Composite::Intersect;
+                    hasComposite = true;
+                } else if (token == "exclude") {
+                    if (hasComposite) {
+                        return false;
+                    }
+                    composite = Composite::Exclude;
+                    hasComposite = true;
+                } else if (!inSize) {
+                    Box box = ComputedStyle::BackgroundBorderBox;
+                    if (isBox(token, box)) {
+                        if (boxes.size() == 2) {
+                            return false;
+                        }
+                        boxes.push_back(box);
+                    } else if (token == "left" || token == "right" || token == "top" ||
+                               token == "bottom" || isCentre(token) ||
+                               !parseLength(token).isAuto()) {
+                        if (!positionText.empty()) {
+                            positionText += ' ';
+                        }
+                        positionText += std::string(token);
+                    } else {
+                        return false;
+                    }
+                } else {
+                    // Past the slash a bare length is a size; anything else is
+                    // invalid there.
+                    if (token == "auto" || token == "cover" || token == "contain" ||
+                        !parseLength(token).isAuto()) {
+                        if (!sizeText.empty()) {
+                            sizeText += ' ';
+                        }
+                        sizeText += std::string(token);
+                    } else {
+                        return false;
+                    }
+                }
+            }
+        }
+        if (!sizeText.empty()) {
+            if (!parseBackgroundSize(sizeText, size)) {
+                return false;
+            }
+            hasSize = true;
+        } else if (halves.size() == 2) {
+            // A slash with nothing after it sizes nothing.
+            return false;
+        }
+        if (hasSize && positionText.empty()) {
+            // A size needs its position, like the background.
+            return false;
+        }
+        Position position;
+        if (!positionText.empty() && !parsePositionPair(positionText, position)) {
+            return false;
+        }
+        images.push_back(hasImage ? image : Mask());
+        modes.push_back(mode);
+        composites.push_back(composite);
+        sizes.push_back(size);
+        positions.push_back(position);
+        repeats.push_back(repeat);
+        if (boxes.empty()) {
+            origins.push_back(ComputedStyle::BackgroundBorderBox);
+            clips.push_back(ComputedStyle::BackgroundBorderBox);
+        } else if (boxes.size() == 1) {
+            origins.push_back(boxes[0]);
+            clips.push_back(boxes[0]);
+        } else {
+            origins.push_back(boxes[0]);
+            clips.push_back(boxes[1]);
+        }
+    }
+    if (images.empty()) {
+        return false;
+    }
+    s.maskImages = std::move(images);
+    s.maskModes = std::move(modes);
+    s.maskComposites = std::move(composites);
+    s.maskSizes = std::move(sizes);
+    s.maskPositions = std::move(positions);
+    s.maskRepeats = std::move(repeats);
+    s.maskOrigins = std::move(origins);
+    s.maskClips = std::move(clips);
+    return true;
+}
+
 
 // A property the engine does not implement is dropped by CSS anyway, but saying so
 // here is what makes the gap debuggable: it turns a hover rule with an unsupported
@@ -3904,9 +4128,12 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
                property == "-webkit-appearance") {
         // Accepted; these control browser chrome that this engine does not draw.
     } else if (property == "will-change" || property == "contain" ||
-               property == "isolation" || property == "mask" ||
-               property == "filter") {
+               property == "isolation" || property == "filter") {
         // Performance / compositing hints and effects: accepted and ignored.
+    } else if (property == "mask" || property == "-webkit-mask") {
+        // Shorthand: every layer expands into all eight longhands, resetting
+        // whatever they set. One bad token drops the whole declaration.
+        parseMask(value, s);
     } else if (property == "mask-image" || property == "-webkit-mask-image") {
         // Every layer parses; one bad layer drops the whole declaration, like
         // any failed parse.
