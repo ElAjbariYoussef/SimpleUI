@@ -563,6 +563,56 @@ int main() {
         }
     }
 
+    // Tab cycles focus through the controls in document order, wrapping at
+    // either end; Shift+Tab walks back. Disabled controls are skipped, and
+    // keyboard-driven focus always shows its ring.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<input id=\"a\" type=\"text\"/>"
+            "<input id=\"skip\" type=\"text\" disabled/>"
+            "<button id=\"b\">go</button>"
+            "</body></sui>", err);
+        check(doc != nullptr, "tab test document parsed");
+        if (doc) {
+            sui::Element* a = doc->getElementById("a");
+            sui::Element* skip = doc->getElementById("skip");
+            sui::Element* b = doc->getElementById("b");
+            check(a && skip && b, "tab elements found");
+            if (a && skip && b) {
+                app.setDocument(std::move(doc));
+
+                sui::StyleResolver layoutResolver;
+                sui::LayoutInput input;
+                input.resolver = &layoutResolver;
+                input.viewportWidth = 400.0f;
+                input.viewportHeight = 300.0f;
+                sui::BlockLayout().layout(app.document().root(), input);
+
+                const auto tab = [&]() {
+                    app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0,
+                                                 0, 0x09));
+                };
+                check(app.document().focused() == nullptr, "nothing focused at first");
+                tab();
+                check(app.document().focused() == a, "tab first stops on the field");
+                check(app.focusVisible(), "keyboard focus shows its ring");
+                tab();
+                check(app.document().focused() == b, "tab skips disabled controls");
+                tab();
+                check(app.document().focused() == a, "tab wraps past the end");
+                app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0, 0,
+                                             0x400000e1));
+                tab();
+                check(app.document().focused() == b, "shift+tab walks back");
+                app.dispatch(sui::InputEvent(sui::InputKind::KeyUp, 0, 0, 0, 0, 0,
+                                             0x400000e1));
+            }
+        }
+    }
+
     // A tilted 3D box is hit through its projected quad: its centre catches,
     // but a point inside the flat box yet outside the warp misses.
     {

@@ -455,6 +455,25 @@ bool focusShowsOnClick(const Element& el) {
            type == "tel" || type == "number";
 }
 
+// Controls that Tab stops on, in document order: inputs (except hidden),
+// selects, textareas, and buttons, skipping disabled and unlaid-out boxes.
+void collectFocusable(Element& root, std::vector<Element*>& out) {
+    for (const auto& child : root.children()) {
+        if (!child || child->isTextNode()) {
+            continue;
+        }
+        const std::string_view tag = child->tag();
+        const bool control =
+            tag == "select" || tag == "textarea" || tag == "button" ||
+            (tag == "input" && child->attribute("type") != "hidden");
+        if (control && !child->hasAttribute("disabled") && child->layoutWidth() > 0.0f &&
+            child->layoutHeight() > 0.0f) {
+            out.push_back(child.get());
+        }
+        collectFocusable(*child, out);
+    }
+}
+
 // A checkbox/radio keeps its state as a boolean `checked` attribute.
 void setChecked(Element& el, bool checked) {
     if (checked) {
@@ -2204,6 +2223,49 @@ void Application::dispatch(const InputEvent& event) {
         case InputKind::KeyDown:
             // Any key marks keyboard modality, so the next focus shows its ring.
             keyboardModality_ = true;
+            // Tab cycles focus through the controls in document order, wrapping
+            // at either end; Shift+Tab walks back. Text editing below ignores
+            // the key, so focus moves instead of typing a tab.
+            if (event.key == 0x09 && document_ && document_->root()) {
+                std::vector<Element*> order;
+                collectFocusable(*document_->root(), order);
+                if (!order.empty()) {
+                    Element* focused = document_->focused();
+                    std::size_t at = order.size();
+                    for (std::size_t i = 0; i < order.size(); ++i) {
+                        if (order[i] == focused) {
+                            at = i;
+                            break;
+                        }
+                    }
+                    const bool backward = shiftDown_;
+                    Element* next = nullptr;
+                    if (at >= order.size()) {
+                        next = backward ? order.back() : order.front();
+                    } else if (backward) {
+                        next = order[(at + order.size() - 1) % order.size()];
+                    } else {
+                        next = order[(at + 1) % order.size()];
+                    }
+                    document_->setFocused(next);
+                    resolver_.setFocused(next);
+                    resolver_.setFocusVisible(true);
+                    lastFocused_ = next;
+                    if (isEditableField(next)) {
+                        resetCaretBlink();
+                        caretBytePos_ = next->value().size();
+                        selectionAnchor_ = caretBytePos_;
+                    } else {
+                        caretBytePos_ = 0;
+                        selectionAnchor_ = 0;
+                    }
+                } else if (document_->focused()) {
+                    document_->setFocused(nullptr);
+                    resolver_.setFocused(nullptr);
+                    resolver_.setFocusVisible(false);
+                    lastFocused_ = nullptr;
+                }
+            }
             if (event.key == 0x400000e1 || event.key == 0x400000e5) {
                 shiftDown_ = true;
             } else if (event.key == 0x400000e0 || event.key == 0x400000e4 ||
