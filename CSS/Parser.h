@@ -27,7 +27,7 @@ enum class Combinator { None, Descendant, Child };
 
 // The interactive states a selector can match against. Everything else the
 // engine cannot evaluate leaves `unsupported` set on the selector.
-enum class PseudoClass : std::uint8_t { Hover, Active, Focus, FocusWithin, Checked, Disabled, Enabled, FirstChild, LastChild, OnlyChild, OnlyOfType, Root, NthChild, NthOfType, NthLastChild, NthLastOfType, Not, Is, Has };
+enum class PseudoClass : std::uint8_t { Hover, Active, Focus, FocusWithin, Checked, Disabled, Enabled, Required, Optional, Valid, Invalid, FirstChild, LastChild, OnlyChild, OnlyOfType, Root, NthChild, NthOfType, NthLastChild, NthLastOfType, Not, Is, Has };
 
 struct SimpleSelector {
     std::vector<Selector> parts;

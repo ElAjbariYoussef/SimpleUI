@@ -8,6 +8,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <set>
 #include <string_view>
 
@@ -5726,6 +5727,116 @@ std::vector<const Element*> elementSiblings(const Element& element) {
     return siblings;
 }
 
+// Whether a form control is a candidate for constraint validation: inputs
+// (except hidden and buttons), selects, and textareas that are not disabled.
+// Anything else matches neither `:valid` nor `:invalid`.
+bool validationCandidate(const Element& element) {
+    const std::string_view tag = element.tag();
+    if (tag != "input" && tag != "select" && tag != "textarea") {
+        return false;
+    }
+    if (element.hasAttribute("disabled")) {
+        return false;
+    }
+    if (tag == "input") {
+        const std::string_view type = element.attribute("type");
+        if (type == "hidden" || type == "submit" || type == "button" || type == "reset" ||
+            type == "image") {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A decimal attribute, trimmed, or NaN when it is not a number at all.
+double numberAttribute(std::string_view text) {
+    const std::string number(trim(text));
+    if (number.empty()) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    char* stop = nullptr;
+    const double value = std::strtod(number.c_str(), &stop);
+    if (!stop || *stop != '\0') {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    return value;
+}
+
+// Whether a candidate control satisfies its constraints: required emptiness,
+// checkable state (a radio group counts when any same-name member is checked),
+// numeric shape and min/max, and a basic single-@ email shape. Anything else
+// with a value is valid; `pattern`/`minlength` stay unchecked.
+bool fieldValid(const Element& element) {
+    const std::string_view tag = element.tag();
+    const bool required = element.hasAttribute("required");
+    if (tag == "select" || tag == "textarea") {
+        return !required || !element.value().empty();
+    }
+    const std::string_view type = element.attribute("type");
+    if (type == "checkbox") {
+        return !required || element.hasAttribute("checked");
+    }
+    if (type == "radio") {
+        if (!required || element.hasAttribute("checked")) {
+            return true;
+        }
+        // The group is document-wide, like the click handler's: any checked
+        // same-name radio validates the whole group.
+        const std::string_view name = element.attribute("name");
+        const Element* root = &element;
+        while (root->parent()) {
+            root = root->parent();
+        }
+        std::vector<const Element*> stack{root};
+        while (!stack.empty()) {
+            const Element* node = stack.back();
+            stack.pop_back();
+            if (node != &element && node->tag() == "input" &&
+                node->attribute("type") == "radio" && node->attribute("name") == name &&
+                node->hasAttribute("checked")) {
+                return true;
+            }
+            for (const auto& child : node->children()) {
+                if (child && !child->isTextNode()) {
+                    stack.push_back(child.get());
+                }
+            }
+        }
+        return false;
+    }
+    const std::string value = element.value();
+    if (value.empty()) {
+        return !required;
+    }
+    if (type == "number" || type == "range") {
+        const double number = numberAttribute(value);
+        if (std::isnan(number)) {
+            return false;
+        }
+        const std::string_view minText = element.attribute("min");
+        const std::string_view maxText = element.attribute("max");
+        if (!minText.empty()) {
+            const double minimum = numberAttribute(minText);
+            if (!std::isnan(minimum) && number < minimum) {
+                return false;
+            }
+        }
+        if (!maxText.empty()) {
+            const double maximum = numberAttribute(maxText);
+            if (!std::isnan(maximum) && number > maximum) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (type == "email") {
+        const std::size_t at = value.find('@');
+        return at != std::string::npos && at > 0 && at + 1 < value.size() &&
+               value.find('@', at + 1) == std::string::npos;
+    }
+    return true;
+}
+
 bool selectorMatches(const SimpleSelector& selector, const Element& element,
                      const PseudoState* state) {
     if (selector.unsupported) {
@@ -5799,6 +5910,29 @@ bool selectorMatches(const SimpleSelector& selector, const Element& element,
                 }
             }
             if ((pseudo == PseudoClass::Disabled) != disabled) {
+                return false;
+            }
+            continue;
+        }
+        if (pseudo == PseudoClass::Required || pseudo == PseudoClass::Optional) {
+            // Only inputs, selects, and textareas take `required`: anything
+            // else matches neither.
+            const std::string_view tag = element.tag();
+            if (tag != "input" && tag != "select" && tag != "textarea") {
+                return false;
+            }
+            if ((pseudo == PseudoClass::Required) != element.hasAttribute("required")) {
+                return false;
+            }
+            continue;
+        }
+        if (pseudo == PseudoClass::Valid || pseudo == PseudoClass::Invalid) {
+            // Candidates that satisfy their constraints match `:valid` and
+            // the rest match `:invalid`; barred controls match neither.
+            if (!validationCandidate(element)) {
+                return false;
+            }
+            if ((pseudo == PseudoClass::Valid) != fieldValid(element)) {
                 return false;
             }
             continue;

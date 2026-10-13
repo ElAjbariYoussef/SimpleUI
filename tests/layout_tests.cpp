@@ -5091,6 +5091,98 @@ void testMaskBorder() {
           "a dangling slash drops the shorthand");
 }
 
+// `:required`/`:optional` read the attribute on inputs, selects, and
+// textareas; `:valid`/`:invalid` judge candidates (no disabled, hidden, or
+// buttons) by required emptiness, checkable state, numeric shape and min/max,
+// and a basic single-@ email shape. A required radio group counts when any
+// same-name member is checked.
+void testValidationPseudos() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<input id=\"a\" type=\"text\" required=\"\" value=\"\"/>"
+        "<input id=\"b\" type=\"text\" required=\"\" value=\"hi\"/>"
+        "<input id=\"c\" type=\"text\" value=\"\"/>"
+        "<input id=\"d\" type=\"text\" required=\"\" disabled=\"\" value=\"\"/>"
+        "<input id=\"e\" type=\"hidden\" value=\"\"/>"
+        "<div id=\"f\"></div>"
+        "<input id=\"g\" type=\"checkbox\" required=\"\"/>"
+        "<input id=\"h\" type=\"checkbox\" required=\"\" checked=\"\"/>"
+        "<input id=\"i\" type=\"radio\" name=\"g\" required=\"\"/>"
+        "<input id=\"j\" type=\"radio\" name=\"g\" required=\"\"/>"
+        "<input id=\"k\" type=\"radio\" name=\"h\" required=\"\"/>"
+        "<input id=\"l\" type=\"radio\" name=\"h\" required=\"\" checked=\"\"/>"
+        "<input id=\"m\" type=\"number\" value=\"abc\"/>"
+        "<input id=\"n\" type=\"number\" value=\"5\" min=\"10\"/>"
+        "<input id=\"o\" type=\"number\" value=\"15\" min=\"10\" max=\"20\"/>"
+        "<input id=\"p\" type=\"email\" value=\"nope\"/>"
+        "<input id=\"q\" type=\"email\" value=\"a@b\"/>"
+        "<select id=\"r\" required=\"\"><option value=\"\" selected=\"\"></option>"
+        "<option value=\"x\">x</option></select>"
+        "<textarea id=\"s\" required=\"\">hi</textarea>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* a = el("a");
+    Element* b = el("b");
+    Element* c = el("c");
+    Element* d = el("d");
+    Element* e = el("e");
+    Element* f = el("f");
+    Element* g = el("g");
+    Element* h = el("h");
+    Element* i = el("i");
+    Element* j = el("j");
+    Element* k = el("k");
+    Element* l = el("l");
+    Element* m = el("m");
+    Element* n = el("n");
+    Element* o = el("o");
+    Element* p = el("p");
+    Element* q = el("q");
+    Element* r = el("r");
+    Element* s = el("s");
+    check(a && b && c && d && e && f && g && h && i && j && k && l && m && n && o &&
+              p && q && r && s,
+          "validation elements found");
+    if (!a || !b || !c || !d || !e || !f || !g || !h || !i || !j || !k || !l || !m ||
+        !n || !o || !p || !q || !r || !s) {
+        return;
+    }
+    const auto sel = [](const char* text) { return sui::CSSParser::parseSelector(text); };
+    const auto on = [&](const char* text, Element& target) {
+        return selectorMatches(sel(text), target);
+    };
+
+    check(on("input:required", *a) && !on("input:optional", *a), "a required input is required");
+    check(on("input:required", *b), "a filled required input stays required");
+    check(on("input:optional", *c) && !on("input:required", *c), "a plain input is optional");
+    check(on("input:required", *d), "a disabled input is still required");
+    check(on("input:optional", *e), "a hidden input is optional");
+    check(!on("input:required", *f) && !on("input:optional", *f), "a div is neither");
+
+    check(on("input:invalid", *a) && !on("input:valid", *a), "required emptiness is invalid");
+    check(on("input:valid", *b) && !on("input:invalid", *b), "a filled required input is valid");
+    check(on("input:valid", *c), "an optional empty input is valid");
+    check(!on("input:valid", *d) && !on("input:invalid", *d), "a disabled input is neither");
+    check(!on("input:valid", *e) && !on("input:invalid", *e), "a hidden input is neither");
+    check(!on("input:valid", *f) && !on("input:invalid", *f), "a div is neither");
+
+    check(on("input:invalid", *g), "a required unchecked box is invalid");
+    check(on("input:valid", *h), "a required checked box is valid");
+    check(on("input:invalid", *i) && on("input:invalid", *j), "an empty required group is invalid");
+    check(on("input:valid", *k) && on("input:valid", *l), "a satisfied group validates its members");
+
+    check(on("input:invalid", *m), "a non-numeric number is invalid");
+    check(on("input:invalid", *n), "a number under its min is invalid");
+    check(on("input:valid", *o), "a number inside its range is valid");
+    check(on("input:invalid", *p), "an @-less email is invalid");
+    check(on("input:valid", *q), "a shaped email is valid");
+    check(on("select:invalid", *r), "a required select on its empty option is invalid");
+    check(on("textarea:valid", *s), "a filled required textarea is valid");
+}
+
 void testBackdropFilter() {
     auto document = parseOrNull("<sui><body><div id=\"x\">hi</div></body></sui>");
     if (!document) {
@@ -6689,6 +6781,7 @@ int main() {
     testMaskGeometry();
     testMaskShorthand();
     testMaskBorder();
+    testValidationPseudos();
     testBackdropFilter();
     testBackgroundListsAreParallel();
     testBackgroundSizeAndPositionKeywords();

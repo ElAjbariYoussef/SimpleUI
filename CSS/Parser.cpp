@@ -371,6 +371,14 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
                 out.pseudoClasses.push_back(PseudoClass::Disabled);
             } else if (name == "enabled") {
                 out.pseudoClasses.push_back(PseudoClass::Enabled);
+            } else if (name == "required") {
+                out.pseudoClasses.push_back(PseudoClass::Required);
+            } else if (name == "optional") {
+                out.pseudoClasses.push_back(PseudoClass::Optional);
+            } else if (name == "valid") {
+                out.pseudoClasses.push_back(PseudoClass::Valid);
+            } else if (name == "invalid") {
+                out.pseudoClasses.push_back(PseudoClass::Invalid);
             } else if (name == "first-child") {
                 out.pseudoClasses.push_back(PseudoClass::FirstChild);
             } else if (name == "last-child") {
@@ -462,6 +470,14 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
                 out.pseudoClasses.push_back(PseudoClass::Disabled);
             } else if (name == "enabled") {
                 out.pseudoClasses.push_back(PseudoClass::Enabled);
+            } else if (name == "required") {
+                out.pseudoClasses.push_back(PseudoClass::Required);
+            } else if (name == "optional") {
+                out.pseudoClasses.push_back(PseudoClass::Optional);
+            } else if (name == "valid") {
+                out.pseudoClasses.push_back(PseudoClass::Valid);
+            } else if (name == "invalid") {
+                out.pseudoClasses.push_back(PseudoClass::Invalid);
             } else if (name == "not") {
                 out.pseudoClasses.push_back(PseudoClass::Not);
             } else if (name == "is") {
