@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <regex>
 #include <set>
 #include <string_view>
 
@@ -5819,13 +5820,41 @@ double numberAttribute(std::string_view text) {
 
 // Whether a candidate control satisfies its constraints: required emptiness,
 // checkable state (a radio group counts when any same-name member is checked),
-// numeric shape and min/max, and a basic single-@ email shape. Anything else
-// with a value is valid; `pattern`/`minlength` stay unchecked.
+// numeric shape and min/max, a basic single-@ email shape, `pattern` full
+// matches, and `minlength` on non-empty values. Anything else with a value is
+// valid; `maxlength` only caps entry, never validity.
 bool fieldValid(const Element& element) {
     const std::string_view tag = element.tag();
     const bool required = element.hasAttribute("required");
-    if (tag == "select" || tag == "textarea") {
+    // A `minlength` only judges non-empty values, in codepoints; emptiness is
+    // `required`'s job.
+    const auto shortOfMinlength = [&]() {
+        if (!element.hasAttribute("minlength")) {
+            return false;
+        }
+        const std::string digits(trim(element.attribute("minlength")));
+        if (digits.empty()) {
+            return false;
+        }
+        char* stop = nullptr;
+        const long least = std::strtol(digits.c_str(), &stop, 10);
+        if (!stop || *stop != '\0' || least <= 0) {
+            return false;
+        }
+        std::size_t codepoints = 0;
+        const std::string value = element.value();
+        for (unsigned char c : value) {
+            if ((c & 0xC0) != 0x80) {
+                ++codepoints;
+            }
+        }
+        return !value.empty() && codepoints < static_cast<std::size_t>(least);
+    };
+    if (tag == "select") {
         return !required || !element.value().empty();
+    }
+    if (tag == "textarea") {
+        return (!required || !element.value().empty()) && !shortOfMinlength();
     }
     const std::string_view type = element.attribute("type");
     if (type == "checkbox") {
@@ -5862,6 +5891,25 @@ bool fieldValid(const Element& element) {
     const std::string value = element.value();
     if (value.empty()) {
         return !required;
+    }
+    // A `minlength` only judges non-empty values; emptiness is `required`'s job.
+    if ((type == "text" || type == "search" || type == "url" || type == "tel" ||
+         type == "email" || type == "password") &&
+        shortOfMinlength()) {
+        return false;
+    }
+    // A `pattern` must match the whole value (HTML anchors it implicitly); a
+    // pattern that does not compile constrains nothing.
+    if ((type == "text" || type == "search" || type == "url" || type == "tel" ||
+         type == "email" || type == "password") &&
+        element.hasAttribute("pattern")) {
+        const std::string source(element.attribute("pattern"));
+        try {
+            if (!std::regex_match(value, std::regex(source))) {
+                return false;
+            }
+        } catch (const std::regex_error&) {
+        }
     }
     if (type == "number" || type == "range") {
         const double number = numberAttribute(value);

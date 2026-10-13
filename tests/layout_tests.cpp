@@ -5181,6 +5181,39 @@ void testValidationPseudos() {
     check(on("input:valid", *q), "a shaped email is valid");
     check(on("select:invalid", *r), "a required select on its empty option is invalid");
     check(on("textarea:valid", *s), "a filled required textarea is valid");
+
+    // `pattern` full-matches non-empty values (a broken pattern constrains
+    // nothing) and `minlength` judges lengths in codepoints.
+    auto document2 = parseOrNull(
+        "<sui><body>"
+        "<input id=\"p1\" type=\"text\" value=\"abc\" pattern=\"[a-z]+\"/>"
+        "<input id=\"p2\" type=\"text\" value=\"ABC\" pattern=\"[a-z]+\"/>"
+        "<input id=\"p3\" type=\"text\" value=\"abc\" pattern=\"([a-z\"/>"
+        "<input id=\"p4\" type=\"text\" value=\"\" pattern=\"[a-z]+\"/>"
+        "<input id=\"m1\" type=\"text\" value=\"ab\" minlength=\"3\"/>"
+        "<input id=\"m2\" type=\"text\" value=\"abc\" minlength=\"3\"/>"
+        "<textarea id=\"m3\" minlength=\"3\">ab</textarea>"
+        "</body></sui>");
+    if (document2) {
+        const auto el2 = [&](const char* id) { return document2->getElementById(id); };
+        Element* p1 = el2("p1");
+        Element* p2 = el2("p2");
+        Element* p3 = el2("p3");
+        Element* p4 = el2("p4");
+        Element* m1 = el2("m1");
+        Element* m2 = el2("m2");
+        Element* m3 = el2("m3");
+        check(p1 && p2 && p3 && p4 && m1 && m2 && m3, "pattern elements found");
+        if (p1 && p2 && p3 && p4 && m1 && m2 && m3) {
+            check(on("input:valid", *p1), "a matching pattern is valid");
+            check(on("input:invalid", *p2), "a misshaped value is invalid");
+            check(on("input:valid", *p3), "a broken pattern constrains nothing");
+            check(on("input:valid", *p4), "an empty value skips its pattern");
+            check(on("input:invalid", *m1), "a short value misses its minlength");
+            check(on("input:valid", *m2), "a long enough value meets minlength");
+            check(on("textarea:invalid", *m3), "a short textarea misses minlength");
+        }
+    }
 }
 
 // A `::placeholder` box carries the `placeholder` attribute while its field is
