@@ -12,6 +12,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <optional>
 #include <string>
@@ -5520,6 +5521,49 @@ void testAccentColor() {
           "an absent accent serializes as auto");
 }
 
+// `list-style-position: inside` flows the marker as the first inline content
+// (taking line space), while `outside` leaves text runs clean for the painted
+// marker. Ordinals count preceding items.
+void testListInside() {
+    auto document = parseOrNull(
+        "<sui><body><ul>"
+        "<li id=\"a\" style=\"list-style-position:inside\">apple</li>"
+        "<li id=\"b\">banana</li>"
+        "<li id=\"c\" style=\"list-style:decimal inside\">cherry</li>"
+        "<li id=\"e\" style=\"list-style:decimal inside\">date</li>"
+        "<li id=\"f\" style=\"list-style:none inside\">fig</li>"
+        "</ul></body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* a = el("a");
+    Element* b = el("b");
+    Element* c = el("c");
+    Element* e = el("e");
+    Element* f = el("f");
+    check(a && b && c && e && f, "list elements found");
+    if (!a || !b || !c || !e || !f) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    layoutRoot(*document, resolver, 400.0f);
+    const auto startsWith = [](const std::string& text, const char* prefix) {
+        return text.compare(0, std::strlen(prefix), prefix) == 0;
+    };
+    check(!a->textRuns().empty() && startsWith(a->textRuns()[0].text, "\xE2\x80\xA2\xC2\xA0"),
+          "an inside bullet leads its text");
+    check(!b->textRuns().empty() && b->textRuns()[0].text == "banana",
+          "an outside item keeps clean runs");
+    check(!c->textRuns().empty() && startsWith(c->textRuns()[0].text, "3.\xC2\xA0"),
+          "inside ordinals count every preceding item");
+    check(!e->textRuns().empty() && startsWith(e->textRuns()[0].text, "4.\xC2\xA0"),
+          "ordinals keep counting down the list");
+    check(!f->textRuns().empty() && f->textRuns()[0].text == "fig",
+          "none paints no marker either way");
+}
+
 // `:focus-visible` matches the focused element only when it wants visible
 // focus UI: the state flag set on keyboard interaction, or on focusing a
 // control that takes text entry.
@@ -7250,6 +7294,7 @@ int main() {
     testScrollSnap();
     testSelectionColors();
     testAccentColor();
+    testListInside();
     testValidationPseudos();
     testGaugeDefaults();
     testFocusVisible();

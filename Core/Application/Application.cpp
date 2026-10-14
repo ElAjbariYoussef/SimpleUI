@@ -1678,8 +1678,10 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         return;
     }
 
-    // List marker: draw bullet or ordinal to the left of <li> box
-    if (el.tag() == "li" && s.listStyleType != ComputedStyle::LSTNone) {
+    // List marker: draw bullet or ordinal to the left of <li> box. Inside
+    // markers already flowed as text in layout and never reach this paint.
+    if (el.tag() == "li" && s.listStyleType != ComputedStyle::LSTNone &&
+        s.listStylePosition == ComputedStyle::LSPOutside) {
         int ordinal = 1;
         if (s.listStyleType == ComputedStyle::LSTDecimal) {
             if (const Element* par = el.parent()) {

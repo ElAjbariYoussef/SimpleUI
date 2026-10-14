@@ -2508,6 +2508,38 @@ private:
             if (el.tag() == "meter" || el.tag() == "progress") {
                 return;
             }
+            // An inside marker flows as the first inline content, taking space
+            // on the line like a browser's. Outside markers paint separately.
+            if (el.tag() == "li") {
+                const ComputedStyle own = owner_.resolveStyle(el);
+                if (own.listStylePosition == ComputedStyle::LSPInside &&
+                    own.listStyleType != ComputedStyle::LSTNone) {
+                    std::string marker;
+                    if (own.listStyleType == ComputedStyle::LSTDecimal) {
+                        int ordinal = 1;
+                        if (const Element* parent = el.parent()) {
+                            for (const auto& sib : parent->children()) {
+                                if (!sib || sib.get() == &el) {
+                                    break;
+                                }
+                                if (!sib->isTextNode() && sib->tag() == "li") {
+                                    ++ordinal;
+                                }
+                            }
+                        }
+                        marker = std::to_string(ordinal) + ".";
+                    } else if (own.listStyleType == ComputedStyle::LSTCircle) {
+                        marker = "\xE2\x97\x8B";  // U+25CB ○
+                    } else if (own.listStyleType == ComputedStyle::LSTSquare) {
+                        marker = "\xE2\x96\xAA";  // U+25AA ▪
+                    } else {
+                        marker = "\xE2\x80\xA2";  // U+2022 •
+                    }
+                    // A non-breaking gap survives collapsing where a plain
+                    // space would not.
+                    text(marker + "\xC2\xA0", own);
+                }
+            }
             // A control draws its current value where a normal element would
             // draw its children, so its text takes part in the same line context.
             // Password fields mask the value with bullet characters. A file

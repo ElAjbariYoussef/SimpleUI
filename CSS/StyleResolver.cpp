@@ -4744,7 +4744,14 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
     } else if (property == "list-style") {
         s.specified |= ComputedStyle::SpecifiedListStyleType;
         // Shorthand: type || position || image. Only the type keyword is stored.
-        if (value == "none") {
+        // A `none` token clears the type whatever else rides along.
+        bool hasNone = false;
+        for (std::string_view token : splitTokens(value)) {
+            if (token == "none") {
+                hasNone = true;
+            }
+        }
+        if (hasNone) {
             s.listStyleType = ComputedStyle::LSTNone;
         } else if (value.find("circle") != std::string_view::npos) {
             s.listStyleType = ComputedStyle::LSTCircle;
