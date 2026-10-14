@@ -791,6 +791,51 @@ int main() {
         }
     }
 
+    // `scroll-behavior: smooth` eases a notch toward its target over several
+    // frames instead of jumping, and lands exactly where a jump would.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<div id=\"s\" style=\"height:100px;overflow-y:auto;"
+            "scroll-behavior:smooth\">"
+            "<div style=\"height:300px\"></div></div>"
+            "</body></sui>",
+            err);
+        check(doc != nullptr, "smooth document parsed");
+        if (doc) {
+            sui::Element* s = doc->getElementById("s");
+            check(s != nullptr, "smooth scroller found");
+            if (s) {
+                app.setDocument(std::move(doc));
+
+                sui::StyleResolver layoutResolver;
+                sui::LayoutInput input;
+                input.resolver = &layoutResolver;
+                input.viewportWidth = 400.0f;
+                input.viewportHeight = 600.0f;
+                sui::BlockLayout().layout(app.document().root(), input);
+
+                app.dispatch(sui::InputEvent(sui::InputKind::Wheel, s->layoutX() + 10.0f,
+                                            s->layoutY() + 10.0f, 0, 0.0f, -1.0f));
+                check(s->scrollTop() == 0.0f, "a smooth notch does not jump");
+                check(app.tickScrolling(), "the scroll reports itself still moving");
+                const float first = s->scrollTop();
+                check(first > 0.0f && first < 40.0f, "the first frame closes part of the gap");
+                app.tickScrolling();
+                check(s->scrollTop() > first, "the next frame moves further");
+                int frames = 0;
+                while (app.tickScrolling() && frames < 200) {
+                    ++frames;
+                }
+                check(frames > 1 && frames < 60, "the scroll takes several frames");
+                check(s->scrollTop() == 40.0f, "the scroll lands exactly on the notch");
+                check(!app.tickScrolling(), "a finished scroll reports itself idle");
+            }
+        }
+    }
+
     // Overlay scrollbars drag by the thumb and page on track clicks. The
     // thumb travels its track proportionally to the scroll range.
     {

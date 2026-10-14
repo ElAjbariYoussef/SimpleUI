@@ -32,6 +32,11 @@ struct ListMarkerSlot {
 };
 ListMarkerSlot listMarkerSlot(const SDL_FRect& box, float imageWidth, float imageHeight);
 
+// One frame of a smooth scroll: the offset closes a fixed share of the gap and
+// lands exactly on the target once the gap is under a pixel, so the animation
+// ends where the gesture asked rather than near it.
+float smoothScrollStep(float current, float target);
+
 class Application {
 public:
     Application();
@@ -50,6 +55,11 @@ public:
 
     // Routes one input event through the DOM, updating input fields or firing handlers.
     void dispatch(const InputEvent& event);
+
+    // Advances every `scroll-behavior: smooth` scroll one frame and reports
+    // whether one is still moving. The frame loop calls it before deciding the
+    // page is stale, so an animating scroller keeps repainting.
+    bool tickScrolling();
 
     std::size_t caretPosition() const noexcept { return caretBytePos_; }
     void setCaretPosition(std::size_t pos) noexcept {
@@ -123,6 +133,11 @@ private:
     // Settles a scroller on its snap points after a gesture moved it.
     void snapScroll(Element& scroller, const ComputedStyle& scrolled, bool movedX,
                     bool movedY);
+    // The offsets a snap container settles on for a scroll heading to
+    // (atX, atY). Either negative means "where it already is", which is how a
+    // smooth scroll snaps its target rather than the offset it is easing from.
+    std::pair<float, float> snapOffsets(Element& scroller, const ComputedStyle& scrolled,
+                                        bool movedX, bool movedY, float atX, float atY);
     // The SDL dialog callback: queues the first pick, never touches the tree.
     static void fileDialogCallback(void* userdata, const char* const* filelist,
                                    int filter);
@@ -215,6 +230,15 @@ private:
     // Where the range currently ends: clicks and arrows move it, Shift+click
     // jumps it, and the marks always span anchor..edge.
     std::size_t selectEdge_ = 0;
+    // One box easing toward a scroll target, for `scroll-behavior: smooth`. A
+    // second notch on the same box retargets it rather than queueing.
+    struct SmoothScroll {
+        Element* box = nullptr;
+        float left = 0.0f;
+        float top = 0.0f;
+    };
+    std::vector<SmoothScroll> smoothScrolls_;
+    void queueSmoothScroll(Element& box, float left, float top);
 };
 
 }  // namespace sui

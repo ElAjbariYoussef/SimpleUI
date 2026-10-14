@@ -4603,6 +4603,15 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
                 s.snapStrictness = strict;
             }
         }
+    } else if (property == "scroll-behavior") {
+        // Not inherited: it describes how this box's own scrolling moves.
+        if (value == "smooth") {
+            s.scrollBehavior = ComputedStyle::ScrollBehavior::Smooth;
+            s.specified |= ComputedStyle::SpecifiedScrollBehavior;
+        } else if (value == "auto") {
+            s.scrollBehavior = ComputedStyle::ScrollBehavior::Auto;
+            s.specified |= ComputedStyle::SpecifiedScrollBehavior;
+        }
     } else if (property == "scroll-padding" || property == "scroll-padding-top" ||
                property == "scroll-padding-right" || property == "scroll-padding-bottom" ||
                property == "scroll-padding-left") {
@@ -5682,6 +5691,10 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "color") return color(style.color);
     if (property == "font-kerning") return style.fontKerning ? "normal" : "none";
+    if (property == "scroll-behavior") {
+        return style.scrollBehavior == ComputedStyle::ScrollBehavior::Smooth ? "smooth"
+                                                                            : "auto";
+    }
     if (property == "font-stretch") {
         for (const auto& step : {std::pair<float, const char*>{0.5f, "ultra-condensed"},
                                  {0.625f, "extra-condensed"},

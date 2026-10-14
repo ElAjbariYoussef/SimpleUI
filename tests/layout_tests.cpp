@@ -5782,6 +5782,46 @@ void testFontStretch() {
     check(std::string(serial("h")) == "normal", "the default serializes as normal");
 }
 
+// `scroll-behavior` picks how a box's own scrolling moves. It does not inherit,
+// and nonsense leaves the jump.
+void testScrollBehavior() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"p\" style=\"scroll-behavior:smooth\"><div id=\"c\">x</div></div>"
+        "<div id=\"a\" style=\"scroll-behavior:auto\">x</div>"
+        "<div id=\"g\" style=\"scroll-behavior:banana\">x</div>"
+        "<div id=\"d\">x</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* p = el("p");
+    Element* c = el("c");
+    Element* a = el("a");
+    Element* g = el("g");
+    Element* d = el("d");
+    check(p && c && a && g && d, "scroll behavior elements found");
+    if (!p || !c || !a || !g || !d) {
+        return;
+    }
+    using Behavior = ComputedStyle::ScrollBehavior;
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    check(resolver.resolve(*p).scrollBehavior == Behavior::Smooth, "smooth parses");
+    check(resolver.resolve(*c).scrollBehavior == Behavior::Auto,
+          "behavior does not inherit");
+    check(resolver.resolve(*a).scrollBehavior == Behavior::Auto, "auto parses");
+    check(resolver.resolve(*g).scrollBehavior == Behavior::Auto, "garbage leaves the jump");
+    check(resolver.resolve(*d).scrollBehavior == Behavior::Auto, "the default is auto");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*p), "scroll-behavior") ==
+              "smooth",
+          "smooth serializes");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*d), "scroll-behavior") ==
+              "auto",
+          "the default serializes as auto");
+}
+
 // `:focus-visible` matches the focused element only when it wants visible
 // focus UI: the state flag set on keyboard interaction, or on focusing a
 // control that takes text entry.
@@ -7674,6 +7714,7 @@ int main() {
     testListStyleImage();
     testFontKerning();
     testFontStretch();
+    testScrollBehavior();
     testValidationApi();
     testBidiOrder();
     testValidationPseudos();

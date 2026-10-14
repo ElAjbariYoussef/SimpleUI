@@ -35,6 +35,18 @@
 
 namespace sui {
 
+// The share of the remaining gap one frame closes. Small enough to read as a
+// glide rather than a jump, large enough to settle in a few frames.
+constexpr float kSmoothScrollShare = 0.28f;
+
+float smoothScrollStep(float current, float target) {
+    const float gap = target - current;
+    if (std::fabs(gap) < 1.0f) {
+        return target;
+    }
+    return current + gap * kSmoothScrollShare;
+}
+
 ListMarkerSlot listMarkerSlot(const SDL_FRect& box, float imageWidth, float imageHeight) {
     ListMarkerSlot slot;
     if (imageWidth > 0.0f && imageHeight > 0.0f) {
@@ -2588,13 +2600,29 @@ std::vector<std::string> splitOnSemicolons(std::string_view text) {
 // always takes the nearest point on each enabled axis, proximity only within
 // half a viewport. Points come from descendants' own `scroll-snap-align`,
 // measured against the content box and clamped to the scroll range.
-void Application::snapScroll(Element& scroller, const ComputedStyle& scrolled,
-                             bool movedX, bool movedY) {
+void Application::snapScroll(Element& scroller, const ComputedStyle& scrolled, bool movedX,
+                             bool movedY) {
+    const auto settled = snapOffsets(scroller, scrolled, movedX, movedY, -1.0f, -1.0f);
+    if (movedX) {
+        scroller.setScrollLeft(settled.first);
+    }
+    if (movedY) {
+        scroller.setScrollTop(settled.second);
+    }
+}
+
+std::pair<float, float> Application::snapOffsets(Element& scroller,
+                                                 const ComputedStyle& scrolled, bool movedX,
+                                                 bool movedY, float atX, float atY) {
     using Axis = ComputedStyle::ScrollSnapAxis;
     using Strict = ComputedStyle::ScrollSnapStrictness;
     using Align = ComputedStyle::ScrollSnapAlign;
+    // A negative target means "where it already is": the caller is asking only
+    // about one axis, or the scroll is still instant.
+    const float fromX = atX >= 0.0f ? atX : scroller.scrollLeft();
+    const float fromY = atY >= 0.0f ? atY : scroller.scrollTop();
     if (scrolled.snapAxis == Axis::None || (!movedX && !movedY)) {
-        return;
+        return {fromX, fromY};
     }
     std::vector<Element*> areas;
     collectSnapAreas(scroller, areas);
@@ -2660,24 +2688,25 @@ void Application::snapScroll(Element& scroller, const ComputedStyle& scrolled,
         }
         return at;
     };
+    float left = fromX;
+    float top = fromY;
     if ((scrolled.snapAxis == Axis::X || scrolled.snapAxis == Axis::Both) && movedX) {
         const float max = scroller.scrollWidth() - scroller.clientWidth();
-        scroller.setScrollLeft(settle(
-            true, scroller.scrollLeft(), scroller.clientWidth(), max, alignX,
-            [&](Element* area) { return area->layoutX() - portX; },
-            [&](Element* area) {
-                return area->layoutX() + area->layoutWidth() - (portX + portW);
-            }));
+        left = settle(true, fromX, scroller.clientWidth(), max, alignX,
+                      [&](Element* area) { return area->layoutX() - portX; },
+                      [&](Element* area) {
+                          return area->layoutX() + area->layoutWidth() - (portX + portW);
+                      });
     }
     if ((scrolled.snapAxis == Axis::Y || scrolled.snapAxis == Axis::Both) && movedY) {
         const float max = scroller.scrollHeight() - scroller.clientHeight();
-        scroller.setScrollTop(settle(
-            true, scroller.scrollTop(), scroller.clientHeight(), max, alignY,
-            [&](Element* area) { return area->layoutY() - portY; },
-            [&](Element* area) {
-                return area->layoutY() + area->layoutHeight() - (portY + portH);
-            }));
+        top = settle(true, fromY, scroller.clientHeight(), max, alignY,
+                     [&](Element* area) { return area->layoutY() - portY; },
+                     [&](Element* area) {
+                         return area->layoutY() + area->layoutHeight() - (portY + portH);
+                     });
     }
+    return {left, top};
 }
 
 void Application::fileDialogCallback(void* userdata,
@@ -2724,6 +2753,44 @@ void Application::openFileDialog(Element& input) {
 
 // Applies queued file picks where their inputs still live. Runs on the main
 // thread before layout so a new value measures and paints the same frame.
+void Application::queueSmoothScroll(Element& box, float left, float top) {
+    for (SmoothScroll& scroll : smoothScrolls_) {
+        if (scroll.box == &box) {
+            scroll.left = left;
+            scroll.top = top;
+            return;
+        }
+    }
+    smoothScrolls_.push_back(SmoothScroll{&box, left, top});
+}
+
+bool Application::tickScrolling() {
+    // Anything whose box left the document stops moving: the pointer may reach
+    // it again, but the gesture that started it is over.
+    Element* root = document_ ? document_->root() : nullptr;
+    smoothScrolls_.erase(
+        std::remove_if(smoothScrolls_.begin(), smoothScrolls_.end(),
+                       [root](const SmoothScroll& scroll) {
+                           return !scroll.box || !root || !isReachable(*root, scroll.box);
+                       }),
+        smoothScrolls_.end());
+    bool moving = false;
+    for (std::size_t i = 0; i < smoothScrolls_.size();) {
+        SmoothScroll& scroll = smoothScrolls_[i];
+        const float left = smoothScrollStep(scroll.box->scrollLeft(), scroll.left);
+        const float top = smoothScrollStep(scroll.box->scrollTop(), scroll.top);
+        scroll.box->setScrollLeft(left);
+        scroll.box->setScrollTop(top);
+        if (left == scroll.left && top == scroll.top) {
+            smoothScrolls_.erase(smoothScrolls_.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        moving = true;
+        ++i;
+    }
+    return moving;
+}
+
 void Application::applyPendingFiles() {
     std::vector<std::pair<Element*, std::string>> picks;
     {
@@ -3308,14 +3375,30 @@ void Application::dispatch(const InputEvent& event) {
             for (Element* current = target; current; current = current->parent()) {
                 const ComputedStyle scrolled = resolver_.resolve(*current);
                 if (clipsAnything(scrolled)) {
-                    if (scrolled.overflowY != ComputedStyle::Visible) {
-                        current->setScrollTop(current->scrollTop() - event.dy * pitch);
+                    const bool movedX = scrolled.overflowX != ComputedStyle::Visible &&
+                                        event.dx != 0.0f;
+                    const bool movedY = scrolled.overflowY != ComputedStyle::Visible &&
+                                        event.dy != 0.0f;
+                    const float wantLeft = current->scrollLeft() + event.dx * pitch;
+                    const float wantTop = current->scrollTop() - event.dy * pitch;
+                    // A snap container settles on its points after the notch. A
+                    // smooth one snaps the target it is about to ease toward,
+                    // not the offset it is easing away from.
+                    const auto settled =
+                        snapOffsets(*current, scrolled, movedX, movedY, wantLeft, wantTop);
+                    if (scrolled.scrollBehavior == ComputedStyle::ScrollBehavior::Smooth) {
+                        queueSmoothScroll(*current, movedX ? settled.first
+                                                           : current->scrollLeft(),
+                                          movedY ? settled.second : current->scrollTop());
+                        break;
                     }
-                    if (scrolled.overflowX != ComputedStyle::Visible) {
-                        current->setScrollLeft(current->scrollLeft() + event.dx * pitch);
+                    if (movedY) {
+                        current->setScrollTop(wantTop);
                     }
-                    // A snap container settles on its points after the notch.
-                    snapScroll(*current, scrolled, event.dx != 0.0f, event.dy != 0.0f);
+                    if (movedX) {
+                        current->setScrollLeft(wantLeft);
+                    }
+                    snapScroll(*current, scrolled, movedX, movedY);
                     break;
                 }
             }
@@ -3877,7 +3960,9 @@ void Application::run() {
         // CSS transition or keyframe animation keeps the frame stale on its own,
         // so an animated page repaints without any script.
         const bool timerFired = sui::script::pumpTimers();
-        const bool animating = resolver_.hasRunningAnimations();
+        // A CSS animation or a smooth scroll keeps moving on its own, so either
+        // holds the frame stale until it finishes.
+        const bool moving = resolver_.hasRunningAnimations() || tickScrolling();
         const bool inputFocused = document_ && isEditableField(document_->focused());
         const Uint64 ticks = SDL_GetTicks();
         const bool caretBlinkPhase = inputFocused && caretVisible(ticks, caretBlinkStart_);
@@ -3895,7 +3980,7 @@ void Application::run() {
         // it, so a skipped frame would swallow the click it carried.
         const bool stale =
             !frameDrawn_ || width != stamp_.width || height != stamp_.height ||
-            timerFired || animating || caretPhaseChanged || !platform_->inputEvents().empty() || !scriptedClicks.empty() ||
+            timerFired || moving || caretPhaseChanged || !platform_->inputEvents().empty() || !scriptedClicks.empty() ||
             !scriptedMoves.empty() || !scriptedWheels.empty() ||
             (document_ && document_->mutationCount() != stamp_.mutations) ||
             resolver_.generation() != stamp_.rules || scriptContext_.generation != stamp_.script;

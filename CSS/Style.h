@@ -643,6 +643,10 @@ struct ComputedStyle {
     enum class ScrollSnapAlign : std::uint8_t { None, Start, End, Center };
     ScrollSnapAlign snapAlignX = ScrollSnapAlign::None;
     ScrollSnapAlign snapAlignY = ScrollSnapAlign::None;
+    // How a scroll of this box moves: `Auto` jumps to the offset, `Smooth`
+    // eases toward it over several frames. Not inherited.
+    enum class ScrollBehavior : std::uint8_t { Auto, Smooth };
+    ScrollBehavior scrollBehavior = ScrollBehavior::Auto;
     // The snapport inset from the padding box, per side. Start snap positions
     // shift by the leading inset, end positions by the trailing one.
     struct ScrollPadding {
@@ -936,6 +940,7 @@ struct ComputedStyle {
         SpecifiedFontKerning = 1u << 22,
         SpecifiedListStyleImage = 1u << 23,
         SpecifiedFontStretch = 1u << 24,
+        SpecifiedScrollBehavior = 1u << 25,
     };
     std::uint32_t specified = 0;
 };
