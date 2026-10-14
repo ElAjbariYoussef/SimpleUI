@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -5700,6 +5701,49 @@ void testFocusVisible() {
 // Meters and progress bars size like replaced elements (10em by 1em), paint
 // their fill from value/min/max, and never lay out fallback text. Fractions
 // clamp; garbage falls back; colour zones follow low/high/optimum.
+// An svg sizes from its attributes (300x150 default) unless CSS sizes it,
+// and its shapes take no layout space: they paint from the svg box.
+void testSvgLayout() {
+    auto document = parseOrNull(
+        "<sui><body><svg id=\"a\"><rect width=\"10\" height=\"10\"/></svg>"
+        "<svg id=\"b\" width=\"200\" height=\"50\">"
+        "<circle r=\"5\"/><g><line x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"/></g></svg>"
+        "<svg id=\"c\" style=\"width:120px\"><rect width=\"10\" height=\"10\"/></svg>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    Element* c = document->getElementById("c");
+    check(a && b && c, "svg elements found");
+    if (!a || !b || !c) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    layoutRoot(*document, resolver, 400.0f);
+    check(a->layoutWidth() == 300.0f && a->layoutHeight() == 150.0f,
+          "a bare svg keeps the 300x150 viewport");
+    check(b->layoutWidth() == 200.0f && b->layoutHeight() == 50.0f,
+          "width and height attributes size the viewport");
+    check(c->layoutWidth() == 120.0f && c->layoutHeight() == 150.0f,
+          "css sizes win, attributes fill the rest");
+    bool flat = true;
+    std::function<void(Element&)> shapesFlat = [&](Element& root) {
+        for (const auto& child : root.children()) {
+            if (child && !child->isTextNode()) {
+                flat = flat && child->layoutWidth() == 0.0f &&
+                       child->layoutHeight() == 0.0f;
+                shapesFlat(*child);
+            }
+        }
+    };
+    shapesFlat(*a);
+    shapesFlat(*b);
+    check(flat, "shapes take no layout space");
+}
+
 void testGaugeDefaults() {
     auto document = parseOrNull(
         "<sui><body><meter id=\"m\" value=\"0.5\"/>"
@@ -7501,6 +7545,7 @@ int main() {
     testMaskBorder();
     testBorderImage();
     testScrollSnap();
+    testSvgLayout();
     testSelectionColors();
     testFirstLineLetter();
     testAccentColor();

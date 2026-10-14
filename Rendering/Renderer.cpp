@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <sstream>
 #include <utility>
 
 namespace sui {
@@ -928,5 +929,52 @@ void Renderer::line(float x1, float y1, float x2, float y2, const Color& color,
     strokePath({SDL_FPoint{x1, y1}, SDL_FPoint{x2, y2}}, color, thickness);
 }
 
+bool parseSvgViewBox(std::string_view text, float box[4]) {
+    // Commas read as spaces; exactly four finite numbers with a live extent.
+    std::string cleaned(text);
+    for (char& c : cleaned) {
+        if (c == ',') {
+            c = ' ';
+        }
+    }
+    std::istringstream in(cleaned);
+    float v[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (int i = 0; i < 4; ++i) {
+        if (!(in >> v[i]) || !std::isfinite(v[i])) {
+            return false;
+        }
+    }
+    std::string tail;
+    if (in >> tail) {
+        return false;
+    }
+    if (!(v[2] > 0.0f) || !(v[3] > 0.0f)) {
+        return false;
+    }
+    for (int i = 0; i < 4; ++i) {
+        box[i] = v[i];
+    }
+    return true;
+}
+
+SvgView svgViewport(float vw, float vh, float vbx, float vby, float vbw, float vbh,
+                    bool none) {
+    SvgView view;
+    if (!(vw > 0.0f) || !(vh > 0.0f) || !(vbw > 0.0f) || !(vbh > 0.0f)) {
+        return view;
+    }
+    if (none) {
+        view.sx = vw / vbw;
+        view.sy = vh / vbh;
+        view.x = -vbx * view.sx;
+        view.y = -vby * view.sy;
+        return view;
+    }
+    const float scale = std::min(vw / vbw, vh / vbh);
+    view.sx = view.sy = scale;
+    view.x = (vw - vbw * scale) * 0.5f - vbx * scale;
+    view.y = (vh - vbh * scale) * 0.5f - vby * scale;
+    return view;
+}
 
 }  // namespace sui

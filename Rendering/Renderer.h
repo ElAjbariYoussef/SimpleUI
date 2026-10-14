@@ -16,6 +16,7 @@
 #include <SDL3/SDL_render.h>
 
 #include <cstdint>
+#include <string_view>
 #include <vector>
 
 struct SDL_Renderer;
@@ -278,5 +279,23 @@ private:
     std::vector<SDL_FPoint> clipFront_;
     std::vector<SDL_FPoint> clipBack_;
 };
+
+// An SVG viewport mapping: user units scale by `sx`/`sy` about the viewport
+// origin plus `x`/`y` (uniform for meet, independent for `none`).
+struct SvgView {
+    float sx = 1.0f;
+    float sy = 1.0f;
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
+// Parses a `viewBox` ("minx miny w h", commas or spaces) into its four
+// numbers. False when they do not parse or the extent is empty.
+bool parseSvgViewBox(std::string_view text, float box[4]);
+
+// Maps a viewport (w by h px at ox, oy) onto a viewBox: uniform meet scaling
+// centred, or independent axes for `none`. Anything else meets too.
+SvgView svgViewport(float vw, float vh, float vbx, float vby, float vbw, float vbh,
+                    bool none);
 
 }  // namespace sui

@@ -870,6 +870,35 @@ void testBorderImageTiles() {
     }
 }
 
+// SVG viewports map user units onto the box: uniform meet scaling centred,
+// or independent axes for `none`. viewBox text parses strictly.
+void testSvgViewport() {
+    float box[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    check(sui::parseSvgViewBox("0 0 100 50", box) && box[2] == 100.0f && box[3] == 50.0f,
+          "a space viewBox parses");
+    check(sui::parseSvgViewBox("10,20,30,40", box) && box[0] == 10.0f && box[1] == 20.0f,
+          "commas read as spaces");
+    check(!sui::parseSvgViewBox("0 0 100", box), "three numbers fail");
+    check(!sui::parseSvgViewBox("0 0 0 50", box), "an empty extent fails");
+    check(!sui::parseSvgViewBox("0 0 100 banana", box), "garbage fails");
+    // A 200x100 box on a 100x50 view: meet scales 2x about the centre.
+    sui::SvgView meet = sui::svgViewport(200.0f, 100.0f, 0.0f, 0.0f, 100.0f, 50.0f, false);
+    check(meet.sx == 2.0f && meet.sy == 2.0f && meet.x == 0.0f && meet.y == 0.0f,
+          "meet scales uniformly");
+    // A wide box letterboxes: 400x100 on 100x50 scales 2x with 100px sides.
+    sui::SvgView wide = sui::svgViewport(400.0f, 100.0f, 0.0f, 0.0f, 100.0f, 50.0f, false);
+    check(wide.sx == 2.0f && wide.x == 100.0f && wide.y == 0.0f,
+          "meet centres the spare axis");
+    // `none` stretches each axis alone.
+    sui::SvgView stretch =
+        sui::svgViewport(400.0f, 100.0f, 0.0f, 0.0f, 100.0f, 50.0f, true);
+    check(stretch.sx == 4.0f && stretch.sy == 2.0f, "none scales axes apart");
+    // A min offset shifts through the scale.
+    sui::SvgView shifted =
+        sui::svgViewport(200.0f, 100.0f, 10.0f, 5.0f, 100.0f, 50.0f, false);
+    check(shifted.x == -20.0f && shifted.y == -10.0f, "min offsets shift scaled");
+}
+
 // HarfBuzz shaping: ligatures fuse codepoints into single glyphs, marks ride
 // with zero advance, and clusters map glyphs back to source bytes. ASCII
 // stays on the fast path; anything past it shapes. Needs a real font, so the
@@ -1185,6 +1214,7 @@ int main() {
     testMaskBorder();
     testBorderImageTiles();
     testShaping();
+    testSvgViewport();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

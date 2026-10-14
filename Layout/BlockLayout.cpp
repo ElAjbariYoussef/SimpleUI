@@ -111,6 +111,35 @@ float verticalAlignShift(const ComputedStyle& s, const Metrics* parent = nullptr
     }
 }
 
+// An SVG viewport length: plain numbers read as px, percentages resolve
+// like CSS, and anything else falls back. Negative lengths clamp to zero.
+Length svgDimension(const Element& el, const char* name, float fallback) {
+    const std::string_view raw = el.attribute(name);
+    if (raw.empty()) {
+        return Length(fallback);
+    }
+    std::string text(raw);
+    while (!text.empty() &&
+           (text.back() == ' ' || text.back() == '\t' || text.back() == '\n' ||
+            text.back() == '\r' || text.back() == '\f')) {
+        text.pop_back();
+    }
+    bool percent = false;
+    if (!text.empty() && text.back() == '%') {
+        percent = true;
+        text.pop_back();
+    }
+    char* stop = nullptr;
+    const float value = std::strtof(text.c_str(), &stop);
+    if (!stop || *stop != '\0' || !(value >= 0.0f)) {
+        return Length(fallback);
+    }
+    if (percent) {
+        return Length(Length::Percent, value);
+    }
+    return Length(value);
+}
+
 float textWidth(const TextFont* font, const ComputedStyle& s, std::string_view t) {
     if (t.empty()) {
         return 0.0f;
@@ -377,6 +406,21 @@ public:
         }
     }
 
+    void applySvgSize(Element& el, ComputedStyle& s) const {
+        if (el.tag() != "svg") {
+            return;
+        }
+        // Without a CSS size an svg behaves like a replaced element: its
+        // width/height attributes win (percentages resolve like CSS), each
+        // defaulting to the 300-by-150 viewport.
+        if (s.width.isAuto()) {
+            s.width = svgDimension(el, "width", 300.0f);
+        }
+        if (s.height.isAuto()) {
+            s.height = svgDimension(el, "height", 150.0f);
+        }
+    }
+
     // Lays out `el` with the given available width. Returns the outer height
     // consumed, margins included.
     float run(Element& el, float availableWidth, float originX, float originY) {
@@ -384,6 +428,7 @@ public:
         applyTextAreaSize(el, s);
         applySelectSize(el, s);
         applyMeterProgressSize(el, s);
+        applySvgSize(el, s);
         const UsedBox box = usedBox(s, availableWidth);
         el.clearTextRuns();
         if (s.display == ComputedStyle::None || !s.visible) {

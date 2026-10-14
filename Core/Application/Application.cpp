@@ -1306,6 +1306,316 @@ std::size_t moveCaretLine(const TextFont* font, const std::string& value, std::s
     return targetStart + best;
 }
 
+// An SVG presentation length: plain numbers read as user units, percentages
+// resolve against the given base, and anything else (ems, garbage) reads zero.
+float svgNumber(std::string_view text, float base) {
+    std::size_t first = text.find_first_not_of(" \t\n\r\f");
+    if (first == std::string_view::npos) {
+        return 0.0f;
+    }
+    const std::string owned(text.substr(first));
+    char* stop = nullptr;
+    const float value = std::strtof(owned.c_str(), &stop);
+    if (stop == owned.c_str()) {
+        return 0.0f;
+    }
+    while (*stop == ' ' || *stop == '\t' || *stop == '\n' || *stop == '\r' ||
+           *stop == '\f') {
+        ++stop;
+    }
+    if (*stop == '%') {
+        return value * 0.01f * base;
+    }
+    return value;
+}
+
+// An SVG paint: a color, or nothing for `none`/missing/garbage.
+bool svgPaint(std::string_view text, Color& out) {
+    const std::size_t first = text.find_first_not_of(" \t\n\r\f");
+    if (first == std::string_view::npos) {
+        return false;
+    }
+    const std::size_t last = text.find_last_not_of(" \t\n\r\f");
+    const std::string_view paint = text.substr(first, last - first + 1);
+    if (paint.empty() || paint == "none") {
+        return false;
+    }
+    SDL_Color parsed{0, 0, 0, 255};
+    if (!parseColor(paint, parsed)) {
+        return false;
+    }
+    out = toColor(parsed);
+    return true;
+}
+
+// Trims both ends for keyword compares (`none` with stray spaces still wins).
+std::string_view svgToken(std::string_view text) {
+    const std::size_t first = text.find_first_not_of(" \t\n\r\f");
+    if (first == std::string_view::npos) {
+        return std::string_view{};
+    }
+    const std::size_t last = text.find_last_not_of(" \t\n\r\f");
+    return text.substr(first, last - first + 1);
+}
+
+// Presentation attributes inherit through `g`: the nearest authored fill or
+// stroke on the way up wins, defaulting to black fill and no stroke.
+struct SvgPaint {
+    bool hasFill = false;
+    Color fill{0, 0, 0, 255};
+    bool hasStroke = false;
+    Color stroke{0, 0, 0, 255};
+    float strokeWidth = 1.0f;
+};
+
+SvgPaint svgInheritedPaint(const Element& el) {
+    SvgPaint paint;
+    bool fillSeen = false;
+    bool strokeSeen = false;
+    bool widthSeen = false;
+    for (const Element* node = &el; node; node = node->parent()) {
+        const std::string_view tag = node->tag();
+        if (tag != "g" && tag != "svg" && node != &el) {
+            break;
+        }
+        if (!fillSeen) {
+            const std::string_view raw = svgToken(node->attribute("fill"));
+            if (!raw.empty()) {
+                if (raw == "none") {
+                    // An explicit `none` stops the search with nothing
+                    // painted; garbage keeps searching, as invalid values
+                    // leave the property unset.
+                    paint.hasFill = false;
+                    fillSeen = true;
+                } else {
+                    Color fill{0, 0, 0, 255};
+                    if (svgPaint(raw, fill)) {
+                        paint.fill = fill;
+                        paint.hasFill = true;
+                        fillSeen = true;
+                    }
+                }
+            }
+        }
+        if (!strokeSeen) {
+            const std::string_view raw = svgToken(node->attribute("stroke"));
+            if (!raw.empty()) {
+                if (raw == "none") {
+                    paint.hasStroke = false;
+                    strokeSeen = true;
+                } else {
+                    Color stroke{0, 0, 0, 255};
+                    if (svgPaint(raw, stroke)) {
+                        paint.stroke = stroke;
+                        paint.hasStroke = true;
+                        strokeSeen = true;
+                    }
+                }
+            }
+        }
+        if (!widthSeen && !node->attribute("stroke-width").empty()) {
+            paint.strokeWidth =
+                std::max(0.0f, svgNumber(node->attribute("stroke-width"), 0.0f));
+            widthSeen = true;
+        }
+        if (fillSeen && strokeSeen && widthSeen) {
+            break;
+        }
+        if (tag != "g" && tag != "svg") {
+            break;
+        }
+    }
+    if (!fillSeen) {
+        paint.hasFill = true;
+        paint.fill = Color{0, 0, 0, 255};
+    }
+    return paint;
+}
+
+// Comma/space-separated point pairs for polylines and polygons.
+std::vector<SDL_FPoint> svgPoints(std::string_view text) {
+    std::vector<SDL_FPoint> points;
+    float pair[2] = {0.0f, 0.0f};
+    int slot = 0;
+    std::size_t i = 0;
+    while (i <= text.size()) {
+        while (i < text.size() &&
+               (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' ||
+                text[i] == '\r' || text[i] == '\f' || text[i] == ',')) {
+            ++i;
+        }
+        if (i >= text.size()) {
+            break;
+        }
+        const std::string number(text.substr(i));
+        char* stop = nullptr;
+        const float v = std::strtof(number.c_str(), &stop);
+        if (stop == number.c_str()) {
+            break;
+        }
+        i += static_cast<std::size_t>(stop - number.c_str());
+        pair[slot++] = v;
+        if (slot == 2) {
+            points.push_back(SDL_FPoint{pair[0], pair[1]});
+            slot = 0;
+        }
+    }
+    return points;
+}
+
+void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
+                    float opacity) {
+    struct Frame {
+        const Element* node;
+        float opacity;
+    };
+    // Explicit stack instead of recursion: deep `g` nesting cannot overflow.
+    std::vector<Frame> stack;
+    for (auto it = svg.children().rbegin(); it != svg.children().rend(); ++it) {
+        if (*it && !(*it)->isTextNode()) {
+            stack.push_back({it->get(), opacity});
+        }
+    }
+    const auto place = [&](float ux, float uy) {
+        return SDL_FPoint{view.x + ux * view.sx, view.y + uy * view.sy};
+    };
+    const auto scaleX = [&](float u) { return u * view.sx; };
+    const auto scaleY = [&](float u) { return u * view.sy; };
+    while (!stack.empty()) {
+        const Frame frame = stack.back();
+        stack.pop_back();
+        const Element& el = *frame.node;
+        const std::string_view tag = el.tag();
+        if (tag == "g") {
+            for (auto it = el.children().rbegin(); it != el.children().rend(); ++it) {
+                if (*it && !(*it)->isTextNode()) {
+                    stack.push_back({it->get(), frame.opacity});
+                }
+            }
+            continue;
+        }
+        const SvgPaint paint = svgInheritedPaint(el);
+        const float alpha = frame.opacity;
+        const auto tint = [&](Color color) {
+            return multiplyAlpha(color, alpha);
+        };
+        if (tag == "rect") {
+            const float w = std::max(0.0f, svgNumber(el.attribute("width"), 0.0f));
+            const float h = std::max(0.0f, svgNumber(el.attribute("height"), 0.0f));
+            if (w <= 0.0f || h <= 0.0f) {
+                continue;
+            }
+            const SDL_FPoint topLeft =
+                place(svgNumber(el.attribute("x"), 0.0f), svgNumber(el.attribute("y"), 0.0f));
+            const SDL_FRect rect{topLeft.x, topLeft.y, scaleX(w), scaleY(h)};
+            if (paint.hasFill) {
+                const float rx = std::min(scaleX(svgNumber(el.attribute("rx"), 0.0f)),
+                                          rect.w * 0.5f);
+                const float ry = std::min(scaleY(svgNumber(el.attribute("ry"), 0.0f)),
+                                          rect.h * 0.5f);
+                Radii radii;
+                radii.topLeft = {rx, ry};
+                radii.topRight = {rx, ry};
+                radii.bottomRight = {rx, ry};
+                radii.bottomLeft = {rx, ry};
+                renderer.fillRect(rect, Shader::solid(tint(paint.fill)), radii);
+            }
+            if (paint.hasStroke && paint.strokeWidth > 0.0f) {
+                renderer.strokeRect(rect, tint(paint.stroke), paint.strokeWidth);
+            }
+        } else if (tag == "circle") {
+            const float r = std::max(0.0f, svgNumber(el.attribute("r"), 0.0f));
+            if (r <= 0.0f) {
+                continue;
+            }
+            const SDL_FPoint center =
+                place(svgNumber(el.attribute("cx"), 0.0f), svgNumber(el.attribute("cy"), 0.0f));
+            const float radius = (scaleX(r) + scaleY(r)) * 0.5f;
+            if (paint.hasFill) {
+                renderer.fillCircle(center.x, center.y, radius, tint(paint.fill));
+            }
+            if (paint.hasStroke && paint.strokeWidth > 0.0f) {
+                std::vector<SDL_FPoint> ring;
+                ring.reserve(24);
+                for (int k = 0; k < 24; ++k) {
+                    const float a = 2.0f * 3.14159265f * static_cast<float>(k) / 24.0f;
+                    ring.push_back(SDL_FPoint{center.x + radius * std::cos(a),
+                                              center.y + radius * std::sin(a)});
+                }
+                renderer.strokePath(ring, tint(paint.stroke), paint.strokeWidth, true);
+            }
+        } else if (tag == "ellipse") {
+            const float rx = std::max(0.0f, svgNumber(el.attribute("rx"), 0.0f));
+            const float ry = std::max(0.0f, svgNumber(el.attribute("ry"), 0.0f));
+            if (rx <= 0.0f || ry <= 0.0f) {
+                continue;
+            }
+            const SDL_FPoint center =
+                place(svgNumber(el.attribute("cx"), 0.0f), svgNumber(el.attribute("cy"), 0.0f));
+            std::vector<SDL_FPoint> disc;
+            disc.reserve(32);
+            for (int k = 0; k < 32; ++k) {
+                const float a = 2.0f * 3.14159265f * static_cast<float>(k) / 32.0f;
+                disc.push_back(SDL_FPoint{center.x + scaleX(rx) * std::cos(a),
+                                          center.y + scaleY(ry) * std::sin(a)});
+            }
+            if (paint.hasFill) {
+                renderer.fillPolygon(disc, tint(paint.fill));
+            }
+            if (paint.hasStroke && paint.strokeWidth > 0.0f) {
+                renderer.strokePath(disc, tint(paint.stroke), paint.strokeWidth, true);
+            }
+        } else if (tag == "line") {
+            const SDL_FPoint a = place(svgNumber(el.attribute("x1"), 0.0f),
+                                       svgNumber(el.attribute("y1"), 0.0f));
+            const SDL_FPoint b = place(svgNumber(el.attribute("x2"), 0.0f),
+                                       svgNumber(el.attribute("y2"), 0.0f));
+            // Lines only stroke; an unstroked line paints nothing.
+            if (paint.hasStroke && paint.strokeWidth > 0.0f) {
+                renderer.line(a.x, a.y, b.x, b.y, tint(paint.stroke),
+                              paint.strokeWidth);
+            }
+        } else if (tag == "polyline" || tag == "polygon") {
+            std::vector<SDL_FPoint> user = svgPoints(el.attribute("points"));
+            if (user.size() < 2) {
+                continue;
+            }
+            std::vector<SDL_FPoint> path;
+            path.reserve(user.size());
+            for (const SDL_FPoint& point : user) {
+                path.push_back(place(point.x, point.y));
+            }
+            const bool closed = tag == "polygon";
+            if (closed && paint.hasFill) {
+                renderer.fillPolygon(path, tint(paint.fill));
+            }
+            if (paint.hasStroke && paint.strokeWidth > 0.0f) {
+                renderer.strokePath(path, tint(paint.stroke), paint.strokeWidth, closed);
+            }
+        }
+        // Paths, text, use, and image stay unpainted: path syntax, glyph
+        // runs, and sub-resource fetching are their own milestones.
+    }
+}
+
+// Paints an svg viewport: user units map through the viewBox (or 1:1),
+// then every supported shape draws from its attributes.
+void paintSvg(Element& el, const SDL_FRect& content, Renderer& renderer,
+              float opacity) {
+    if (content.w <= 0.0f || content.h <= 0.0f) {
+        return;
+    }
+    SvgView view;
+    float vb[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (parseSvgViewBox(el.attribute("viewBox"), vb)) {
+        const bool none = svgToken(el.attribute("preserveAspectRatio")) == "none";
+        view = svgViewport(content.w, content.h, vb[0], vb[1], vb[2], vb[3], none);
+    }
+    view.x += content.x;
+    view.y += content.y;
+    paintSvgShapes(el, view, renderer, opacity);
+}
+
 void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
               const StyleResolver& resolver, const TextFont& font, float opacity,
               ImageCache& images, float offX, float offY, int caretBytePos = -1,
@@ -1390,6 +1700,12 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
 
         // An <img> or <video> paints its decoded source into the content box, honoring
         // the `object-fit` property (contain / cover / fill / none / scale-down).
+        if (el.tag() == "svg") {
+            paintSvg(el,
+                     SDL_FRect{el.contentX() - offX, el.contentY() - offY,
+                               el.contentWidth(), el.contentHeight()},
+                     renderer, opacity);
+        }
         if (el.tag() == "img" || el.tag() == "video") {
             std::string_view src = el.attribute("src");
             if (el.tag() == "video") {
