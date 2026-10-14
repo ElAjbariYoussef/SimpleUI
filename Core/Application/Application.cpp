@@ -481,6 +481,50 @@ void collectFocusable(Element& root, std::vector<Element*>& out) {
     }
 }
 
+// A scrollbar thumb and track in one frame's coordinates. Overlay bars float
+// above the content's edge without taking layout space.
+struct ScrollbarGeom {
+    bool vertical = false;
+    bool horizontal = false;
+    SDL_FRect vTrack{0.0f, 0.0f, 0.0f, 0.0f};
+    SDL_FRect vThumb{0.0f, 0.0f, 0.0f, 0.0f};
+    SDL_FRect hTrack{0.0f, 0.0f, 0.0f, 0.0f};
+    SDL_FRect hThumb{0.0f, 0.0f, 0.0f, 0.0f};
+};
+
+constexpr float kScrollbarThick = 10.0f;
+constexpr float kScrollbarMinThumb = 20.0f;
+
+ScrollbarGeom scrollbarGeom(float boxX, float boxY, float boxW, float boxH,
+                            float clientW, float clientH, float scrollW, float scrollH,
+                            float scrollTop, float scrollLeft, bool allowX, bool allowY) {
+    ScrollbarGeom geom;
+    if (allowY && scrollH > clientH && clientH > 0.0f && boxW >= kScrollbarThick &&
+        boxH > 0.0f) {
+        const float max = scrollH - clientH;
+        const float len = std::max(kScrollbarMinThumb, boxH * clientH / scrollH);
+        const float pos = boxY + (max > 0.0f ? scrollTop / max * (boxH - len) : 0.0f);
+        geom.vertical = true;
+        geom.vTrack = SDL_FRect{boxX + boxW - kScrollbarThick, boxY, kScrollbarThick,
+                                boxH};
+        geom.vThumb = SDL_FRect{geom.vTrack.x, pos, kScrollbarThick, len};
+    }
+    if (allowX && scrollW > clientW && clientW > 0.0f && boxH >= kScrollbarThick &&
+        boxW > 0.0f) {
+        const float max = scrollW - clientW;
+        const float len = std::max(kScrollbarMinThumb, boxW * clientW / scrollW);
+        const float pos = boxX + (max > 0.0f ? scrollLeft / max * (boxW - len) : 0.0f);
+        geom.horizontal = true;
+        geom.hTrack = SDL_FRect{boxX, boxY + boxH - kScrollbarThick, boxW, kScrollbarThick};
+        geom.hThumb = SDL_FRect{pos, geom.hTrack.y, len, kScrollbarThick};
+    }
+    return geom;
+}
+
+bool inRect(float x, float y, const SDL_FRect& rect) {
+    return x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
+}
+
 void setChecked(Element& el, bool checked) {
     if (checked) {
         el.setAttribute("checked", "");
@@ -1504,6 +1548,32 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         }
     }
 
+    // Overlay scrollbars float above the box's edge: a track with a thumb
+    // sized and placed by the scroll extents. Later siblings may overlap them;
+    // the bars paint with their own box either way.
+    {
+        const bool allowX = s.overflowX != ComputedStyle::Visible;
+        const bool allowY = s.overflowY != ComputedStyle::Visible;
+        if (allowX || allowY) {
+            const ScrollbarGeom bars = scrollbarGeom(
+                box.x, box.y, box.w, box.h, el.clientWidth(), el.clientHeight(),
+                el.scrollWidth(), el.scrollHeight(), el.scrollTop(), el.scrollLeft(),
+                allowX, allowY);
+            const sui::Color trackCol =
+                multiplyAlpha(sui::Color{39, 39, 42, 200}, opacity);
+            const sui::Color thumbCol =
+                multiplyAlpha(sui::Color{113, 113, 122, 255}, opacity);
+            if (bars.vertical) {
+                renderer.fillRect(bars.vTrack, trackCol);
+                renderer.fillRect(bars.vThumb, thumbCol);
+            }
+            if (bars.horizontal) {
+                renderer.fillRect(bars.hTrack, trackCol);
+                renderer.fillRect(bars.hThumb, thumbCol);
+            }
+        }
+    }
+
     // A checked checkbox/radio draws its own control: a tick for the box, a dot
     // for the circle. The background and border were painted above, and neither
     // mark needs a font.
@@ -2165,6 +2235,7 @@ void Application::setDocument(std::unique_ptr<Document> document) {
     selectEdge_ = 0;
     openDatalist_ = nullptr;
     datalistHighlight_ = 0;
+    scrollDrag_ = nullptr;
     // A picked file for the old tree must never land in the new one.
     std::lock_guard<std::mutex> lock(fileMutex_);
     pendingFileInput_ = nullptr;
@@ -2391,6 +2462,69 @@ void Application::dispatch(const InputEvent& event) {
                 }
             }
         }
+        // A scrollbar grab retargets onto the scroller: thumbs and tracks are
+        // overlays, so without the retarget the press would toggle whatever
+        // control happens to sit underneath. The nearest clipping ancestor
+        // owns the bars, mirroring the wheel's scroller search.
+        if (event.kind == InputKind::PointerDown && target) {
+            for (Element* current = target; current; current = current->parent()) {
+                const ComputedStyle scrolled = resolver_.resolve(*current);
+                if (!clipsAnything(scrolled)) {
+                    continue;
+                }
+                const bool allowX = scrolled.overflowX != ComputedStyle::Visible;
+                const bool allowY = scrolled.overflowY != ComputedStyle::Visible;
+                float offX = 0.0f, offY = 0.0f;
+                if (!selectBoxOffset(ops, current, offX, offY)) {
+                    break;
+                }
+                const ScrollbarGeom geom = scrollbarGeom(
+                    current->layoutX() - offX, current->layoutY() - offY,
+                    current->layoutWidth(), current->layoutHeight(),
+                    current->clientWidth(), current->clientHeight(),
+                    current->scrollWidth(), current->scrollHeight(),
+                    current->scrollTop(), current->scrollLeft(), allowX, allowY);
+                const bool hitVThumb = geom.vertical && inRect(event.x, event.y, geom.vThumb);
+                const bool hitHThumb =
+                    geom.horizontal && inRect(event.x, event.y, geom.hThumb);
+                if (hitVThumb || hitHThumb) {
+                    scrollDrag_ = current;
+                    scrollDragX_ = hitHThumb && !hitVThumb;
+                    if (scrollDragX_) {
+                        scrollGrab_ = event.x - geom.hThumb.x;
+                        scrollTrack_ = geom.hTrack.x;
+                        scrollTravel_ = geom.hTrack.w - geom.hThumb.w;
+                        scrollMax_ = current->scrollWidth() - current->clientWidth();
+                    } else {
+                        scrollGrab_ = event.y - geom.vThumb.y;
+                        scrollTrack_ = geom.vTrack.y;
+                        scrollTravel_ = geom.vTrack.h - geom.vThumb.h;
+                        scrollMax_ = current->scrollHeight() - current->clientHeight();
+                    }
+                    target = current;
+                    break;
+                }
+                if ((geom.vertical && inRect(event.x, event.y, geom.vTrack)) ||
+                    (geom.horizontal && inRect(event.x, event.y, geom.hTrack))) {
+                    // A track click pages toward the press.
+                    if (geom.vertical && inRect(event.x, event.y, geom.vTrack)) {
+                        const float at = event.y < geom.vThumb.y
+                                             ? current->scrollTop() - current->clientHeight()
+                                             : current->scrollTop() + current->clientHeight();
+                        current->setScrollTop(at);
+                    }
+                    if (geom.horizontal && inRect(event.x, event.y, geom.hTrack)) {
+                        const float at = event.x < geom.hThumb.x
+                                             ? current->scrollLeft() - current->clientWidth()
+                                             : current->scrollLeft() + current->clientWidth();
+                        current->setScrollLeft(at);
+                    }
+                    target = current;
+                    break;
+                }
+                break;
+            }
+        }
     }
 
     // Interactive state is set first and unconditionally. A move that changes what
@@ -2412,6 +2546,19 @@ void Application::dispatch(const InputEvent& event) {
             // field is zero for a plain hover, which is what separates the two.
             if (event.button != 0) {
                 resolver_.setActive(target);
+                // A scrollbar thumb drag retargets the scroll offset along its
+                // track, proportionally to the travel the grab recorded.
+                if (scrollDrag_ && document_->root() &&
+                    isReachable(*document_->root(), scrollDrag_)) {
+                    const float at = scrollDragX_ ? event.x : event.y;
+                    const float pos = at - scrollGrab_ - scrollTrack_;
+                    const float f = scrollTravel_ > 0.0f ? pos / scrollTravel_ : 0.0f;
+                    if (scrollDragX_) {
+                        scrollDrag_->setScrollLeft(f * scrollMax_);
+                    } else {
+                        scrollDrag_->setScrollTop(f * scrollMax_);
+                    }
+                }
                 // Mouse drag updates selection on a focused text field
                 Element* focused = document_ ? document_->focused() : nullptr;
                 if (focused && isEditableField(focused) && !focused->hasAttribute("disabled") &&
@@ -2596,6 +2743,7 @@ void Application::dispatch(const InputEvent& event) {
             break;
         case InputKind::PointerUp:
             resolver_.setActive(nullptr);
+            scrollDrag_ = nullptr;
             // Releasing over an open popup's row picks it, so press-drag-release
             // works alongside click-click. Anything else leaves the popup open.
             if (openSelect_ && document_->root() &&

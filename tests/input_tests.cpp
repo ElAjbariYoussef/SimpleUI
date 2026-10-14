@@ -11,6 +11,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 
@@ -776,6 +777,73 @@ int main() {
                 p->setScrollTop(165.0f);
                 wheel(p, 0.0f, -1.0f);
                 check(p->scrollTop() == 200.0f, "proximity takes near points");
+            }
+        }
+    }
+
+    // Overlay scrollbars drag by the thumb and page on track clicks. The
+    // thumb travels its track proportionally to the scroll range.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<div id=\"s\" style=\"height:100px;overflow-y:auto\">"
+            "<div style=\"height:60px\"></div>"
+            "<div style=\"height:60px\"></div>"
+            "<div style=\"height:60px\"></div>"
+            "<div style=\"height:60px\"></div>"
+            "<div style=\"height:60px\"></div>"
+            "</div>"
+            "<div id=\"f\" style=\"height:100px;overflow-y:auto\">"
+            "<div style=\"height:20px\"></div>"
+            "</div>"
+            "</body></sui>", err);
+        check(doc != nullptr, "scrollbar document parsed");
+        if (doc) {
+            sui::Element* s = doc->getElementById("s");
+            sui::Element* f = doc->getElementById("f");
+            check(s && f, "scrollbar elements found");
+            if (s && f) {
+                app.setDocument(std::move(doc));
+
+                sui::StyleResolver layoutResolver;
+                sui::LayoutInput input;
+                input.resolver = &layoutResolver;
+                input.viewportWidth = 400.0f;
+                input.viewportHeight = 600.0f;
+                sui::BlockLayout().layout(app.document().root(), input);
+
+                // Content 300 over a 100 viewport: a 33px thumb at the top.
+                // Drag math divides unevenly, so the landing asserts near.
+                const float edge = s->layoutX() + s->layoutWidth() - 5.0f;
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerDown, edge,
+                                             s->layoutY() + 10.0f, 1));
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerMove, edge,
+                                             s->layoutY() + 60.0f, 1));
+                check(std::fabs(s->scrollTop() - 150.0f) < 0.5f,
+                      "dragging the thumb scrolls along");
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerUp, edge,
+                                             s->layoutY() + 60.0f, 1));
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerMove, edge,
+                                             s->layoutY() + 90.0f, 1));
+                check(std::fabs(s->scrollTop() - 150.0f) < 0.5f,
+                      "release drops the drag");
+
+                // A track click below the thumb pages down by a viewport.
+                s->setScrollTop(0.0f);
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerDown, edge,
+                                             s->layoutY() + 80.0f, 1));
+                check(s->scrollTop() == 100.0f, "a track click pages toward it");
+
+                // Nothing scrollable, nothing to grab.
+                app.dispatch(sui::InputEvent(
+                    sui::InputKind::PointerDown, f->layoutX() + f->layoutWidth() - 5.0f,
+                    f->layoutY() + 10.0f, 1));
+                app.dispatch(sui::InputEvent(
+                    sui::InputKind::PointerMove, f->layoutX() + f->layoutWidth() - 5.0f,
+                    f->layoutY() + 60.0f, 1));
+                check(f->scrollTop() == 0.0f, "a flat box drags nowhere");
             }
         }
     }

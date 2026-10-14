@@ -185,6 +185,15 @@ private:
     // out; picking writes the input's `value`.
     Element* openDatalist_ = nullptr;
     std::size_t datalistHighlight_ = 0;
+    // A scrollbar thumb drag: the scroller, the axis, the grab offset into
+    // the thumb, and the track span the thumb travels. Moves retarget the
+    // scroll offset; release drops the drag.
+    Element* scrollDrag_ = nullptr;
+    bool scrollDragX_ = false;
+    float scrollGrab_ = 0.0f;
+    float scrollTrack_ = 0.0f;
+    float scrollTravel_ = 0.0f;
+    float scrollMax_ = 0.0f;
     // A file dialog resolves off-thread, so its callback only queues picks;
     // the run loop applies them where the element still lives. Guarded because
     // the callback may run on another thread.
