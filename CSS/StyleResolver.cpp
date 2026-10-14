@@ -4570,6 +4570,44 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
                 s.snapStrictness = strict;
             }
         }
+    } else if (property == "scroll-padding" || property == "scroll-padding-top" ||
+               property == "scroll-padding-right" || property == "scroll-padding-bottom" ||
+               property == "scroll-padding-left") {
+        // One to four lengths (longhand takes exactly one); `auto` insets
+        // nothing. Percentages resolve against the snapport at use.
+        std::vector<Length> parts;
+        bool ok = true;
+        for (std::string_view token : splitTokens(value)) {
+            if (token.empty()) {
+                continue;
+            }
+            if (token == "auto") {
+                parts.push_back(Length{});
+                continue;
+            }
+            const Length length = parseLength(token);
+            if (length.isAuto() || length.unit == Length::Number) {
+                ok = false;
+                break;
+            }
+            parts.push_back(length);
+        }
+        if (ok && !parts.empty() && parts.size() <= 4) {
+            ComputedStyle::ScrollPadding padding = s.scrollPadding;
+            if (property == "scroll-padding-top") {
+                padding.top = parts[0];
+            } else if (property == "scroll-padding-right") {
+                padding.right = parts[0];
+            } else if (property == "scroll-padding-bottom") {
+                padding.bottom = parts[0];
+            } else if (property == "scroll-padding-left") {
+                padding.left = parts[0];
+            } else {
+                expandSides(parts, padding.top, padding.right, padding.bottom,
+                            padding.left);
+            }
+            s.scrollPadding = padding;
+        }
     } else if (property == "scroll-snap-align") {
         // One value sets both axes; two set block (y) then inline (x).
         using Align = ComputedStyle::ScrollSnapAlign;

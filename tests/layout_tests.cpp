@@ -5107,6 +5107,10 @@ void testScrollSnap() {
         .h { scroll-snap-align: start }
         .i { scroll-snap-align: center end }
         .j { scroll-snap-align: banana }
+        .k { scroll-padding: 10px 20px }
+        .l { scroll-padding-top: 5px }
+        .m { scroll-padding: banana }
+        .n { scroll-padding: 1px 2px 3px 4px }
     )");
     sui::StyleResolver resolver;
     resolver.setRules(rules);
@@ -5114,13 +5118,14 @@ void testScrollSnap() {
         "<div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div>"
         "<div class=\"d\"></div><div class=\"e\"></div><div class=\"f\"></div>"
         "<div class=\"g\"></div><div class=\"h\"></div><div class=\"i\"></div>"
-        "<div class=\"j\"></div>";
+        "<div class=\"j\"></div><div class=\"k\"></div><div class=\"l\"></div>"
+        "<div class=\"m\"></div><div class=\"n\"></div>";
     auto body = parseOrNull((std::string("<sui><body>") + kClasses + "</body></sui>").c_str());
     if (!body) {
         return;
     }
     const std::vector<ComputedStyle> styles = bodyStyles(*body, resolver);
-    if (styles.size() < 10) {
+    if (styles.size() < 14) {
         check(false, "snap elements found");
         return;
     }
@@ -5143,6 +5148,20 @@ void testScrollSnap() {
     check(styles[8].snapAlignY == Align::Center && styles[8].snapAlignX == Align::End,
           "two alignments set block then inline");
     check(styles[9].snapAlignX == Align::None, "a bad alignment drops");
+    check(styles[10].scrollPadding.top.value == 10.0f &&
+              styles[10].scrollPadding.bottom.value == 10.0f &&
+              styles[10].scrollPadding.left.value == 20.0f &&
+              styles[10].scrollPadding.right.value == 20.0f,
+          "two paddings expand vertical and horizontal");
+    check(styles[11].scrollPadding.top.value == 5.0f &&
+              styles[11].scrollPadding.bottom.value == 0.0f,
+          "a top longhand sets one side");
+    check(styles[12].scrollPadding.top.value == 0.0f, "a bad padding drops");
+    check(styles[13].scrollPadding.top.value == 1.0f &&
+              styles[13].scrollPadding.right.value == 2.0f &&
+              styles[13].scrollPadding.bottom.value == 3.0f &&
+              styles[13].scrollPadding.left.value == 4.0f,
+          "four paddings expand clockwise");
 }
 
 // `border-image` describes a 9-patch like the mask border but paints it:

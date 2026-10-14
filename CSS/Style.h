@@ -640,6 +640,15 @@ struct ComputedStyle {
     enum class ScrollSnapAlign : std::uint8_t { None, Start, End, Center };
     ScrollSnapAlign snapAlignX = ScrollSnapAlign::None;
     ScrollSnapAlign snapAlignY = ScrollSnapAlign::None;
+    // The snapport inset from the padding box, per side. Start snap positions
+    // shift by the leading inset, end positions by the trailing one.
+    struct ScrollPadding {
+        Length top;
+        Length right;
+        Length bottom;
+        Length left;
+    };
+    ScrollPadding scrollPadding;
 
     // Grid track sizing from `grid-template-columns` / `grid-template-rows`. A
     // track is a fixed length, an `fr` share of the leftover space, or `auto`

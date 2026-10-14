@@ -2093,8 +2093,27 @@ void Application::snapScroll(Element& scroller, const ComputedStyle& scrolled,
     }
     std::vector<Element*> areas;
     collectSnapAreas(scroller, areas);
-    const float contentX = scroller.contentX();
-    const float contentY = scroller.contentY();
+    // The snapport insets the content box by `scroll-padding`; start positions
+    // measure from its leading edge, end positions to its trailing edge.
+    const float rootFontSize = resolver_.rootFontSize();
+    const float padLeft =
+        std::max(0.0f, scrolled.scrollPadding.left.resolve(
+                            scroller.clientWidth(), scrolled.fontSize, rootFontSize));
+    const float padRight =
+        std::max(0.0f, scrolled.scrollPadding.right.resolve(
+                            scroller.clientWidth(), scrolled.fontSize, rootFontSize));
+    const float padTop =
+        std::max(0.0f, scrolled.scrollPadding.top.resolve(
+                            scroller.clientHeight(), scrolled.fontSize, rootFontSize));
+    const float padBottom =
+        std::max(0.0f, scrolled.scrollPadding.bottom.resolve(
+                            scroller.clientHeight(), scrolled.fontSize, rootFontSize));
+    const float portX = scroller.contentX() + padLeft;
+    const float portY = scroller.contentY() + padTop;
+    const float portW =
+        std::max(0.0f, scroller.clientWidth() - padLeft - padRight);
+    const float portH =
+        std::max(0.0f, scroller.clientHeight() - padTop - padBottom);
     const auto alignX = [&](Element* area) {
         return resolver_.resolve(*area).snapAlignX;
     };
@@ -2140,20 +2159,18 @@ void Application::snapScroll(Element& scroller, const ComputedStyle& scrolled,
         const float max = scroller.scrollWidth() - scroller.clientWidth();
         scroller.setScrollLeft(settle(
             true, scroller.scrollLeft(), scroller.clientWidth(), max, alignX,
-            [&](Element* area) { return area->layoutX() - contentX; },
+            [&](Element* area) { return area->layoutX() - portX; },
             [&](Element* area) {
-                return area->layoutX() + area->layoutWidth() -
-                       (contentX + scroller.clientWidth());
+                return area->layoutX() + area->layoutWidth() - (portX + portW);
             }));
     }
     if ((scrolled.snapAxis == Axis::Y || scrolled.snapAxis == Axis::Both) && movedY) {
         const float max = scroller.scrollHeight() - scroller.clientHeight();
         scroller.setScrollTop(settle(
             true, scroller.scrollTop(), scroller.clientHeight(), max, alignY,
-            [&](Element* area) { return area->layoutY() - contentY; },
+            [&](Element* area) { return area->layoutY() - portY; },
             [&](Element* area) {
-                return area->layoutY() + area->layoutHeight() -
-                       (contentY + scroller.clientHeight());
+                return area->layoutY() + area->layoutHeight() - (portY + portH);
             }));
     }
 }

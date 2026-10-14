@@ -740,14 +740,21 @@ int main() {
             "<div style=\"height:60px\"></div>"
             "<div style=\"height:60px\"></div>"
             "</div>"
+            "<div id=\"d\" style=\"height:100px;overflow-y:auto;scroll-snap-type:y "
+            "mandatory;scroll-padding-top:20px\">"
+            "<div style=\"height:60px;scroll-snap-align:start\"></div>"
+            "<div style=\"height:60px;scroll-snap-align:start\"></div>"
+            "<div style=\"height:60px;scroll-snap-align:start\"></div>"
+            "</div>"
             "</body></sui>", err);
         check(doc != nullptr, "snap document parsed");
         if (doc) {
             sui::Element* m = doc->getElementById("m");
             sui::Element* p = doc->getElementById("p");
             sui::Element* n = doc->getElementById("n");
-            check(m && p && n, "snap elements found");
-            if (m && p && n) {
+            sui::Element* d = doc->getElementById("d");
+            check(m && p && n && d, "snap elements found");
+            if (m && p && n && d) {
                 app.setDocument(std::move(doc));
 
                 sui::StyleResolver layoutResolver;
@@ -777,6 +784,9 @@ int main() {
                 p->setScrollTop(165.0f);
                 wheel(p, 0.0f, -1.0f);
                 check(p->scrollTop() == 200.0f, "proximity takes near points");
+                // Padding insets the snapport: the 60px starts snap at 40.
+                wheel(d, 0.0f, -1.0f);
+                check(d->scrollTop() == 40.0f, "padding shifts snap points");
             }
         }
     }
