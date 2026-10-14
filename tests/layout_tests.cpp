@@ -5901,6 +5901,50 @@ void testColorScheme() {
           "an author keeps the colors it set");
 }
 
+// `prefers-color-scheme` asks the host, which the resolver carries: the engine
+// assumes the dark canvas it ships with until told otherwise.
+void testPrefersColorScheme() {
+    auto document = parseOrNull("<sui><body><div id=\"d\">x</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* d = document->getElementById("d");
+    if (!d) {
+        return;
+    }
+    const auto colorOf = [&](bool dark) {
+        sui::StyleResolver resolver;
+        resolver.setSystemColorSchemeDark(dark);
+        resolver.setViewportSize(400.0f, 300.0f);
+        resolver.setRules(sui::CSSParser::parse(
+            "@media (prefers-color-scheme: dark) { #d { color: #111111 } }"
+            "@media (prefers-color-scheme: light) { #d { color: #222222 } }"
+            "@media not (prefers-color-scheme: light) { #d { background-color: #333333 } }"
+            "@media (prefers-color-scheme: banana) { #d { border-width: 9px } }"
+            "@media (min-width: 1px) and (prefers-color-scheme: dark) {"
+            " #d { border-width: 3px } }"));
+        return resolver.resolve(*d);
+    };
+    const ComputedStyle dark = colorOf(true);
+    check(dark.color.r == 0x11, "a dark host matches the dark query");
+    check(dark.backgroundColor.r == 0x33, "a negated light query matches a dark host");
+    check(dark.borderWidth.top.value == 3.0f, "a feature ANDs with the scheme");
+    const ComputedStyle light = colorOf(false);
+    check(light.color.r == 0x22, "a light host matches the light query");
+    check(light.backgroundColor.a == 0, "a negated light query misses a light host");
+
+    // The preference defaults to dark and changing it bumps the generation, so
+    // rules under the feature re-resolve.
+    sui::StyleResolver resolver;
+    check(resolver.systemColorSchemeDark(), "the host defaults to dark");
+    const unsigned before = resolver.generation();
+    check(resolver.setSystemColorSchemeDark(true) == false,
+          "setting the same preference changes nothing");
+    check(resolver.setSystemColorSchemeDark(false) &&
+              resolver.generation() != before,
+          "a new preference bumps the generation");
+}
+
 // `:focus-visible` matches the focused element only when it wants visible
 // focus UI: the state flag set on keyboard interaction, or on focusing a
 // control that takes text entry.
@@ -6453,7 +6497,7 @@ void testMediaQueries() {
           "a viewport unit is kept for evaluation against the viewport");
 
     const auto matches = [](const sui::Rule& rule, float w, float h) {
-        return sui::mediaMatches(rule.media, w, h);
+        return sui::mediaMatches(rule.media, w, h, true);
     };
     check(matches(rules[1], 700, 500), "the screen type matches what the engine draws to");
     check(!matches(rules[8], 700, 500), "the print type does not match a screen engine");
@@ -6482,9 +6526,9 @@ void testMediaQueries() {
     if (nested.size() == 1) {
         check(nested[0].media.size() == 1 && nested[0].media[0].features.size() == 2,
               "a nested @media is merged with its parent rather than replacing it");
-        check(sui::mediaMatches(nested[0].media, 700, 500), "a merged query needs both levels");
-        check(!sui::mediaMatches(nested[0].media, 700, 900), "a merged query fails on the inner level");
-        check(!sui::mediaMatches(nested[0].media, 500, 500), "a merged query fails on the outer level");
+        check(sui::mediaMatches(nested[0].media, 700, 500, true), "a merged query needs both levels");
+        check(!sui::mediaMatches(nested[0].media, 700, 900, true), "a merged query fails on the inner level");
+        check(!sui::mediaMatches(nested[0].media, 500, 500, true), "a merged query fails on the outer level");
     }
 
     // End to end: which rule wins depends on the viewport, and changing it makes
@@ -7795,6 +7839,7 @@ int main() {
     testFontStretch();
     testScrollBehavior();
     testColorScheme();
+    testPrefersColorScheme();
     testValidationApi();
     testBidiOrder();
     testValidationPseudos();

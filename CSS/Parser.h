@@ -55,7 +55,8 @@ struct Declaration {
 // One feature inside an `@media` query, already reduced to something that can be
 // compared against the viewport. `min-width: 768px` is Width, >=, 768.
 struct MediaFeature {
-    enum class Kind : std::uint8_t { Width, Height, AspectRatio, Orientation, Unknown };
+    enum class Kind : std::uint8_t { Width, Height, AspectRatio, Orientation, ColorScheme,
+                                 Unknown };
     // `min-` and `max-` collapse onto the ordered operators; a bare `name: value`
     // is Eq.
     enum class Op : std::uint8_t { Eq, Lt, Gt, Le, Ge };
@@ -165,11 +166,13 @@ public:
 std::vector<MediaQuery> parseMediaList(std::string_view source);
 
 // Evaluates one alternative, or a whole list as an OR of alternatives. An empty
-// list is unconditional and matches.
+// list is unconditional and matches. `systemDark` answers
+// `prefers-color-scheme`, which is a property of the host rather than of the
+// document.
 bool mediaQueryMatches(const MediaQuery& query, float viewportWidth,
-                       float viewportHeight);
+                       float viewportHeight, bool systemDark);
 bool mediaMatches(const std::vector<MediaQuery>& media, float viewportWidth,
-                  float viewportHeight);
+                  float viewportHeight, bool systemDark);
 
 // Parses a `style="..."` attribute value into declarations.
 std::vector<Declaration> parseDeclarations(std::string_view source);

@@ -140,6 +140,12 @@ public:
     float viewportWidth() const noexcept { return viewportWidth_; }
     float viewportHeight() const noexcept { return viewportHeight_; }
 
+    // The host's colour preference, which `prefers-color-scheme` asks about.
+    // Defaults to dark because that is the user-agent canvas. Changing it bumps
+    // the generation, so a rule under the feature re-resolves like a resize.
+    bool setSystemColorSchemeDark(bool dark);
+    bool systemColorSchemeDark() const noexcept { return systemDark_; }
+
     // Interactive state the pseudo-classes are matched against. Each setter
     // returns whether anything changed, so the caller only re-lays-out on a real
     // transition rather than on every mouse move.
@@ -203,6 +209,7 @@ private:
     float rootFontSize_ = 16.0f;
     float viewportWidth_ = 0.0f;
     float viewportHeight_ = 0.0f;
+    bool systemDark_ = true;
     PseudoState state_;
 };
 

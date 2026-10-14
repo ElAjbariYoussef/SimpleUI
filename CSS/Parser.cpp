@@ -884,6 +884,14 @@ MediaFeature parseMediaFeature(std::string_view text) {
         if (ranged || (f.keyword != "landscape" && f.keyword != "portrait")) {
             f.kind = MediaFeature::Kind::Unknown;
         }
+    } else if (name == "prefers-color-scheme") {
+        // A bare range test against the host preference; `min-`/`max-` spellings
+        // do not exist for it.
+        f.kind = MediaFeature::Kind::ColorScheme;
+        f.keyword = lower(value);
+        if (ranged || (f.keyword != "light" && f.keyword != "dark")) {
+            f.kind = MediaFeature::Kind::Unknown;
+        }
     }
     return f;
 }
@@ -968,12 +976,15 @@ float mediaThreshold(const MediaFeature& f, float width, float height) {
     return f.number;
 }
 
-bool featureMatches(const MediaFeature& f, float width, float height) {
+bool featureMatches(const MediaFeature& f, float width, float height, bool systemDark) {
     if (f.kind == MediaFeature::Kind::Unknown) {
         return false;
     }
     if (f.kind == MediaFeature::Kind::Orientation) {
         return f.keyword == (width >= height ? "landscape" : "portrait");
+    }
+    if (f.kind == MediaFeature::Kind::ColorScheme) {
+        return f.keyword == (systemDark ? "dark" : "light");
     }
     const float threshold = mediaThreshold(f, width, height);
     // A zero-height viewport would divide by zero before the first layout; the
@@ -1015,11 +1026,12 @@ std::vector<MediaQuery> parseMediaList(std::string_view source) {
     return out;
 }
 
-bool mediaQueryMatches(const MediaQuery& query, float viewportWidth, float viewportHeight) {
+bool mediaQueryMatches(const MediaQuery& query, float viewportWidth, float viewportHeight,
+                       bool systemDark) {
     bool base = typeMatches(query.type);
     if (base) {
         for (const MediaFeature& feature : query.features) {
-            if (!featureMatches(feature, viewportWidth, viewportHeight)) {
+            if (!featureMatches(feature, viewportWidth, viewportHeight, systemDark)) {
                 base = false;
                 break;
             }
@@ -1029,12 +1041,12 @@ bool mediaQueryMatches(const MediaQuery& query, float viewportWidth, float viewp
 }
 
 bool mediaMatches(const std::vector<MediaQuery>& media, float viewportWidth,
-                  float viewportHeight) {
+                  float viewportHeight, bool systemDark) {
     if (media.empty()) {
         return true;
     }
     for (const MediaQuery& query : media) {
-        if (mediaQueryMatches(query, viewportWidth, viewportHeight)) {
+        if (mediaQueryMatches(query, viewportWidth, viewportHeight, systemDark)) {
             return true;
         }
     }

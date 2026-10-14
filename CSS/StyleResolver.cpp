@@ -6783,7 +6783,7 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
                 return;
             }
             if (!rule.media.empty() &&
-                !mediaMatches(rule.media, viewportWidth_, viewportHeight_)) {
+                !mediaMatches(rule.media, viewportWidth_, viewportHeight_, systemDark_)) {
                 return;
             }
             if (rule.container.active && !containerMatches(rule.container, element)) {
@@ -6848,7 +6848,7 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
             // Only a rule under an `@media` pays for evaluating one, which keeps
             // an ordinary stylesheet at the cost it had before.
             if (!rule.media.empty() &&
-                !mediaMatches(rule.media, viewportWidth_, viewportHeight_)) {
+                !mediaMatches(rule.media, viewportWidth_, viewportHeight_, systemDark_)) {
                 return;
             }
             if (rule.container.active && !containerMatches(rule.container, element)) {
@@ -7258,6 +7258,15 @@ bool StyleResolver::setViewportSize(float width, float height) {
     return true;
 }
 
+bool StyleResolver::setSystemColorSchemeDark(bool dark) {
+    if (dark == systemDark_) {
+        return false;
+    }
+    systemDark_ = dark;
+    ++generation_;
+    return true;
+}
+
 // Interactive state is part of the resolution input, so a change to it has to bump
 // the same generation counter the frame loop already watches.
 #define SUI_SET_PSEUDO(field, value)                    \
@@ -7321,7 +7330,7 @@ SelectionColors StyleResolver::pseudoColors(Element& element,
             continue;
         }
         if (!rule.media.empty() &&
-            !mediaMatches(rule.media, viewportWidth_, viewportHeight_)) {
+            !mediaMatches(rule.media, viewportWidth_, viewportHeight_, systemDark_)) {
             continue;
         }
         if (rule.container.active && !containerMatches(rule.container, element)) {

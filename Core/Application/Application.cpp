@@ -29,6 +29,7 @@
 #include <SDL3/SDL_dialog.h>
 
 #include <charconv>
+#include <cstring>
 #include <cstdio>
 #include <limits>
 #include <utility>
@@ -3850,6 +3851,20 @@ void Application::run() {
     // document's own font size, so it has to be known before the first layout.
     if (Element* body = document_->querySelector("body")) {
         resolver_.setRootFontSize(resolver_.resolve(*body).fontSize);
+    }
+
+    // `SUI_COLOR_SCHEME=dark|light` states the host's colour preference, which
+    // `@media (prefers-color-scheme: ...)` asks about. SDL has no way to ask
+    // the desktop, so the engine assumes the dark canvas it ships with and the
+    // host states it when it differs.
+    if (const char* scheme = SDL_getenv("SUI_COLOR_SCHEME")) {
+        if (std::strcmp(scheme, "light") == 0) {
+            resolver_.setSystemColorSchemeDark(false);
+        } else if (std::strcmp(scheme, "dark") == 0) {
+            resolver_.setSystemColorSchemeDark(true);
+        } else {
+            SDL_Log("SUI_COLOR_SCHEME expects dark or light; got '%s'", scheme);
+        }
     }
 
     // SUI_CLICK=x,y[;x,y...] dispatches one synthetic press per frame, so click
