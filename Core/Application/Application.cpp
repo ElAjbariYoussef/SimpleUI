@@ -440,6 +440,12 @@ bool isEditableField(const Element* el) {
            type == "week" || type == "color";
 }
 
+// A native control's accent: the authored `accent-color`, else its ambient
+// text color, which is what tick, dot, and thumb chrome painted before.
+sui::Color controlAccent(const ComputedStyle& s) {
+    return toColor(s.hasAccentColor ? s.accentColor : s.color);
+}
+
 // Whether focusing `el` with the pointer still wants visible focus UI: text
 // entry controls show their keyboard UI however they are focused, while
 // buttons and boxes wait for keyboard modality.
@@ -1507,7 +1513,8 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
             const SDL_FRect content{el.contentX() - offX, el.contentY() - offY,
                                     el.contentWidth(), el.contentHeight()};
             if (content.w > 0.0f && content.h > 0.0f) {
-                const sui::Color mark = multiplyAlpha(toColor(s.color), opacity);
+                const sui::Color mark =
+                    multiplyAlpha(controlAccent(s), opacity);
                 if (type == "radio") {
                     renderer.fillCircle(content.x + content.w * 0.5f,
                                         content.y + content.h * 0.5f,
@@ -1543,7 +1550,7 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
             if (r > 0.0f) {
                 renderer.fillCircle(content.x + f * content.w,
                                     content.y + content.h * 0.5f, r,
-                                    multiplyAlpha(toColor(s.color), opacity));
+                                    multiplyAlpha(controlAccent(s), opacity));
             }
         }
     }
@@ -1551,12 +1558,15 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
     // A meter or progress paints its own bar: a fill across the content box
     // at the value's fraction. A valueless progress shows a fixed
     // indeterminate block instead of animating. Meters colour by zone: green
-    // beside the optimum, yellow inside the band, red outside it.
+    // beside the optimum, yellow inside the band, red outside it. An authored
+    // `accent-color` retints a progress fill.
     if (el.tag() == "meter" || el.tag() == "progress") {
         const SDL_FRect content{el.contentX() - offX, el.contentY() - offY,
                                 el.contentWidth(), el.contentHeight()};
         if (content.w > 0.0f && content.h > 0.0f) {
-            sui::Color fill{96, 165, 250, 255};
+            sui::Color fill = s.hasAccentColor && el.tag() == "progress"
+                                  ? toColor(s.accentColor)
+                                  : sui::Color{96, 165, 250, 255};
             float fraction = el.gaugeFraction();
             if (el.tag() == "meter") {
                 const int zone = el.gaugeZone();

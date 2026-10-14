@@ -241,6 +241,11 @@ struct ComputedStyle {
     SDL_Color backgroundColor = {0, 0, 0, 0};  // transparent
     SDL_Color color = {255, 255, 255, 255};    // default text
     SDL_Color borderColor = {63, 63, 70, 255};
+    // An explicit `accent-color` for native controls (checkbox, radio, range,
+    // progress); `auto` leaves `hasAccentColor` clear and the controls paint
+    // their defaults. Inherited like `color`.
+    SDL_Color accentColor = {0, 0, 0, 255};
+    bool hasAccentColor = false;
 
     // How a border edge is drawn. Prefixed because `Solid`, `Dashed` and friends
     // read too loosely on their own next to the other unscoped enumerators here.
@@ -909,6 +914,7 @@ struct ComputedStyle {
         SpecifiedPointerEvents = 1u << 18,
         SpecifiedCursor = 1u << 19,
         SpecifiedListStylePosition = 1u << 20,
+        SpecifiedAccentColor = 1u << 21,
     };
     std::uint32_t specified = 0;
 };
@@ -1066,6 +1072,10 @@ inline UsedBox resolveBox(const ComputedStyle& style, float containingWidth,
 inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexcept {
     if (!(style.specified & ComputedStyle::SpecifiedColor)) {
         style.color = parent.color;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedAccentColor)) {
+        style.accentColor = parent.accentColor;
+        style.hasAccentColor = parent.hasAccentColor;
     }
     if (!(style.specified & ComputedStyle::SpecifiedFontSize)) {
         style.fontSize = parent.fontSize;

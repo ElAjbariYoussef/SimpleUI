@@ -4127,6 +4127,18 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         if (parseColor(value, color)) {
             s.color = color;
         }
+    } else if (property == "accent-color") {
+        if (value == "auto") {
+            s.hasAccentColor = false;
+            s.specified |= ComputedStyle::SpecifiedAccentColor;
+        } else {
+            SDL_Color color{};
+            if (parseColor(value, color)) {
+                s.accentColor = color;
+                s.hasAccentColor = true;
+                s.specified |= ComputedStyle::SpecifiedAccentColor;
+            }
+        }
     } else if (property == "border-color") {
         SDL_Color color{};
         if (parseColor(value, color)) {
@@ -5553,6 +5565,9 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         }
     }
     if (property == "color") return color(style.color);
+    if (property == "accent-color") {
+        return style.hasAccentColor ? color(style.accentColor) : "auto";
+    }
     if (property == "background-color") return color(style.backgroundColor);
     if (property == "border-color") return color(style.borderColor);
     if (property == "font-size") return number(style.fontSize);

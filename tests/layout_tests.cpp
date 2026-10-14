@@ -5478,6 +5478,48 @@ void testSelectionColors() {
     check(!junk.fgSet && !junk.bgSet, "other declarations never apply");
 }
 
+// `accent-color` tints native controls, inherits like `color`, and resets to
+// `auto`. Garbage keeps the previous cascade winner.
+void testAccentColor() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"p\" style=\"accent-color:#00ff00\">"
+        "<input id=\"c\" type=\"checkbox\"/></div>"
+        "<input id=\"a\" type=\"checkbox\" style=\"accent-color:red\"/>"
+        "<input id=\"u\" type=\"checkbox\" style=\"accent-color:auto\"/>"
+        "<input id=\"g\" type=\"checkbox\" style=\"accent-color:banana\"/>"
+        "<div id=\"d\">x</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* p = document->getElementById("p");
+    Element* c = document->getElementById("c");
+    Element* a = document->getElementById("a");
+    Element* u = document->getElementById("u");
+    Element* g = document->getElementById("g");
+    Element* d = document->getElementById("d");
+    check(p && c && a && u && g && d, "accent elements found");
+    if (!p || !c || !a || !u || !g || !d) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    const ComputedStyle parent = resolver.resolve(*p);
+    check(parent.hasAccentColor && parent.accentColor.g == 255, "an accent stores");
+    check(sui::StyleResolver::propertyValue(parent, "accent-color") == "#00ff00",
+          "accent-color serializes");
+    const ComputedStyle child = resolver.resolve(*c);
+    check(child.hasAccentColor && child.accentColor.g == 255,
+          "an accent inherits into controls");
+    const ComputedStyle own = resolver.resolve(*a);
+    check(own.hasAccentColor && own.accentColor.r == 255, "an own accent wins");
+    check(resolver.resolve(*u).hasAccentColor == false, "auto resets the accent");
+    check(resolver.resolve(*g).hasAccentColor == false, "garbage keeps no accent");
+    check(resolver.resolve(*d).hasAccentColor == false, "plain text has no accent");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*d), "accent-color") ==
+              "auto",
+          "an absent accent serializes as auto");
+}
+
 // `:focus-visible` matches the focused element only when it wants visible
 // focus UI: the state flag set on keyboard interaction, or on focusing a
 // control that takes text entry.
@@ -7207,6 +7249,7 @@ int main() {
     testBorderImage();
     testScrollSnap();
     testSelectionColors();
+    testAccentColor();
     testValidationPseudos();
     testGaugeDefaults();
     testFocusVisible();
