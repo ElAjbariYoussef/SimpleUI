@@ -14,6 +14,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 
 namespace {
 
@@ -834,6 +836,80 @@ int main() {
                 check(!app.tickScrolling(), "a finished scroll reports itself idle");
             }
         }
+    }
+
+    // Navigating between .sui pages. A project is a directory of pages with one
+    // entry file; every href resolves against that directory, so a link to
+    // `pages/settings.sui` is the same page from anywhere in the project.
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "sui-nav-check";
+        fs::remove_all(root);
+        fs::create_directories(root / "pages");
+        const auto write = [](const fs::path& at, const char* text) {
+            std::ofstream out(at, std::ios::binary);
+            out << text;
+        };
+        write(root / "index.sui",
+              "<sui><head><link rel=\"stylesheet\" href=\"home.css\"/></head>"
+              "<body><a id=\"to-settings\" href=\"pages/settings.sui\">Settings</a>"
+              "<p id=\"where\">home</p></body></sui>");
+        write(root / "home.css", "#where { color: #ff0000 }");
+        write(root / "pages" / "settings.sui",
+              "<sui><head><link rel=\"stylesheet\" href=\"theme.css\"/></head>"
+              "<body><p id=\"where\">settings</p></body></sui>");
+        write(root / "theme.css", "#where { font-size: 30px }");
+        write(root / "broken.sui", "<sui><body><p>never closed</body></sui>");
+
+        // The entry is named relative to the project root, so the process has
+        // to be standing in it -- which is how a packaged app launches.
+        const fs::path previous = fs::current_path();
+        fs::current_path(root);
+        struct Restore {
+            fs::path previous;
+            ~Restore() {
+                std::error_code ec;
+                fs::current_path(previous, ec);
+            }
+        } restore{previous};
+
+        sui::Application app;
+        std::string error;
+        check(app.openProject("index.sui", error), "a project opens");
+        check(app.currentPage() == "index.sui", "the entry is the live page");
+        sui::Element* where = app.document().getElementById("where");
+        check(where && app.document().getElementById("to-settings"),
+              "the entry page is on screen");
+
+        // A page's own stylesheets load with it, and its identifiers replace the
+        // previous page's.
+        check(app.navigate("pages/settings.sui"), "a linked page loads");
+        check(app.currentPage() == "pages/settings.sui", "the navigated page is live");
+        where = app.document().getElementById("where");
+        check(where && !app.document().getElementById("to-settings"),
+              "the new page replaced the old tree");
+
+        // The page brought its own stylesheet and the previous page's is gone:
+        // the entry styled `where` red and the new page does not, so anything
+        // but the user-agent colour means the old rules outlived their page.
+        sui::StyleResolver* live = sui::script::context()->styles;
+        const sui::ComputedStyle styled =
+            live && where ? live->resolve(*where) : sui::ComputedStyle{};
+        check(styled.color.r != 0xff, "the previous page's rules did not survive");
+        check(styled.fontSize == 30.0f, "the new page's stylesheet loaded");
+
+        // A page that will not parse is refused, and the live one survives.
+        check(!app.navigate("broken.sui"), "a broken page is refused");
+        check(app.currentPage() == "pages/settings.sui",
+              "the live page survives a broken link");
+        check(app.document().getElementById("where") != nullptr,
+              "the old tree is still there");
+        check(!app.navigate("pages/missing.sui"), "a missing page is refused");
+        check(!app.navigate("https://example.com/") &&
+                  app.currentPage() == "pages/settings.sui",
+              "an external url is refused and changes nothing");
+
+        fs::remove_all(root);
     }
 
     // Overlay scrollbars drag by the thumb and page on track clicks. The

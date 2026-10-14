@@ -21,6 +21,7 @@ public:
     bool pumpEvents() override;
     const std::vector<InputEvent>& inputEvents() const override { return input_; }
 
+    void setWindowTitle(std::string_view title) override;
     void setCursor(std::string_view name) override;
 
 private:

@@ -279,6 +279,10 @@ bool LinuxPlatform::pumpEvents() {
     return running_;
 }
 
+void LinuxPlatform::setWindowTitle(std::string_view title) {
+    SDL_SetWindowTitle(window_, std::string(title).c_str());
+}
+
 void LinuxPlatform::setCursor(std::string_view name) {
     if (name == cursorName_) {
         return;

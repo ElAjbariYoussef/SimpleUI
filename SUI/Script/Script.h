@@ -20,6 +20,7 @@
 
 namespace sui {
 
+class Application;
 class Document;
 class StyleResolver;
 
@@ -35,6 +36,9 @@ using EntryPoint = void (*)();
 struct Context {
     Document* document = nullptr;
     StyleResolver* styles = nullptr;
+    // The running application, or null before start and after shutdown. A page
+    // reaches navigation and the rest of the host through this.
+    Application* application = nullptr;
 
     void invalidate() noexcept { generation += 1; }
 

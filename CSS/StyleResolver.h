@@ -81,6 +81,14 @@ public:
 
     void setRules(std::vector<Rule> rules);
     void addRule(Rule rule);
+
+    // Drops everything a stylesheet put in: rules, keyframes, the layer order,
+    // the container and pseudo-element feature flags, and any running
+    // animation. What the *host* owns stays -- the viewport size, the colour
+    // preference, and the interactive pseudo state -- because none of those
+    // come from a page. The generation bump is what makes the frame loop treat
+    // the swap as a change and re-lay-out.
+    void clearStyles();
     void eraseRule(std::size_t index);
     void clearRules() {
         rules_.clear();

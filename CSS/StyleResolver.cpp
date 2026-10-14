@@ -7289,6 +7289,18 @@ void StyleResolver::addKeyframes(std::vector<KeyframeBlock> keyframes) {
     }
 }
 
+void StyleResolver::clearStyles() {
+    rules_.clear();
+    importantOrder_.clear();
+    layerOrder_.clear();
+    keyframes_.clear();
+    animations_.clear();
+    anyContainerRules_ = false;
+    hasFirstLineRules_ = false;
+    hasFirstLetterRules_ = false;
+    ++generation_;
+}
+
 void StyleResolver::setRootFontSize(float size) {
     if (size > 0.0f && size != rootFontSize_) {
         rootFontSize_ = size;

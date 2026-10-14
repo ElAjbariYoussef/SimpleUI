@@ -56,6 +56,32 @@ public:
     // Routes one input event through the DOM, updating input fields or firing handlers.
     void dispatch(const InputEvent& event);
 
+    // --- Pages ---
+    //
+    // A project is any number of .sui files under one directory: the entry
+    // file the app started from is just the first page. `loadPage` reads one by
+    // href -- resolved against the project root, exactly like every other href
+    // in a page -- parses it, loads the stylesheets and scripts it names, and
+    // makes it the live document. The window the host created is left alone;
+    // only the title bar follows the page.
+    //
+    // A page that cannot be read or parsed is refused and leaves whatever was
+    // live still live, so a broken link cannot blank the app.
+    bool loadPage(std::string_view href, std::string& error);
+
+    // Reads and installs the first page of a project rooted at that file's
+    // directory, without opening a window. `start` is this plus the window; an
+    // embedder that owns its own window, and a test that only needs pages, use
+    // this alone.
+    bool openProject(std::string_view entrySuiPath, std::string& error);
+
+    // `loadPage` without a caller for the error: reports it and answers whether
+    // the page loaded. This is what navigation goes through.
+    bool navigate(std::string_view href);
+
+    // The href of the page on screen, empty before the first load.
+    const std::string& currentPage() const noexcept { return currentPage_; }
+
     // Advances every `scroll-behavior: smooth` scroll one frame and reports
     // whether one is still moving. The frame loop calls it before deciding the
     // page is stale, so an animating scroller keeps repainting.
@@ -114,6 +140,12 @@ public:
 
 private:
     static WindowConfig windowConfigFrom(Document& document);
+    // A page's title bar text, empty when it declares none.
+    static std::string windowTitleFrom(Document& document);
+    // Makes an already-parsed document the live page. Everything a page brings
+    // with it is loaded here, so the entry file and every navigation take the
+    // same path.
+    void installPage(std::unique_ptr<Document> document, std::string_view href);
 
     // Resolves `target`'s `cursor` and, when it changed, hands the keyword to the
     // platform. Called on every pointer move, so an unchanged hover is a no-op.
@@ -239,6 +271,8 @@ private:
     };
     std::vector<SmoothScroll> smoothScrolls_;
     void queueSmoothScroll(Element& box, float left, float top);
+    // The href of the page on screen, set by installPage.
+    std::string currentPage_;
 };
 
 }  // namespace sui

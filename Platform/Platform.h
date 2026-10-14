@@ -93,6 +93,10 @@ public:
     // Drains the event queue; returns false once the app should quit.
     virtual bool pumpEvents() = 0;
 
+    // Sets the window's title bar text. A page swap re-reads it from the new
+    // page's <window title>, which is the only place a title comes from.
+    virtual void setWindowTitle(std::string_view title) = 0;
+
     // Sets the pointer shape shown while it is over the window. `name` is a CSS
     // cursor keyword ("pointer", "text", "col-resize", ...). A platform folds the
     // values its toolkit has no cursor for onto the nearest one it does; "none"

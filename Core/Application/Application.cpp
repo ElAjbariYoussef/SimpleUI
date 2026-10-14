@@ -2830,6 +2830,7 @@ void Application::setDocument(std::unique_ptr<Document> document) {
     document_ = std::move(document);
     scriptContext_.document = document_.get();
     scriptContext_.styles = &resolver_;
+    scriptContext_.application = this;
     script::setContext(&scriptContext_);
     // The open popup points into the old tree.
     openSelect_ = nullptr;
@@ -2845,17 +2846,25 @@ void Application::setDocument(std::unique_ptr<Document> document) {
     pendingFiles_.clear();
 }
 
+// A page's title comes from its <window title>. A page without one leaves the
+// title bar as the platform default rather than blanking it.
+std::string Application::windowTitleFrom(Document& document) {
+    Element* window = document.windowElement();
+    if (!window) {
+        return {};
+    }
+    return std::string(window->attribute("title"));
+}
+
 WindowConfig Application::windowConfigFrom(Document& document) {
     WindowConfig config;
+    config.title = windowTitleFrom(document);
 
     Element* window = document.windowElement();
     if (!window) {
         return config;
     }
 
-    if (const std::string_view title = window->attribute("title"); !title.empty()) {
-        config.title = std::string(title);
-    }
     config.width = attributeInt(*window, "width", config.width);
     config.height = attributeInt(*window, "height", config.height);
 
@@ -2868,45 +2877,11 @@ WindowConfig Application::windowConfigFrom(Document& document) {
     return config;
 }
 
-bool Application::start(std::string_view entrySuiPath, std::string& error) {
-    resources_ =
-        std::make_unique<FileResources>(projectRootFor(std::string(entrySuiPath)));
-    images_ = std::make_unique<ImageCache>(*resources_);
-
-    const std::string absolute = resources_->resolve(entrySuiPath);
-    auto source = resources_->readText(entrySuiPath);
-    if (!source) {
-        error = "cannot read " + absolute;
-        return false;
-    }
-
-    // SUI_SCREENSHOT renders one frame to a BMP and exits, so layout can be
-    // verified without a visible window.
-    if (const char* shot = SDL_getenv("SUI_SCREENSHOT")) {
-        screenshotPath_ = shot;
-    }
-
-    ParseError parseError;
-    document_ = MarkupParser::parse(*source, parseError);
-    if (!document_) {
-        error = std::string(entrySuiPath) + ":" + std::to_string(parseError.line) +
-                ": " + parseError.message;
-        return false;
-    }
-
-    SDL_SetAppMetadata("SimpleUI", "0.1.0", "org.simpleui.app");
-
-    platform_ = makePlatform();
-    if (!platform_->initialize(windowConfigFrom(*document_), error)) {
-        platform_.reset();
-        document_.reset();
-        return false;
-    }
-
-    SDL_Log("loaded %s (%zu stylesheets, %zu scripts)", std::string(entrySuiPath).c_str(),
-            document_->stylesheets().size(), document_->scripts().size());
-
-    for (const auto& link : document_->stylesheets()) {
+void Application::installPage(std::unique_ptr<Document> document, std::string_view href) {
+    // A page brings its own stylesheets and nothing else does: the previous
+    // page's rules go first, or a style it declared would outlive it.
+    resolver_.clearStyles();
+    for (const auto& link : document->stylesheets()) {
         auto css = resources_->readText(link.href);
         if (!css) {
             script::warn("cannot read stylesheet " + link.href);
@@ -2919,8 +2894,8 @@ bool Application::start(std::string_view entrySuiPath, std::string& error) {
         // sheet.
         CSSParser::parseWithKeyframes(
             *css, rules, keyframes,
-            [this](std::string_view href) -> std::optional<std::string> {
-                return resources_->readText(href);
+            [this](std::string_view import) -> std::optional<std::string> {
+                return resources_->readText(import);
             },
             link.href);
         for (auto& rule : rules) {
@@ -2929,10 +2904,97 @@ bool Application::start(std::string_view entrySuiPath, std::string& error) {
         resolver_.addKeyframes(std::move(keyframes));
     }
 
-    scriptContext_.document = document_.get();
-    scriptContext_.styles = &resolver_;
-    script::setContext(&scriptContext_);
+    setDocument(std::move(document));
 
+    // `rem` and `font-size: <percentage>` on the root resolve against the new
+    // page's own font size, so it has to be known before its first layout.
+    if (Element* body = document_->querySelector("body")) {
+        resolver_.setRootFontSize(resolver_.resolve(*body).fontSize);
+    }
+    if (platform_) {
+        const std::string title = windowTitleFrom(*document_);
+        if (!title.empty()) {
+            platform_->setWindowTitle(title);
+        }
+    }
+    currentPage_ = std::string(href);
+    // The new page's after-body scripts have not run yet.
+    scriptsAfterBodyRun_ = false;
+    SDL_Log("loaded %s (%zu stylesheets, %zu scripts)", std::string(href).c_str(),
+            document_->stylesheets().size(), document_->scripts().size());
+}
+
+bool Application::loadPage(std::string_view href, std::string& error) {
+    if (!resources_) {
+        error = "no project to load " + std::string(href) + " from";
+        return false;
+    }
+    auto source = resources_->readText(href);
+    if (!source) {
+        error = "cannot read " + resources_->resolve(href);
+        return false;
+    }
+    ParseError parseError;
+    std::unique_ptr<Document> document = MarkupParser::parse(*source, parseError);
+    if (!document) {
+        error = std::string(href) + ":" + std::to_string(parseError.line) + ": " +
+                parseError.message;
+        return false;
+    }
+    installPage(std::move(document), href);
+    return true;
+}
+
+bool Application::navigate(std::string_view href) {
+    if (href.empty()) {
+        return false;
+    }
+    // A URL with a scheme is not something this engine opens; a link to one is
+    // reported rather than silently swallowed.
+    if (href.find("://") != std::string_view::npos) {
+        script::error("cannot navigate to " + std::string(href) +
+                      ": only .sui pages inside the project are supported");
+        return false;
+    }
+    std::string error;
+    if (loadPage(href, error)) {
+        return true;
+    }
+    // Whatever page was live stays live: a broken link must not blank the app.
+    script::error(error);
+    return false;
+}
+
+bool Application::openProject(std::string_view entrySuiPath, std::string& error) {
+    // The project root is the entry file's directory, and it is what every href
+    // in every page resolves against -- so a link to `pages/settings.sui` reads
+    // `<root>/pages/settings.sui` from whichever page the link is on.
+    resources_ = std::make_unique<FileResources>(projectRootFor(std::string(entrySuiPath)));
+    images_ = std::make_unique<ImageCache>(*resources_);
+    // SUI_SCREENSHOT renders one frame to a BMP and exits, so layout can be
+    // verified without a visible window.
+    if (const char* shot = SDL_getenv("SUI_SCREENSHOT")) {
+        screenshotPath_ = shot;
+    }
+    return loadPage(entrySuiPath, error);
+}
+
+bool Application::start(std::string_view entrySuiPath, std::string& error) {
+    if (!openProject(entrySuiPath, error)) {
+        return false;
+    }
+
+    SDL_SetAppMetadata("SimpleUI", "0.1.0", "org.simpleui.app");
+
+    // The window comes from the entry page only. A navigated page keeps the
+    // window the host created and may re-title it, but never resizes it.
+    platform_ = makePlatform();
+    if (!platform_->initialize(windowConfigFrom(*document_), error)) {
+        platform_.reset();
+        document_.reset();
+        script::setContext(nullptr);
+        return false;
+    }
     return true;
 }
 
