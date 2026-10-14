@@ -4603,6 +4603,32 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
                 s.snapStrictness = strict;
             }
         }
+    } else if (property == "color-scheme") {
+        // `normal` is the absence of a preference; a list takes its first
+        // recognized scheme, and `only` refuses the other one outright.
+        ComputedStyle::ColorScheme scheme = ComputedStyle::ColorScheme::Normal;
+        bool only = false;
+        bool saw = false;
+        for (std::string_view token : splitTokens(value)) {
+            if (!saw && (token == "normal" || token == "only" || token == "light" ||
+                         token == "dark")) {
+                saw = true;
+            }
+            if (token == "only") {
+                only = true;
+                continue;
+            }
+            if (token == "light" && scheme == ComputedStyle::ColorScheme::Normal) {
+                scheme = ComputedStyle::ColorScheme::Light;
+            } else if (token == "dark" && scheme == ComputedStyle::ColorScheme::Normal) {
+                scheme = ComputedStyle::ColorScheme::Dark;
+            }
+        }
+        if (saw) {
+            s.colorScheme = scheme;
+            s.colorSchemeOnly = only;
+            s.specified |= ComputedStyle::SpecifiedColorScheme;
+        }
     } else if (property == "scroll-behavior") {
         // Not inherited: it describes how this box's own scrolling moves.
         if (value == "smooth") {
@@ -5694,6 +5720,15 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "scroll-behavior") {
         return style.scrollBehavior == ComputedStyle::ScrollBehavior::Smooth ? "smooth"
                                                                             : "auto";
+    }
+    if (property == "color-scheme") {
+        const char* name = style.colorScheme == ComputedStyle::ColorScheme::Dark  ? "dark"
+                            : style.colorScheme == ComputedStyle::ColorScheme::Light ? "light"
+                                                                                     : "normal";
+        if (style.colorSchemeOnly && style.colorScheme != ComputedStyle::ColorScheme::Normal) {
+            return std::string("only ") + name;
+        }
+        return name;
     }
     if (property == "font-stretch") {
         for (const auto& step : {std::pair<float, const char*>{0.5f, "ultra-condensed"},
@@ -6852,6 +6887,25 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
     applyLevel(true);
 
     applyDimensionAttributes(style, element);
+    // The document root still wears the user-agent canvas colours, which
+    // `color-scheme` re-picks. Either pair an author set survives, and the UA
+    // colors carry no `specified` bit of their own, so both are recognized by
+    // still holding the dark pair they shipped with.
+    if ((style.specified & ComputedStyle::SpecifiedUACanvas) &&
+        style.colorScheme != ComputedStyle::ColorScheme::Normal) {
+        const UaCanvas& was = uaCanvas(true);
+        const UaCanvas& now =
+            uaCanvas(style.colorScheme == ComputedStyle::ColorScheme::Dark);
+        if (style.color.r == was.text.r && style.color.g == was.text.g &&
+            style.color.b == was.text.b) {
+            style.color = now.text;
+        }
+        if (style.backgroundColor.r == was.background.r &&
+            style.backgroundColor.g == was.background.g &&
+            style.backgroundColor.b == was.background.b) {
+            style.backgroundColor = now.background;
+        }
+    }
     animateStyle(element, style);
     return style;
 }

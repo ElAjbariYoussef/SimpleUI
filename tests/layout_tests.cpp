@@ -5822,6 +5822,85 @@ void testScrollBehavior() {
           "the default serializes as auto");
 }
 
+// `color-scheme` re-picks the user-agent canvas pair for a document root that
+// never chose its own colours, and an author who set them keeps them.
+void testColorScheme() {
+    using Scheme = ComputedStyle::ColorScheme;
+    const sui::UaCanvas& dark = sui::uaCanvas(true);
+    const sui::UaCanvas& light = sui::uaCanvas(false);
+    // One document per case: the scheme is declared on the root itself, so the
+    // cases cannot share a root.
+    const auto bodyOf = [](const char* style, ComputedStyle& out, Element*& child) {
+        std::string markup = "<sui><body";
+        if (style[0]) {
+            markup += " style=\"";
+            markup += style;
+            markup += "\"";
+        }
+        markup += "><div id=\"d\">x</div></body></sui>";
+        auto document = parseOrNull(markup.c_str());
+        if (!document) {
+            return false;
+        }
+        Element* root = document->querySelector("body");
+        child = document->getElementById("d");
+        if (!root || !child) {
+            return false;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+        out = resolver.resolve(*root);
+        return true;
+    };
+
+    ComputedStyle style;
+    Element* child = nullptr;
+    check(bodyOf("color-scheme:dark", style, child) && style.colorScheme == Scheme::Dark,
+          "dark parses");
+    check(style.backgroundColor.r == dark.background.r && style.color.r == dark.text.r,
+          "dark keeps the default pair");
+    // The scheme belongs to the root, not to everything below it.
+    if (child) {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+        check(resolver.resolve(*child).colorScheme == Scheme::Normal,
+              "the scheme does not inherit");
+    }
+
+    check(bodyOf("color-scheme:light", style, child) &&
+              style.colorScheme == Scheme::Light && style.colorSchemeOnly == false,
+          "light parses");
+    check(style.backgroundColor.r == light.background.r && style.color.r == light.text.r,
+          "light flips the canvas pair");
+    check(sui::StyleResolver::propertyValue(style, "color-scheme") == "light",
+          "light serializes");
+
+    check(bodyOf("color-scheme:only dark", style, child) && style.colorSchemeOnly,
+          "only dark parses");
+    check(style.backgroundColor.r == dark.background.r, "only dark paints dark");
+    check(sui::StyleResolver::propertyValue(style, "color-scheme") == "only dark",
+          "only dark serializes");
+
+    // A list takes its first recognized scheme.
+    check(bodyOf("color-scheme:dark light", style, child) &&
+              style.colorScheme == Scheme::Dark,
+          "a list takes the first");
+    check(bodyOf("color-scheme:banana", style, child) &&
+              style.colorScheme == Scheme::Normal &&
+              style.backgroundColor.r == dark.background.r,
+          "garbage leaves the default pair");
+    check(sui::StyleResolver::propertyValue(style, "color-scheme") == "normal",
+          "no preference serializes as normal");
+    check(bodyOf("", style, child) && style.colorScheme == Scheme::Normal,
+          "the default is no preference");
+
+    // An author who paints the canvas keeps its colors whatever the scheme.
+    check(bodyOf("color-scheme:light;background-color:#010203;color:#040506", style,
+                 child) &&
+              style.backgroundColor.r == 0x01 && style.color.r == 0x04,
+          "an author keeps the colors it set");
+}
+
 // `:focus-visible` matches the focused element only when it wants visible
 // focus UI: the state flag set on keyboard interaction, or on focusing a
 // control that takes text entry.
@@ -7715,6 +7794,7 @@ int main() {
     testFontKerning();
     testFontStretch();
     testScrollBehavior();
+    testColorScheme();
     testValidationApi();
     testBidiOrder();
     testValidationPseudos();

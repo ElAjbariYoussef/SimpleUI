@@ -17,6 +17,12 @@ ComputedStyle block(std::uint32_t specified = 0) {
 
 }  // namespace
 
+const UaCanvas& uaCanvas(bool dark) noexcept {
+    static const UaCanvas kDark{{24, 24, 27, 255}, {228, 228, 231, 255}};
+    static const UaCanvas kLight{{255, 255, 255, 255}, {24, 24, 27, 255}};
+    return dark ? kDark : kLight;
+}
+
 ComputedStyle defaultStyleFor(std::string_view tag) {
     // A generated box joins the inline flow of the element it hangs off, which is
     // what `content` on `::before`/`::after` is for.
@@ -27,9 +33,12 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
     }
 
     if (tag == "body") {
-        Style s = block(Style::SpecifiedColor);
-        s.backgroundColor = {24, 24, 27, 255};
-        s.color = {228, 228, 231, 255};
+        // The document root paints the canvas, so it is the one element whose
+        // user-agent colours `color-scheme` gets to re-pick.
+        Style s = block(Style::SpecifiedColor | Style::SpecifiedUACanvas);
+        const UaCanvas& canvas = uaCanvas(true);
+        s.backgroundColor = canvas.background;
+        s.color = canvas.text;
         s.margin = {8.0f, 8.0f, 8.0f, 8.0f};
         return s;
     }

@@ -647,6 +647,12 @@ struct ComputedStyle {
     // eases toward it over several frames. Not inherited.
     enum class ScrollBehavior : std::uint8_t { Auto, Smooth };
     ScrollBehavior scrollBehavior = ScrollBehavior::Auto;
+    // Which user-agent colour pair the canvas takes. Not inherited: it
+    // describes the element it is declared on, and only the document root paints.
+    enum class ColorScheme : std::uint8_t { Normal, Light, Dark };
+    ColorScheme colorScheme = ColorScheme::Normal;
+    // `only light` / `only dark`: the page refuses the other scheme entirely.
+    bool colorSchemeOnly = false;
     // The snapport inset from the padding box, per side. Start snap positions
     // shift by the leading inset, end positions by the trailing one.
     struct ScrollPadding {
@@ -941,6 +947,10 @@ struct ComputedStyle {
         SpecifiedListStyleImage = 1u << 23,
         SpecifiedFontStretch = 1u << 24,
         SpecifiedScrollBehavior = 1u << 25,
+        SpecifiedColorScheme = 1u << 26,
+        // A marker, not a property: the element still carries the user-agent
+        // canvas colours, which `color-scheme` may re-pick.
+        SpecifiedUACanvas = 1u << 27,
     };
     std::uint32_t specified = 0;
 };
