@@ -7158,6 +7158,10 @@ SelectionColors StyleResolver::firstLetterColors(Element& element) const {
     return pseudoColors(element, "::first-letter");
 }
 
+SelectionColors StyleResolver::markerColors(Element& element) const {
+    return pseudoColors(element, "::marker");
+}
+
 SelectionColors StyleResolver::pseudoColors(Element& element,
                                             std::string_view pseudo) const {
     SelectionColors out;

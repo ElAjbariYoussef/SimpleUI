@@ -439,11 +439,12 @@ std::size_t readCompound(std::string_view src, std::size_t i, SimpleSelector& ou
             // `::before` and `::after` become real boxes in the tree, so they can
             // select those boxes and carry their own declarations. `::placeholder`
             // works the same way: its box carries the `placeholder` text.
-            // `::selection`, `::first-line`, and `::first-letter` never become
-            // boxes; the resolver matches them separately for their colors. No
-            // other pseudo-element is generated.
+            // `::selection`, `::first-line`, `::first-letter`, and `::marker`
+            // never become boxes; the resolver matches them separately for
+            // their colors. No other pseudo-element is generated.
             if (name == "before" || name == "after" || name == "placeholder" ||
-                name == "selection" || name == "first-line" || name == "first-letter") {
+                name == "selection" || name == "first-line" || name == "first-letter" ||
+                name == "marker") {
                 Selector part;
                 part.kind = Selector::Kind::PseudoElement;
                 part.value = std::string("::") + std::string(name);

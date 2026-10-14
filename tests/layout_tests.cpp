@@ -3735,8 +3735,9 @@ void testPseudoElements() {
     check(before.parts.back().value == "::before", "the pseudo-element part keeps its name");
     check(sui::CSSParser::parseSelector("#card::after").parts.back().value == "::after",
           "::after parses too");
-    check(sui::CSSParser::parseSelector("#card::marker").unsupported,
-          "an ungenerated pseudo-element matches nothing");
+    const auto marker = sui::CSSParser::parseSelector("#card::marker");
+    check(!marker.unsupported && marker.parts.back().value == "::marker",
+          "::marker parses as a pseudo-element part");
     const auto firstLine = sui::CSSParser::parseSelector("#card::first-line");
     check(!firstLine.unsupported, "::first-line is a supported selector");
     check(firstLine.parts.back().kind == sui::Selector::Kind::PseudoElement &&
@@ -5542,6 +5543,36 @@ void testFirstLineLetter() {
     sui::SelectionColors para =
         colorsOf("p::first-letter { color: red }", *b, true);
     check(para.fgSet, "first-letter matches paragraphs too");
+}
+
+// `::marker` recolors list bullets through the same mini-cascade: scoped
+// rules beat globals, ties break by order.
+void testMarkerColors() {
+    auto document = parseOrNull(
+        "<sui><body><ul><li id=\"a\">x</li></ul><div id=\"d\">x</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* a = document->getElementById("a");
+    Element* d = document->getElementById("d");
+    check(a && d, "marker elements found");
+    if (!a || !d) {
+        return;
+    }
+    const auto colorsOf = [&](const char* css, Element& el) {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(css));
+        return resolver.markerColors(el);
+    };
+    sui::SelectionColors none = colorsOf("body { margin: 0 }", *a);
+    check(!none.fgSet, "no rule leaves the marker unset");
+    sui::SelectionColors global = colorsOf("::marker { color: #ff0000 }", *a);
+    check(global.fgSet && global.fg.r == 255, "a global rule colours markers");
+    sui::SelectionColors scoped =
+        colorsOf("::marker { color: #00ff00 } li::marker { color: #0000ff }", *a);
+    check(scoped.fgSet && scoped.fg.b == 255, "a scoped rule beats a later global");
+    sui::SelectionColors div = colorsOf("div::marker { color: red }", *d);
+    check(div.fgSet, "marker rules match by prefix tag too");
 }
 
 // `accent-color` tints native controls, inherits like `color`, and resets to
@@ -7548,6 +7579,7 @@ int main() {
     testSvgLayout();
     testSelectionColors();
     testFirstLineLetter();
+    testMarkerColors();
     testAccentColor();
     testListInside();
     testFontKerning();

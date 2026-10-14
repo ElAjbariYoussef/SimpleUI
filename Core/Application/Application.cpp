@@ -2093,9 +2093,17 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
             marker = "\xE2\x80\xA2";  // U+2022 •
         }
 
-        const SDL_Color markerColor{
-            s.color.r, s.color.g, s.color.b,
-            static_cast<Uint8>(static_cast<float>(s.color.a) * opacity)};
+        // A `::marker` rule recolors the glyph; the background never paints
+        // behind these procedural marks.
+        const sui::SelectionColors markerStyled = resolver.markerColors(el);
+        const SDL_Color markerColor =
+            markerStyled.fgSet
+                ? SDL_Color{markerStyled.fg.r, markerStyled.fg.g, markerStyled.fg.b,
+                            static_cast<Uint8>(static_cast<float>(markerStyled.fg.a) *
+                                               opacity)}
+                : SDL_Color{
+                      s.color.r, s.color.g, s.color.b,
+                      static_cast<Uint8>(static_cast<float>(s.color.a) * opacity)};
         SDL_Texture* markerTex = font.renderText(sdlRenderer, marker, s.fontSize,
                                                  markerColor, s.fontBold,
                                                  s.fontStyle != ComputedStyle::FontNormal,

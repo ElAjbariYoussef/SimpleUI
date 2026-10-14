@@ -157,6 +157,7 @@ public:
     SelectionColors selectionColors(Element& element) const;
     SelectionColors firstLineColors(Element& element) const;
     SelectionColors firstLetterColors(Element& element) const;
+    SelectionColors markerColors(Element& element) const;
 
 private:
     ComputedStyle resolveWithParent(Element& element, const ComputedStyle& parent) const;
