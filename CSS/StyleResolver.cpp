@@ -7222,6 +7222,89 @@ bool StyleResolver::setFocusVisible(bool visible) {
     SUI_SET_PSEUDO(focusVisible, visible);
 }
 
+SelectionColors StyleResolver::selectionColors(Element& element) const {
+    SelectionColors out;
+    // Best (important, specificity, order) per property so far.
+    struct Bid {
+        bool important = false;
+        int specificity = -1;
+        std::size_t order = 0;
+        bool set = false;
+    };
+    Bid fgBid, bgBid;
+    for (const auto& rule : rules_) {
+        if (rule.layerStatement || rule.selector.parts.empty()) {
+            continue;
+        }
+        const Selector::Kind last = rule.selector.parts.back().kind;
+        if (last != Selector::Kind::PseudoElement ||
+            rule.selector.parts.back().value != "::selection") {
+            continue;
+        }
+        if (!rule.media.empty() &&
+            !mediaMatches(rule.media, viewportWidth_, viewportHeight_)) {
+            continue;
+        }
+        if (rule.container.active && !containerMatches(rule.container, element)) {
+            continue;
+        }
+        // The prefix selects the highlight's owner; the pseudo-element part
+        // only named the highlight itself. A bare `::selection` owns every
+        // element's text.
+        SimpleSelector prefix = rule.selector;
+        prefix.parts.pop_back();
+        if (!prefix.combinators.empty()) {
+            prefix.combinators.pop_back();
+        }
+        const bool ownsAll =
+            prefix.parts.empty() && prefix.pseudoClasses.empty();
+        if (!ownsAll && !selectorMatches(prefix, element, &state_)) {
+            continue;
+        }
+        const int specificity = specificityOf(prefix);
+        for (const auto& decl : rule.declarations) {
+            const bool isFg = decl.property == "color";
+            const bool isBg = decl.property == "background-color" ||
+                              decl.property == "background";
+            if (!isFg && !isBg) {
+                continue;
+            }
+            Bid& bid = isFg ? fgBid : bgBid;
+            if (bid.set &&
+                (decl.important != bid.important
+                     ? bid.important > decl.important
+                     : (specificity != bid.specificity
+                            ? specificity < bid.specificity
+                            : rule.order < bid.order))) {
+                continue;
+            }
+            SDL_Color color{};
+            if (isBg && decl.property == "background") {
+                // A bare `background` shorthand carries the color first.
+                std::string_view first = trim(decl.value);
+                const std::size_t space = first.find(' ');
+                if (space != std::string_view::npos) {
+                    first = trim(first.substr(0, space));
+                }
+                if (!parseColor(first, color)) {
+                    continue;
+                }
+            } else if (!parseColor(decl.value, color)) {
+                continue;
+            }
+            bid = Bid{decl.important, specificity, rule.order, true};
+            if (isFg) {
+                out.fgSet = true;
+                out.fg = color;
+            } else {
+                out.bgSet = true;
+                out.bg = color;
+            }
+        }
+    }
+    return out;
+}
+
 #undef SUI_SET_PSEUDO
 
 }  // namespace sui

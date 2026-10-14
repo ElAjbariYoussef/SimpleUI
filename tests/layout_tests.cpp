@@ -5427,6 +5427,57 @@ void testPlaceholder() {
     }
 }
 
+// `::selection` colors come from rules ending in the pseudo-element whose
+// prefix matches the text owner, won by important/specificity/order. Only
+// `color` and `background-color` apply; anything else never paints a
+// highlight.
+void testSelectionColors() {
+    auto document = parseOrNull(
+        "<sui><body><input id=\"t\" type=\"text\" value=\"hi\"/>"
+        "<div id=\"d\">hi</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* t = document->getElementById("t");
+    Element* d = document->getElementById("d");
+    check(t && d, "selection elements found");
+    if (!t || !d) {
+        return;
+    }
+    const auto colorsOf = [&](const char* css, Element& el) {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(css));
+        return resolver.selectionColors(el);
+    };
+    sui::SelectionColors none = colorsOf("body { margin: 0 }", *t);
+    check(!none.fgSet && !none.bgSet, "no rule leaves both colors unset");
+
+    sui::SelectionColors global =
+        colorsOf("::selection { color: #ff0000; background-color: #00ff00 }", *d);
+    check(global.fgSet && global.fg.r == 255 && global.bgSet && global.bg.g == 255,
+          "a global rule colours any text");
+
+    // Specificity beats order: the later global loses to the scoped rule.
+    sui::SelectionColors scoped = colorsOf(
+        "::selection { color: #00ff00 } input::selection { color: #0000ff }", *t);
+    check(scoped.fgSet && scoped.fg.b == 255, "a scoped rule beats a later global");
+
+    // Order breaks specificity ties, and !important beats everything.
+    sui::SelectionColors ordered = colorsOf(
+        "input::selection { color: #111111 } input::selection { color: #222222 }", *t);
+    check(ordered.fgSet && ordered.fg.r == 0x22, "the later tie wins");
+    sui::SelectionColors important = colorsOf(
+        "input::selection { color: #111111 !important } "
+        "body input::selection { color: #222222 }",
+        *t);
+    check(important.fgSet && important.fg.r == 0x11, "important beats specificity");
+
+    // Anything but the two colors never paints a highlight.
+    sui::SelectionColors junk =
+        colorsOf("input::selection { border-image: none; font-size: 99px }", *t);
+    check(!junk.fgSet && !junk.bgSet, "other declarations never apply");
+}
+
 // `:focus-visible` matches the focused element only when it wants visible
 // focus UI: the state flag set on keyboard interaction, or on focusing a
 // control that takes text entry.
@@ -7155,6 +7206,7 @@ int main() {
     testMaskBorder();
     testBorderImage();
     testScrollSnap();
+    testSelectionColors();
     testValidationPseudos();
     testGaugeDefaults();
     testFocusVisible();

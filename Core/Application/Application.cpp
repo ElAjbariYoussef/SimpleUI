@@ -1709,9 +1709,14 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
 
     // Draw the selection highlight for a focused field before drawing glyphs.
     // Runs are grouped by line so every chosen line paints one bar, covering the
-    // whitespace gaps between words the way a browser's selection does.
+    // whitespace gaps between words the way a browser's selection does. A
+    // `::selection` rule recolors the bar; its foreground repaints the
+    // selected glyphs afterwards from the spans recorded here.
+    std::vector<std::tuple<std::size_t, float, float>> selSpans;
+    sui::SelectionColors selColors;
     if (selStart >= 0 && selEnd > selStart && isEditableField(&el) &&
         !el.textRuns().empty()) {
+        selColors = resolver.selectionColors(el);
         const std::string value = el.value();
         const std::vector<std::pair<std::size_t, std::size_t>> spans =
             wordSpansFor(value, el.textRuns().size());
@@ -1751,13 +1756,42 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                         endX = r.x - tx + wordPrefixWidth(&font, r.text, coverEnd - spans[k].first,
                                                           r.fontSize, ls);
                     }
+                    // The run-local selected span, for the foreground recolor.
+                    if (selColors.fgSet) {
+                        const std::size_t lo =
+                            std::max(coverStart, spans[k].first);
+                        const std::size_t hi =
+                            std::min(coverEnd, spans[k].second);
+                        if (hi > lo) {
+                            const float a =
+                                lo == spans[k].first
+                                    ? 0.0f
+                                    : wordPrefixWidth(&font, r.text, lo - spans[k].first,
+                                                      r.fontSize, ls);
+                            const float b =
+                                hi == spans[k].second
+                                    ? r.width
+                                    : wordPrefixWidth(&font, r.text, hi - spans[k].first,
+                                                      r.fontSize, ls);
+                            if (b > a) {
+                                selSpans.emplace_back(k, a, b);
+                            }
+                        }
+                    }
                 }
                 const Element::TextRun& firstRun = el.textRuns()[lineStartIdx];
                 const float selH = firstRun.height > 0.0f ? firstRun.height : (firstRun.fontSize * 1.2f);
                 const SDL_FRect selRect{std::floor(startX), std::floor(firstRun.y - ty),
                                         std::max(1.0f, endX - startX), selH};
-                SDL_SetRenderDrawColor(sdlRenderer, 51, 144, 255,
-                                       static_cast<Uint8>(128.0f * opacity));
+                if (selColors.bgSet) {
+                    const SDL_Color bg = selColors.bg;
+                    SDL_SetRenderDrawColor(
+                        sdlRenderer, bg.r, bg.g, bg.b,
+                        static_cast<Uint8>(static_cast<float>(bg.a) * opacity));
+                } else {
+                    SDL_SetRenderDrawColor(sdlRenderer, 51, 144, 255,
+                                           static_cast<Uint8>(128.0f * opacity));
+                }
                 SDL_RenderFillRect(sdlRenderer, &selRect);
             }
             lineStartIdx = lineEndIdx;
@@ -1766,7 +1800,8 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
 
     // A text shadow is the run drawn again, offset and blurred, before the run
     // itself. Both carry the group's opacity.
-    for (const auto& run : el.textRuns()) {
+    for (std::size_t runIdx = 0; runIdx < el.textRuns().size(); ++runIdx) {
+        const auto& run = el.textRuns()[runIdx];
         if (run.text.empty() || run.fontSize <= 0.0f) {
             continue;
         }
@@ -1797,6 +1832,36 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         const float ty = offY + (s.overflowY != ComputedStyle::Visible ? el.scrollTop() : 0.0f);
         const SDL_FRect dst{std::floor(run.x - tx), std::floor(run.y - ty), texW, texH};
         SDL_RenderTexture(sdlRenderer, texture, nullptr, &dst);
+
+        // A `::selection` foreground repaints the run's selected span from the
+        // same shaping: the full run re-rendered in the highlight color,
+        // clipped to the span recorded with the bar.
+        if (selColors.fgSet) {
+            for (const auto& span : selSpans) {
+                if (std::get<0>(span) != runIdx) {
+                    continue;
+                }
+                const float sx0 = std::get<1>(span);
+                const float sx1 = std::get<2>(span);
+                if (!(sx1 > sx0) || sx0 >= texW) {
+                    continue;
+                }
+                const SDL_Color fg = selColors.fg;
+                SDL_Texture* fgTex = font.renderText(
+                    sdlRenderer, run.text, run.fontSize,
+                    SDL_Color{fg.r, fg.g, fg.b,
+                              static_cast<Uint8>(static_cast<float>(fg.a) * opacity)},
+                    run.bold, run.italic);
+                if (!fgTex) {
+                    continue;
+                }
+                const SDL_FRect src{sx0, 0.0f, std::min(sx1, texW) - sx0, texH};
+                const SDL_FRect fgDst{std::floor(run.x - tx) + sx0,
+                                      std::floor(run.y - ty), src.w, src.h};
+                SDL_RenderTexture(sdlRenderer, fgTex, &src, &fgDst);
+                SDL_DestroyTexture(fgTex);
+            }
+        }
 
         // Text decoration
         if (s.textDecorationLine != ComputedStyle::DecNone) {

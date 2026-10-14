@@ -27,6 +27,16 @@ struct PseudoState {
     bool focusVisible = false;
 };
 
+// A `::selection` rule's winnings for one element's text: explicit foreground
+// and background, each optional. Unset colors fall back to the run color and
+// the default highlight bar.
+struct SelectionColors {
+    bool fgSet = false;
+    SDL_Color fg{0, 0, 0, 255};
+    bool bgSet = false;
+    SDL_Color bg{0, 0, 0, 255};
+};
+
 // Per-element animation state, kept between resolves. `target` is the previous
 // raw computed style (before interpolation): a transition compares author values
 // against it, so an interpolated output can never restart its own transition.
@@ -137,6 +147,11 @@ public:
     bool setFocusVisible(bool visible);
     bool focusVisible() const noexcept { return state_.focusVisible; }
     const PseudoState& pseudoState() const noexcept { return state_; }
+    // The `::selection` colors for text owned by `element`: the winning
+    // `color`/`background-color` from rules ending in `::selection` whose
+    // prefix matches, by important/specificity/order. Cascade layers do not
+    // reorder selection rules.
+    SelectionColors selectionColors(Element& element) const;
 
 private:
     ComputedStyle resolveWithParent(Element& element, const ComputedStyle& parent) const;
