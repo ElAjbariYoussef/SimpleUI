@@ -5660,6 +5660,49 @@ void testListInside() {
           "none paints no marker either way");
 }
 
+// `list-style-image` stores a url marker, `none` clears it, the shorthand
+// rides it along, it inherits, and it serializes back. Garbage keeps the
+// previous cascade winner.
+void testListStyleImage() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<ul id=\"u\" style=\"list-style-image:url(assets/bullet.png)\">"
+        "<li id=\"a\">x</li></ul>"
+        "<ul id=\"v\" style=\"list-style-image:none\"><li id=\"b\">x</li></ul>"
+        "<ul id=\"w\" style=\"list-style:decimal outside url(assets/n.png)\">"
+        "<li id=\"c\">x</li></ul>"
+        "<ul id=\"z\" style=\"list-style-image:banana\"><li id=\"d\">x</li></ul>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* a = el("a");
+    Element* b = el("b");
+    Element* c = el("c");
+    Element* d = el("d");
+    Element* z = el("z");
+    check(a && b && c && d && z, "list image elements found");
+    if (!a || !b || !c || !d || !z) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    check(resolver.resolve(*a).listStyleImage == "assets/bullet.png",
+          "a url sets the marker image");
+    check(resolver.resolve(*b).listStyleImage.empty(), "none clears the marker image");
+    check(resolver.resolve(*c).listStyleImage == "assets/n.png",
+          "the shorthand carries the image");
+    check(resolver.resolve(*d).listStyleImage.empty(), "garbage clears nothing");
+    check(resolver.resolve(*z).listStyleImage.empty(), "a bad value keeps none");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*a), "list-style-image") ==
+              "url(assets/bullet.png)",
+          "the image serializes");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*b), "list-style-image") ==
+              "none",
+          "an unset image serializes as none");
+}
+
 // `font-kerning` toggles pair kerning in shaped runs, inherits like other
 // text properties, and serializes back. Garbage keeps the previous winner.
 void testFontKerning() {
@@ -7582,6 +7625,7 @@ int main() {
     testMarkerColors();
     testAccentColor();
     testListInside();
+    testListStyleImage();
     testFontKerning();
     testValidationApi();
     testBidiOrder();

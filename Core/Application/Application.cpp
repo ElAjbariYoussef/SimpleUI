@@ -34,6 +34,19 @@
 #include <utility>
 
 namespace sui {
+
+ListMarkerSlot listMarkerSlot(const SDL_FRect& box, float imageWidth, float imageHeight) {
+    ListMarkerSlot slot;
+    if (imageWidth > 0.0f && imageHeight > 0.0f) {
+        slot.image = true;
+        slot.rect = SDL_FRect{box.x - imageWidth - 8.0f, box.y + (box.h - imageHeight) * 0.5f,
+                             imageWidth, imageHeight};
+        return slot;
+    }
+    slot.rect = SDL_FRect{box.x - 8.0f, box.y, 0.0f, 0.0f};
+    return slot;
+}
+
 namespace {
 
 // One open group on the paint stack. A composited group renders into `texture`;
@@ -2093,29 +2106,49 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
             marker = "\xE2\x80\xA2";  // U+2022 •
         }
 
-        // A `::marker` rule recolors the glyph; the background never paints
-        // behind these procedural marks.
-        const sui::SelectionColors markerStyled = resolver.markerColors(el);
-        const SDL_Color markerColor =
-            markerStyled.fgSet
-                ? SDL_Color{markerStyled.fg.r, markerStyled.fg.g, markerStyled.fg.b,
-                            static_cast<Uint8>(static_cast<float>(markerStyled.fg.a) *
-                                               opacity)}
-                : SDL_Color{
-                      s.color.r, s.color.g, s.color.b,
-                      static_cast<Uint8>(static_cast<float>(s.color.a) * opacity)};
-        SDL_Texture* markerTex = font.renderText(sdlRenderer, marker, s.fontSize,
-                                                 markerColor, s.fontBold,
-                                                 s.fontStyle != ComputedStyle::FontNormal,
-                                                 s.fontKerning);
-        if (markerTex) {
-            float mTexW = 0.0f, mTexH = 0.0f;
-            SDL_GetTextureSize(markerTex, &mTexW, &mTexH);
-            const float markerX = box.x - mTexW - 8.0f;
-            const float markerY = box.y;
-            const SDL_FRect dst{std::floor(markerX), std::floor(markerY), mTexW, mTexH};
-            SDL_RenderTexture(sdlRenderer, markerTex, nullptr, &dst);
-            SDL_DestroyTexture(markerTex);
+        // An image marker replaces the procedural glyph: it paints at its
+        // intrinsic size. A URL that does not load falls back to the type glyph.
+        SDL_Texture* imageMark = nullptr;
+        float imageW = 0.0f;
+        float imageH = 0.0f;
+        if (!s.listStyleImage.empty()) {
+            imageMark = images.texture(sdlRenderer, s.listStyleImage);
+            if (imageMark) {
+                SDL_GetTextureSize(imageMark, &imageW, &imageH);
+            }
+        }
+        const ListMarkerSlot slot = listMarkerSlot(box, imageW, imageH);
+
+        if (slot.image) {
+            const SDL_FRect dst{std::floor(slot.rect.x), std::floor(slot.rect.y),
+                                slot.rect.w, slot.rect.h};
+            renderer.fillRect(
+                dst, Shader::image(imageMark, dst, dst, Repeat::No,
+                                   Color{255, 255, 255,
+                                         static_cast<std::uint8_t>(opacity * 255.0f)}));
+        } else {
+            // A `::marker` rule recolors the glyph; the background never paints
+            // behind these procedural marks.
+            const sui::SelectionColors markerStyled = resolver.markerColors(el);
+            const SDL_Color markerColor =
+                markerStyled.fgSet
+                    ? SDL_Color{markerStyled.fg.r, markerStyled.fg.g, markerStyled.fg.b,
+                                static_cast<Uint8>(static_cast<float>(markerStyled.fg.a) *
+                                                   opacity)}
+                    : SDL_Color{
+                          s.color.r, s.color.g, s.color.b,
+                          static_cast<Uint8>(static_cast<float>(s.color.a) * opacity)};
+            SDL_Texture* markerTex =
+                font.renderText(sdlRenderer, marker, s.fontSize, markerColor, s.fontBold,
+                                s.fontStyle != ComputedStyle::FontNormal, s.fontKerning);
+            if (markerTex) {
+                float mTexW = 0.0f, mTexH = 0.0f;
+                SDL_GetTextureSize(markerTex, &mTexW, &mTexH);
+                const SDL_FRect dst{std::floor(slot.rect.x - mTexW),
+                                    std::floor(slot.rect.y), mTexW, mTexH};
+                SDL_RenderTexture(sdlRenderer, markerTex, nullptr, &dst);
+                SDL_DestroyTexture(markerTex);
+            }
         }
     }
 

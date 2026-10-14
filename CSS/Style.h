@@ -803,9 +803,12 @@ struct ComputedStyle {
     ObjectFit objectFit = ObjContain;
 
     // List bullet / counter style. `Disc` (•) for unordered, `Decimal` for ordered.
-    // Only the first marker position (outside the box) is rendered for now.
     enum ListStyleType : std::uint8_t { LSTDisc, LSTCircle, LSTSquare, LSTDecimal, LSTNone };
     ListStyleType listStyleType = LSTDisc;
+    // An image marker (`url()`), painted at intrinsic size instead of the
+    // procedural glyph; empty means none. A URL that fails to load falls back
+    // to the type glyph.
+    std::string listStyleImage;
 
     // Visibility
     bool visible = true;
@@ -928,6 +931,7 @@ struct ComputedStyle {
         SpecifiedListStylePosition = 1u << 20,
         SpecifiedAccentColor = 1u << 21,
         SpecifiedFontKerning = 1u << 22,
+        SpecifiedListStyleImage = 1u << 23,
     };
     std::uint32_t specified = 0;
 };
@@ -1134,6 +1138,9 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     }
     if (!(style.specified & ComputedStyle::SpecifiedListStylePosition)) {
         style.listStylePosition = parent.listStylePosition;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedListStyleImage)) {
+        style.listStyleImage = parent.listStyleImage;
     }
     if (!(style.specified & ComputedStyle::SpecifiedTextDecorationColor)) {
         style.textDecorationColor = parent.textDecorationColor;

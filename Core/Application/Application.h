@@ -22,6 +22,16 @@ class Document;
 class Element;
 class TextFont;
 
+// Where a list item's outside marker lands. An image that loaded takes its own
+// size, vertically centred in the item box and a gap left of it; a zero size
+// (no image, or one that failed to load) falls back to the glyph, whose size
+// the caller measures and which the same gap places.
+struct ListMarkerSlot {
+    bool image = false;
+    SDL_FRect rect{};
+};
+ListMarkerSlot listMarkerSlot(const SDL_FRect& box, float imageWidth, float imageHeight);
+
 class Application {
 public:
     Application();

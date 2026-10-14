@@ -4815,8 +4815,27 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.listStylePosition = ComputedStyle::LSPOutside;
             s.specified |= ComputedStyle::SpecifiedListStylePosition;
         }
+        // The image rides along in the shorthand: a `url()` sets it, and the
+        // `none` that also clears the type clears the image.
+        s.specified |= ComputedStyle::SpecifiedListStyleImage;
+        s.listStyleImage.clear();
+        for (std::string_view token : splitTokens(value)) {
+            if (const std::string_view href = unwrapUrl(token); !href.empty()) {
+                s.listStyleImage = std::string(href);
+                break;
+            }
+        }
     } else if (property == "list-style-image") {
-        // Accepted; image markers are not yet rendered.
+        // `none` clears; a `url()` stores its href for the marker paint.
+        // Anything else keeps the previous cascade winner.
+        if (trim(value) == "none") {
+            s.listStyleImage.clear();
+            s.specified |= ComputedStyle::SpecifiedListStyleImage;
+        } else if (const std::string_view href = unwrapUrl(trim(value));
+                   !href.empty()) {
+            s.listStyleImage = std::string(href);
+            s.specified |= ComputedStyle::SpecifiedListStyleImage;
+        }
     } else if (property == "pointer-events") {
         std::string_view val = trim(value);
         if (val == "none") {
@@ -5630,6 +5649,9 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "color") return color(style.color);
     if (property == "font-kerning") return style.fontKerning ? "normal" : "none";
+    if (property == "list-style-image") {
+        return style.listStyleImage.empty() ? "none" : "url(" + style.listStyleImage + ")";
+    }
     if (property == "accent-color") {
         return style.hasAccentColor ? color(style.accentColor) : "auto";
     }

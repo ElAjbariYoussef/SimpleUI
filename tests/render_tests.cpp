@@ -1,6 +1,7 @@
 // Geometry checks for the renderer that need no device, so the parts a screenshot
 // cannot pin down precisely still have a regression test.
 #include "CSS/Style.h"
+#include "Core/Application/Application.h"
 #include "Core/Application/Background.h"
 #include "Rendering/ClipMask.h"
 #include "Rendering/ColorMatrix.h"
@@ -870,6 +871,25 @@ void testBorderImageTiles() {
     }
 }
 
+// A list item's marker slot: a loaded image takes its own size, vertically
+// centred and a gap left of the box; anything else leaves the glyph, which the
+// caller measures and places with the same gap.
+void testListMarkerSlot() {
+    const SDL_FRect box{100.0f, 50.0f, 200.0f, 40.0f};
+    sui::ListMarkerSlot image = sui::listMarkerSlot(box, 16.0f, 16.0f);
+    check(image.image && image.rect.w == 16.0f && image.rect.h == 16.0f,
+          "a loaded image takes its own size");
+    check(image.rect.x == 76.0f, "the image keeps the gap left of the box");
+    check(image.rect.y == 62.0f, "the image centres in the item");
+    // A wide image still centres on its own height.
+    sui::ListMarkerSlot wide = sui::listMarkerSlot(box, 12.0f, 8.0f);
+    check(wide.rect.y == 66.0f, "a short image centres too");
+    // Nothing loaded (or nothing set) falls back to the glyph.
+    sui::ListMarkerSlot glyph = sui::listMarkerSlot(box, 0.0f, 0.0f);
+    check(!glyph.image && glyph.rect.w == 0.0f, "a missing image falls back");
+    check(glyph.rect.x == 92.0f && glyph.rect.y == 50.0f, "the glyph starts at the gap");
+}
+
 // SVG viewports map user units onto the box: uniform meet scaling centred,
 // or independent axes for `none`. viewBox text parses strictly.
 void testSvgViewport() {
@@ -1215,6 +1235,7 @@ int main() {
     testBorderImageTiles();
     testShaping();
     testSvgViewport();
+    testListMarkerSlot();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }
