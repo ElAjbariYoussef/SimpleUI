@@ -5945,6 +5945,71 @@ void testPrefersColorScheme() {
           "a new preference bumps the generation");
 }
 
+// `currentColor` follows the element's own `color` wherever it appears, and
+// the placeholder never survives a resolution.
+void testCurrentColor() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"a\" style=\"color:#112233;background-color:currentColor;"
+        "border:2px solid currentColor;outline-color:currentColor;"
+        "accent-color:currentColor;text-decoration-color:currentColor;"
+        "box-shadow:1px 1px 2px currentColor\">x</div>"
+        "<div id=\"b\" style=\"color:#445566\">x</div>"
+        "<div id=\"c\" style=\"color:currentColor\">x</div>"
+        "<div id=\"g\" style=\"color:#778899;background-color:banana\">x</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* a = el("a");
+    Element* b = el("b");
+    Element* c = el("c");
+    Element* g = el("g");
+    check(a && b && c && g, "currentColor elements found");
+    if (!a || !b || !c || !g) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    const ComputedStyle style = resolver.resolve(*a);
+    check(style.color.r == 0x11, "the element keeps its own color");
+    check(style.backgroundColor.r == 0x11 && style.backgroundColor.g == 0x22 &&
+              style.backgroundColor.b == 0x33,
+          "background follows the color");
+    check(style.borderColor.r == 0x11, "the border shorthand follows too");
+    check(style.outline.color.r == 0x11, "the outline follows");
+    check(style.accentColor.r == 0x11, "the accent follows");
+    check(style.textDecorationColor.r == 0x11, "the decoration follows");
+    check(!style.boxShadows.empty() && style.boxShadows[0].color.r == 0x11,
+          "a shadow follows");
+    check(!sui::isCurrentColor(style.backgroundColor) &&
+              !sui::isCurrentColor(style.borderColor) &&
+              !sui::isCurrentColor(style.accentColor),
+          "no placeholder survives");
+
+    // The keyword is case-insensitive and resolves against this element, not an
+    // ancestor that happened to set one.
+    sui::StyleResolver childResolver;
+    childResolver.setRules(
+        sui::CSSParser::parse("body { margin: 0 } #c { color: #445566; "
+                              "background-color: CURRENTCOLOR }"));
+    const ComputedStyle child = childResolver.resolve(*c);
+    check(child.color.r == 0x44 && child.backgroundColor.r == 0x44 &&
+              child.backgroundColor.g == 0x55,
+          "the keyword reads this element's color");
+
+    // `color: currentColor` is not a colour; the element inherits instead.
+    const ComputedStyle bad = resolver.resolve(*c);
+    check(bad.color.r != 0x11 && bad.color.r != 0x44, "color never takes the keyword");
+
+    // A literal still wins, and garbage leaves the background transparent.
+    const ComputedStyle literal = resolver.resolve(*g);
+    check(literal.color.r == 0x77 && literal.backgroundColor.a == 0,
+          "a literal color is untouched and garbage is dropped");
+    (void)b;
+}
+
 // `:focus-visible` matches the focused element only when it wants visible
 // focus UI: the state flag set on keyboard interaction, or on focusing a
 // control that takes text entry.
@@ -7840,6 +7905,7 @@ int main() {
     testScrollBehavior();
     testColorScheme();
     testPrefersColorScheme();
+    testCurrentColor();
     testValidationApi();
     testBidiOrder();
     testValidationPseudos();

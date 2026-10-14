@@ -18,6 +18,17 @@ namespace sui {
 
 struct Length;
 
+// The placeholder a `currentColor` keyword parks in until the resolver knows
+// the element's own `color`, which is only settled after inheritance. The
+// resolver swaps every one of these out before a style is handed back, so the
+// value never reaches paint or layout.
+inline constexpr SDL_Color kCurrentColor{1, 2, 3, 4};
+
+inline bool isCurrentColor(SDL_Color color) noexcept {
+    return color.r == kCurrentColor.r && color.g == kCurrentColor.g &&
+           color.b == kCurrentColor.b && color.a == kCurrentColor.a;
+}
+
 // A calc()/min()/max()/clamp() expression tree. A Value node holds one length
 // leaf; Add/Sub/Mul/Div and the range nodes hold their operands as lengths that
 // may themselves be further expressions. `dimensioned` records whether any leaf

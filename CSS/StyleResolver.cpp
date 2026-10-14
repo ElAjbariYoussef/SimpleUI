@@ -1006,6 +1006,24 @@ bool parseColor(std::string_view value, SDL_Color& out) {
 
 namespace {
 
+// A colour that may also be the `currentColor` keyword, which parks a
+// placeholder for the resolver to swap once `color` itself is settled. Case
+// does not matter, as it does not for any other keyword.
+bool parseColorValue(std::string_view value, SDL_Color& out) {
+    const std::string_view text = trim(value);
+    if (text.size() == 12) {
+        std::string lowered(text);
+        for (char& c : lowered) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        if (lowered == "currentcolor") {
+            out = kCurrentColor;
+            return true;
+        }
+    }
+    return parseColor(text, out);
+}
+
 // Splits on whitespace and parses each piece as a length, so `margin: 5px 10%`
 // keeps both units rather than flattening them to pixels. The splitter brackets
 // `calc(...)` whole, so `margin: 10px calc(50% - 2rem)` stays two parts.
@@ -1797,7 +1815,7 @@ ShadowParts parseShadowParts(std::string_view value) {
             continue;
         }
         SDL_Color color{};
-        if (parseColor(token, color)) {
+        if (parseColorValue(token, color)) {
             parts.color = color;
             parts.hasColor = true;
         }
@@ -1818,7 +1836,7 @@ void applyOutline(ComputedStyle& s, std::string_view value) {
             continue;
         }
         SDL_Color color{};
-        if (parseColor(token, color)) {
+        if (parseColorValue(token, color)) {
             s.outline.color = color;
             continue;
         }
@@ -1899,7 +1917,7 @@ bool parseGradientStop(std::string_view entry, ComputedStyle::GradientStop& out)
     }
     for (const std::string_view part : parts) {
         SDL_Color color;
-        if (parseColor(part, color)) {
+        if (parseColorValue(part, color)) {
             out.color = color;
             continue;
         }
@@ -2089,7 +2107,7 @@ bool parseConicalStop(std::string_view entry, ComputedStyle::GradientStop& out) 
     }
     for (const std::string_view part : parts) {
         SDL_Color color;
-        if (parseColor(part, color)) {
+        if (parseColorValue(part, color)) {
             out.color = color;
             continue;
         }
@@ -4106,7 +4124,7 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
                 continue;
             }
             SDL_Color color{};
-            if (parseColor(part, color)) {
+            if (parseColorValue(part, color)) {
                 s.borderColor = color;
             }
         }
@@ -4120,7 +4138,7 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         }
     } else if (property == "background-color" || property == "background") {
         SDL_Color color{};
-        if (parseColor(value, color)) {
+        if (parseColorValue(value, color)) {
             s.backgroundColor = color;
         }
     } else if (property == "color") {
@@ -4174,7 +4192,7 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.specified |= ComputedStyle::SpecifiedAccentColor;
         } else {
             SDL_Color color{};
-            if (parseColor(value, color)) {
+            if (parseColorValue(value, color)) {
                 s.accentColor = color;
                 s.hasAccentColor = true;
                 s.specified |= ComputedStyle::SpecifiedAccentColor;
@@ -4182,7 +4200,7 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         }
     } else if (property == "border-color") {
         SDL_Color color{};
-        if (parseColor(value, color)) {
+        if (parseColorValue(value, color)) {
             s.borderColor = color;
         }
     } else if (property == "border-style") {
@@ -4229,7 +4247,7 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         parseBorderStyle(value, s.outline.style);
     } else if (property == "outline-color") {
         SDL_Color color{};
-        if (parseColor(value, color)) {
+        if (parseColorValue(value, color)) {
             s.outline.color = color;
         }
     } else if (property == "outline-offset") {
@@ -4466,7 +4484,7 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         }
         s.specified |= ComputedStyle::SpecifiedTextDecorationLine;
     } else if (property == "text-decoration-color") {
-        if (parseColor(value, s.textDecorationColor)) {
+        if (parseColorValue(value, s.textDecorationColor)) {
             s.hasTextDecorationColor = true;
             s.specified |= ComputedStyle::SpecifiedTextDecorationColor;
         }
@@ -4488,7 +4506,7 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
                 token != "solid" && token != "dashed" && token != "dotted" &&
                 token != "double" && token != "wavy") {
                 SDL_Color c;
-                if (parseColor(token, c)) {
+                if (parseColorValue(token, c)) {
                     s.textDecorationColor = c;
                     s.hasTextDecorationColor = true;
                     s.specified |= ComputedStyle::SpecifiedTextDecorationColor;
@@ -6726,6 +6744,38 @@ void applyCssWideKeyword(ComputedStyle& style, Element* element,
 
 }  // namespace
 
+// `currentColor` asks for the element's own `color`, which is only settled
+// once inheritance and the cascade are done. Every parked placeholder is
+// swapped out here, before the style leaves the resolver.
+void substituteCurrentColor(ComputedStyle& style) {
+    const auto swap = [&](SDL_Color& color) {
+        if (isCurrentColor(color)) {
+            color = style.color;
+        }
+    };
+    const auto swapStops = [&](std::vector<ComputedStyle::GradientStop>& stops) {
+        for (auto& stop : stops) {
+            swap(stop.color);
+        }
+    };
+    swap(style.backgroundColor);
+    swap(style.borderColor);
+    swap(style.accentColor);
+    swap(style.textDecorationColor);
+    swap(style.outline.color);
+    for (auto& shadow : style.boxShadows) {
+        swap(shadow.color);
+    }
+    for (auto& shadow : style.textShadows) {
+        swap(shadow.color);
+    }
+    for (auto& image : style.backgroundImages) {
+        swapStops(image.linear.stops);
+        swapStops(image.radial.stops);
+        swapStops(image.conical.stops);
+    }
+}
+
 ComputedStyle StyleResolver::resolveWithParent(Element& element,
                                                const ComputedStyle& parent) const {
     ComputedStyle style = defaultStyleFor(element.tag());
@@ -6887,6 +6937,7 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
     applyLevel(true);
 
     applyDimensionAttributes(style, element);
+    substituteCurrentColor(style);
     // The document root still wears the user-agent canvas colours, which
     // `color-scheme` re-picks. Either pair an author set survives, and the UA
     // colors carry no `specified` bit of their own, so both are recognized by
