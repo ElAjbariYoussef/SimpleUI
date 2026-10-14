@@ -1800,6 +1800,91 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
     // whitespace gaps between words the way a browser's selection does. A
     // `::selection` rule recolors the bar; its foreground repaints the
     // selected glyphs afterwards from the spans recorded here.
+    //
+    // `::first-line` and `::first-letter` paint first for precedence: their
+    // bar and letter wash go down before any selection, and their foregrounds
+    // repaint before the selection foreground does.
+    std::vector<std::size_t> firstLineRuns;
+    bool hasFirstLetter = false;
+    std::size_t firstLetterRun = 0;
+    float firstLetterWidth = 0.0f;
+    sui::SelectionColors lineColors;
+    sui::SelectionColors letterColors;
+    {
+        const bool blockText = el.tag() != "input" && el.tag() != "textarea";
+        const bool wanted =
+            (resolver.hasFirstLineRules() || resolver.hasFirstLetterRules()) && blockText &&
+            !el.textRuns().empty();
+        if (wanted) {
+            lineColors = resolver.firstLineColors(el);
+            letterColors = resolver.firstLetterColors(el);
+        }
+        if (wanted && (lineColors.fgSet || lineColors.bgSet || letterColors.fgSet ||
+                       letterColors.bgSet)) {
+                float minY = el.textRuns()[0].y;
+                for (const auto& run : el.textRuns()) {
+                    minY = std::min(minY, run.y);
+                }
+                for (std::size_t k = 0; k < el.textRuns().size(); ++k) {
+                    if (std::fabs(el.textRuns()[k].y - minY) <= 0.5f) {
+                        firstLineRuns.push_back(k);
+                    }
+                }
+                const float tx0 =
+                    offX + (s.overflowX != ComputedStyle::Visible ? el.scrollLeft() : 0.0f);
+                const float ty0 =
+                    offY + (s.overflowY != ComputedStyle::Visible ? el.scrollTop() : 0.0f);
+                const float ls0 = resolvedLetterSpacing(s);
+                if (lineColors.bgSet && !firstLineRuns.empty()) {
+                    float x0 = el.textRuns()[firstLineRuns.front()].x - tx0;
+                    float x1 = x0;
+                    float hh = 0.0f;
+                    for (std::size_t k : firstLineRuns) {
+                        const auto& run = el.textRuns()[k];
+                        x1 = std::max(x1, run.x - tx0 + run.width);
+                        hh = std::max(hh, run.height > 0.0f ? run.height
+                                                            : run.fontSize * 1.2f);
+                    }
+                    const SDL_Color bg = lineColors.bg;
+                    SDL_SetRenderDrawColor(
+                        sdlRenderer, bg.r, bg.g, bg.b,
+                        static_cast<Uint8>(static_cast<float>(bg.a) * opacity));
+                    const SDL_FRect bar{std::floor(x0),
+                                        std::floor(el.textRuns()[firstLineRuns.front()].y - ty0),
+                                        std::max(1.0f, x1 - x0), hh};
+                    SDL_RenderFillRect(sdlRenderer, &bar);
+                }
+                if (!firstLineRuns.empty()) {
+                    const auto& first = el.textRuns()[firstLineRuns.front()];
+                    if (!first.text.empty() &&
+                        (letterColors.fgSet || letterColors.bgSet)) {
+                        std::size_t bytes = 1;
+                        while (bytes < first.text.size() &&
+                               (static_cast<unsigned char>(first.text[bytes]) & 0xC0) ==
+                                   0x80) {
+                            ++bytes;
+                        }
+                        firstLetterRun = firstLineRuns.front();
+                        firstLetterWidth =
+                            wordPrefixWidth(&font, first.text, bytes, first.fontSize, ls0);
+                        hasFirstLetter = true;
+                        if (letterColors.bgSet) {
+                            const SDL_Color bg = letterColors.bg;
+                            SDL_SetRenderDrawColor(
+                                sdlRenderer, bg.r, bg.g, bg.b,
+                                static_cast<Uint8>(static_cast<float>(bg.a) * opacity));
+                            const SDL_FRect span{
+                                std::floor(first.x - tx0),
+                                std::floor(first.y - ty0),
+                                std::max(1.0f, firstLetterWidth),
+                                first.height > 0.0f ? first.height
+                                                    : first.fontSize * 1.2f};
+                            SDL_RenderFillRect(sdlRenderer, &span);
+                        }
+                    }
+                }
+            }
+        }
     std::vector<std::tuple<std::size_t, float, float>> selSpans;
     sui::SelectionColors selColors;
     if (selStart >= 0 && selEnd > selStart && isEditableField(&el) &&
@@ -1924,6 +2009,39 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         const float ty = offY + (s.overflowY != ComputedStyle::Visible ? el.scrollTop() : 0.0f);
         const SDL_FRect dst{std::floor(run.x - tx), std::floor(run.y - ty), texW, texH};
         SDL_RenderTexture(sdlRenderer, texture, nullptr, &dst);
+
+        // `::first-line` repaints whole runs; `::first-letter` repaints the
+        // first grapheme from the same shaping. Both land before the
+        // selection foreground, which wins overlapping spans.
+        const auto blitFg = [&](const SDL_Color& fg, float sx0, float sx1) {
+            if (!(sx1 > sx0) || sx0 >= texW) {
+                return;
+            }
+            SDL_Texture* fgTex = font.renderText(
+                sdlRenderer, run.text, run.fontSize,
+                SDL_Color{fg.r, fg.g, fg.b,
+                          static_cast<Uint8>(static_cast<float>(fg.a) * opacity)},
+                run.bold, run.italic, s.fontKerning);
+            if (!fgTex) {
+                return;
+            }
+            const SDL_FRect src{sx0, 0.0f, std::min(sx1, texW) - sx0, texH};
+            const SDL_FRect fgDst{std::floor(run.x - tx) + sx0,
+                                  std::floor(run.y - ty), src.w, src.h};
+            SDL_RenderTexture(sdlRenderer, fgTex, &src, &fgDst);
+            SDL_DestroyTexture(fgTex);
+        };
+        if (lineColors.fgSet) {
+            for (std::size_t first : firstLineRuns) {
+                if (first == runIdx) {
+                    blitFg(lineColors.fg, 0.0f, texW);
+                    break;
+                }
+            }
+        }
+        if (hasFirstLetter && letterColors.fgSet && firstLetterRun == runIdx) {
+            blitFg(letterColors.fg, 0.0f, firstLetterWidth);
+        }
 
         // A `::selection` foreground repaints the run's selected span from the
         // same shaping: the full run re-rendered in the highlight color,

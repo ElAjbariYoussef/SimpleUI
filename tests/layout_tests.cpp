@@ -3736,8 +3736,11 @@ void testPseudoElements() {
           "::after parses too");
     check(sui::CSSParser::parseSelector("#card::marker").unsupported,
           "an ungenerated pseudo-element matches nothing");
-    check(sui::CSSParser::parseSelector("#card::first-line").unsupported,
-          "::first-line matches nothing");
+    const auto firstLine = sui::CSSParser::parseSelector("#card::first-line");
+    check(!firstLine.unsupported, "::first-line is a supported selector");
+    check(firstLine.parts.back().kind == sui::Selector::Kind::PseudoElement &&
+              firstLine.parts.back().value == "::first-line",
+          "::first-line parses as a pseudo-element part");
 
     // A pseudo-element counts in the type group, so `#card::before` outranks
     // `#card` exactly as `#card span` would.
@@ -5496,6 +5499,45 @@ void testSelectionColors() {
     sui::SelectionColors junk =
         colorsOf("input::selection { border-image: none; font-size: 99px }", *t);
     check(!junk.fgSet && !junk.bgSet, "other declarations never apply");
+}
+
+// `::first-line` and `::first-letter` read the same mini-cascade as
+// `::selection`: scoped rules beat globals, ties break by order.
+void testFirstLineLetter() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"a\">hi</div><p id=\"b\">hi</p></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    check(a && b, "first-line elements found");
+    if (!a || !b) {
+        return;
+    }
+    const auto colorsOf = [&](const char* css, Element& el, bool letter) {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(css));
+        return letter ? resolver.firstLetterColors(el) : resolver.firstLineColors(el);
+    };
+    sui::SelectionColors none = colorsOf("p::first-line { color: red }", *a, false);
+    check(!none.fgSet, "a first-line rule misses other tags");
+    sui::SelectionColors line =
+        colorsOf("div::first-line { color: #ff0000; background-color: #00ff00 }", *a,
+                 false);
+    check(line.fgSet && line.fg.r == 255 && line.bgSet && line.bg.g == 255,
+          "a scoped first-line rule colours");
+    sui::SelectionColors letter =
+        colorsOf("div::first-letter { color: #0000ff } ::first-line { color: #00ff00 }",
+                 *a, true);
+    check(letter.fgSet && letter.fg.b == 255, "a first-letter rule colours");
+    sui::SelectionColors both =
+        colorsOf("::first-letter { color: #111111 } div::first-letter { color: #222222 }",
+                 *a, true);
+    check(both.fgSet && both.fg.r == 0x22, "specificity orders first-letter ties");
+    sui::SelectionColors para =
+        colorsOf("p::first-letter { color: red }", *b, true);
+    check(para.fgSet, "first-letter matches paragraphs too");
 }
 
 // `accent-color` tints native controls, inherits like `color`, and resets to
@@ -7345,6 +7387,7 @@ int main() {
     testBorderImage();
     testScrollSnap();
     testSelectionColors();
+    testFirstLineLetter();
     testAccentColor();
     testListInside();
     testFontKerning();

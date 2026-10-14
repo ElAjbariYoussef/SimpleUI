@@ -123,6 +123,8 @@ public:
     // Whether any registered rule sits under `@container`. Layout asks once
     // per pass: without container rules there is nothing to re-read.
     bool anyContainerRules() const noexcept { return anyContainerRules_; }
+    bool hasFirstLineRules() const noexcept { return hasFirstLineRules_; }
+    bool hasFirstLetterRules() const noexcept { return hasFirstLetterRules_; }
 
     // What `rem` and initial `font-size: <percentage>` resolve against. The
     // application sets this from the document root once it is known.
@@ -150,11 +152,17 @@ public:
     // The `::selection` colors for text owned by `element`: the winning
     // `color`/`background-color` from rules ending in `::selection` whose
     // prefix matches, by important/specificity/order. Cascade layers do not
-    // reorder selection rules.
+    // reorder these rules. `::first-line` and `::first-letter` read through
+    // the same mini-cascade.
     SelectionColors selectionColors(Element& element) const;
+    SelectionColors firstLineColors(Element& element) const;
+    SelectionColors firstLetterColors(Element& element) const;
 
 private:
     ComputedStyle resolveWithParent(Element& element, const ComputedStyle& parent) const;
+
+    // The shared mini-cascade behind the three color pseudos.
+    SelectionColors pseudoColors(Element& element, std::string_view pseudo) const;
 
     // Cascade layers (`@layer`), in first-declared order. A rule's layer sorts
     // before its specificity: later layers beat earlier ones, and unlayered
@@ -185,6 +193,8 @@ private:
     // `@layer` names in first-declared order, from statements and first use.
     std::vector<std::string> layerOrder_;
     bool anyContainerRules_ = false;
+    bool hasFirstLineRules_ = false;
+    bool hasFirstLetterRules_ = false;
     std::map<std::string, std::vector<KeyframeBlock::Keyframe>, std::less<>> keyframes_;
     mutable std::map<const Element*, ElementAnim> animations_;
     mutable double (*timeSource_)() = nullptr;

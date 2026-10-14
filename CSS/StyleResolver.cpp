@@ -5404,10 +5404,21 @@ void StyleResolver::setRules(std::vector<Rule> rules) {
     // register in stream order.
     layerOrder_.clear();
     anyContainerRules_ = false;
+    hasFirstLineRules_ = false;
+    hasFirstLetterRules_ = false;
     for (const Rule& rule : rules_) {
         noteLayer(rule.layer);
         if (rule.container.active) {
             anyContainerRules_ = true;
+        }
+        for (const Selector& part : rule.selector.parts) {
+            if (part.kind == Selector::Kind::PseudoElement) {
+                if (part.value == "::first-line") {
+                    hasFirstLineRules_ = true;
+                } else if (part.value == "::first-letter") {
+                    hasFirstLetterRules_ = true;
+                }
+            }
         }
     }
     sortRulesNormal();
@@ -7292,6 +7303,19 @@ bool StyleResolver::setFocusVisible(bool visible) {
 }
 
 SelectionColors StyleResolver::selectionColors(Element& element) const {
+    return pseudoColors(element, "::selection");
+}
+
+SelectionColors StyleResolver::firstLineColors(Element& element) const {
+    return pseudoColors(element, "::first-line");
+}
+
+SelectionColors StyleResolver::firstLetterColors(Element& element) const {
+    return pseudoColors(element, "::first-letter");
+}
+
+SelectionColors StyleResolver::pseudoColors(Element& element,
+                                            std::string_view pseudo) const {
     SelectionColors out;
     // Best (important, specificity, order) per property so far.
     struct Bid {
@@ -7307,7 +7331,7 @@ SelectionColors StyleResolver::selectionColors(Element& element) const {
         }
         const Selector::Kind last = rule.selector.parts.back().kind;
         if (last != Selector::Kind::PseudoElement ||
-            rule.selector.parts.back().value != "::selection") {
+            rule.selector.parts.back().value != pseudo) {
             continue;
         }
         if (!rule.media.empty() &&
