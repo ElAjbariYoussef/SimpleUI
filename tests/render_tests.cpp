@@ -961,6 +961,27 @@ void testShaping() {
     const float unkearned = font.measureText("AV", 16.0f, false);
     check(kerned < unkearned, "a kern pair tucks with kerning on");
     check(font.measureText("AV", 16.0f) == kerned, "kerning defaults on");
+    // `font-stretch` scales the font's horizontal axis, so advances widen and
+    // narrow with the glyphs rather than just spreading them.
+    const float wide = font.measureText("AV", 16.0f, true, 1.5f);
+    const float narrow = font.measureText("AV", 16.0f, true, 0.5f);
+    check(wide > kerned, "an expanded run measures wider");
+    check(narrow < kerned, "a condensed run measures narrower");
+    check(wide / kerned > 1.4f && wide / kerned < 1.6f, "expansion scales by the factor");
+    check(narrow / kerned > 0.4f && narrow / kerned < 0.6f, "condensation scales by the factor");
+    check(font.measureText("AV", 16.0f, true, 1.0f) == kerned, "a normal stretch is identity");
+    // The raster follows the advances: the glyphs themselves widen and narrow.
+    const unsigned int lamGlyph = font.shapeText("\xD9\x84", 16.0f).front().glyph;
+    int lx = 0, ly = 0, lw = 0, lh = 0;
+    int wx = 0, wy = 0, ww = 0, wh = 0;
+    int nx = 0, ny = 0, nw = 0, nh = 0;
+    check(font.glyphBitmapBox(lamGlyph, 16.0f, 1.0f, lx, ly, lw, lh) && lw > 0 && lh > 0,
+          "a shaped glyph reports its box");
+    check(font.glyphBitmapBox(lamGlyph, 16.0f, 2.0f, wx, wy, ww, wh) && ww > lw * 2 - 2,
+          "a doubled stretch doubles the glyph width");
+    check(wh == lh, "stretching leaves the height alone");
+    check(font.glyphBitmapBox(lamGlyph, 16.0f, 0.5f, nx, ny, nw, nh) && nw <= lw,
+          "a condensed glyph is no wider");
     check(font.glyphCount("fi") == 1, "ascii ligatures count fused");
     check(font.glyphCount("\xD9\x84\xD8\xA7") == lamAlef.size(),
           "shaped text counts glyphs");

@@ -213,13 +213,14 @@ TextFont::VerticalMetrics TextFont::verticalMetrics(float size) const {
     return vm;
 }
 
-float TextFont::measureText(std::string_view text, float size, bool kern) const {
+float TextFont::measureText(std::string_view text, float size, bool kern,
+                          float stretch) const {
     if (!font_ || size <= 0.0f) {
         return 0.0f;
     }
     if (hbFont_) {
         float total = 0.0f;
-        for (const ShapedGlyph& glyph : shapeText(text, size, kern)) {
+        for (const ShapedGlyph& glyph : shapeText(text, size, kern, stretch)) {
             total += glyph.advance;
         }
         return total;
@@ -242,9 +243,29 @@ bool TextFont::needsShaping(std::string_view text) {
     return false;
 }
 
-std::size_t TextFont::glyphCount(std::string_view text, bool kern) const {
+bool TextFont::glyphBitmapBox(unsigned int glyphId, float size, float stretch, int& x0,
+                              int& y0, int& width, int& height) const {
+    x0 = 0;
+    y0 = 0;
+    width = 0;
+    height = 0;
+    if (!font_ || size <= 0.0f) {
+        return false;
+    }
+    auto* info = static_cast<stbtt_fontinfo*>(font_);
+    const float scale = emScale(info, size);
+    int x1 = 0, y1 = 0;
+    stbtt_GetGlyphBitmapBox(info, static_cast<int>(glyphId), scale * stretch, scale, &x0, &y0,
+                            &x1, &y1);
+    width = x1 - x0;
+    height = y1 - y0;
+    return width > 0 && height > 0;
+}
+
+std::size_t TextFont::glyphCount(std::string_view text, bool kern,
+                              float stretch) const {
     if (hbFont_) {
-        return shapeText(text, 16.0f, kern).size();
+        return shapeText(text, 16.0f, kern, stretch).size();
     }
     std::size_t count = 0;
     for (unsigned char c : text) {
@@ -256,15 +277,17 @@ std::size_t TextFont::glyphCount(std::string_view text, bool kern) const {
 }
 
 std::vector<ShapedGlyph> TextFont::shapeText(std::string_view text, float size,
-                                              bool kern) const {
+                                              bool kern, float stretch) const {
     std::vector<ShapedGlyph> out;
     if (!hbFont_ || text.empty() || size <= 0.0f) {
         return out;
     }
     hb_font_t* font = static_cast<hb_font_t*>(hbFont_);
     // 26.6 fixed point: advances come back in px after one divide.
+    // `font-stretch` is a horizontal scale of the font itself, so advances and
+    // offsets widen or narrow with the glyphs rather than just spacing them.
     const int scaled = static_cast<int>(size * 64.0f);
-    hb_font_set_scale(font, scaled, scaled);
+    hb_font_set_scale(font, static_cast<int>(size * 64.0f * stretch), scaled);
     hb_buffer_t* buffer = hb_buffer_create();
     hb_buffer_add_utf8(buffer, text.data(), static_cast<int>(text.size()), 0,
                        static_cast<int>(text.size()));
@@ -294,7 +317,7 @@ std::vector<ShapedGlyph> TextFont::shapeText(std::string_view text, float size,
 
 SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
                                   float size, SDL_Color color, bool bold,
-                                  bool italic, bool kern) const {
+                                  bool italic, bool kern, float stretch) const {
     if (!font_ || !renderer || text.empty() || size <= 0.0f) {
         return nullptr;
     }
@@ -313,7 +336,8 @@ SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
     const int boldRight = bold ? 1 : 0;
 
     const int h = static_cast<int>(std::ceil(vm.height));
-    const int w = static_cast<int>(std::ceil(measureText(text, size))) + italicLeft +
+    const int w = static_cast<int>(std::ceil(measureText(text, size, kern, stretch))) +
+                  italicLeft +
                   italicRight + boldRight;
     if (w <= 0 || h <= 0) {
         return nullptr;
@@ -346,20 +370,19 @@ SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
     float penX = 0.0f;
     const bool shaped = hbFont_ != nullptr;
     const std::vector<ShapedGlyph> glyphs =
-        shaped ? shapeText(text, size, kern) : std::vector<ShapedGlyph>{};
+        shaped ? shapeText(text, size, kern, stretch) : std::vector<ShapedGlyph>{};
     if (shaped && !glyphs.empty()) {
         // Shaped blit: glyph ids with advances and mark offsets from the
-        // shaper, rasterized by stb from the same font bytes.
+        // shaper, rasterized by stb from the same font bytes. stb takes the
+        // axes apart, so a stretched run widens its glyphs to match the
+        // stretched advances the shaper handed back.
+        const float scaleX = scale * stretch;
         for (const ShapedGlyph& glyph : glyphs) {
-            int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-            stbtt_GetGlyphBitmapBox(info, static_cast<int>(glyph.glyph), scale, scale,
-                                    &x0, &y0, &x1, &y1);
-            const int gw = x1 - x0;
-            const int gh = y1 - y0;
-            if (gw > 0 && gh > 0) {
+            int x0 = 0, y0 = 0, gw = 0, gh = 0;
+            if (glyphBitmapBox(glyph.glyph, size, stretch, x0, y0, gw, gh)) {
                 std::vector<unsigned char> bmp(static_cast<std::size_t>(gw) *
                                                static_cast<std::size_t>(gh));
-                stbtt_MakeGlyphBitmap(info, bmp.data(), gw, gh, gw, scale, scale,
+                stbtt_MakeGlyphBitmap(info, bmp.data(), gw, gh, gw, scaleX, scale,
                                        static_cast<int>(glyph.glyph));
                 for (int gy = 0; gy < gh; ++gy) {
                     const int destY = ascentPx + y0 + gy -

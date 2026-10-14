@@ -59,13 +59,14 @@ public:
     // Advance width of a UTF-8 string at the given size. Runs needing shaping
     // (anything past ASCII) go through HarfBuzz so ligatures, kerning, and
     // mark positioning measure what renders. `kern` follows `font-kerning`.
-    float measureText(std::string_view text, float size, bool kern = true) const;
+    float measureText(std::string_view text, float size, bool kern = true,
+                   float stretch = 1.0f) const;
 
     // Shapes a run with HarfBuzz: glyph ids with clusters, advances, and mark
     // offsets. Empty when there is no font. Direction stays left-to-right;
     // bidirectional reordering is not shaped yet.
-    std::vector<ShapedGlyph> shapeText(std::string_view text, float size,
-                                       bool kern = true) const;
+    std::vector<ShapedGlyph> shapeText(std::string_view text, float size, bool kern = true,
+                                       float stretch = 1.0f) const;
 
     // Whether a run contains complex script content (anything past ASCII),
     // where ligatures, marks, and non-Latin scripts live. Informational: all
@@ -74,14 +75,22 @@ public:
 
     // Glyphs in a run: the shaped count when shaping, else codepoints. Feeds
     // letter-spacing, which applies per rendered glyph.
-    std::size_t glyphCount(std::string_view text, bool kern = true) const;
+    std::size_t glyphCount(std::string_view text, bool kern = true,
+                           float stretch = 1.0f) const;
+
+    // The pixel box one shaped glyph rasterizes to at a stretch: origin inside the
+    // em, plus size. stb takes the axes apart, so an expanded run widens its
+    // glyphs to match its stretched advances rather than just spreading them.
+    // False for a glyph that draws nothing (a space, or no font).
+    bool glyphBitmapBox(unsigned int glyphId, float size, float stretch, int& x0, int& y0,
+                        int& width, int& height) const;
 
     // Renders a string to a texture for a given color and size. Caller owns the
     // returned texture (SDL_DestroyTexture). The texture is exactly
     // (measureText(text, size), verticalMetrics(size).height) pixels.
     SDL_Texture* renderText(SDL_Renderer* renderer, std::string_view text, float size,
                             SDL_Color color, bool bold = false, bool italic = false,
-                            bool kern = true) const;
+                            bool kern = true, float stretch = 1.0f) const;
 
     bool hasFont() const noexcept { return font_ != nullptr; }
 

@@ -580,6 +580,9 @@ struct ComputedStyle {
     // Pair kerning in shaped runs. Inherited; `none` keeps ligatures and
     // marks but sets pairs unkerned.
     bool fontKerning = true;
+    // Horizontal scale of glyphs and advances: 1.0 is normal, below 1 condenses,
+    // above 1 expands. Inherited.
+    float fontStretch = 1.0f;
 
     // Text properties (basic)
     enum FontStyle : std::uint8_t { FontNormal, FontItalic, FontOblique };
@@ -932,6 +935,7 @@ struct ComputedStyle {
         SpecifiedAccentColor = 1u << 21,
         SpecifiedFontKerning = 1u << 22,
         SpecifiedListStyleImage = 1u << 23,
+        SpecifiedFontStretch = 1u << 24,
     };
     std::uint32_t specified = 0;
 };
@@ -1096,6 +1100,9 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     }
     if (!(style.specified & ComputedStyle::SpecifiedFontKerning)) {
         style.fontKerning = parent.fontKerning;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedFontStretch)) {
+        style.fontStretch = parent.fontStretch;
     }
     if (!(style.specified & ComputedStyle::SpecifiedFontSize)) {
         style.fontSize = parent.fontSize;

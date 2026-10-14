@@ -5736,6 +5736,52 @@ void testFontKerning() {
           "the default serializes as normal");
 }
 
+// `font-stretch` names nine steps and takes raw percentages, inherits, and
+// serializes. Nonsense widths and garbage drop.
+void testFontStretch() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"a\" style=\"font-stretch:condensed\">"
+        "<span id=\"c\">hi</span></div>"
+        "<div id=\"b\" style=\"font-stretch:extra-expanded\">hi</div>"
+        "<div id=\"d\" style=\"font-stretch:135%\">hi</div>"
+        "<div id=\"e\" style=\"font-stretch:0%\">hi</div>"
+        "<div id=\"g\" style=\"font-stretch:banana\">hi</div>"
+        "<div id=\"h\">hi</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* a = el("a");
+    Element* c = el("c");
+    Element* b = el("b");
+    Element* d = el("d");
+    Element* e = el("e");
+    Element* g = el("g");
+    Element* h = el("h");
+    check(a && c && b && d && e && g && h, "stretch elements found");
+    if (!a || !c || !b || !d || !e || !g || !h) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    check(resolver.resolve(*a).fontStretch == 0.75f, "condensed is three quarters");
+    check(resolver.resolve(*c).fontStretch == 0.75f, "stretch inherits");
+    check(resolver.resolve(*b).fontStretch == 1.5f, "extra-expanded is one and a half");
+    check(resolver.resolve(*d).fontStretch == 1.35f, "a percentage is the raw factor");
+    check(resolver.resolve(*e).fontStretch == 1.0f, "a zero width drops");
+    check(resolver.resolve(*g).fontStretch == 1.0f, "garbage keeps normal");
+    check(resolver.resolve(*h).fontStretch == 1.0f, "the default is normal");
+    const auto serial = [&](const char* id) {
+        return sui::StyleResolver::propertyValue(resolver.resolve(*el(id)),
+                                                 "font-stretch");
+    };
+    check(std::string(serial("a")) == "condensed", "a named step serializes by name");
+    check(std::string(serial("d")) == "135%", "an unnamed width serializes as a percentage");
+    check(std::string(serial("h")) == "normal", "the default serializes as normal");
+}
+
 // `:focus-visible` matches the focused element only when it wants visible
 // focus UI: the state flag set on keyboard interaction, or on focusing a
 // control that takes text entry.
@@ -7627,6 +7673,7 @@ int main() {
     testListInside();
     testListStyleImage();
     testFontKerning();
+    testFontStretch();
     testValidationApi();
     testBidiOrder();
     testValidationPseudos();

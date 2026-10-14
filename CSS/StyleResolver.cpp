@@ -12,6 +12,7 @@
 #include <regex>
 #include <set>
 #include <string_view>
+#include <utility>
 
 namespace sui {
 namespace {
@@ -4127,6 +4128,38 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         if (parseColor(value, color)) {
             s.color = color;
         }
+    } else if (property == "font-stretch") {
+        // Keywords name the nine steps; a percentage is the raw factor.
+        float factor = 0.0f;
+        if (value == "ultra-condensed") {
+            factor = 0.5f;
+        } else if (value == "extra-condensed") {
+            factor = 0.625f;
+        } else if (value == "condensed") {
+            factor = 0.75f;
+        } else if (value == "semi-condensed") {
+            factor = 0.875f;
+        } else if (value == "normal") {
+            factor = 1.0f;
+        } else if (value == "semi-expanded") {
+            factor = 1.125f;
+        } else if (value == "expanded") {
+            factor = 1.25f;
+        } else if (value == "extra-expanded") {
+            factor = 1.5f;
+        } else if (value == "ultra-expanded") {
+            factor = 2.0f;
+        } else {
+            const Length length = parseLength(value);
+            if (length.unit == Length::Percent) {
+                factor = length.value * 0.01f;
+            }
+        }
+        // Only a sane width describes text: zero and negatives do not.
+        if (factor > 0.0f) {
+            s.fontStretch = factor;
+            s.specified |= ComputedStyle::SpecifiedFontStretch;
+        }
     } else if (property == "font-kerning") {
         if (value == "none") {
             s.fontKerning = false;
@@ -5649,6 +5682,22 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "color") return color(style.color);
     if (property == "font-kerning") return style.fontKerning ? "normal" : "none";
+    if (property == "font-stretch") {
+        for (const auto& step : {std::pair<float, const char*>{0.5f, "ultra-condensed"},
+                                 {0.625f, "extra-condensed"},
+                                 {0.75f, "condensed"},
+                                 {0.875f, "semi-condensed"},
+                                 {1.0f, "normal"},
+                                 {1.125f, "semi-expanded"},
+                                 {1.25f, "expanded"},
+                                 {1.5f, "extra-expanded"},
+                                 {2.0f, "ultra-expanded"}}) {
+            if (style.fontStretch == step.first) {
+                return step.second;
+            }
+        }
+        return std::to_string(static_cast<int>(style.fontStretch * 100.0f)) + "%";
+    }
     if (property == "list-style-image") {
         return style.listStyleImage.empty() ? "none" : "url(" + style.listStyleImage + ")";
     }
