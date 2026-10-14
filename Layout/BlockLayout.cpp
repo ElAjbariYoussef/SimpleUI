@@ -4,6 +4,8 @@
 #include "Rendering/Text.h"
 #include "SUI/DOM/Element.h"
 
+#include <fribidi.h>
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -2673,7 +2675,132 @@ private:
             bottom_ = std::max(bottom_, boxBottom);
         }
 
+        // Reorders one finished line's runs into visual order (positions only;
+        // the vector stays logical so caret mapping keeps working). Pure LTR
+        // lines return untouched. Levels come from FriBiDi over the joined
+        // line text, and fribidi_reorder_line maps visual positions back to
+        // logical runs; runs then lay out from the line start (or end for an
+        // RTL base) with uniform gaps. Mixed-script runs keep printed order
+        // inside, and caret/selection stay logical approximations.
+        void reorderBidiLine() {
+            auto& runs = ownerEl_.textRuns();
+            if (lineRunStartIndex_ >= runs.size()) {
+                return;
+            }
+            // Logical chars with their run slot; gap spaces keep neighbors honest.
+            std::vector<FriBidiChar> ustr;
+            std::vector<int> charRun;
+            for (std::size_t k = lineRunStartIndex_; k < runs.size(); ++k) {
+                if (k > lineRunStartIndex_) {
+                    ustr.push_back(' ');
+                    charRun.push_back(-1);
+                }
+                const std::string& text = runs[k].text;
+                for (std::size_t i = 0; i < text.size();) {
+                    unsigned char c = static_cast<unsigned char>(text[i]);
+                    FriBidiChar cp = 0xFFFDu;
+                    std::size_t extra = 0;
+                    if (c < 0x80) {
+                        cp = c;
+                    } else if ((c & 0xE0) == 0xC0) {
+                        extra = 1;
+                        cp = c & 0x1Fu;
+                    } else if ((c & 0xF0) == 0xE0) {
+                        extra = 2;
+                        cp = c & 0x0Fu;
+                    } else if ((c & 0xF8) == 0xF0) {
+                        extra = 3;
+                        cp = c & 0x07u;
+                    }
+                    bool ok = extra > 0 || c < 0x80;
+                    for (std::size_t j = 1; ok && j <= extra; ++j) {
+                        if (i + j >= text.size()) {
+                            ok = false;
+                            break;
+                        }
+                        const unsigned char cc =
+                            static_cast<unsigned char>(text[i + j]);
+                        if ((cc & 0xC0) != 0x80) {
+                            ok = false;
+                            break;
+                        }
+                        cp = (cp << 6) | (cc & 0x3Fu);
+                    }
+                    if (!ok) {
+                        cp = 0xFFFDu;
+                        extra = 0;
+                    }
+                    i += extra + 1;
+                    ustr.push_back(cp);
+                    charRun.push_back(static_cast<int>(k - lineRunStartIndex_));
+                }
+            }
+            if (ustr.empty()) {
+                return;
+            }
+            const FriBidiStrIndex len = static_cast<FriBidiStrIndex>(ustr.size());
+            std::vector<FriBidiCharType> types(static_cast<std::size_t>(len));
+            fribidi_get_bidi_types(ustr.data(), len, types.data());
+            bool rtl = false;
+            for (FriBidiCharType type : types) {
+                if (type == FRIBIDI_TYPE_RTL || type == FRIBIDI_TYPE_AL) {
+                    rtl = true;
+                    break;
+                }
+            }
+            if (!rtl) {
+                return;
+            }
+            FriBidiParType base = fribidi_get_par_direction(types.data(), len);
+            std::vector<FriBidiBracketType> brackets(static_cast<std::size_t>(len));
+            fribidi_get_bracket_types(ustr.data(), len, types.data(), brackets.data());
+            std::vector<FriBidiLevel> levels(static_cast<std::size_t>(len));
+            if (fribidi_get_par_embedding_levels_ex(types.data(), brackets.data(), len,
+                                                     &base, levels.data()) == 0) {
+                return;
+            }
+            std::vector<FriBidiStrIndex> map(static_cast<std::size_t>(len));
+            for (FriBidiStrIndex i = 0; i < len; ++i) {
+                map[static_cast<std::size_t>(i)] = i;
+            }
+            const FriBidiLevel reordered = fribidi_reorder_line(
+                FRIBIDI_FLAGS_DEFAULT, types.data(), len, 0, base, levels.data(),
+                ustr.data(), map.data());
+            if (reordered == 0) {
+                return;
+            }
+            // Visual run order: runs by first visual appearance. Positions
+            // only; the vector stays logical.
+            const std::size_t count = runs.size() - lineRunStartIndex_;
+            std::vector<std::size_t> order;
+            order.reserve(count);
+            std::vector<bool> seen(count, false);
+            for (FriBidiStrIndex visual = 0; visual < len; ++visual) {
+                const int slot = charRun[static_cast<std::size_t>(map[static_cast<std::size_t>(visual)])];
+                if (slot >= 0 && !seen[static_cast<std::size_t>(slot)]) {
+                    seen[static_cast<std::size_t>(slot)] = true;
+                    order.push_back(static_cast<std::size_t>(slot));
+                }
+            }
+            for (std::size_t k = 0; k < count; ++k) {
+                if (!seen[k]) {
+                    order.push_back(k);
+                }
+            }
+            // Visual order always lays left to right from the line start;
+            // the base direction already shaped the order itself. (Lines stay
+            // left-anchored; RTL right alignment is not modeled.)
+            float cursor = runs[lineRunStartIndex_].x;
+            const float gap = metrics_.spaceWidth;
+            for (std::size_t slot : order) {
+                auto& run = runs[lineRunStartIndex_ + slot];
+                run.x = cursor;
+                cursor += run.width + gap;
+            }
+        }
+
         void newLine() {
+            reorderBidiLine();
             cursorY_ += metrics_.lineHeight;
             penX_ = 0.0f;
             lineHasContent_ = false;
@@ -2682,7 +2809,9 @@ private:
             syncLine();
         }
 
-        void finish() {}
+        void finish() {
+            reorderBidiLine();
+        }
 
         float cursorY() const {
             // The trailing line is never committed, so count it here.

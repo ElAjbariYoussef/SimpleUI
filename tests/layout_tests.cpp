@@ -5833,6 +5833,74 @@ void testValidationApi() {
     check(!a->reportValidity(), "reporting an invalid field fails");
     check(document->focused() == a, "reporting focuses the failure");
     check(c->reportValidity(), "reporting a valid field passes");
+}
+
+// Bidi visual order: runs lay out left-to-right in LTR paragraphs and flip
+// around RTL ones, while pure-LTR lines never move. Positions only; run order
+// and caret mapping stay logical.
+void testBidiOrder() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"rtl\">\xD8\xB9\xD8\xA7\xD9\x84\xD9\x85 hello</div>"
+        "<div id=\"ltr\">one \xD7\xA9\xD7\xA0\xD7\x99 three</div>"
+        "<div id=\"num\">\xD8\xB3\xD9\x86\xD8\xA9 2024</div>"
+        "<div id=\"plain\">just ascii here</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* rtl = el("rtl");
+    Element* ltr = el("ltr");
+    Element* num = el("num");
+    Element* plain = el("plain");
+    check(rtl && ltr && num && plain, "bidi elements found");
+    if (!rtl || !ltr || !num || !plain) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    layoutRoot(*document, resolver, 400.0f);
+    const auto xs = [](Element& e) {
+        std::vector<float> out;
+        for (const auto& run : e.textRuns()) {
+            out.push_back(run.x);
+        }
+        return out;
+    };
+    // RTL paragraph: the trailing latin word prints left of the arabic one.
+    {
+        const std::vector<float> at = xs(*rtl);
+        check(at.size() == 2, "two runs share the rtl line");
+        if (at.size() == 2) {
+            check(at[1] < at[0], "latin follows arabic visually in rtl");
+        }
+    }
+    // LTR paragraph: hebrew sits between, order untouched.
+    {
+        const std::vector<float> at = xs(*ltr);
+        check(at.size() == 3, "three runs share the mixed line");
+        if (at.size() == 3) {
+            check(at[0] < at[1] && at[1] < at[2], "an ltr line keeps run order");
+        }
+    }
+    // European digits in RTL text sit left of their noun.
+    {
+        const std::vector<float> at = xs(*num);
+        check(at.size() == 2, "two runs share the numbered line");
+        if (at.size() == 2) {
+            check(at[1] < at[0], "digits print left of arabic");
+        }
+    }
+    // Pure ASCII never reorders.
+    {
+        const std::vector<float> at = xs(*plain);
+        bool ordered = true;
+        for (std::size_t i = 1; i < at.size(); ++i) {
+            ordered = ordered && at[i - 1] < at[i];
+        }
+        check(ordered, "ascii runs stay put");
+    }
 }void testBackdropFilter() {
     auto document = parseOrNull("<sui><body><div id=\"x\">hi</div></body></sui>");
     if (!document) {
@@ -7439,6 +7507,7 @@ int main() {
     testListInside();
     testFontKerning();
     testValidationApi();
+    testBidiOrder();
     testValidationPseudos();
     testGaugeDefaults();
     testFocusVisible();

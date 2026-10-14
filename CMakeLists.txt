@@ -17,6 +17,7 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL3 REQUIRED IMPORTED_TARGET sdl3)
 pkg_check_modules(HARFBUZZ REQUIRED IMPORTED_TARGET harfbuzz)
+pkg_check_modules(FRIBIDI REQUIRED IMPORTED_TARGET fribidi)
 
 add_library(sui STATIC
     Core/Object/Object.cpp
@@ -46,7 +47,7 @@ add_library(sui STATIC
     Platform/Linux/LinuxPlatform.cpp)
 
 target_include_directories(sui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(sui PUBLIC PkgConfig::SDL3 PkgConfig::HARFBUZZ)
+target_link_libraries(sui PUBLIC PkgConfig::SDL3 PkgConfig::HARFBUZZ PkgConfig::FRIBIDI)
 target_compile_options(sui PRIVATE -Wall -Wextra)
 
 # stb_truetype is a header-only dependency; make it available via include path.
