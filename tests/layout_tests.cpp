@@ -5339,6 +5339,9 @@ void testValidationPseudos() {
     check(on("select:invalid", *r), "a required select on its empty option is invalid");
     check(on("textarea:valid", *s), "a filled required textarea is valid");
 
+// The script-facing validity API shares the matcher engine: candidates,
+// per-constraint flags, messages, custom errors, and focusing reports.
+
     // `pattern` full-matches non-empty values (a broken pattern constrains
     // nothing) and `minlength` judges lengths in codepoints.
     auto document2 = parseOrNull(
@@ -5786,7 +5789,51 @@ void testGaugeDefaults() {
           "past the band turns red");
 }
 
-void testBackdropFilter() {
+void testValidationApi() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<input id=\"a\" type=\"text\" required=\"\" value=\"\"/>"
+        "<input id=\"b\" type=\"number\" value=\"5\" min=\"10\"/>"
+        "<input id=\"c\" type=\"text\" value=\"ok\"/>"
+        "<input id=\"d\" type=\"text\" disabled=\"\" value=\"\"/>"
+        "<div id=\"e\"></div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* a = el("a");
+    Element* b = el("b");
+    Element* c = el("c");
+    Element* d = el("d");
+    Element* e = el("e");
+    check(a && b && c && d && e, "api elements found");
+    if (!a || !b || !c || !d || !e) {
+        return;
+    }
+    check(a->willValidate() && !d->willValidate() && !e->willValidate(),
+          "candidates validate, barred elements do not");
+    check(!a->checkValidity() && a->validity().valueMissing,
+          "required emptiness flags valueMissing");
+    check(!a->validationMessage().empty(), "a failure explains itself");
+    check(!b->checkValidity() && b->validity().rangeUnderflow,
+          "a low number flags rangeUnderflow");
+    check(c->checkValidity() && c->validity().valid() && c->validationMessage().empty(),
+          "a good field is valid and quiet");
+
+    // Custom errors fail until cleared, with their own message.
+    c->setCustomValidity("nope");
+    check(!c->checkValidity() && c->validity().customError &&
+              c->validationMessage() == "nope",
+          "a custom error fails with its message");
+    c->setCustomValidity("");
+    check(c->checkValidity(), "clearing the custom error validates");
+
+    // Reporting focuses the failure and answers validity.
+    check(!a->reportValidity(), "reporting an invalid field fails");
+    check(document->focused() == a, "reporting focuses the failure");
+    check(c->reportValidity(), "reporting a valid field passes");
+}void testBackdropFilter() {
     auto document = parseOrNull("<sui><body><div id=\"x\">hi</div></body></sui>");
     if (!document) {
         return;
@@ -7391,6 +7438,7 @@ int main() {
     testAccentColor();
     testListInside();
     testFontKerning();
+    testValidationApi();
     testValidationPseudos();
     testGaugeDefaults();
     testFocusVisible();

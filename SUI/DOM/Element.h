@@ -129,6 +129,28 @@ public:
     // inside the low/high band but off the optimum side, 2 outside the band.
     // Only meaningful for meters.
     int gaugeZone() const;
+    // Constraint validation: whether this control is a candidate, its
+    // per-constraint state, and the script-facing API. Custom errors come
+    // from setCustomValidity; reportValidity focuses the first failure.
+    struct ValidityState {
+        bool valueMissing = false;
+        bool typeMismatch = false;
+        bool patternMismatch = false;
+        bool tooShort = false;
+        bool rangeUnderflow = false;
+        bool rangeOverflow = false;
+        bool customError = false;
+        bool valid() const noexcept {
+            return !valueMissing && !typeMismatch && !patternMismatch && !tooShort &&
+                   !rangeUnderflow && !rangeOverflow && !customError;
+        }
+    };
+    bool willValidate() const;
+    ValidityState validity() const;
+    bool checkValidity() const;
+    bool reportValidity();
+    std::string validationMessage() const;
+    void setCustomValidity(std::string message);
     // The select this option/optgroup nests in: the parent, or the grandparent
     // through an <optgroup>. Null for anything else.
     Element* owningSelect() const;
@@ -232,6 +254,8 @@ private:
     std::map<std::string, std::string, std::less<>> attributes_;
     std::string text_;
     bool visual_ = true;
+    // A custom validation error from setCustomValidity; empty means none.
+    std::string customValidity_;
 
     float layoutX_ = 0.0f;
     float layoutY_ = 0.0f;

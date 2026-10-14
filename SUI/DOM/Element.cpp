@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <limits>
+#include <regex>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -437,6 +439,235 @@ int Element::gaugeZone() const {
         return 0;
     }
     return 2;
+}
+
+bool Element::willValidate() const {
+    if (tag_ != "input" && tag_ != "select" && tag_ != "textarea") {
+        return false;
+    }
+    if (hasAttribute("disabled")) {
+        return false;
+    }
+    if (tag_ == "input") {
+        const std::string_view type = attribute("type");
+        if (type == "hidden" || type == "submit" || type == "button" ||
+            type == "reset" || type == "image") {
+            return false;
+        }
+    }
+    return true;
+}
+
+Element::ValidityState Element::validity() const {
+    ValidityState state;
+    if (!willValidate()) {
+        return state;
+    }
+    if (!customValidity_.empty()) {
+        state.customError = true;
+        return state;
+    }
+    const bool required = hasAttribute("required");
+    const std::string value = this->value();
+    const std::string_view inputType = tag_ == "input" ? attribute("type") : std::string_view{};
+    if (tag_ == "select" || tag_ == "textarea") {
+        if (required && value.empty()) {
+            state.valueMissing = true;
+            return state;
+        }
+        if (tag_ == "select" || value.empty()) {
+            return state;
+        }
+        // A textarea still answers its minlength.
+        if (hasAttribute("minlength")) {
+            const std::string_view raw = attribute("minlength");
+            const std::size_t first = raw.find_first_not_of(" \t\n\r\f");
+            if (first != std::string_view::npos) {
+                const std::size_t last = raw.find_last_not_of(" \t\n\r\f");
+                const std::string digits(raw.substr(first, last - first + 1));
+                char* stop = nullptr;
+                const long least = std::strtol(digits.c_str(), &stop, 10);
+                if (stop && *stop == '\0' && least > 0) {
+                    std::size_t codepoints = 0;
+                    for (unsigned char c : value) {
+                        if ((c & 0xC0) != 0x80) {
+                            ++codepoints;
+                        }
+                    }
+                    if (codepoints < static_cast<std::size_t>(least)) {
+                        state.tooShort = true;
+                    }
+                }
+            }
+        }
+        return state;
+    } else {
+        const std::string_view type = attribute("type");
+        if (type == "checkbox") {
+            if (required && !hasAttribute("checked")) {
+                state.valueMissing = true;
+            }
+            return state;
+        }
+        if (type == "radio") {
+            if (required && !hasAttribute("checked")) {
+                // The group is document-wide, like the click handler's: any
+                // checked same-name radio validates the whole group.
+                bool shared = false;
+                const std::string_view name = attribute("name");
+                const Element* root = this;
+                while (root->parent_) {
+                    root = root->parent_;
+                }
+                std::vector<const Element*> stack{root};
+                while (!stack.empty() && !shared) {
+                    const Element* node = stack.back();
+                    stack.pop_back();
+                    if (node != this && node->tag_ == "input" &&
+                        node->attribute("type") == "radio" &&
+                        node->attribute("name") == name &&
+                        node->hasAttribute("checked")) {
+                        shared = true;
+                        break;
+                    }
+                    for (const auto& child : node->children_) {
+                        if (child && !child->isTextNode()) {
+                            stack.push_back(child.get());
+                        }
+                    }
+                }
+                if (!shared) {
+                    state.valueMissing = true;
+                }
+            }
+            return state;
+        }
+        if (value.empty()) {
+            if (required) {
+                state.valueMissing = true;
+            }
+            return state;
+        }
+        if (type == "number" || type == "range") {
+            char* stop = nullptr;
+            const double number = std::strtod(value.c_str(), &stop);
+            if (!stop || *stop != '\0') {
+                state.typeMismatch = true;
+                return state;
+            }
+            const std::string_view minText = attribute("min");
+            const std::string_view maxText = attribute("max");
+            if (!minText.empty()) {
+                char* end = nullptr;
+                const double minimum = std::strtod(std::string(minText).c_str(), &end);
+                if (end && *end == '\0' && number < minimum) {
+                    state.rangeUnderflow = true;
+                    return state;
+                }
+            }
+            if (!maxText.empty()) {
+                char* end = nullptr;
+                const double maximum = std::strtod(std::string(maxText).c_str(), &end);
+                if (end && *end == '\0' && number > maximum) {
+                    state.rangeOverflow = true;
+                    return state;
+                }
+            }
+            return state;
+        }
+        if (type == "email") {
+            const std::size_t at = value.find('@');
+            if (at == std::string::npos || at == 0 || at + 1 >= value.size() ||
+                value.find('@', at + 1) != std::string::npos) {
+                state.typeMismatch = true;
+                return state;
+            }
+        }
+    }
+    // Length and pattern judge non-empty text-like values (selects return
+    // above; radios and checkboxes never reach here).
+    if ((inputType == "text" || inputType == "search" || inputType == "url" ||
+         inputType == "tel" || inputType == "email" || inputType == "password") &&
+        hasAttribute("minlength")) {
+        const std::string_view raw = attribute("minlength");
+        const std::size_t first = raw.find_first_not_of(" \t\n\r\f");
+        if (first != std::string_view::npos) {
+            const std::size_t last = raw.find_last_not_of(" \t\n\r\f");
+            const std::string digits(raw.substr(first, last - first + 1));
+            char* stop = nullptr;
+            const long least = std::strtol(digits.c_str(), &stop, 10);
+            if (stop && *stop == '\0' && least > 0) {
+                std::size_t codepoints = 0;
+                for (unsigned char c : value) {
+                    if ((c & 0xC0) != 0x80) {
+                        ++codepoints;
+                    }
+                }
+                if (codepoints < static_cast<std::size_t>(least)) {
+                    state.tooShort = true;
+                    return state;
+                }
+            }
+        }
+    }
+    if ((inputType == "text" || inputType == "search" || inputType == "url" ||
+         inputType == "tel" || inputType == "email" || inputType == "password") &&
+        hasAttribute("pattern")) {
+        try {
+            if (!std::regex_match(value, std::regex(std::string(attribute("pattern"))))) {
+                state.patternMismatch = true;
+                return state;
+            }
+        } catch (const std::regex_error&) {
+        }
+    }
+    return state;
+}
+
+bool Element::checkValidity() const {
+    return validity().valid();
+}
+
+bool Element::reportValidity() {
+    if (checkValidity()) {
+        return true;
+    }
+    // Focus the failure for the author to find; the application picks up
+    // visible focus from its own modality on the next event.
+    if (document_) {
+        document_->setFocused(this);
+    }
+    return false;
+}
+
+std::string Element::validationMessage() const {
+    const ValidityState state = validity();
+    if (state.customError) {
+        return customValidity_;
+    }
+    if (state.valueMissing) {
+        return "Please fill out this field.";
+    }
+    if (state.typeMismatch) {
+        return "Please match the requested format.";
+    }
+    if (state.patternMismatch) {
+        return "Please match the requested format.";
+    }
+    if (state.tooShort) {
+        return "Please lengthen this text.";
+    }
+    if (state.rangeUnderflow) {
+        return "Value is below the minimum.";
+    }
+    if (state.rangeOverflow) {
+        return "Value is above the maximum.";
+    }
+    return {};
+}
+
+void Element::setCustomValidity(std::string message) {
+    customValidity_ = std::move(message);
 }
 
 int Element::listboxRows() const {
