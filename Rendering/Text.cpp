@@ -213,13 +213,13 @@ TextFont::VerticalMetrics TextFont::verticalMetrics(float size) const {
     return vm;
 }
 
-float TextFont::measureText(std::string_view text, float size) const {
+float TextFont::measureText(std::string_view text, float size, bool kern) const {
     if (!font_ || size <= 0.0f) {
         return 0.0f;
     }
-    if (needsShaping(text) && hbFont_) {
+    if (hbFont_) {
         float total = 0.0f;
-        for (const ShapedGlyph& glyph : shapeText(text, size)) {
+        for (const ShapedGlyph& glyph : shapeText(text, size, kern)) {
             total += glyph.advance;
         }
         return total;
@@ -242,9 +242,9 @@ bool TextFont::needsShaping(std::string_view text) {
     return false;
 }
 
-std::size_t TextFont::glyphCount(std::string_view text) const {
-    if (needsShaping(text) && hbFont_) {
-        return shapeText(text, 16.0f).size();
+std::size_t TextFont::glyphCount(std::string_view text, bool kern) const {
+    if (hbFont_) {
+        return shapeText(text, 16.0f, kern).size();
     }
     std::size_t count = 0;
     for (unsigned char c : text) {
@@ -255,7 +255,8 @@ std::size_t TextFont::glyphCount(std::string_view text) const {
     return count;
 }
 
-std::vector<ShapedGlyph> TextFont::shapeText(std::string_view text, float size) const {
+std::vector<ShapedGlyph> TextFont::shapeText(std::string_view text, float size,
+                                              bool kern) const {
     std::vector<ShapedGlyph> out;
     if (!hbFont_ || text.empty() || size <= 0.0f) {
         return out;
@@ -268,7 +269,13 @@ std::vector<ShapedGlyph> TextFont::shapeText(std::string_view text, float size) 
     hb_buffer_add_utf8(buffer, text.data(), static_cast<int>(text.size()), 0,
                        static_cast<int>(text.size()));
     hb_buffer_guess_segment_properties(buffer);
-    hb_shape(font, buffer, nullptr, 0);
+    if (kern) {
+        hb_shape(font, buffer, nullptr, 0);
+    } else {
+        hb_feature_t noKern;
+        hb_feature_from_string("kern=0", -1, &noKern);
+        hb_shape(font, buffer, &noKern, 1);
+    }
     unsigned int count = 0;
     const hb_glyph_info_t* infos = hb_buffer_get_glyph_infos(buffer, &count);
     const hb_glyph_position_t* positions = hb_buffer_get_glyph_positions(buffer, &count);
@@ -287,7 +294,7 @@ std::vector<ShapedGlyph> TextFont::shapeText(std::string_view text, float size) 
 
 SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
                                   float size, SDL_Color color, bool bold,
-                                  bool italic) const {
+                                  bool italic, bool kern) const {
     if (!font_ || !renderer || text.empty() || size <= 0.0f) {
         return nullptr;
     }
@@ -337,9 +344,9 @@ SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
     };
 
     float penX = 0.0f;
-    const bool shaped = needsShaping(text) && hbFont_;
+    const bool shaped = hbFont_ != nullptr;
     const std::vector<ShapedGlyph> glyphs =
-        shaped ? shapeText(text, size) : std::vector<ShapedGlyph>{};
+        shaped ? shapeText(text, size, kern) : std::vector<ShapedGlyph>{};
     if (shaped && !glyphs.empty()) {
         // Shaped blit: glyph ids with advances and mark offsets from the
         // shaper, rasterized by stb from the same font bytes.

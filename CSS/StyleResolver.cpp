@@ -4127,6 +4127,14 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         if (parseColor(value, color)) {
             s.color = color;
         }
+    } else if (property == "font-kerning") {
+        if (value == "none") {
+            s.fontKerning = false;
+            s.specified |= ComputedStyle::SpecifiedFontKerning;
+        } else if (value == "normal" || value == "auto") {
+            s.fontKerning = true;
+            s.specified |= ComputedStyle::SpecifiedFontKerning;
+        }
     } else if (property == "accent-color") {
         if (value == "auto") {
             s.hasAccentColor = false;
@@ -5572,6 +5580,7 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         }
     }
     if (property == "color") return color(style.color);
+    if (property == "font-kerning") return style.fontKerning ? "normal" : "none";
     if (property == "accent-color") {
         return style.hasAccentColor ? color(style.accentColor) : "auto";
     }

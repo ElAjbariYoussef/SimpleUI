@@ -58,27 +58,30 @@ public:
 
     // Advance width of a UTF-8 string at the given size. Runs needing shaping
     // (anything past ASCII) go through HarfBuzz so ligatures, kerning, and
-    // mark positioning measure what renders.
-    float measureText(std::string_view text, float size) const;
+    // mark positioning measure what renders. `kern` follows `font-kerning`.
+    float measureText(std::string_view text, float size, bool kern = true) const;
 
     // Shapes a run with HarfBuzz: glyph ids with clusters, advances, and mark
     // offsets. Empty when there is no font. Direction stays left-to-right;
     // bidirectional reordering is not shaped yet.
-    std::vector<ShapedGlyph> shapeText(std::string_view text, float size) const;
+    std::vector<ShapedGlyph> shapeText(std::string_view text, float size,
+                                       bool kern = true) const;
 
-    // Whether a run needs the shaper: anything past ASCII, where ligatures,
-    // marks, and non-Latin scripts live.
+    // Whether a run contains complex script content (anything past ASCII),
+    // where ligatures, marks, and non-Latin scripts live. Informational: all
+    // runs shape when the shaper is ready, ASCII included for kerning.
     static bool needsShaping(std::string_view text);
 
     // Glyphs in a run: the shaped count when shaping, else codepoints. Feeds
     // letter-spacing, which applies per rendered glyph.
-    std::size_t glyphCount(std::string_view text) const;
+    std::size_t glyphCount(std::string_view text, bool kern = true) const;
 
     // Renders a string to a texture for a given color and size. Caller owns the
     // returned texture (SDL_DestroyTexture). The texture is exactly
     // (measureText(text, size), verticalMetrics(size).height) pixels.
     SDL_Texture* renderText(SDL_Renderer* renderer, std::string_view text, float size,
-                            SDL_Color color, bool bold = false, bool italic = false) const;
+                            SDL_Color color, bool bold = false, bool italic = false,
+                            bool kern = true) const;
 
     bool hasFont() const noexcept { return font_ != nullptr; }
 

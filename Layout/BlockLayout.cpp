@@ -47,7 +47,7 @@ Metrics metricsFor(const TextFont* font, const ComputedStyle& s) {
         const TextFont::VerticalMetrics vm = font->verticalMetrics(s.fontSize);
         m.ascent = vm.ascent;
         m.lineHeight = std::max(s.fontSize * s.lineHeight, vm.height);
-        m.spaceWidth = font->measureText(" ", s.fontSize);
+        m.spaceWidth = font->measureText(" ", s.fontSize, s.fontKerning);
     } else {
         m.ascent = s.fontSize * 0.8f;
         m.lineHeight = s.fontSize * s.lineHeight;
@@ -122,9 +122,9 @@ float textWidth(const TextFont* font, const ComputedStyle& s, std::string_view t
         }
     }
     if (font && font->hasFont() && s.fontSize > 0.0f) {
-        w = font->measureText(tt, s.fontSize);
+        w = font->measureText(tt, s.fontSize, s.fontKerning);
         // Letter-spacing applies per rendered glyph: ligatures render fewer.
-        glyphCount = font->glyphCount(tt);
+        glyphCount = font->glyphCount(tt, s.fontKerning);
     } else {
         w = static_cast<float>(glyphCount) * s.fontSize * 0.5f;
     }
@@ -320,7 +320,7 @@ public:
         // characters wide by `rows` lines tall, measured in its own font.
         const int cols = intAttribute(el, "cols", 20);
         const int rows = intAttribute(el, "rows", 2);
-        const float advance = (font_ && font_->hasFont()) ? font_->measureText("0", s.fontSize)
+        const float advance = (font_ && font_->hasFont()) ? font_->measureText("0", s.fontSize, s.fontKerning)
                                                           : s.fontSize * 0.5f;
         const Metrics m = metricsFor(font_, s);
         if (s.width.isAuto()) {
@@ -341,7 +341,7 @@ public:
             float text = 0.0f;
             if (font_ && font_->hasFont()) {
                 for (Element* option : el.selectOptions()) {
-                    text = std::max(text, font_->measureText(option->optionLabel(), s.fontSize));
+                    text = std::max(text, font_->measureText(option->optionLabel(), s.fontSize, s.fontKerning));
                 }
             } else {
                 std::size_t longest = 0;

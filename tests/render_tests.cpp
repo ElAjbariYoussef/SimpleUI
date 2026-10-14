@@ -907,7 +907,12 @@ void testShaping() {
     }
     check(font.measureText("\xD9\x84\xD8\xA7", 16.0f) == shaped,
           "measurement matches the shaped advances");
-    check(font.glyphCount("fi") == 2, "ascii counts codepoints");
+    // Kerning pairs kern by default and stand apart with `none`.
+    const float kerned = font.measureText("AV", 16.0f, true);
+    const float unkearned = font.measureText("AV", 16.0f, false);
+    check(kerned < unkearned, "a kern pair tucks with kerning on");
+    check(font.measureText("AV", 16.0f) == kerned, "kerning defaults on");
+    check(font.glyphCount("fi") == 1, "ascii ligatures count fused");
     check(font.glyphCount("\xD9\x84\xD8\xA7") == lamAlef.size(),
           "shaped text counts glyphs");
 }

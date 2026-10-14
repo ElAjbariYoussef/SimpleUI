@@ -577,6 +577,9 @@ struct ComputedStyle {
     std::string fontFamily;   // empty = default
     bool fontBold = false;
     float lineHeight = 1.2f;  // multiplier
+    // Pair kerning in shaped runs. Inherited; `none` keeps ligatures and
+    // marks but sets pairs unkerned.
+    bool fontKerning = true;
 
     // Text properties (basic)
     enum FontStyle : std::uint8_t { FontNormal, FontItalic, FontOblique };
@@ -915,6 +918,7 @@ struct ComputedStyle {
         SpecifiedCursor = 1u << 19,
         SpecifiedListStylePosition = 1u << 20,
         SpecifiedAccentColor = 1u << 21,
+        SpecifiedFontKerning = 1u << 22,
     };
     std::uint32_t specified = 0;
 };
@@ -1076,6 +1080,9 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     if (!(style.specified & ComputedStyle::SpecifiedAccentColor)) {
         style.accentColor = parent.accentColor;
         style.hasAccentColor = parent.hasAccentColor;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedFontKerning)) {
+        style.fontKerning = parent.fontKerning;
     }
     if (!(style.specified & ComputedStyle::SpecifiedFontSize)) {
         style.fontSize = parent.fontSize;

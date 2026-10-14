@@ -5564,6 +5564,39 @@ void testListInside() {
           "none paints no marker either way");
 }
 
+// `font-kerning` toggles pair kerning in shaped runs, inherits like other
+// text properties, and serializes back. Garbage keeps the previous winner.
+void testFontKerning() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"p\" style=\"font-kerning:none\">"
+        "<span id=\"c\">AV</span></div>"
+        "<div id=\"d\">AV</div>"
+        "<div id=\"g\" style=\"font-kerning:banana\">AV</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* p = document->getElementById("p");
+    Element* c = document->getElementById("c");
+    Element* d = document->getElementById("d");
+    Element* g = document->getElementById("g");
+    check(p && c && d && g, "kerning elements found");
+    if (!p || !c || !d || !g) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    check(resolver.resolve(*p).fontKerning == false, "none disables kerning");
+    check(resolver.resolve(*c).fontKerning == false, "kerning inherits");
+    check(resolver.resolve(*d).fontKerning == true, "kerning defaults on");
+    check(resolver.resolve(*g).fontKerning == true, "garbage keeps kerning on");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*p), "font-kerning") ==
+              "none",
+          "none serializes");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*d), "font-kerning") ==
+              "normal",
+          "the default serializes as normal");
+}
+
 // `:focus-visible` matches the focused element only when it wants visible
 // focus UI: the state flag set on keyboard interaction, or on focusing a
 // control that takes text entry.
@@ -7295,6 +7328,7 @@ int main() {
     testSelectionColors();
     testAccentColor();
     testListInside();
+    testFontKerning();
     testValidationPseudos();
     testGaugeDefaults();
     testFocusVisible();
