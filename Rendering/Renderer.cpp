@@ -3,7 +3,9 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <sstream>
 #include <utility>
 
@@ -975,6 +977,400 @@ SvgView svgViewport(float vw, float vh, float vbx, float vby, float vbw, float v
     view.x = (vw - vbw * scale) * 0.5f - vbx * scale;
     view.y = (vh - vbh * scale) * 0.5f - vby * scale;
     return view;
+}
+
+namespace {
+
+// The path `d` grammar lets numbers run together: "10-20.5e2" is three numbers
+// with no separator. This scanner reads that form directly.
+struct PathScanner {
+    std::string_view text;
+    std::size_t i = 0;
+
+    static bool isSeparator(char c) {
+        return c == ',' || c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+    }
+    void skipSeparators() {
+        while (i < text.size() && isSeparator(text[i])) {
+            ++i;
+        }
+    }
+    // The next command letter, if any. A bare number means the previous command
+    // repeats, which is the caller's business.
+    bool command(char& out) {
+        skipSeparators();
+        if (i < text.size() && std::isalpha(static_cast<unsigned char>(text[i]))) {
+            out = text[i];
+            ++i;
+            return true;
+        }
+        return false;
+    }
+    bool number(float& out) {
+        skipSeparators();
+        const std::size_t start = i;
+        if (i < text.size() && (text[i] == '+' || text[i] == '-')) {
+            ++i;
+        }
+        bool digits = false;
+        while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i]))) {
+            ++i;
+            digits = true;
+        }
+        if (i < text.size() && text[i] == '.') {
+            ++i;
+            while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i]))) {
+                ++i;
+                digits = true;
+            }
+        }
+        if (digits && i < text.size() && (text[i] == 'e' || text[i] == 'E')) {
+            const std::size_t mark = i;
+            ++i;
+            if (i < text.size() && (text[i] == '+' || text[i] == '-')) {
+                ++i;
+            }
+            if (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i]))) {
+                while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i]))) {
+                    ++i;
+                }
+            } else {
+                i = mark;
+            }
+        }
+        if (!digits) {
+            i = start;
+            return false;
+        }
+        out = std::strtof(std::string(text.substr(start, i - start)).c_str(), nullptr);
+        return true;
+    }
+    // An arc flag is a single `0` or `1`, which may sit flush against the next
+    // number ("a1 1 0 0110 10").
+    bool flag(bool& out) {
+        skipSeparators();
+        if (i < text.size() && (text[i] == '0' || text[i] == '1')) {
+            out = text[i] == '1';
+            ++i;
+            return true;
+        }
+        return false;
+    }
+    bool more() {
+        skipSeparators();
+        return i < text.size();
+    }
+};
+
+// Segments for a curve, from the length of its control polygon: enough that the
+// flattening error stays under a pixel at any sane scale, never more than 64.
+int segmentsFor(float span) {
+    const int n = static_cast<int>(std::ceil(std::fabs(span) / 6.0f));
+    return std::clamp(n, 4, 64);
+}
+
+// Samples an elliptical arc in the endpoint parameterization, appending every
+// point after the first (the caller already holds the start).
+void appendArc(std::vector<SDL_FPoint>& out, float x1, float y1, float rx, float ry,
+               float degrees, bool largeArc, bool sweep, float x2, float y2) {
+    rx = std::fabs(rx);
+    ry = std::fabs(ry);
+    if (rx <= 0.0f || ry <= 0.0f || (x1 == x2 && y1 == y2)) {
+        out.push_back(SDL_FPoint{x2, y2});
+        return;
+    }
+    const float phi = degrees * 3.14159265f / 180.0f;
+    const float cosPhi = std::cos(phi);
+    const float sinPhi = std::sin(phi);
+    const float dx = (x1 - x2) * 0.5f;
+    const float dy = (y1 - y2) * 0.5f;
+    const float xp = cosPhi * dx + sinPhi * dy;
+    const float yp = -sinPhi * dx + cosPhi * dy;
+    // Scale the radii up when they cannot span the endpoints, as the spec says.
+    const float lambda = xp * xp / (rx * rx) + yp * yp / (ry * ry);
+    if (lambda > 1.0f) {
+        const float grow = std::sqrt(lambda);
+        rx *= grow;
+        ry *= grow;
+    }
+    const float rx2 = rx * rx;
+    const float ry2 = ry * ry;
+    const float num = rx2 * ry2 - rx2 * yp * yp - ry2 * xp * xp;
+    const float den = rx2 * yp * yp + ry2 * xp * xp;
+    float factor = std::sqrt(std::max(0.0f, num / den));
+    if (largeArc == sweep) {
+        factor = -factor;
+    }
+    const float cxp = factor * rx * yp / ry;
+    const float cyp = -factor * ry * xp / rx;
+    const float cx = cosPhi * cxp - sinPhi * cyp + (x1 + x2) * 0.5f;
+    const float cy = sinPhi * cxp + cosPhi * cyp + (y1 + y2) * 0.5f;
+    const auto angleOf = [&](float ux, float uy) {
+        return std::atan2(uy, ux);
+    };
+    const float ux = (xp - cxp) / rx;
+    const float uy = (yp - cyp) / ry;
+    const float vx = (-xp - cxp) / rx;
+    const float vy = (-yp - cyp) / ry;
+    const float theta = angleOf(ux, uy);
+    float sweepAngle = angleOf(vx, vy) - theta;
+    if (!sweep && sweepAngle > 0.0f) {
+        sweepAngle -= 2.0f * 3.14159265f;
+    } else if (sweep && sweepAngle < 0.0f) {
+        sweepAngle += 2.0f * 3.14159265f;
+    }
+    const int steps =
+        std::clamp(static_cast<int>(std::ceil(std::fabs(sweepAngle) / (0.5f * 3.14159265f) *
+                                         8.0f)),
+                   8, 64);
+    for (int k = 1; k <= steps; ++k) {
+        const float a = theta + sweepAngle * static_cast<float>(k) / static_cast<float>(steps);
+        out.push_back(SDL_FPoint{cx + rx * cosPhi * std::cos(a) - ry * sinPhi * std::sin(a),
+                                 cy + rx * sinPhi * std::cos(a) + ry * cosPhi * std::sin(a)});
+    }
+}
+
+}  // namespace
+
+bool parseSvgPath(std::string_view d, std::vector<SvgSubpath>& out) {
+    PathScanner scan{d, 0};
+    SvgSubpath* current = nullptr;
+    float x = 0.0f;
+    float y = 0.0f;
+    // The start of the subpath in progress, for the shorthand curve commands.
+    float subX = 0.0f;
+    float subY = 0.0f;
+    float lastCtrlX = 0.0f;
+    float lastCtrlY = 0.0f;
+    char prev = 0;
+    char command = 0;
+
+    const auto flush = [&]() {
+        current = nullptr;
+        prev = 0;
+    };
+    const auto start = [&](float px, float py) {
+        // `current` always aliases the subpath being built, so opening the
+        // next one is just appending: the last is already in `out`.
+        out.emplace_back();
+        current = &out.back();
+        current->points.push_back(SDL_FPoint{px, py});
+    };
+    const auto lineTo = [&](float px, float py) {
+        if (!current) {
+            start(px, py);
+            return;
+        }
+        current->points.push_back(SDL_FPoint{px, py});
+    };
+    // Reads `n` numbers, reporting failure without consuming past the problem.
+    const auto numbers = [&](float* values, int n) {
+        for (int k = 0; k < n; ++k) {
+            if (!scan.number(values[k])) {
+                return false;
+            }
+        }
+        return true;
+    };
+    const auto cubic = [&](float x1, float y1, float x2, float y2, float px, float py) {
+        const int steps = segmentsFor(std::hypot(x1 - x, y1 - y) + std::hypot(x2 - x1, y2 - y1) +
+                                     std::hypot(px - x2, py - y2));
+        for (int k = 1; k <= steps; ++k) {
+            const float t = static_cast<float>(k) / static_cast<float>(steps);
+            const float u = 1.0f - t;
+            lineTo(u * u * u * x + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * px,
+                   u * u * u * y + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * py);
+        }
+        lastCtrlX = x2;
+        lastCtrlY = y2;
+    };
+    const auto quad = [&](float x1, float y1, float px, float py) {
+        const int steps = segmentsFor(std::hypot(x1 - x, y1 - y) + std::hypot(px - x1, py - y1));
+        for (int k = 1; k <= steps; ++k) {
+            const float t = static_cast<float>(k) / static_cast<float>(steps);
+            const float u = 1.0f - t;
+            lineTo(u * u * x + 2 * u * t * x1 + t * t * px, u * u * y + 2 * u * t * y1 + t * t * py);
+        }
+        lastCtrlX = x1;
+        lastCtrlY = y1;
+    };
+    const auto arc = [&](float rx, float ry, float degrees, bool largeArc, bool sweep,
+                         float px, float py) {
+        if (!current) {
+            start(px, py);
+            return;
+        }
+        appendArc(current->points, x, y, rx, ry, degrees, largeArc, sweep, px, py);
+    };
+
+    while (scan.more()) {
+        char letter = 0;
+        if (scan.command(letter)) {
+            command = letter;
+        } else if (!command || scan.i == 0) {
+            // No command letter ever appeared.
+            return !out.empty();
+        } else {
+            // A run of numbers repeats the previous command; `M` after itself
+            // becomes an implicit `L`, as the spec spells out.
+            if (command == 'M') {
+                command = 'L';
+            } else if (command == 'm') {
+                command = 'l';
+            }
+        }
+        const bool relative = std::islower(static_cast<unsigned char>(command)) != 0;
+        switch (command) {
+            case 'M':
+            case 'm': {
+                float v[2] = {0.0f, 0.0f};
+                if (!numbers(v, 2)) {
+                    return true;
+                }
+                x = relative ? x + v[0] : v[0];
+                y = relative ? y + v[1] : v[1];
+                subX = x;
+                subY = y;
+                start(x, y);
+                break;
+            }
+            case 'L':
+            case 'l': {
+                float v[2] = {0.0f, 0.0f};
+                if (!numbers(v, 2)) {
+                    return true;
+                }
+                x = relative ? x + v[0] : v[0];
+                y = relative ? y + v[1] : v[1];
+                lineTo(x, y);
+                break;
+            }
+            case 'H':
+            case 'h': {
+                float v[1] = {0.0f};
+                if (!numbers(v, 1)) {
+                    return true;
+                }
+                x = relative ? x + v[0] : v[0];
+                lineTo(x, y);
+                break;
+            }
+            case 'V':
+            case 'v': {
+                float v[1] = {0.0f};
+                if (!numbers(v, 1)) {
+                    return true;
+                }
+                y = relative ? y + v[0] : v[0];
+                lineTo(x, y);
+                break;
+            }
+            case 'C':
+            case 'c': {
+                float v[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+                if (!numbers(v, 6)) {
+                    return true;
+                }
+                const float ax = relative ? x + v[0] : v[0];
+                const float ay = relative ? y + v[1] : v[1];
+                const float bx = relative ? x + v[2] : v[2];
+                const float by = relative ? y + v[3] : v[3];
+                const float px = relative ? x + v[4] : v[4];
+                const float py = relative ? y + v[5] : v[5];
+                cubic(ax, ay, bx, by, px, py);
+                x = px;
+                y = py;
+                break;
+            }
+            case 'S':
+            case 's': {
+                float v[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                if (!numbers(v, 4)) {
+                    return true;
+                }
+                const bool reflected = prev == 'C' || prev == 'c' || prev == 'S' || prev == 's';
+                const float ax = reflected ? 2 * x - lastCtrlX : x;
+                const float ay = reflected ? 2 * y - lastCtrlY : y;
+                const float bx = relative ? x + v[0] : v[0];
+                const float by = relative ? y + v[1] : v[1];
+                const float px = relative ? x + v[2] : v[2];
+                const float py = relative ? y + v[3] : v[3];
+                cubic(ax, ay, bx, by, px, py);
+                x = px;
+                y = py;
+                break;
+            }
+            case 'Q':
+            case 'q': {
+                float v[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                if (!numbers(v, 4)) {
+                    return true;
+                }
+                const float ax = relative ? x + v[0] : v[0];
+                const float ay = relative ? y + v[1] : v[1];
+                const float px = relative ? x + v[2] : v[2];
+                const float py = relative ? y + v[3] : v[3];
+                quad(ax, ay, px, py);
+                x = px;
+                y = py;
+                break;
+            }
+            case 'T':
+            case 't': {
+                float v[2] = {0.0f, 0.0f};
+                if (!numbers(v, 2)) {
+                    return true;
+                }
+                const bool reflected = prev == 'Q' || prev == 'q' || prev == 'T' || prev == 't';
+                const float ax = reflected ? 2 * x - lastCtrlX : x;
+                const float ay = reflected ? 2 * y - lastCtrlY : y;
+                const float px = relative ? x + v[0] : v[0];
+                const float py = relative ? y + v[1] : v[1];
+                quad(ax, ay, px, py);
+                x = px;
+                y = py;
+                break;
+            }
+            case 'A':
+            case 'a': {
+                float v[3] = {0.0f, 0.0f, 0.0f};
+                if (!numbers(v, 3)) {
+                    return true;
+                }
+                bool largeArc = false;
+                bool sweep = false;
+                if (!scan.flag(largeArc) || !scan.flag(sweep)) {
+                    return true;
+                }
+                float v2[2] = {0.0f, 0.0f};
+                if (!numbers(v2, 2)) {
+                    return true;
+                }
+                const float px = relative ? x + v2[0] : v2[0];
+                const float py = relative ? y + v2[1] : v2[1];
+                arc(v[0], v[1], v[2], largeArc, sweep, px, py);
+                x = px;
+                y = py;
+                break;
+            }
+            case 'Z':
+            case 'z': {
+                if (current) {
+                    current->closed = true;
+                }
+                x = subX;
+                y = subY;
+                break;
+            }
+            default:
+                // An unknown letter ends the path; whatever it described stands.
+                flush();
+                return !out.empty();
+        }
+        prev = command;
+    }
+    flush();
+    return !out.empty();
 }
 
 }  // namespace sui

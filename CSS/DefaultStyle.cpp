@@ -194,8 +194,8 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
     }
 
     // SVG shapes never lay out as boxes of their own: the svg box paints them
-    // from their attributes, so they take no space (paths and text stay
-    // unpainted for now, like use and image).
+    // from their attributes, so they take no space (text and use stay
+    // unpainted for now, like image).
     if (tag == "rect" || tag == "circle" || tag == "ellipse" || tag == "line" ||
         tag == "polyline" || tag == "polygon" || tag == "path" || tag == "text" ||
         tag == "g" || tag == "use" || tag == "image") {

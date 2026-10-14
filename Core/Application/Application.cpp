@@ -1583,6 +1583,30 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
             if (paint.hasStroke && paint.strokeWidth > 0.0f) {
                 renderer.strokePath(disc, tint(paint.stroke), paint.strokeWidth, true);
             }
+        } else if (tag == "path") {
+            // Every curve is already flattened to line segments; each subpath
+            // fills only when it closes, which is what the fill rule says.
+            std::vector<SvgSubpath> subpaths;
+            if (!parseSvgPath(el.attribute("d"), subpaths)) {
+                continue;
+            }
+            for (const SvgSubpath& sub : subpaths) {
+                if (sub.points.size() < 2) {
+                    continue;
+                }
+                std::vector<SDL_FPoint> path;
+                path.reserve(sub.points.size());
+                for (const SDL_FPoint& point : sub.points) {
+                    path.push_back(place(point.x, point.y));
+                }
+                if (sub.closed && paint.hasFill) {
+                    renderer.fillPolygon(path, tint(paint.fill));
+                }
+                if (paint.hasStroke && paint.strokeWidth > 0.0f) {
+                    renderer.strokePath(path, tint(paint.stroke), paint.strokeWidth,
+                                        sub.closed);
+                }
+            }
         } else if (tag == "line") {
             const SDL_FPoint a = place(svgNumber(el.attribute("x1"), 0.0f),
                                        svgNumber(el.attribute("y1"), 0.0f));
@@ -1611,8 +1635,8 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                 renderer.strokePath(path, tint(paint.stroke), paint.strokeWidth, closed);
             }
         }
-        // Paths, text, use, and image stay unpainted: path syntax, glyph
-        // runs, and sub-resource fetching are their own milestones.
+        // Text, use, and image stay unpainted: glyph runs and sub-resource
+        // fetching are their own milestones.
     }
 }
 

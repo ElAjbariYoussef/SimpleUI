@@ -890,6 +890,146 @@ void testListMarkerSlot() {
     check(glyph.rect.x == 92.0f && glyph.rect.y == 50.0f, "the glyph starts at the gap");
 }
 
+// A path `d` flattens to subpaths: absolute and relative commands, the
+// shorthand curves, arcs, implicit repeats, and the close.
+void testSvgPath() {
+    std::vector<sui::SvgSubpath> subs;
+    // Each case starts from nothing: the parser appends to what it is given.
+    const auto parse = [&](const char* d) {
+        subs.clear();
+        return sui::parseSvgPath(d, subs);
+    };
+    // A square, closed.
+    check(parse("M0 0 L10 0 L10 10 L0 10 Z") && subs.size() == 1 &&
+              subs[0].closed && subs[0].points.size() == 4,
+          "a square flattens to one closed subpath");
+    check(subs[0].points[1].x == 10.0f && subs[0].points[2].y == 10.0f,
+          "the square's points land where the commands said");
+    // Horizontal and vertical shorthands.
+    check(parse("M0 0 H5 V5") && subs.size() == 1 &&
+              subs[0].points.size() == 3 && !subs[0].closed,
+          "h and v add one point each");
+    check(subs[0].points[2].x == 5.0f && subs[0].points[2].y == 5.0f, "h and v land right");
+    // Relative commands measure from the current point, including the first.
+    check(parse("m10 10 l5 0 l0 5") && subs[0].points[1].x == 15.0f &&
+              subs[0].points[2].y == 15.0f,
+          "relative moves and lines step from the last point");
+    // A repeated coordinate repeats the previous command; a second moveto pair
+    // is an implicit lineto.
+    check(parse("M0 0 5 5 10 10") && subs.size() == 1 &&
+              subs[0].points.size() == 3,
+          "bare numbers repeat the last command");
+    check(parse("M0 0 5 5") && subs[0].points.size() == 2 &&
+              subs[0].points[1].x == 5.0f && subs[0].points[1].y == 5.0f,
+          "a repeated moveto pair draws a line");
+    // Two moves make two subpaths.
+    check(parse("M0 0 L1 1 M5 5 L6 6") && subs.size() == 2,
+          "a second moveto opens a subpath");
+    // A cubic flattens into several points between its ends.
+    check(parse("M0 0 C0 10 10 10 10 0") && subs.size() == 1 &&
+              subs[0].points.size() > 3 && subs[0].points.back().x == 10.0f,
+          "a cubic bulges between its endpoints");
+    bool bulge = false;
+    for (const SDL_FPoint& p : subs[0].points) {
+        bulge = bulge || p.y > 6.0f;
+    }
+    check(bulge, "the cubic's middle rises above both endpoints");
+    // Flattening follows the control polygon: a long curve gets many samples, a
+    // short one just enough to round.
+    parse("M0 0 C0 10 10 10 10 0");
+    check(subs[0].points.size() >= 6, "a long curve flattens finely");
+    parse("M0 0 C0 1 1 1 1 0");
+    check(subs[0].points.size() >= 5, "a short curve still rounds");
+    // The shorthand reflects the previous control point when there was one, and
+    // treats the current point as the control when there was not. A reflected
+    // second curve bulges as deep as the first; an unreflected one barely.
+    check(parse("M0 0 C0 10 10 10 10 0 S20 -10 20 0"), "s follows a cubic");
+    float reflected = 0.0f;
+    for (const SDL_FPoint& p : subs[0].points) {
+        reflected = std::min(reflected, p.y);
+    }
+    check(parse("M0 0 S10 10 20 0"), "s without a cubic still curves");
+    float plain = 0.0f;
+    for (const SDL_FPoint& p : subs[0].points) {
+        plain = std::min(plain, p.y);
+    }
+    check(reflected < -6.0f && plain > reflected / 2.0f,
+          "s mirrors the control point only after a curve");
+    // Quadratics and their shorthand.
+    check(parse("M0 0 Q5 10 10 0") && subs[0].points.back().x == 10.0f,
+          "a quadratic ends at its point");
+    check(parse("M0 0 Q5 10 10 0 T20 0"), "t follows a quadratic");
+    float quadReflected = 0.0f;
+    for (const SDL_FPoint& p : subs[0].points) {
+        quadReflected = std::min(quadReflected, p.y);
+    }
+    check(parse("M0 0 T20 0"), "t without a quadratic still curves");
+    float quadPlain = 0.0f;
+    for (const SDL_FPoint& p : subs[0].points) {
+        quadPlain = std::min(quadPlain, p.y);
+    }
+    check(quadReflected < -2.0f && quadPlain > quadReflected / 2.0f,
+          "t mirrors the control point only after a curve");
+    // Arcs: a half circle from (0,0) to (20,0) with radius 10 bows upward or
+    // downward depending on the sweep flag.
+    check(parse("M0 0 A10 10 0 0 1 20 0") && subs.size() == 1 &&
+              subs[0].points.size() >= 8,
+          "an arc flattens into several points");
+    float topDown = 0.0f;
+    for (const SDL_FPoint& p : subs[0].points) {
+        topDown = std::min(topDown, p.y);
+    }
+    float topUp = 0.0f;
+    check(parse("M0 0 A10 10 0 0 0 20 0"), "the other sweep parses");
+    for (const SDL_FPoint& p : subs[0].points) {
+        topUp = std::max(topUp, p.y);
+    }
+    check(topDown < 0.0f && topUp > 0.0f, "the sweep flag picks the arc's side");
+    // The large-arc flag takes the long way round: with radii far longer than
+    // the chord, the arc wraps most of the way instead of clipping it.
+    parse("M0 0 A30 30 0 0 1 20 0");
+    float shallow = 0.0f;
+    for (const SDL_FPoint& p : subs[0].points) {
+        shallow = std::min(shallow, p.y);
+    }
+    const std::size_t few = subs[0].points.size();
+    parse("M0 0 A30 30 0 1 1 20 0");
+    float deep = 0.0f;
+    for (const SDL_FPoint& p : subs[0].points) {
+        deep = std::min(deep, p.y);
+    }
+    check(deep < shallow * 4.0f && subs[0].points.size() > few * 2,
+          "the large-arc flag takes the long way");
+    // Numbers may run together: "10-20" is two numbers.
+    check(parse("M10-20") && subs[0].points[0].x == 10.0f &&
+              subs[0].points[0].y == -20.0f,
+          "numbers run together without separators");
+    // A zero radius degenerates to a straight line, as the spec says.
+    check(parse("M0 0 A0 0 0 0 1 20 0") && subs[0].points.size() == 2 &&
+              subs[0].points[1].x == 20.0f,
+          "a zero-radius arc is a line");
+    // Radii too small for the chord grow until they span it: five is too small
+    // for a twenty-wide chord, so the arc comes out as the ten it needed.
+    check(parse("M0 0 A5 5 0 0 1 20 0"), "an arc too small for its chord parses");
+    float grew = 0.0f;
+    for (const SDL_FPoint& p : subs[0].points) {
+        grew = std::min(grew, p.y);
+    }
+    check(grew <= -9.0f, "too-small radii grow to span the chord");
+    // Nothing, and rubbish, both refuse.
+    check(!parse(""), "an empty path parses to nothing");
+    check(!parse("banana"), "an unknown command parses to nothing");
+    // A path cut short keeps what it already described.
+    check(parse("M0 0 L10 10 L") && subs.size() == 1 &&
+              subs[0].points.size() == 2,
+          "a truncated path keeps its points");
+    // A path that breaks the rules still opens where it says: a leading lineto
+    // becomes a one-point subpath, which draws nothing.
+    check(parse("L10 10") && subs.size() == 1 &&
+              subs[0].points.size() == 1 && subs[0].points[0].x == 10.0f,
+          "a leading lineto opens a bare subpath");
+}
+
 // SVG viewports map user units onto the box: uniform meet scaling centred,
 // or independent axes for `none`. viewBox text parses strictly.
 void testSvgViewport() {
@@ -1255,6 +1395,7 @@ int main() {
     testMaskBorder();
     testBorderImageTiles();
     testShaping();
+    testSvgPath();
     testSvgViewport();
     testListMarkerSlot();
     std::printf("%d checks, %d failures\n", checks, failures);

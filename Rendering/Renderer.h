@@ -298,4 +298,16 @@ bool parseSvgViewBox(std::string_view text, float box[4]);
 SvgView svgViewport(float vw, float vh, float vbx, float vby, float vbw, float vbh,
                     bool none);
 
+// One flattened SVG subpath: the points a `d` attribute describes once every
+// curve has become line segments, plus whether it closes back on its start.
+struct SvgSubpath {
+    std::vector<SDL_FPoint> points;
+    bool closed = false;
+};
+
+// Parses a path `d` attribute into flattened subpaths in user units: moves,
+// lines, both curve families with their shorthand forms, elliptical arcs, and
+// the close. False when nothing parsed; a partial path keeps what it read.
+bool parseSvgPath(std::string_view d, std::vector<SvgSubpath>& out);
+
 }  // namespace sui
