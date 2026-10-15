@@ -158,6 +158,14 @@ bool createsPaintGroup(const ComputedStyle& s);
 // backdrop filter, which diffuses what is behind the box instead of the box.
 float filterBlur(std::string_view filter);
 
+// The product of every `opacity()` in a filter chain, or 1. Shared with the
+// backdrop filter, which fades what is behind the box.
+float filterOpacity(std::string_view filter);
+
+// The first `drop-shadow()` in a filter chain. Shared with the backdrop
+// filter, which shadows the silhouette of what is behind the box.
+DropShadowFilter filterDropShadow(std::string_view filter);
+
 // Whether any mask layer needs a compositing surface: gradients evaluate
 // against it and url() sources sample decoded bytes. Shared with the
 // executor, which copies the layers onto its group frame.

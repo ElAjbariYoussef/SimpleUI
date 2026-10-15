@@ -1833,9 +1833,11 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
 
     if (box.w > 0.0f && box.h > 0.0f) {
         // A `backdrop-filter` processes what is already on the target behind
-        // this box, before the box paints anything of its own over it. Only
-        // blur() and colour operations apply; `opacity()` and `drop-shadow()`
-        // in the chain stay unapplied.
+        // this box, before the box paints anything of its own over it. Blur,
+        // colour operations, `opacity()`, and one `drop-shadow()` apply in a
+        // fixed order (matrix, blur, opacity, shadow) rather than chain order;
+        // the shadow is confined to the box, so anything spilling past it is
+        // cut where the read region ends.
         if (!s.backdropFilter.empty() && s.backdropFilter != "none") {
             SDL_Rect clipRect;
             const bool clipped = SDL_GetRenderClipRect(sdlRenderer, &clipRect);
@@ -1868,6 +1870,21 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                             std::lround(filterBlur(s.backdropFilter));
                         if (blurRadius > 0) {
                             sui::blurRGBA(pixels, conv->w, conv->h, blurRadius);
+                        }
+                        const float backdropOpacity =
+                            sui::filterOpacity(s.backdropFilter);
+                        if (backdropOpacity < 1.0f) {
+                            sui::applyBackdropOpacity(pixels, conv->w, conv->h,
+                                                      backdropOpacity);
+                        }
+                        const DropShadowFilter backdropShadow =
+                            sui::filterDropShadow(s.backdropFilter);
+                        if (backdropShadow.present) {
+                            sui::applyBackdropDropShadow(
+                                pixels, conv->w, conv->h, backdropShadow.dx, backdropShadow.dy,
+                                static_cast<int>(std::lround(backdropShadow.blur)),
+                                backdropShadow.color.r, backdropShadow.color.g,
+                                backdropShadow.color.b, backdropShadow.color.a);
                         }
                         SDL_Texture* backdrop =
                             SDL_CreateTextureFromSurface(sdlRenderer, conv);

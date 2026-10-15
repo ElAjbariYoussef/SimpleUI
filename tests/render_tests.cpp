@@ -1248,6 +1248,59 @@ void testBoxBlur() {
 // The CPU affine colour matrix the `filter:` shift chain hands the executor.
 // `filterColorMatrix` composes the chain into one matrix; `applyColorMatrix`
 // maps each pixel through it, rounding to the nearest byte and clipping.
+// Backdrop opacity fades every alpha and leaves colours alone; drop shadows
+// composite a shifted, tinted silhouette underneath the content.
+void testBackdropFilters() {
+    // Halving: colours intact, alphas halved with rounding.
+    std::vector<std::uint8_t> img{255, 0, 0, 255, 0, 255, 0, 128};
+    sui::applyBackdropOpacity(img.data(), 2, 1, 0.5f);
+    check(img[0] == 255 && img[1] == 0 && img[2] == 0 && img[3] == 128,
+          "opacity halves an opaque alpha, colours intact");
+    check(img[4] == 0 && img[5] == 255 && img[6] == 0 && img[7] == 64,
+          "opacity halves a partial alpha");
+    // Clamping both ways.
+    std::vector<std::uint8_t> full{10, 20, 30, 200};
+    sui::applyBackdropOpacity(full.data(), 1, 1, 2.0f);
+    check(full[3] == 200, "an over-one amount clamps to identity");
+    sui::applyBackdropOpacity(full.data(), 1, 1, -1.0f);
+    check(full[3] == 0, "a negative amount clears the alpha");
+
+    // One opaque white pixel in a 5x1 row, shadowed one right in black.
+    std::vector<std::uint8_t> row(5 * 4, 0);
+    row[2 * 4] = 255;
+    row[2 * 4 + 1] = 255;
+    row[2 * 4 + 2] = 255;
+    row[2 * 4 + 3] = 255;
+    sui::applyBackdropDropShadow(row.data(), 5, 1, 1.0f, 0.0f, 0, 0, 0, 0, 255);
+    check(row[2 * 4] == 255 && row[2 * 4 + 3] == 255, "content survives its shadow");
+    check(row[3 * 4] == 0 && row[3 * 4 + 3] == 255, "the shadow lands shifted");
+    check(row[4 * 4 + 3] == 0, "nothing spills past the shift");
+    check(row[1 * 4 + 3] == 0, "nothing paints upwind of the content");
+
+    // The shadow color (with its own alpha) is what paints, not the content.
+    std::vector<std::uint8_t> tint(5 * 4, 0);
+    tint[4] = 255;
+    tint[5] = 255;
+    tint[6] = 255;
+    tint[7] = 255;
+    sui::applyBackdropDropShadow(tint.data(), 5, 1, 1.0f, 0.0f, 0, 255, 0, 0, 128);
+    check(tint[8] == 255 && tint[9] == 0 && tint[10] == 0 && tint[11] == 128,
+          "a translucent red shadow lands shifted");
+    check(tint[4] == 255 && tint[7] == 255, "content keeps its color and alpha");
+
+    // Blur spreads the silhouette: a neighbour the sharp shadow never reaches
+    // gains partial coverage.
+    std::vector<std::uint8_t> soft(7 * 4, 0);
+    soft[3 * 4] = 255;
+    soft[3 * 4 + 1] = 255;
+    soft[3 * 4 + 2] = 255;
+    soft[3 * 4 + 3] = 255;
+    sui::applyBackdropDropShadow(soft.data(), 7, 1, 2.0f, 0.0f, 2, 0, 0, 0, 255);
+    const std::uint8_t near = soft[4 * 4 + 3];
+    check(near > 0 && near < 255, "blur softens the shadow's edge");
+    check(soft[0] == 0 && soft[1 * 4 + 3] == 0, "far pixels stay clear");
+}
+
 void testColorMatrix() {
     auto apply = [](const float m[12], std::uint8_t r, std::uint8_t g, std::uint8_t b,
                     std::uint8_t a) {
@@ -1461,6 +1514,7 @@ int main() {
     testRadialPosition();
     testFontSizeIsTheEmSquare();
     testBoxBlur();
+    testBackdropFilters();
     testColorMatrix();
     testClipCoverage();
     testClipMask();

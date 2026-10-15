@@ -1,9 +1,12 @@
 #include "Rendering/ColorMatrix.h"
 
+#include "Rendering/ImageBlur.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 namespace sui {
 
@@ -195,6 +198,67 @@ void applyColorMatrix(std::uint8_t* rgba, int width, int height, const float m[1
         rgba[i] = static_cast<std::uint8_t>(std::lround(nr));
         rgba[i + 1] = static_cast<std::uint8_t>(std::lround(ng));
         rgba[i + 2] = static_cast<std::uint8_t>(std::lround(nb));
+    }
+}
+
+void applyBackdropOpacity(std::uint8_t* rgba, int width, int height, float amount) {
+    if (!rgba || width <= 0 || height <= 0) {
+        return;
+    }
+    const float scale = std::clamp(amount, 0.0f, 1.0f);
+    const int pixels = width * height;
+    for (int p = 0; p < pixels; ++p) {
+        rgba[p * 4 + 3] =
+            static_cast<std::uint8_t>(std::lround(rgba[p * 4 + 3] * scale));
+    }
+}
+
+void applyBackdropDropShadow(std::uint8_t* rgba, int width, int height, float dx, float dy,
+                             int blurRadius, std::uint8_t r, std::uint8_t g,
+                             std::uint8_t b, std::uint8_t a) {
+    if (!rgba || width <= 0 || height <= 0 || a == 0) {
+        return;
+    }
+    // The silhouette blurs on its own copy; only its alpha is read back, so
+    // the colour channels it smears do not matter.
+    std::vector<std::uint8_t> blurred(rgba, rgba + static_cast<std::size_t>(4) * width * height);
+    if (blurRadius > 0) {
+        blurRGBA(blurred.data(), width, height, blurRadius);
+    }
+    const int ox = static_cast<int>(std::lround(dx));
+    const int oy = static_cast<int>(std::lround(dy));
+    const float sr = r / 255.0f;
+    const float sg = g / 255.0f;
+    const float sb = b / 255.0f;
+    const float sa = a / 255.0f;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const int i = (y * width + x) * 4;
+            const float ca = rgba[i + 3] / 255.0f;
+            const int sx = x - ox;
+            const int sy = y - oy;
+            float ba = 0.0f;
+            if (sx >= 0 && sx < width && sy >= 0 && sy < height) {
+                ba = blurred[static_cast<std::size_t>((sy * width + sx) * 4 + 3)] / 255.0f;
+            }
+            // Source-over: the content over its shifted, tinted silhouette.
+            const float shadow = ba * sa;
+            const float outA = ca + shadow * (1.0f - ca);
+            float or_ = 0.0f, og = 0.0f, ob = 0.0f, oa = 0.0f;
+            if (outA > 0.0f) {
+                or_ = (rgba[i] / 255.0f * ca + sr * shadow * (1.0f - ca)) / outA * 255.0f;
+                og = (rgba[i + 1] / 255.0f * ca + sg * shadow * (1.0f - ca)) / outA * 255.0f;
+                ob = (rgba[i + 2] / 255.0f * ca + sb * shadow * (1.0f - ca)) / outA * 255.0f;
+                oa = outA * 255.0f;
+            }
+            rgba[i] = static_cast<std::uint8_t>(std::lround(std::clamp(or_, 0.0f, 255.0f)));
+            rgba[i + 1] =
+                static_cast<std::uint8_t>(std::lround(std::clamp(og, 0.0f, 255.0f)));
+            rgba[i + 2] =
+                static_cast<std::uint8_t>(std::lround(std::clamp(ob, 0.0f, 255.0f)));
+            rgba[i + 3] =
+                static_cast<std::uint8_t>(std::lround(std::clamp(oa, 0.0f, 255.0f)));
+        }
     }
 }
 

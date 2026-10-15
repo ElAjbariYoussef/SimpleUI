@@ -113,129 +113,6 @@ SDL_FRect intersectClip(const SDL_FRect& a, const SDL_FRect& b) {
             std::max(0.0f, std::min(a.y + a.h, b.y + b.h) - y)};
 }
 
-// A `filter: opacity(x)` is the one filter the painter can honour without an
-// offscreen surface: it scales the same group alpha `opacity` already threads
-// down. Other filter functions are left for a renderer that can blur or colour-
-// shift a surface. Returns 1 when there is no opacity() in the chain.
-float filterOpacity(std::string_view filter) {
-    float result = 1.0f;
-    std::size_t at = 0;
-    while ((at = filter.find("opacity(", at)) != std::string_view::npos) {
-        at += 8;
-        const std::size_t end = filter.find(')', at);
-        if (end == std::string_view::npos) {
-            break;
-        }
-        const std::string_view number = filter.substr(at, end - at);
-        char* stop = nullptr;
-        const std::string owned(number);
-        const float value = std::strtof(owned.c_str(), &stop);
-        if (stop != owned.c_str()) {
-            result *= value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
-        }
-        at = end + 1;
-    }
-    return result;
-}
-
-// The `)` that closes the `(` just after `open`, letting a `drop-shadow()`'s
-// color argument -- rgba(), hsl(), color-mix() and friends -- keep its own
-// nested parentheses inside the body.
-std::size_t closingParen(std::string_view text, std::size_t open) {
-    int depth = 0;
-    for (std::size_t i = open; i < text.size(); ++i) {
-        if (text[i] == '(') {
-            ++depth;
-        } else if (text[i] == ')' && --depth == 0) {
-            return i;
-        }
-    }
-    return std::string_view::npos;
-}
-
-// A `filter: drop-shadow(x y blur color)` shadows the group's own silhouette --
-// its alpha shape, not its box -- so the group still needs an offscreen
-// surface. The executor colours the readback with `color`, softens it by
-// `blur` px, and blits a shadow texture offset by (x, y) under the content; the
-// shadow may spill past the group's bounds, so it is not confined the way blur
-// is. The offset and blur are parsed as bare numbers (em is flattened to px,
-// like the other filter lengths); a missing color stays opaque near-black.
-// Returns present=false unless both offsets parse; only the first
-// drop-shadow() in the chain is honoured.
-DropShadowFilter filterDropShadow(std::string_view filter) {
-    DropShadowFilter shadow;
-    std::size_t at = 0;
-    while ((at = filter.find("drop-shadow(", at)) != std::string_view::npos) {
-        const std::size_t close = closingParen(filter, at + 11);
-        if (close == std::string_view::npos) {
-            break;
-        }
-        const std::string_view body = filter.substr(at + 12, close - at - 12);
-        at = close + 1;
-        if (shadow.present) {
-            continue;
-        }
-        // Split the body on whitespace that is not inside parentheses, so a
-        // functional color (rgba()/color-mix()) stays one token.
-        std::vector<std::string_view> tokens;
-        std::size_t begin = 0;
-        int depth = 0;
-        for (std::size_t i = 0; i <= body.size(); ++i) {
-            const bool end = i == body.size();
-            const char ch = end ? ' ' : body[i];
-            if (!end) {
-                if (ch == '(') {
-                    ++depth;
-                } else if (ch == ')') {
-                    --depth;
-                }
-            }
-            if (end || (std::isspace(static_cast<unsigned char>(ch)) && depth == 0)) {
-                if (i > begin) {
-                    tokens.push_back(body.substr(begin, i - begin));
-                }
-                begin = i + 1;
-            }
-        }
-        auto asLength = [](std::string_view token, float& value) {
-            if (token.empty() || token.find('(') != std::string_view::npos) {
-                return false;
-            }
-            const std::string owned(token);
-            char* stop = nullptr;
-            const float parsed = std::strtof(owned.c_str(), &stop);
-            if (stop == owned.c_str()) {
-                return false;
-            }
-            value = parsed;
-            return true;
-        };
-        if (tokens.size() < 2) {
-            continue;
-        }
-        float dx = 0.0f, dy = 0.0f;
-        if (!asLength(tokens[0], dx) || !asLength(tokens[1], dy)) {
-            continue;
-        }
-        shadow.dx = dx;
-        shadow.dy = dy;
-        bool blurSet = false;
-        for (std::size_t i = 2; i < tokens.size(); ++i) {
-            float value = 0.0f;
-            if (!blurSet && asLength(tokens[i], value)) {
-                shadow.blur = std::max(0.0f, value);
-                blurSet = true;
-            } else {
-                SDL_Color color;
-                if (parseColor(tokens[i], color)) {
-                    shadow.color = color;
-                }
-            }
-        }
-        shadow.present = true;
-    }
-    return shadow;
-}
 
 // A 2D affine map, x' = a*x + c*y + e, y' = b*x + d*y + f. Enough for the
 // translate/scale/rotate a CSS `transform` can express; the translation part
@@ -1521,6 +1398,131 @@ struct Collector {
 };
 
 }  // namespace
+
+// A `filter: opacity(x)` is the one filter the painter can honour without an
+// offscreen surface: it scales the same group alpha `opacity` already threads
+// down. Other filter functions are left for a renderer that can blur or colour-
+// shift a surface. Returns 1 when there is no opacity() in the chain.
+float filterOpacity(std::string_view filter) {
+    float result = 1.0f;
+    std::size_t at = 0;
+    while ((at = filter.find("opacity(", at)) != std::string_view::npos) {
+        at += 8;
+        const std::size_t end = filter.find(')', at);
+        if (end == std::string_view::npos) {
+            break;
+        }
+        const std::string_view number = filter.substr(at, end - at);
+        char* stop = nullptr;
+        const std::string owned(number);
+        const float value = std::strtof(owned.c_str(), &stop);
+        if (stop != owned.c_str()) {
+            result *= value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
+        }
+        at = end + 1;
+    }
+    return result;
+}
+
+// The `)` that closes the `(` just after `open`, letting a `drop-shadow()`'s
+// color argument -- rgba(), hsl(), color-mix() and friends -- keep its own
+// nested parentheses inside the body.
+std::size_t closingParen(std::string_view text, std::size_t open) {
+    int depth = 0;
+    for (std::size_t i = open; i < text.size(); ++i) {
+        if (text[i] == '(') {
+            ++depth;
+        } else if (text[i] == ')' && --depth == 0) {
+            return i;
+        }
+    }
+    return std::string_view::npos;
+}
+
+// A `filter: drop-shadow(x y blur color)` shadows the group's own silhouette --
+// its alpha shape, not its box -- so the group still needs an offscreen
+// surface. The executor colours the readback with `color`, softens it by
+// `blur` px, and blits a shadow texture offset by (x, y) under the content; the
+// shadow may spill past the group's bounds, so it is not confined the way blur
+// is. The offset and blur are parsed as bare numbers (em is flattened to px,
+// like the other filter lengths); a missing color stays opaque near-black.
+// Returns present=false unless both offsets parse; only the first
+// drop-shadow() in the chain is honoured.
+DropShadowFilter filterDropShadow(std::string_view filter) {
+    DropShadowFilter shadow;
+    std::size_t at = 0;
+    while ((at = filter.find("drop-shadow(", at)) != std::string_view::npos) {
+        const std::size_t close = closingParen(filter, at + 11);
+        if (close == std::string_view::npos) {
+            break;
+        }
+        const std::string_view body = filter.substr(at + 12, close - at - 12);
+        at = close + 1;
+        if (shadow.present) {
+            continue;
+        }
+        // Split the body on whitespace that is not inside parentheses, so a
+        // functional color (rgba()/color-mix()) stays one token.
+        std::vector<std::string_view> tokens;
+        std::size_t begin = 0;
+        int depth = 0;
+        for (std::size_t i = 0; i <= body.size(); ++i) {
+            const bool end = i == body.size();
+            const char ch = end ? ' ' : body[i];
+            if (!end) {
+                if (ch == '(') {
+                    ++depth;
+                } else if (ch == ')') {
+                    --depth;
+                }
+            }
+            if (end || (std::isspace(static_cast<unsigned char>(ch)) && depth == 0)) {
+                if (i > begin) {
+                    tokens.push_back(body.substr(begin, i - begin));
+                }
+                begin = i + 1;
+            }
+        }
+        auto asLength = [](std::string_view token, float& value) {
+            if (token.empty() || token.find('(') != std::string_view::npos) {
+                return false;
+            }
+            const std::string owned(token);
+            char* stop = nullptr;
+            const float parsed = std::strtof(owned.c_str(), &stop);
+            if (stop == owned.c_str()) {
+                return false;
+            }
+            value = parsed;
+            return true;
+        };
+        if (tokens.size() < 2) {
+            continue;
+        }
+        float dx = 0.0f, dy = 0.0f;
+        if (!asLength(tokens[0], dx) || !asLength(tokens[1], dy)) {
+            continue;
+        }
+        shadow.dx = dx;
+        shadow.dy = dy;
+        bool blurSet = false;
+        for (std::size_t i = 2; i < tokens.size(); ++i) {
+            float value = 0.0f;
+            if (!blurSet && asLength(tokens[i], value)) {
+                shadow.blur = std::max(0.0f, value);
+                blurSet = true;
+            } else {
+                SDL_Color color;
+                if (parseColor(tokens[i], color)) {
+                    shadow.color = color;
+                }
+            }
+        }
+        shadow.present = true;
+    }
+    return shadow;
+}
+
 
 // Whether any mask layer needs a compositing surface: gradients evaluate
 // against it and url() sources sample decoded bytes, while `none` layers and
