@@ -1425,7 +1425,7 @@ struct SvgPaint {
     float strokeWidth = 1.0f;
 };
 
-SvgPaint svgInheritedPaint(const Element& el) {
+SvgPaint svgInheritedPaint(const Element& el, float diagBase) {
     SvgPaint paint;
     bool fillSeen = false;
     bool strokeSeen = false;
@@ -1471,8 +1471,8 @@ SvgPaint svgInheritedPaint(const Element& el) {
             }
         }
         if (!widthSeen && !node->attribute("stroke-width").empty()) {
-            paint.strokeWidth =
-                std::max(0.0f, svgNumber(node->attribute("stroke-width"), 0.0f));
+            paint.strokeWidth = std::max(0.0f, svgNumber(node->attribute("stroke-width"),
+                                                         diagBase));
             widthSeen = true;
         }
         if (fillSeen && strokeSeen && widthSeen) {
@@ -1489,8 +1489,9 @@ SvgPaint svgInheritedPaint(const Element& el) {
     return paint;
 }
 
-// Comma/space-separated point pairs for polylines and polygons.
-std::vector<SDL_FPoint> svgPoints(std::string_view text) {
+// Comma/space-separated point pairs for polylines and polygons. Percentages
+// resolve against each axis in turn, like every other x/y pair.
+std::vector<SDL_FPoint> svgPoints(std::string_view text, float baseW, float baseH) {
     std::vector<SDL_FPoint> points;
     float pair[2] = {0.0f, 0.0f};
     int slot = 0;
@@ -1511,7 +1512,15 @@ std::vector<SDL_FPoint> svgPoints(std::string_view text) {
             break;
         }
         i += static_cast<std::size_t>(stop - number.c_str());
-        pair[slot++] = v;
+        while (i < text.size() && (text[i] == ' ' || text[i] == '\t')) {
+            ++i;
+        }
+        float scale = 1.0f;
+        if (i < text.size() && text[i] == '%') {
+            ++i;
+            scale = (slot == 0 ? baseW : baseH) * 0.01f;
+        }
+        pair[slot++] = v * scale;
         if (slot == 2) {
             points.push_back(SDL_FPoint{pair[0], pair[1]});
             slot = 0;
@@ -1569,6 +1578,13 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
         stack.pop_back();
         const Element& el = *frame.node;
         const std::string_view tag = el.tag();
+        // Lengths resolve percentages against the viewBox extents: x-like
+        // against its width, y-like against its height, radii against the
+        // normalized diagonal.
+        const auto len = [&](std::string_view name) {
+            return svgNumber(el.attribute(name),
+                             svgLengthBase(name, frame.view.vbw, frame.view.vbh));
+        };
         // Every frame maps through its own view: a `<use>` shifts its clone by
         // scaling the x/y offset into the view it was expanded in.
         const auto place = [&](float ux, float uy) {
@@ -1586,6 +1602,26 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
             }
             continue;
         }
+        if (tag == "svg") {
+            float vb[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            const bool hasBox = parseSvgViewBox(el.attribute("viewBox"), vb);
+            const bool none = svgToken(el.attribute("preserveAspectRatio")) == "none";
+            float nw = el.attribute("width").empty() ? frame.view.vbw : len("width");
+            float nh =
+                el.attribute("height").empty() ? frame.view.vbh : len("height");
+            if (nw > 0.0f && nh > 0.0f) {
+                const SvgView sub =
+                    svgSubViewport(frame.view, len("x"), len("y"), nw, nh, none, hasBox,
+                                   vb[0], vb[1], vb[2], vb[3]);
+                for (auto it = el.children().rbegin(); it != el.children().rend(); ++it) {
+                    if (*it && !(*it)->isTextNode()) {
+                        stack.push_back(
+                            {it->get(), frame.opacity, sub, frame.depth, frame.chain});
+                    }
+                }
+            }
+            continue;
+        }
         if (tag == "use") {
             // A clone of the referenced element at x/y. Deep chains cap out and
             // cyclic ones refuse, so a self-referencing use paints nothing
@@ -1598,8 +1634,8 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                 if (target && target != &svg && target != &el &&
                     !svgUseEntersCycle(frame.chain, target)) {
                     SvgView sub = frame.view;
-                    sub.x += svgNumber(el.attribute("x"), 0.0f) * frame.view.sx;
-                    sub.y += svgNumber(el.attribute("y"), 0.0f) * frame.view.sy;
+                    sub.x += len("x") * frame.view.sx;
+                    sub.y += len("y") * frame.view.sy;
                     frame.chain.push_back(&el);
                     stack.push_back(
                         {target, frame.opacity, sub, frame.depth + 1, frame.chain});
@@ -1607,25 +1643,23 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
             }
             continue;
         }
-        const SvgPaint paint = svgInheritedPaint(el);
+        const float diag = svgLengthBase("stroke-width", frame.view.vbw, frame.view.vbh);
+        const SvgPaint paint = svgInheritedPaint(el, diag);
         const float alpha = frame.opacity;
         const auto tint = [&](Color color) {
             return multiplyAlpha(color, alpha);
         };
         if (tag == "rect") {
-            const float w = std::max(0.0f, svgNumber(el.attribute("width"), 0.0f));
-            const float h = std::max(0.0f, svgNumber(el.attribute("height"), 0.0f));
+            const float w = std::max(0.0f, len("width"));
+            const float h = std::max(0.0f, len("height"));
             if (w <= 0.0f || h <= 0.0f) {
                 continue;
             }
-            const SDL_FPoint topLeft =
-                place(svgNumber(el.attribute("x"), 0.0f), svgNumber(el.attribute("y"), 0.0f));
+            const SDL_FPoint topLeft = place(len("x"), len("y"));
             const SDL_FRect rect{topLeft.x, topLeft.y, scaleX(w), scaleY(h)};
             if (paint.hasFill) {
-                const float rx = std::min(scaleX(svgNumber(el.attribute("rx"), 0.0f)),
-                                          rect.w * 0.5f);
-                const float ry = std::min(scaleY(svgNumber(el.attribute("ry"), 0.0f)),
-                                          rect.h * 0.5f);
+                const float rx = std::min(scaleX(len("rx")), rect.w * 0.5f);
+                const float ry = std::min(scaleY(len("ry")), rect.h * 0.5f);
                 Radii radii;
                 radii.topLeft = {rx, ry};
                 radii.topRight = {rx, ry};
@@ -1637,12 +1671,11 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                 renderer.strokeRect(rect, tint(paint.stroke), paint.strokeWidth);
             }
         } else if (tag == "circle") {
-            const float r = std::max(0.0f, svgNumber(el.attribute("r"), 0.0f));
+            const float r = std::max(0.0f, len("r"));
             if (r <= 0.0f) {
                 continue;
             }
-            const SDL_FPoint center =
-                place(svgNumber(el.attribute("cx"), 0.0f), svgNumber(el.attribute("cy"), 0.0f));
+            const SDL_FPoint center = place(len("cx"), len("cy"));
             const float radius = (scaleX(r) + scaleY(r)) * 0.5f;
             if (paint.hasFill) {
                 renderer.fillCircle(center.x, center.y, radius, tint(paint.fill));
@@ -1658,13 +1691,12 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                 renderer.strokePath(ring, tint(paint.stroke), paint.strokeWidth, true);
             }
         } else if (tag == "ellipse") {
-            const float rx = std::max(0.0f, svgNumber(el.attribute("rx"), 0.0f));
-            const float ry = std::max(0.0f, svgNumber(el.attribute("ry"), 0.0f));
+            const float rx = std::max(0.0f, len("rx"));
+            const float ry = std::max(0.0f, len("ry"));
             if (rx <= 0.0f || ry <= 0.0f) {
                 continue;
             }
-            const SDL_FPoint center =
-                place(svgNumber(el.attribute("cx"), 0.0f), svgNumber(el.attribute("cy"), 0.0f));
+            const SDL_FPoint center = place(len("cx"), len("cy"));
             std::vector<SDL_FPoint> disc;
             disc.reserve(32);
             for (int k = 0; k < 32; ++k) {
@@ -1703,17 +1735,16 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                 }
             }
         } else if (tag == "line") {
-            const SDL_FPoint a = place(svgNumber(el.attribute("x1"), 0.0f),
-                                       svgNumber(el.attribute("y1"), 0.0f));
-            const SDL_FPoint b = place(svgNumber(el.attribute("x2"), 0.0f),
-                                       svgNumber(el.attribute("y2"), 0.0f));
+            const SDL_FPoint a = place(len("x1"), len("y1"));
+            const SDL_FPoint b = place(len("x2"), len("y2"));
             // Lines only stroke; an unstroked line paints nothing.
             if (paint.hasStroke && paint.strokeWidth > 0.0f) {
                 renderer.line(a.x, a.y, b.x, b.y, tint(paint.stroke),
                               paint.strokeWidth);
             }
         } else if (tag == "polyline" || tag == "polygon") {
-            std::vector<SDL_FPoint> user = svgPoints(el.attribute("points"));
+            std::vector<SDL_FPoint> user =
+                svgPoints(el.attribute("points"), frame.view.vbw, frame.view.vbh);
             if (user.size() < 2) {
                 continue;
             }
@@ -1738,7 +1769,7 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                 continue;
             }
             const float pxSize = svgTextPxSize(el.attribute("font-size"), style.fontSize,
-                                              view.sx);
+                                              frame.view.sx);
             if (!(pxSize > 0.0f)) {
                 continue;
             }
@@ -1747,8 +1778,7 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                                                 style.fontStretch, small);
             const float ascent = font.verticalMetrics(pxSize).ascent;
             const SDL_FPoint origin =
-                svgTextOrigin(view, svgNumber(el.attribute("x"), 0.0f),
-                              svgNumber(el.attribute("y"), 0.0f),
+                svgTextOrigin(frame.view, len("x"), len("y"),
                               svgToken(el.attribute("text-anchor")), width, ascent);
             const Color tinted = tint(paint.fill);
             SDL_Texture* text = font.renderText(
@@ -1777,13 +1807,12 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
             }
             float iw = 0.0f, ih = 0.0f;
             SDL_GetTextureSize(img, &iw, &ih);
-            const float w = std::max(0.0f, svgNumber(el.attribute("width"), 0.0f));
-            const float h = std::max(0.0f, svgNumber(el.attribute("height"), 0.0f));
+            const float w = std::max(0.0f, len("width"));
+            const float h = std::max(0.0f, len("height"));
             if (!(iw > 0.0f) || !(ih > 0.0f) || !(w > 0.0f) || !(h > 0.0f)) {
                 continue;
             }
-            const SDL_FPoint topLeft =
-                place(svgNumber(el.attribute("x"), 0.0f), svgNumber(el.attribute("y"), 0.0f));
+            const SDL_FPoint topLeft = place(len("x"), len("y"));
             const bool none = svgToken(el.attribute("preserveAspectRatio")) == "none";
             const SDL_FRect fit = svgImageFit(iw, ih, scaleX(w), scaleY(h), none);
             const SDL_FRect dst{topLeft.x + fit.x, topLeft.y + fit.y, fit.w, fit.h};
@@ -1806,12 +1835,13 @@ void paintSvg(Element& el, const SDL_FRect& content, Renderer& renderer,
     if (content.w <= 0.0f || content.h <= 0.0f) {
         return;
     }
-    SvgView view;
     float vb[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    if (parseSvgViewBox(el.attribute("viewBox"), vb)) {
-        const bool none = svgToken(el.attribute("preserveAspectRatio")) == "none";
-        view = svgViewport(content.w, content.h, vb[0], vb[1], vb[2], vb[3], none);
-    }
+    const bool hasBox = parseSvgViewBox(el.attribute("viewBox"), vb);
+    const bool none = svgToken(el.attribute("preserveAspectRatio")) == "none";
+    SvgView view = hasBox ? svgViewport(content.w, content.h, vb[0], vb[1], vb[2], vb[3],
+                                        none)
+                          : svgViewport(content.w, content.h, 0.0f, 0.0f, content.w,
+                                        content.h, false);
     view.x += content.x;
     view.y += content.y;
     paintSvgShapes(el, view, renderer, style, font, sdlRenderer, images, opacity);

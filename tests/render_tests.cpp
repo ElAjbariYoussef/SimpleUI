@@ -1106,6 +1106,49 @@ void testSvgText() {
     check(end.x == -10.0f, "end right-aligns the run");
     const SDL_FPoint plain = sui::svgTextOrigin(view, 10.0f, 20.0f, "", 30.0f, 8.0f);
     check(plain.x == 20.0f, "no anchor reads as start");
+    // A percentage font-size scales the CSS size, not user units.
+    check(sui::svgTextPxSize("50%", 16.0f, 2.0f) == 8.0f, "a percentage scales CSS");
+}
+
+// Lengths resolve percentages against the viewBox: x-like against its width,
+// y-like against its height, radii against the diagonal. A nested viewport
+// places and sizes in the parent's user units, then maps its own box inside.
+void testSvgViewBoxUnits() {
+    check(sui::svgLengthBase("x", 100.0f, 50.0f) == 100.0f, "x rides the width");
+    check(sui::svgLengthBase("width", 100.0f, 50.0f) == 100.0f, "width rides the width");
+    check(sui::svgLengthBase("cx", 100.0f, 50.0f) == 100.0f, "cx rides the width");
+    check(sui::svgLengthBase("y", 100.0f, 50.0f) == 50.0f, "y rides the height");
+    check(sui::svgLengthBase("height", 100.0f, 50.0f) == 50.0f, "height rides the height");
+    check(sui::svgLengthBase("cy", 100.0f, 50.0f) == 50.0f, "cy rides the height");
+    const float diag = sui::svgLengthBase("r", 100.0f, 50.0f);
+    check(diag > 79.0f && diag < 79.1f, "a radius rides the diagonal");
+    check(sui::svgLengthBase("stroke-width", 100.0f, 50.0f) == diag,
+          "a stroke rides the diagonal too");
+    check(sui::svgLengthBase("banana", 100.0f, 50.0f) == 0.0f, "unknown resolves zero");
+
+    // A nested svg without a viewBox is 1:1 at its parent-unit offset.
+    const sui::SvgView parent = sui::svgViewport(200.0f, 100.0f, 0.0f, 0.0f, 100.0f,
+                                                 50.0f, false);
+    const sui::SvgView plain =
+        sui::svgSubViewport(parent, 5.0f, 5.0f, 10.0f, 10.0f, false, false, 0.0f, 0.0f,
+                            0.0f, 0.0f);
+    check(plain.sx == 1.0f && plain.x == 10.0f && plain.y == 10.0f,
+          "a boxless nest offsets 1:1");
+    check(plain.vbw == 10.0f && plain.vbh == 10.0f, "a nest carries its own extents");
+    // With a viewBox the nest meets inside its parent-unit size.
+    const sui::SvgView boxed =
+        sui::svgSubViewport(parent, 5.0f, 5.0f, 10.0f, 10.0f, false, true, 0.0f, 0.0f,
+                            10.0f, 10.0f);
+    check(boxed.sx == 2.0f && boxed.sy == 2.0f, "a boxed nest meets uniformly");
+    check(boxed.x == 10.0f && boxed.y == 10.0f, "a fitting nest starts at its offset");
+    check(boxed.vbw == 10.0f && boxed.vbh == 10.0f, "a boxed nest keeps its box");
+    // A nest inside an offset parent (a viewBox with a min) inherits the shift.
+    const sui::SvgView shiftedParent =
+        sui::svgViewport(200.0f, 100.0f, 10.0f, 5.0f, 100.0f, 50.0f, false);
+    const sui::SvgView shifted =
+        sui::svgSubViewport(shiftedParent, 5.0f, 5.0f, 10.0f, 10.0f, false, false, 0.0f,
+                            0.0f, 0.0f, 0.0f);
+    check(shifted.x == -10.0f && shifted.y == 0.0f, "a nest follows its parent's shift");
 }
 
 // HarfBuzz shaping: ligatures fuse codepoints into single glyphs, marks ride
@@ -1528,6 +1571,7 @@ int main() {
     testSvgPath();
     testSvgViewport();
     testSvgText();
+    testSvgViewBoxUnits();
     testSvgImageFit();
     testListMarkerSlot();
     std::printf("%d checks, %d failures\n", checks, failures);

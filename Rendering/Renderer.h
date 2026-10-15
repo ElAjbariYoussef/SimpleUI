@@ -281,12 +281,16 @@ private:
 };
 
 // An SVG viewport mapping: user units scale by `sx`/`sy` about the viewport
-// origin plus `x`/`y` (uniform for meet, independent for `none`).
+// origin plus `x`/`y` (uniform for meet, independent for `none`). `vbw`/`vbh`
+// are the viewBox extents in user units -- the base percentages resolve
+// against -- or the viewport size where there is no viewBox.
 struct SvgView {
     float sx = 1.0f;
     float sy = 1.0f;
     float x = 0.0f;
     float y = 0.0f;
+    float vbw = 0.0f;
+    float vbh = 0.0f;
 };
 
 // Parses a `viewBox` ("minx miny w h", commas or spaces) into its four
@@ -294,9 +298,22 @@ struct SvgView {
 bool parseSvgViewBox(std::string_view text, float box[4]);
 
 // Maps a viewport (w by h px at ox, oy) onto a viewBox: uniform meet scaling
-// centred, or independent axes for `none`. Anything else meets too.
+// centred, or independent axes for `none`. Anything else meets too. The view
+// remembers the box extents for percentage bases.
 SvgView svgViewport(float vw, float vh, float vbx, float vby, float vbw, float vbh,
                     bool none);
+
+// A nested `<svg>` viewport inside `parent`: x/y place it and w/h size it in
+// the parent's user units, and its own viewBox (or 1:1 when it has none) maps
+// inside. `none` stretches; anything else meets.
+SvgView svgSubViewport(const SvgView& parent, float x, float y, float w, float h,
+                       bool none, bool hasBox, float bvx, float bvy, float bvw,
+                       float bvh);
+
+// Which viewBox extent a length attribute resolves percentages against: x-like
+// against the width, y-like against the height, radii and stroke widths against
+// the normalized diagonal. Anything else resolves against zero, as before.
+float svgLengthBase(std::string_view attr, float vbw, float vbh);
 
 // One flattened SVG subpath: the points a `d` attribute describes once every
 // curve has become line segments, plus whether it closes back on its start.

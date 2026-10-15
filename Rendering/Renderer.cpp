@@ -967,8 +967,20 @@ float svgTextPxSize(std::string_view size, float cssSize, float scaleX) {
         const std::string number(size.substr(first));
         char* stop = nullptr;
         const float value = std::strtof(number.c_str(), &stop);
-        if (stop != number.c_str() && value > 0.0f && scaleX > 0.0f) {
-            return value * scaleX;
+        if (stop != number.c_str() && value > 0.0f) {
+            // A trailing percent scales the inherited CSS size; a plain number
+            // is user units through the viewport.
+            const char* end = stop;
+            while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r' ||
+                   *end == '\f') {
+                ++end;
+            }
+            if (*end == '%') {
+                return cssSize * value * 0.01f;
+            }
+            if (scaleX > 0.0f) {
+                return value * scaleX;
+            }
         }
     }
     return cssSize;
@@ -983,6 +995,35 @@ SDL_FPoint svgTextOrigin(const SvgView& view, float x, float y, std::string_view
         px -= width;
     }
     return SDL_FPoint{px, view.y + y * view.sy - ascent};
+}
+
+SvgView svgSubViewport(const SvgView& parent, float x, float y, float w, float h,
+                       bool none, bool hasBox, float bvx, float bvy, float bvw,
+                       float bvh) {
+    const float ox = parent.x + x * parent.sx;
+    const float oy = parent.y + y * parent.sy;
+    if (!hasBox || !(bvw > 0.0f) || !(bvh > 0.0f)) {
+        return SvgView{1.0f, 1.0f, ox, oy, w, h};
+    }
+    SvgView sub = svgViewport(w * parent.sx, h * parent.sy, bvx, bvy, bvw, bvh, none);
+    sub.x += ox;
+    sub.y += oy;
+    return sub;
+}
+
+float svgLengthBase(std::string_view attr, float vbw, float vbh) {
+    if (attr == "x" || attr == "x1" || attr == "x2" || attr == "width" || attr == "cx" ||
+        attr == "rx") {
+        return vbw;
+    }
+    if (attr == "y" || attr == "y1" || attr == "y2" || attr == "height" || attr == "cy" ||
+        attr == "ry") {
+        return vbh;
+    }
+    if (attr == "r" || attr == "stroke-width") {
+        return std::sqrt(vbw * vbw + vbh * vbh) / 1.41421356f;
+    }
+    return 0.0f;
 }
 
 SDL_FRect svgImageFit(float sw, float sh, float dw, float dh, bool none) {
@@ -1001,6 +1042,8 @@ SDL_FRect svgImageFit(float sw, float sh, float dw, float dh, bool none) {
 SvgView svgViewport(float vw, float vh, float vbx, float vby, float vbw, float vbh,
                     bool none) {
     SvgView view;
+    view.vbw = vbw;
+    view.vbh = vbh;
     if (!(vw > 0.0f) || !(vh > 0.0f) || !(vbw > 0.0f) || !(vbh > 0.0f)) {
         return view;
     }
