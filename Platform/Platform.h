@@ -15,6 +15,12 @@ struct SDL_Cursor;
 
 namespace sui {
 
+// Identifies one open window, for as long as it stays open. `kInvalidWindow` is
+// "no window", which is what an event the engine cannot attribute to a window of
+// its own carries -- and what the engine reads as "the primary window".
+using WindowId = std::uint32_t;
+inline constexpr WindowId kInvalidWindow = 0;
+
 // Pointer and keyboard input, in window coordinates, forwarded to the engine as
 // SDL-free structs so the DOM/event code stays platform independent.
 enum class InputKind : std::uint8_t {
@@ -41,12 +47,17 @@ struct InputEvent {
     std::string text;
     int editStart = 0;
     int editLength = 0;
+    // Which window the event arrived on. Appended last and defaulted, so every
+    // existing construction site keeps compiling; `kInvalidWindow` reads as the
+    // primary window, which is what a single-window app means by it.
+    WindowId window = kInvalidWindow;
 
     InputEvent() = default;
     InputEvent(InputKind k, float px = 0.0f, float py = 0.0f, int b = 0, float ddx = 0.0f,
-               float ddy = 0.0f, int kk = 0, std::string t = {}, int start = 0, int len = 0)
+               float ddy = 0.0f, int kk = 0, std::string t = {}, int start = 0, int len = 0,
+               WindowId w = kInvalidWindow)
         : kind(k), x(px), y(py), button(b), dx(ddx), dy(ddy), key(kk), text(std::move(t)),
-          editStart(start), editLength(len) {}
+          editStart(start), editLength(len), window(w) {}
 };
 
 struct WindowConfig {
@@ -70,21 +81,50 @@ public:
     virtual bool initialize(const WindowConfig& config, std::string& error) = 0;
     virtual void shutdown() = 0;
 
-    virtual SDL_Window* window() const = 0;
-    virtual SDL_Renderer* renderer() const = 0;
+    // --- Windows ---
+    //
+    // An app opens one window per page it shows side by side, so a window is
+    // created and destroyed independently of any other. Ids stay stable for a
+    // window's lifetime; `kInvalidWindow` means none.
+    virtual WindowId openWindow(const WindowConfig& config, std::string& error) = 0;
+    virtual void closeWindow(WindowId id) = 0;
+    virtual bool hasWindow(WindowId id) const = 0;
+    // The window `initialize` created, which is also the one every convenience
+    // below means. `kInvalidWindow` once it is closed.
+    virtual WindowId primaryWindow() const = 0;
+    // Windows closed since the last pumpEvents(), oldest first. The application
+    // reads this to drop the page each one was showing.
+    virtual const std::vector<WindowId>& closedWindows() const = 0;
 
-    virtual void clear() = 0;
-    virtual void present() = 0;
+    virtual SDL_Window* window(WindowId id) const = 0;
+    virtual SDL_Renderer* renderer(WindowId id) const = 0;
+
+    virtual void clear(WindowId id) = 0;
+    virtual void present(WindowId id) = 0;
 
     // The drawable size in *pixels*, not in window points, because every coordinate
     // the engine works in -- layout, hit tests, glyph bitmaps -- is a pixel. On a
     // display where the two differ the pointer events below are converted to match.
-    virtual void windowSize(int& width, int& height) const = 0;
+    virtual void windowSize(WindowId id, int& width, int& height) const = 0;
 
     // Tells the renderer to map its coordinates onto a drawable this size. Without it
     // the logical canvas stays whatever it was created at, so a resize only ever
     // letterboxes the old frame instead of relaying the page out to the new size.
-    virtual void setViewportSize(int width, int height) = 0;
+    virtual void setViewportSize(WindowId id, int width, int height) = 0;
+
+    // The primary window's conveniences. Every engine call site that has not been
+    // threaded with a window id goes through these, which is what keeps the
+    // single-window path reading exactly as it did.
+    SDL_Window* window() const { return window(primaryWindow()); }
+    SDL_Renderer* renderer() const { return renderer(primaryWindow()); }
+    void clear() { clear(primaryWindow()); }
+    void present() { present(primaryWindow()); }
+    void windowSize(int& width, int& height) const {
+        windowSize(primaryWindow(), width, height);
+    }
+    void setViewportSize(int width, int height) {
+        setViewportSize(primaryWindow(), width, height);
+    }
 
     // Writes the current backbuffer to a BMP file; used by the headless
     // screenshot mode for verifying layout without a visible window.
@@ -93,9 +133,12 @@ public:
     // Drains the event queue; returns false once the app should quit.
     virtual bool pumpEvents() = 0;
 
-    // Sets the window's title bar text. A page swap re-reads it from the new
+    // Sets a window's title bar text. A page swap re-reads it from the new
     // page's <window title>, which is the only place a title comes from.
-    virtual void setWindowTitle(std::string_view title) = 0;
+    virtual void setWindowTitle(WindowId id, std::string_view title) = 0;
+
+    // The primary window's convenience.
+    void setWindowTitle(std::string_view title) { setWindowTitle(primaryWindow(), title); }
 
     // Sets the pointer shape shown while it is over the window. `name` is a CSS
     // cursor keyword ("pointer", "text", "col-resize", ...). A platform folds the

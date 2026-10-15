@@ -30,18 +30,20 @@ void check(bool condition, const char* what) {
     }
 }
 
-void pushMotion(int x, int y, Uint32 buttons) {
+void pushMotion(int x, int y, Uint32 buttons, SDL_WindowID sdlId = 0) {
     SDL_Event event{};
     event.type = SDL_EVENT_MOUSE_MOTION;
+    event.motion.windowID = sdlId;
     event.motion.x = x;
     event.motion.y = y;
     event.motion.state = buttons;
     SDL_PushEvent(&event);
 }
 
-void pushLeave() {
+void pushLeave(SDL_WindowID sdlId = 0) {
     SDL_Event event{};
     event.type = SDL_EVENT_WINDOW_MOUSE_LEAVE;
+    event.window.windowID = sdlId;
     SDL_PushEvent(&event);
 }
 
@@ -87,34 +89,35 @@ int main() {
     // check below starts from an empty queue and accounts for exactly the one event it
     // pushed.
     drain();
+    const SDL_WindowID primarySdl = SDL_GetWindowID(platform->window());
 
     // A plain hover, with nothing held: this is the case that used to be dropped, and
     // dropping it is what made `:hover` never fire.
-    pushMotion(120, 80, 0);
+    pushMotion(120, 80, 0, primarySdl);
     platform->pumpEvents();
     expectOne(*platform, sui::InputKind::PointerMove, 120.0f, 80.0f, 0,
               "a motion with no button held reports a move");
 
     // The same motion mid-drag. `button` is what separates the two, because `:active`
     // follows the cursor during a drag but must not stick without a press.
-    pushMotion(121, 81, SDL_BUTTON_LMASK);
+    pushMotion(121, 81, SDL_BUTTON_LMASK, primarySdl);
     platform->pumpEvents();
     expectOne(*platform, sui::InputKind::PointerMove, 121.0f, 81.0f, SDL_BUTTON_LEFT,
               "a left drag reports a move carrying the held button");
 
-    pushMotion(122, 82, SDL_BUTTON_RMASK);
+    pushMotion(122, 82, SDL_BUTTON_RMASK, primarySdl);
     platform->pumpEvents();
     expectOne(*platform, sui::InputKind::PointerMove, 122.0f, 82.0f, SDL_BUTTON_RIGHT,
               "a right drag reports the right button");
 
-    pushMotion(123, 83, SDL_BUTTON_MMASK);
+    pushMotion(123, 83, SDL_BUTTON_MMASK, primarySdl);
     platform->pumpEvents();
     expectOne(*platform, sui::InputKind::PointerMove, 123.0f, 83.0f, SDL_BUTTON_MIDDLE,
               "a middle drag reports the middle button");
 
     // Leaving the window must clear the hover rather than freeze it on whatever was
     // under the cursor. Off-screen is how the engine is told nothing is hovered.
-    pushLeave();
+    pushLeave(primarySdl);
     platform->pumpEvents();
     const auto& left = platform->inputEvents();
     ++checks;
@@ -128,6 +131,7 @@ int main() {
     // A press is still a press and a release still a release.
     SDL_Event down{};
     down.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+    down.button.windowID = primarySdl;
     down.button.x = 50;
     down.button.y = 60;
     down.button.button = SDL_BUTTON_LEFT;
@@ -138,6 +142,7 @@ int main() {
 
     SDL_Event up{};
     up.type = SDL_EVENT_MOUSE_BUTTON_UP;
+    up.button.windowID = primarySdl;
     up.button.x = 50;
     up.button.y = 60;
     up.button.button = SDL_BUTTON_LEFT;
@@ -150,6 +155,7 @@ int main() {
     // aimed at and the cursor position under which it turned.
     SDL_Event wheel{};
     wheel.type = SDL_EVENT_MOUSE_WHEEL;
+    wheel.wheel.windowID = primarySdl;
     wheel.wheel.x = 1.5f;
     wheel.wheel.y = -2.0f;
     wheel.wheel.mouse_x = 100.0f;
@@ -172,6 +178,7 @@ int main() {
     // focused field inspects for Backspace and the like.
     SDL_Event keyDown{};
     keyDown.type = SDL_EVENT_KEY_DOWN;
+    keyDown.key.windowID = primarySdl;
     keyDown.key.key = SDLK_A;
     SDL_PushEvent(&keyDown);
     platform->pumpEvents();
@@ -188,6 +195,7 @@ int main() {
 
     SDL_Event keyUp{};
     keyUp.type = SDL_EVENT_KEY_UP;
+    keyUp.key.windowID = primarySdl;
     keyUp.key.key = SDLK_A;
     SDL_PushEvent(&keyUp);
     platform->pumpEvents();
@@ -206,6 +214,7 @@ int main() {
     // text field insert what the layout actually produced.
     SDL_Event input{};
     input.type = SDL_EVENT_TEXT_INPUT;
+    input.text.windowID = primarySdl;
     input.text.text = "hi";
     SDL_PushEvent(&input);
     platform->pumpEvents();
@@ -224,6 +233,7 @@ int main() {
     // IME composition events report text being edited, start, and length.
     SDL_Event editEv{};
     editEv.type = SDL_EVENT_TEXT_EDITING;
+    editEv.edit.windowID = primarySdl;
     editEv.edit.text = const_cast<char*>("nihon");
     editEv.edit.start = 2;
     editEv.edit.length = 5;
@@ -241,6 +251,67 @@ int main() {
             ++failures;
             std::printf("FAIL text editing event reports composition text and ranges\n");
         }
+    }
+
+    // Windows carry their own identity through the event queue. A second window
+    // opens beside the first, events name the window they came from, and closing
+    // one window closes one window.
+    {
+        check(sui::InputEvent{}.window == sui::kInvalidWindow,
+              "an event with no window names none");
+        const sui::WindowId primary = platform->primaryWindow();
+        check(primary != sui::kInvalidWindow && platform->hasWindow(primary),
+              "the entry window is the primary window");
+        sui::WindowConfig second;
+        second.width = 400;
+        second.height = 300;
+        std::string windowError;
+        const sui::WindowId other = platform->openWindow(second, windowError);
+        check(other != sui::kInvalidWindow && other != primary,
+              "a second window opens with its own id");
+        check(platform->hasWindow(other) && platform->primaryWindow() == primary,
+              "opening a window changes nothing about the primary");
+        check(platform->window(other) != nullptr && platform->renderer(other) != nullptr,
+              "a second window owns its SDL pair");
+        check(platform->window(sui::kInvalidWindow) == nullptr,
+              "no window means no SDL pair");
+
+        // An event on the second window arrives tagged with the second window.
+        drain();
+        const SDL_WindowID otherSdl = SDL_GetWindowID(platform->window(other));
+        pushMotion(10, 20, 0, otherSdl);
+        platform->pumpEvents();
+        {
+            const auto& events = platform->inputEvents();
+            ++checks;
+            const bool routed = events.size() == 1 && events.front().window == other;
+            if (!routed) {
+                ++failures;
+                std::printf("FAIL an event on the second window names the second window\n");
+            }
+        }
+        // An event for a window the engine does not own is nobody's business.
+        drain();
+        pushMotion(10, 20, 0, static_cast<SDL_WindowID>(987654321));
+        platform->pumpEvents();
+        check(platform->inputEvents().empty(), "an event for an unknown window is dropped");
+
+        // A close request closes that window and no other, and the application
+        // learns about it from `closedWindows`.
+        drain();
+        SDL_Event close{};
+        close.type = SDL_EVENT_WINDOW_CLOSE_REQUESTED;
+        close.window.windowID = otherSdl;
+        SDL_PushEvent(&close);
+        platform->pumpEvents();
+        check(platform->closedWindows().size() == 1 &&
+                  platform->closedWindows().front() == other,
+              "a close request reports the window it closed");
+        check(!platform->hasWindow(other) && platform->hasWindow(primary),
+              "closing one window closes one window");
+        check(platform->primaryWindow() == primary, "the primary survives the close");
+        platform->closeWindow(static_cast<sui::WindowId>(424242));
+        check(platform->hasWindow(primary), "closing an unknown window changes nothing");
     }
 
     // Test Application dispatch for input fields (editing, readonly, disabled, password, button, backspace).
