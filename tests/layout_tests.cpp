@@ -2,6 +2,7 @@
 // assertions stay independent of any bundled asset; the engine falls back to
 // fixed average advances in that case.
 
+#include "Core/Application/Application.h"
 #include "CSS/Parser.h"
 #include "CSS/PseudoElements.h"
 #include "CSS/StyleResolver.h"
@@ -5839,6 +5840,46 @@ void testFontWeight() {
     check(std::string(serial("h")) == "400", "the default serializes as 400");
 }
 
+// A `<use>` resolves its same-document `#id` to the element to clone, and a
+// use-expansion chain refuses repeats so cyclic uses paint nothing.
+void testSvgUse() {
+    auto document = parseOrNull(
+        "<sui><body><svg id=\"s\">"
+        "<rect id=\"r\" width=\"10\" height=\"10\"/>"
+        "<use id=\"u\" href=\"#r\"/>"
+        "<use id=\"v\" href=\"#missing\"/>"
+        "<use id=\"w\" href=\"https://example.com/x.svg#r\"/>"
+        "<use id=\"e\" href=\"\"/>"
+        "</svg></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* s = document->getElementById("s");
+    Element* r = document->getElementById("r");
+    Element* u = document->getElementById("u");
+    Element* v = document->getElementById("v");
+    Element* w = document->getElementById("w");
+    Element* e = document->getElementById("e");
+    check(s && r && u && v && w && e, "use elements found");
+    if (!s || !r || !u || !v || !w || !e) {
+        return;
+    }
+    check(sui::resolveSvgUse(*s, "#r") == r, "a fragment resolves to its element");
+    check(sui::resolveSvgUse(*s, "#missing") == nullptr, "a missing id resolves nowhere");
+    check(sui::resolveSvgUse(*s, "https://example.com/x.svg#r") == nullptr,
+          "an external url never resolves");
+    check(sui::resolveSvgUse(*s, "") == nullptr, "an empty href resolves nowhere");
+    check(sui::resolveSvgUse(*s, "r") == nullptr, "a bare name is not a fragment");
+    check(sui::resolveSvgUse(*s, "#") == nullptr, "a bare hash resolves nowhere");
+
+    // The chain check is pointer identity along the expansion path.
+    check(!sui::svgUseEntersCycle({}, r), "an empty chain cycles nothing");
+    check(sui::svgUseEntersCycle({u}, u), "the use itself on the chain refuses");
+    check(sui::svgUseEntersCycle({u, v}, v), "a repeat anywhere refuses");
+    check(!sui::svgUseEntersCycle({u}, r), "an unexpanded target passes");
+}
+
+
 // `font-variant` switches synthetic small caps on and off, inherits, and
 // serializes. Anything but the two keywords keeps the previous winner.
 void testFontVariant() {
@@ -8043,6 +8084,7 @@ int main() {
     testFontStretch();
     testFontWeight();
     testFontVariant();
+    testSvgUse();
     testScrollBehavior();
     testColorScheme();
     testPrefersColorScheme();

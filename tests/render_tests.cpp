@@ -890,6 +890,28 @@ void testListMarkerSlot() {
     check(glyph.rect.x == 92.0f && glyph.rect.y == 50.0f, "the glyph starts at the gap");
 }
 
+// An SVG `<image>` meet-fits its raster inside the box: uniform scale
+// centred, or a straight stretch for `none`. Degenerate inputs fit nothing.
+void testSvgImageFit() {
+    const SDL_FRect meet = sui::svgImageFit(100.0f, 50.0f, 200.0f, 200.0f, false);
+    check(meet.w == 200.0f && meet.h == 100.0f, "meet scales by the binding axis");
+    check(meet.x == 0.0f && meet.y == 50.0f, "meet centres the spare axis");
+    const SDL_FRect tall = sui::svgImageFit(50.0f, 100.0f, 200.0f, 200.0f, false);
+    check(tall.w == 100.0f && tall.h == 200.0f && tall.x == 50.0f && tall.y == 0.0f,
+          "a tall raster letterboxes the other way");
+    const SDL_FRect stretch = sui::svgImageFit(100.0f, 50.0f, 200.0f, 200.0f, true);
+    check(stretch.w == 200.0f && stretch.h == 200.0f && stretch.x == 0.0f &&
+              stretch.y == 0.0f,
+          "none stretches to the box");
+    const SDL_FRect exact = sui::svgImageFit(200.0f, 200.0f, 200.0f, 200.0f, false);
+    check(exact.x == 0.0f && exact.y == 0.0f && exact.w == 200.0f,
+          "an exact fit sits at the origin");
+    const SDL_FRect empty = sui::svgImageFit(0.0f, 50.0f, 200.0f, 200.0f, false);
+    check(empty.w == 0.0f && empty.h == 0.0f, "an empty raster fits nothing");
+    const SDL_FRect nobox = sui::svgImageFit(100.0f, 50.0f, 0.0f, 200.0f, false);
+    check(nobox.w == 0.0f, "an empty box fits nothing");
+}
+
 // A path `d` flattens to subpaths: absolute and relative commands, the
 // shorthand curves, arcs, implicit repeats, and the close.
 void testSvgPath() {
@@ -1452,6 +1474,7 @@ int main() {
     testSvgPath();
     testSvgViewport();
     testSvgText();
+    testSvgImageFit();
     testListMarkerSlot();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

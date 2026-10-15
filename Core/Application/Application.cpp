@@ -48,8 +48,28 @@ float smoothScrollStep(float current, float target) {
     return current + gap * kSmoothScrollShare;
 }
 
-ListMarkerSlot listMarkerSlot(const SDL_FRect& box, float imageWidth, float imageHeight) {
-    ListMarkerSlot slot;
+const Element* resolveSvgUse(const Element& svg, std::string_view href) {
+    // Only a same-document fragment resolves: anything without a `#id` shape
+    // (an external URL, a bare name, nothing at all) is left alone.
+    if (href.size() < 2 || href.front() != '#') {
+        return nullptr;
+    }
+    Document* document = svg.document();
+    if (!document) {
+        return nullptr;
+    }
+    const Element* target = document->getElementById(href.substr(1));
+    if (!target || target->isTextNode()) {
+        return nullptr;
+    }
+    return target;
+}
+
+bool svgUseEntersCycle(const std::vector<const Element*>& chain, const Element* target) {
+    return std::find(chain.begin(), chain.end(), target) != chain.end();
+}
+
+ListMarkerSlot listMarkerSlot(const SDL_FRect& box, float imageWidth, float imageHeight) {    ListMarkerSlot slot;
     if (imageWidth > 0.0f && imageHeight > 0.0f) {
         slot.image = true;
         slot.rect = SDL_FRect{box.x - imageWidth - 8.0f, box.y + (box.h - imageHeight) * 0.5f,
@@ -1526,32 +1546,63 @@ std::string collapseSvgText(std::string_view text) {
 
 void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                     const ComputedStyle& style, const TextFont& font,
-                    SDL_Renderer* sdlRenderer, float opacity) {
+                    SDL_Renderer* sdlRenderer, ImageCache& images, float opacity) {
+    // A use-expansion chain caps out rather than recursing forever; eight is
+    // deeper than any sane icon sprite nests.
+    constexpr int kSvgUseDepth = 8;
     struct Frame {
         const Element* node;
         float opacity;
+        SvgView view;
+        int depth = 0;
+        std::vector<const Element*> chain;
     };
     // Explicit stack instead of recursion: deep `g` nesting cannot overflow.
     std::vector<Frame> stack;
     for (auto it = svg.children().rbegin(); it != svg.children().rend(); ++it) {
         if (*it && !(*it)->isTextNode()) {
-            stack.push_back({it->get(), opacity});
+            stack.push_back({it->get(), opacity, view, 0, {}});
         }
     }
-    const auto place = [&](float ux, float uy) {
-        return SDL_FPoint{view.x + ux * view.sx, view.y + uy * view.sy};
-    };
-    const auto scaleX = [&](float u) { return u * view.sx; };
-    const auto scaleY = [&](float u) { return u * view.sy; };
     while (!stack.empty()) {
-        const Frame frame = stack.back();
+        Frame frame = stack.back();
         stack.pop_back();
         const Element& el = *frame.node;
         const std::string_view tag = el.tag();
+        // Every frame maps through its own view: a `<use>` shifts its clone by
+        // scaling the x/y offset into the view it was expanded in.
+        const auto place = [&](float ux, float uy) {
+            return SDL_FPoint{frame.view.x + ux * frame.view.sx,
+                              frame.view.y + uy * frame.view.sy};
+        };
+        const auto scaleX = [&](float u) { return u * frame.view.sx; };
+        const auto scaleY = [&](float u) { return u * frame.view.sy; };
         if (tag == "g") {
             for (auto it = el.children().rbegin(); it != el.children().rend(); ++it) {
                 if (*it && !(*it)->isTextNode()) {
-                    stack.push_back({it->get(), frame.opacity});
+                    stack.push_back(
+                        {it->get(), frame.opacity, frame.view, frame.depth, frame.chain});
+                }
+            }
+            continue;
+        }
+        if (tag == "use") {
+            // A clone of the referenced element at x/y. Deep chains cap out and
+            // cyclic ones refuse, so a self-referencing use paints nothing
+            // instead of looping forever.
+            if (frame.depth < kSvgUseDepth) {
+                const Element* target = resolveSvgUse(svg, el.attribute("href"));
+                if (!target) {
+                    target = resolveSvgUse(svg, el.attribute("xlink:href"));
+                }
+                if (target && target != &svg && target != &el &&
+                    !svgUseEntersCycle(frame.chain, target)) {
+                    SvgView sub = frame.view;
+                    sub.x += svgNumber(el.attribute("x"), 0.0f) * frame.view.sx;
+                    sub.y += svgNumber(el.attribute("y"), 0.0f) * frame.view.sy;
+                    frame.chain.push_back(&el);
+                    stack.push_back(
+                        {target, frame.opacity, sub, frame.depth + 1, frame.chain});
                 }
             }
             continue;
@@ -1713,9 +1764,37 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
             const SDL_FRect dst{std::floor(origin.x), std::floor(origin.y), texW, texH};
             SDL_RenderTexture(sdlRenderer, text, nullptr, &dst);
             SDL_DestroyTexture(text);
+        } else if (tag == "image") {
+            // A raster in a box: meet-fit by default, stretched for `none`. A
+            // URL that does not load paints nothing.
+            std::string_view href = el.attribute("href");
+            if (href.empty()) {
+                href = el.attribute("xlink:href");
+            }
+            SDL_Texture* img = href.empty() ? nullptr : images.texture(sdlRenderer, href);
+            if (!img) {
+                continue;
+            }
+            float iw = 0.0f, ih = 0.0f;
+            SDL_GetTextureSize(img, &iw, &ih);
+            const float w = std::max(0.0f, svgNumber(el.attribute("width"), 0.0f));
+            const float h = std::max(0.0f, svgNumber(el.attribute("height"), 0.0f));
+            if (!(iw > 0.0f) || !(ih > 0.0f) || !(w > 0.0f) || !(h > 0.0f)) {
+                continue;
+            }
+            const SDL_FPoint topLeft =
+                place(svgNumber(el.attribute("x"), 0.0f), svgNumber(el.attribute("y"), 0.0f));
+            const bool none = svgToken(el.attribute("preserveAspectRatio")) == "none";
+            const SDL_FRect fit = svgImageFit(iw, ih, scaleX(w), scaleY(h), none);
+            const SDL_FRect dst{topLeft.x + fit.x, topLeft.y + fit.y, fit.w, fit.h};
+            const SDL_FRect src{0.0f, 0.0f, iw, ih};
+            renderer.fillRect(dst,
+                              Shader::image(img, src, dst, Repeat::No,
+                                            Color{255, 255, 255,
+                                                  static_cast<std::uint8_t>(alpha * 255.0f)}));
         }
-        // Use and image stay unpainted: sub-resource fetching is its own
-        // milestone.
+        // Anything else (a nested svg, an unknown tag) paints nothing: only the
+        // shapes above have painters.
     }
 }
 
@@ -1723,7 +1802,7 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
 // then every supported shape draws from its attributes.
 void paintSvg(Element& el, const SDL_FRect& content, Renderer& renderer,
               const ComputedStyle& style, const TextFont& font, SDL_Renderer* sdlRenderer,
-              float opacity) {
+              ImageCache& images, float opacity) {
     if (content.w <= 0.0f || content.h <= 0.0f) {
         return;
     }
@@ -1735,7 +1814,7 @@ void paintSvg(Element& el, const SDL_FRect& content, Renderer& renderer,
     }
     view.x += content.x;
     view.y += content.y;
-    paintSvgShapes(el, view, renderer, style, font, sdlRenderer, opacity);
+    paintSvgShapes(el, view, renderer, style, font, sdlRenderer, images, opacity);
 }
 
 void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
@@ -1826,7 +1905,7 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
             paintSvg(el,
                      SDL_FRect{el.contentX() - offX, el.contentY() - offY,
                                el.contentWidth(), el.contentHeight()},
-                     renderer, s, font, sdlRenderer, opacity);
+                     renderer, s, font, sdlRenderer, images, opacity);
         }
         if (el.tag() == "img" || el.tag() == "video") {
             std::string_view src = el.attribute("src");

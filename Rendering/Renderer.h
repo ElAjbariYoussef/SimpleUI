@@ -323,4 +323,8 @@ float svgTextPxSize(std::string_view size, float cssSize, float scaleX);
 SDL_FPoint svgTextOrigin(const SvgView& view, float x, float y, std::string_view anchor,
                          float width, float ascent);
 
+// Fits a source (sw by sh) inside a destination (dw by dh): uniform meet
+// scaling centred, or a straight stretch for `none`. Anything else meets too.
+SDL_FRect svgImageFit(float sw, float sh, float dw, float dh, bool none);
+
 }  // namespace sui

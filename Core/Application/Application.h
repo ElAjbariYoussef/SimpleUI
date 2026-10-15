@@ -83,6 +83,15 @@ struct ListMarkerSlot {
 };
 ListMarkerSlot listMarkerSlot(const SDL_FRect& box, float imageWidth, float imageHeight);
 
+// The element a `<use>` clones: the same-document `#id` its href names. Null
+// for anything else -- a missing id, an external URL, no document, or a text
+// node -- so callers paint nothing instead of guessing.
+const Element* resolveSvgUse(const Element& svg, std::string_view href);
+
+// Whether expanding `target` would re-enter a use-expansion already on the
+// chain, which is how a self-referencing use is refused instead of looping.
+bool svgUseEntersCycle(const std::vector<const Element*>& chain, const Element* target);
+
 // One frame of a smooth scroll: the offset closes a fixed share of the gap and
 // lands exactly on the target once the gap is under a pixel, so the animation
 // ends where the gesture asked rather than near it.

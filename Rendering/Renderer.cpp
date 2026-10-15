@@ -985,6 +985,19 @@ SDL_FPoint svgTextOrigin(const SvgView& view, float x, float y, std::string_view
     return SDL_FPoint{px, view.y + y * view.sy - ascent};
 }
 
+SDL_FRect svgImageFit(float sw, float sh, float dw, float dh, bool none) {
+    if (!(sw > 0.0f) || !(sh > 0.0f) || !(dw > 0.0f) || !(dh > 0.0f)) {
+        return SDL_FRect{0.0f, 0.0f, 0.0f, 0.0f};
+    }
+    if (none) {
+        return SDL_FRect{0.0f, 0.0f, dw, dh};
+    }
+    const float scale = std::min(dw / sw, dh / sh);
+    const float w = sw * scale;
+    const float h = sh * scale;
+    return SDL_FRect{(dw - w) * 0.5f, (dh - h) * 0.5f, w, h};
+}
+
 SvgView svgViewport(float vw, float vh, float vbx, float vby, float vbw, float vbh,
                     bool none) {
     SvgView view;
