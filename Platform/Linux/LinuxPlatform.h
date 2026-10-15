@@ -13,6 +13,7 @@ public:
     void closeWindow(WindowId id) override;
     bool hasWindow(WindowId id) const override;
     WindowId primaryWindow() const override;
+    std::vector<WindowId> windows() const override;
     const std::vector<WindowId>& closedWindows() const override { return closed_; }
 
     SDL_Window* window(WindowId id) const override;

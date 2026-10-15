@@ -92,6 +92,9 @@ public:
     // The window `initialize` created, which is also the one every convenience
     // below means. `kInvalidWindow` once it is closed.
     virtual WindowId primaryWindow() const = 0;
+    // Every open window, oldest first. The frame loop paints each of these in
+    // turn, which is what shows one page per window once pages bind to windows.
+    virtual std::vector<WindowId> windows() const = 0;
     // Windows closed since the last pumpEvents(), oldest first. The application
     // reads this to drop the page each one was showing.
     virtual const std::vector<WindowId>& closedWindows() const = 0;

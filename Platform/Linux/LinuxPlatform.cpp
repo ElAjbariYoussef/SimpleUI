@@ -242,6 +242,15 @@ WindowId LinuxPlatform::primaryWindow() const {
     return windows_.empty() ? kInvalidWindow : windows_.front().id;
 }
 
+std::vector<WindowId> LinuxPlatform::windows() const {
+    std::vector<WindowId> ids;
+    ids.reserve(windows_.size());
+    for (const Window& window : windows_) {
+        ids.push_back(window.id);
+    }
+    return ids;
+}
+
 LinuxPlatform::Window* LinuxPlatform::find(WindowId id) {
     for (Window& window : windows_) {
         if (window.id == id) {

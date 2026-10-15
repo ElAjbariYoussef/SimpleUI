@@ -3888,8 +3888,11 @@ void Application::dispatch(const InputEvent& event) {
     }
 }
 
-void Application::run() {
-    Renderer renderer(platform_->renderer());
+void Application::ensureFrameStartup() {
+    if (frameStartupDone_) {
+        return;
+    }
+    frameStartupDone_ = true;
 
     font_ = std::make_unique<TextFont>();
     if (!loadFirstAvailable(*font_, resources_.get())) {
@@ -3933,13 +3936,12 @@ void Application::run() {
     // handling can be exercised without a visible window. Allowing several is
     // what makes it possible to click an already-idle page, which is where a
     // frame-skipping bug would swallow the event.
-    std::deque<InputEvent> scriptedClicks;
     if (const char* clicks = SDL_getenv("SUI_CLICK")) {
         for (const std::string& pair : splitOnSemicolons(clicks)) {
             float x = 0.0f;
             float y = 0.0f;
             if (std::sscanf(pair.c_str(), "%f,%f", &x, &y) == 2) {
-                scriptedClicks.push_back(InputEvent{InputKind::PointerDown, x, y, 1});
+                scriptedClicks_.push_back(InputEvent{InputKind::PointerDown, x, y, 1});
             } else {
                 SDL_Log("SUI_CLICK expects x,y; got '%s'", pair.c_str());
             }
@@ -3950,7 +3952,6 @@ void Application::run() {
     // `:hover` restyle path is exercised without a visible cursor. A third field names
     // the button held during the move, which is what makes it a drag, so `:active`
     // following the pointer can be reached the same way.
-    std::deque<InputEvent> scriptedMoves;
     if (const char* moves = SDL_getenv("SUI_MOVE")) {
         for (const std::string& pair : splitOnSemicolons(moves)) {
             float x = 0.0f;
@@ -3958,7 +3959,7 @@ void Application::run() {
             int button = 0;
             const int fields = std::sscanf(pair.c_str(), "%f,%f,%d", &x, &y, &button);
             if (fields >= 2) {
-                scriptedMoves.push_back(InputEvent{InputKind::PointerMove, x, y, button});
+                scriptedMoves_.push_back(InputEvent{InputKind::PointerMove, x, y, button});
             } else {
                 SDL_Log("SUI_MOVE expects x,y[,button]; got '%s'", pair.c_str());
             }
@@ -3968,7 +3969,6 @@ void Application::run() {
     // SUI_WHEEL=x,y,dx,dy[;...] dispatches one synthetic wheel per frame, so the
     // scroll path works headlessly. A pair with no delta is a zero scroll, which
     // is useless, so both are required.
-    std::deque<InputEvent> scriptedWheels;
     if (const char* wheels = SDL_getenv("SUI_WHEEL")) {
         for (const std::string& pair : splitOnSemicolons(wheels)) {
             float x = 0.0f;
@@ -3976,7 +3976,7 @@ void Application::run() {
             float dx = 0.0f;
             float dy = 0.0f;
             if (std::sscanf(pair.c_str(), "%f,%f,%f,%f", &x, &y, &dx, &dy) == 4) {
-                scriptedWheels.push_back(InputEvent{InputKind::Wheel, x, y, 0, dx, dy});
+                scriptedWheels_.push_back(InputEvent{InputKind::Wheel, x, y, 0, dx, dy});
             } else {
                 SDL_Log("SUI_WHEEL expects x,y,dx,dy; got '%s'", pair.c_str());
             }
@@ -3986,44 +3986,82 @@ void Application::run() {
     // SUI_FRAMES=n keeps the loop alive for n pumped frames instead of stopping
     // at the first clean one, so the skip path can be measured rather than
     // assumed: compare frames pumped against frames painted.
-    unsigned minFrames = 0;
     if (const char* frames = SDL_getenv("SUI_FRAMES")) {
-        if (std::sscanf(frames, "%u", &minFrames) != 1) {
+        if (std::sscanf(frames, "%u", &minFrames_) != 1) {
             SDL_Log("SUI_FRAMES expects a count; got '%s'", frames);
-            minFrames = 0;
+            minFrames_ = 0;
         }
     }
 
     // SUI_RESIZE=w,h resizes the window once the first frame is on screen, so the
     // relayout path can be exercised without a visible window. It is the only way to
     // reach the code that runs when the drawable size no longer matches the frame.
-    int resizeWidth = 0;
-    int resizeHeight = 0;
-    bool resizeRequested = false;
     if (const char* resize = SDL_getenv("SUI_RESIZE")) {
-        if (std::sscanf(resize, "%dx%d", &resizeWidth, &resizeHeight) != 2 || resizeWidth <= 0 ||
-            resizeHeight <= 0) {
+        if (std::sscanf(resize, "%dx%d", &resizeWidth_, &resizeHeight_) != 2 || resizeWidth_ <= 0 ||
+            resizeHeight_ <= 0) {
             SDL_Log("SUI_RESIZE expects WxH; got '%s'", resize);
         } else {
-            resizeRequested = true;
+            resizeRequested_ = true;
         }
     }
 
-    BlockLayout layout;
-    while (platform_->pumpEvents()) {
-        ++framesPumped_;
+}
+
+Application::WindowFrame* Application::frameFor(WindowId id) {
+    if (!platform_ || !platform_->hasWindow(id)) {
+        return nullptr;
+    }
+    SDL_Renderer* sdl = platform_->renderer(id);
+    if (!sdl) {
+        return nullptr;
+    }
+    auto found = frames_.find(id);
+    if (found != frames_.end()) {
+        return &found->second;
+    }
+    WindowFrame frame;
+    frame.renderer = std::make_unique<Renderer>(sdl);
+    auto inserted = frames_.emplace(id, std::move(frame));
+    return &inserted.first->second;
+}
+
+void Application::dropClosedFrames() {
+    if (!platform_) {
+        frames_.clear();
+        return;
+    }
+    for (auto it = frames_.begin(); it != frames_.end();) {
+        if (!platform_->hasWindow(it->first)) {
+            it = frames_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+bool Application::renderFrame(WindowId id) {
+    ensureFrameStartup();
+    dropClosedFrames();
+    if (!platform_) {
+        return false;
+    }
+    WindowFrame* frame = frameFor(id);
+    if (!frame || !frame->renderer) {
+        return false;
+    }
+    const bool isPrimary = (id == platform_->primaryWindow());
         int width = 0;
         int height = 0;
-        platform_->windowSize(width, height);
+        platform_->windowSize(id, width, height);
 
         // The renderer's logical canvas has to follow the drawable, or a resize would
         // only letterbox the frame that is already on screen. The frame loop below
         // already treats a size change as stale, so layout re-runs against the new
         // viewport in the same pass that repaints.
-        if (width != viewportWidth_ || height != viewportHeight_) {
-            viewportWidth_ = width;
-            viewportHeight_ = height;
-            platform_->setViewportSize(width, height);
+        if (width != frame->viewportWidth || height != frame->viewportHeight) {
+            frame->viewportWidth = width;
+            frame->viewportHeight = height;
+            platform_->setViewportSize(id, width, height);
             // A resize re-decides which `@media` blocks apply, so the resolver has
             // to hear about it in the same pass that re-lays-out. The generation
             // bump is also what makes the frame loop below treat the page stale.
@@ -4055,14 +4093,28 @@ void Application::run() {
         // them moved, the previous frame is still correct and can stay on screen
         // untouched. Input has to be listed because pumping the queue discards
         // it, so a skipped frame would swallow the click it carried.
+        // Scripted hooks address the primary window, which is what a synthetic
+        // event with no window already means -- so only the primary frame treats
+        // them as a reason to paint.
+        bool windowEvents = false;
+        for (const auto& queued : platform_->inputEvents()) {
+            if (queued.window == id || (queued.window == kInvalidWindow && isPrimary)) {
+                windowEvents = true;
+                break;
+            }
+        }
         const bool stale =
-            !frameDrawn_ || width != stamp_.width || height != stamp_.height ||
-            timerFired || moving || caretPhaseChanged || !platform_->inputEvents().empty() || !scriptedClicks.empty() ||
-            !scriptedMoves.empty() || !scriptedWheels.empty() ||
-            (document_ && document_->mutationCount() != stamp_.mutations) ||
-            resolver_.generation() != stamp_.rules || scriptContext_.generation != stamp_.script;
+            !frame->drawn || width != frame->stamp.width || height != frame->stamp.height ||
+            timerFired || moving || caretPhaseChanged || windowEvents ||
+            (isPrimary &&
+             (!scriptedClicks_.empty() || !scriptedMoves_.empty() || !scriptedWheels_.empty())) ||
+            (document_ && document_->mutationCount() != frame->stamp.mutations) ||
+            resolver_.generation() != frame->stamp.rules ||
+            scriptContext_.generation != frame->stamp.script;
         if (stale) {
-            platform_->clear();
+            platform_->clear(id);
+            Renderer& renderer = *frame->renderer;
+            BlockLayout layout;
 
             if (document_ && document_->root()) {
                 LayoutInput input;
@@ -4087,22 +4139,26 @@ void Application::run() {
                 // geometry rather than the previous frame's.
                 bool mutated = false;
                 for (const auto& event : platform_->inputEvents()) {
+                    if (event.window != id &&
+                        !(event.window == kInvalidWindow && isPrimary)) {
+                        continue;
+                    }
                     dispatch(event);
                     mutated = true;
                 }
-                if (!scriptedClicks.empty()) {
-                    dispatch(scriptedClicks.front());
-                    scriptedClicks.pop_front();
+                if (isPrimary && !scriptedClicks_.empty()) {
+                    dispatch(scriptedClicks_.front());
+                    scriptedClicks_.pop_front();
                     mutated = true;
                 }
-                if (!scriptedMoves.empty()) {
-                    dispatch(scriptedMoves.front());
-                    scriptedMoves.pop_front();
+                if (isPrimary && !scriptedMoves_.empty()) {
+                    dispatch(scriptedMoves_.front());
+                    scriptedMoves_.pop_front();
                     mutated = true;
                 }
-                if (!scriptedWheels.empty()) {
-                    dispatch(scriptedWheels.front());
-                    scriptedWheels.pop_front();
+                if (isPrimary && !scriptedWheels_.empty()) {
+                    dispatch(scriptedWheels_.front());
+                    scriptedWheels_.pop_front();
                     mutated = true;
                 }
                 if (mutated) {
@@ -4123,7 +4179,7 @@ void Application::run() {
                 // back as one unit, so its overlapping members mix first.
                 const std::vector<PaintOp> paintOps =
                     computePaintOps(*document_->root(), resolver_);
-                SDL_Renderer* sdlRenderer = platform_->renderer();
+                SDL_Renderer* sdlRenderer = platform_->renderer(id);
                 std::vector<GroupFrame> groups;
                 // Where the open select painted this frame, if it did: an open
                 // popup overlays the whole frame, so its list is positioned from
@@ -4548,14 +4604,14 @@ void Application::run() {
                 renderer.strokeRect(panel, Color{63, 63, 70, 255}, 1.0f);
             }
 
-            platform_->present();
+            platform_->present(id);
 
-            stamp_.mutations = document_ ? document_->mutationCount() : 0;
-            stamp_.rules = resolver_.generation();
-            stamp_.script = scriptContext_.generation;
-            stamp_.width = width;
-            stamp_.height = height;
-            frameDrawn_ = true;
+            frame->stamp.mutations = document_ ? document_->mutationCount() : 0;
+            frame->stamp.rules = resolver_.generation();
+            frame->stamp.script = scriptContext_.generation;
+            frame->stamp.width = width;
+            frame->stamp.height = height;
+            frame->drawn = true;
             ++framesDrawn_;
 
             // Scripts placed after </body> run once the frame is on screen.
@@ -4564,16 +4620,30 @@ void Application::run() {
                 runScripts(true);
             }
 
-            if (resizeRequested) {
-                resizeRequested = false;
-                SDL_SetWindowSize(platform_->window(), resizeWidth, resizeHeight);
+            if (isPrimary && resizeRequested_) {
+                resizeRequested_ = false;
+                SDL_SetWindowSize(platform_->window(), resizeWidth_, resizeHeight_);
             }
+            return true;
         }
+        return false;
 
+}
+
+void Application::run() {
+    ensureFrameStartup();
+    while (platform_ && platform_->pumpEvents()) {
+        ++framesPumped_;
+        dropClosedFrames();
+        // One frame per open window. Each window keeps its own skip state, so an
+        // idle window repaints nothing while its neighbour paints.
+        for (WindowId id : platform_->windows()) {
+            renderFrame(id);
+        }
         // Termination is checked every iteration, skipped frames included: an
         // idle page skips almost all of them, so putting this inside the branch
         // that does the drawing would leave it waiting for work that never comes.
-        if (!screenshotPath_.empty() && scriptedClicks.empty() && framesPumped_ >= minFrames) {
+        if (!screenshotPath_.empty() && scriptedClicks_.empty() && framesPumped_ >= minFrames_) {
             if (platform_->saveScreenshot(screenshotPath_)) {
                 SDL_Log("wrote %s", screenshotPath_.c_str());
             } else {

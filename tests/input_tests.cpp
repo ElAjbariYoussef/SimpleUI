@@ -1817,6 +1817,68 @@ int main() {
         }
     }
 
+    // One frame per window, each with its own skip state. The first frame paints;
+    // an unchanged frame is correctly skipped; a second window paints on its own
+    // stamp; a closed or unknown window paints nothing.
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "sui-frame-check";
+        fs::remove_all(root);
+        fs::create_directories(root);
+        {
+            std::ofstream out(root / "index.sui", std::ios::binary);
+            out << "<sui><body><p id=\"where\">frame</p></body></sui>";
+        }
+        const fs::path previous = fs::current_path();
+        fs::current_path(root);
+        struct RestoreFrame {
+            fs::path previous;
+            ~RestoreFrame() {
+                std::error_code ec;
+                fs::current_path(previous, ec);
+            }
+        } restoreFrame{previous};
+
+        sui::Application app;
+        std::string error;
+        check(app.start("index.sui", error), "a headed project starts");
+        if (app.platform()) {
+            const sui::WindowId primary = app.platform()->primaryWindow();
+            check(primary != sui::kInvalidWindow, "the started app has a primary window");
+            check(app.renderFrame(primary), "the first frame paints");
+            check(!app.renderFrame(primary), "an unchanged frame is skipped");
+
+            sui::WindowConfig second;
+            int primaryW = 0, primaryH = 0;
+            app.platform()->windowSize(primary, primaryW, primaryH);
+            // Same size as the primary: viewports are still resolver-global until
+            // pages own them (M3), so a different size would legitimately restyle.
+            second.width = primaryW > 0 ? primaryW : 400;
+            second.height = primaryH > 0 ? primaryH : 300;
+            const sui::WindowId other = app.platform()->openWindow(second, error);
+            check(other != sui::kInvalidWindow && other != primary,
+                  "a second headed window opens");
+            check(app.platform()->windows().size() == 2, "two windows are open");
+            check(app.renderFrame(other), "the second window paints on its own stamp");
+            check(!app.renderFrame(other), "the second window skips when idle");
+            check(!app.renderFrame(primary), "the primary stays quiet while idle");
+            check(!app.renderFrame(sui::kInvalidWindow), "no window paints nothing");
+
+            // A mutation repaints the window it is shown in.
+            sui::Element* where = app.document().getElementById("where");
+            check(where != nullptr, "the framed page is on screen");
+            if (where) {
+                where->setAttribute("style", "color:#ff0000");
+                check(app.renderFrame(primary), "a mutated page repaints");
+                check(!app.renderFrame(primary), "and then goes quiet again");
+            }
+
+            app.platform()->closeWindow(other);
+            check(!app.renderFrame(other), "a closed window paints nothing");
+        }
+        fs::remove_all(root);
+    }
+
     platform->shutdown();
 
     std::printf("input_tests: %d checks, %d failures\n", checks, failures);

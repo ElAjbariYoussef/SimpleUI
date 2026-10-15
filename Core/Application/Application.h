@@ -14,6 +14,8 @@
 #include <string>
 #include <string_view>
 #include <cstdint>
+#include <deque>
+#include <map>
 #include <vector>
 
 namespace sui {
@@ -21,6 +23,7 @@ namespace sui {
 class Document;
 class Element;
 class TextFont;
+class Renderer;
 
 // Where a list item's outside marker lands. An image that loaded takes its own
 // size, vertically centred in the item box and a gap left of it; a zero size
@@ -86,6 +89,20 @@ public:
     // whether one is still moving. The frame loop calls it before deciding the
     // page is stale, so an animating scroller keeps repainting.
     bool tickScrolling();
+
+    // Renders one frame of the live page into one window and presents it.
+    // True when anything painted; false when the frame was correctly skipped
+    // (nothing changed) or there was nothing to paint into (no platform, no
+    // such window, no document). The `run` loop calls this once per open
+    // window per pump; a test calls it directly to drive a headless window.
+    // Each window keeps its own skip state, so an idle window stays quiet
+    // while another window paints.
+    bool renderFrame(WindowId id);
+
+    // The platform behind the windows, or null before `start`. Exposed so a
+    // test driving `renderFrame` headlessly can open the windows it renders
+    // into.
+    Platform* platform() const noexcept { return platform_.get(); }
 
     std::size_t caretPosition() const noexcept { return caretBytePos_; }
     void setCaretPosition(std::size_t pos) noexcept {
@@ -196,6 +213,38 @@ private:
         int height = -1;
     };
     FrameStamp stamp_;
+    // One window's skip state. The stamp is per window so an idle window stays
+    // quiet while another paints; the renderer is per window because it caches
+    // clip state and mesh scratch that belong to one SDL renderer.
+    struct WindowFrame {
+        std::unique_ptr<Renderer> renderer;
+        int viewportWidth = -1;
+        int viewportHeight = -1;
+        FrameStamp stamp;
+        bool drawn = false;
+    };
+    std::map<WindowId, WindowFrame> frames_;
+    // The frame for a window, creating it (with its own renderer) the first
+    // time the window paints. Null when there is no platform or no such window.
+    WindowFrame* frameFor(WindowId id);
+    // Drops the skip state of windows the platform no longer has, so a closed
+    // window's renderer and stamp die with it.
+    void dropClosedFrames();
+    // The one-time frame setup `run` used to do inline: the font, the
+    // before-body scripts, the colour preference, and the scripted test hooks.
+    // Idempotent, so `renderFrame` can call it directly and `run` stays a loop.
+    void ensureFrameStartup();
+    bool frameStartupDone_ = false;
+    // Scripted test hooks (SUI_CLICK / SUI_MOVE / SUI_WHEEL / SUI_FRAMES /
+    // SUI_RESIZE), parsed once at startup. They address the primary window,
+    // which is what `kInvalidWindow` on a synthetic event already means.
+    std::deque<InputEvent> scriptedClicks_;
+    std::deque<InputEvent> scriptedMoves_;
+    std::deque<InputEvent> scriptedWheels_;
+    unsigned minFrames_ = 0;
+    int resizeWidth_ = 0;
+    int resizeHeight_ = 0;
+    bool resizeRequested_ = false;
     // The drawable size the renderer's logical canvas is currently set to, which is
     // also what made the frame loop mark a size change as stale.
     int viewportWidth_ = -1;
