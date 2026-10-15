@@ -6978,6 +6978,45 @@ void testTextAlignLast() {
     check(std::string(serial("g")) == "auto", "the default serializes as auto");
 }
 
+// A `<wbr/>` is a soft break opportunity: under `white-space:nowrap` (where
+// words never wrap on their own) the next word starts a fresh line when
+// anything is already on this one. Under normal wrapping the overflow check
+// reaches the same break by itself, and a fitting word always stays.
+void testWordBreakOpportunity() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"w\" style=\"width:50px;white-space:nowrap\">aaaa<wbr/>bbbbbbbb</div>"
+        "<div id=\"n\" style=\"width:50px;white-space:nowrap\">aaaabbbbbbbb</div>"
+        "<div id=\"f\" style=\"width:50px;white-space:nowrap\">aa<wbr/>bb</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* w = el("w");
+    Element* n = el("n");
+    Element* f = el("f");
+    check(w && n && f, "wbr elements found");
+    if (!w || !n || !f) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+    layoutRoot(*document, resolver, 400.0f);
+    check(w->textRuns().size() == 2, "a wbr breaks the nowrap line in two");
+    if (w->textRuns().size() == 2) {
+        check(w->textRuns()[0].y < w->textRuns()[1].y, "the second piece drops a line");
+        check(w->textRuns()[0].text == "aaaa" && w->textRuns()[1].text == "bbbbbbbb",
+              "no piece gains or loses glyphs");
+    }
+    check(n->textRuns().size() == 1, "no wbr means no break under nowrap");
+    check(f->textRuns().size() == 2, "words stay words with or without a wbr");
+    if (f->textRuns().size() == 2) {
+        check(f->textRuns()[0].y == f->textRuns()[1].y,
+              "a fitting word stays on its line at its wbr");
+    }
+}
+
 // Phrasing elements carry their semantic styles: emphasis is italic, small and
 // big scale off the parent, sub/sup shift the baseline, struck text strikes
 // through and inserted text underlines, templates stay inert, and a disabled
@@ -8654,6 +8693,7 @@ int main() {
     testObjectPosition();
     testCaretColor();
     testPhrasingStyles();
+    testWordBreakOpportunity();
     testColorScheme();
     testPrefersColorScheme();
     testCurrentColor();

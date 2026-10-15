@@ -2647,6 +2647,13 @@ private:
                     lineBreak();
                     continue;
                 }
+                if (child->tag() == "wbr") {
+                    // A soft break opportunity: the next word starts a fresh
+                    // line when anything is already on this one. Unlike `br`
+                    // it adds no line when nothing precedes it.
+                    breakAllowed_ = true;
+                    continue;
+                }
                 if (!owner_.isLaidOut(*child)) {
                     continue;
                 }
@@ -2688,6 +2695,13 @@ private:
             const float outerW = boxWidth + box.margin.left + box.margin.right +
                                  box.borderWidth.left + box.borderWidth.right +
                                  box.padding.left + box.padding.right;
+            if (breakAllowed_) {
+                breakAllowed_ = false;
+                if (lineHasContent_ && !spacing_.wraps &&
+                    lineIndent_ + penX_ + outerW > lineAvail_) {
+                    newLine();
+                }
+            }
             if (lineHasContent_ && lineIndent_ + penX_ + outerW > lineAvail_) {
                 newLine();
             }
@@ -2934,6 +2948,7 @@ private:
         void newLine() {
             reorderBidiLine();
             distributeLine(false);
+            breakAllowed_ = false;
             cursorY_ += metrics_.lineHeight;
             penX_ = 0.0f;
             lineHasContent_ = false;
@@ -3104,6 +3119,16 @@ private:
             if (lineHasContent_ && s.wordSpacing.unit != sui::Length::Auto) {
                 space += s.wordSpacing.resolve(s.fontSize, s.fontSize, 16.0f);
             }
+            // A pending soft break matters only where ordinary wrapping is
+            // off: under normal wrapping the overflow check below reaches the
+            // same break on its own. Either way a fitting word stays put.
+            if (breakAllowed_) {
+                breakAllowed_ = false;
+                if (lineHasContent_ && !spacing_.wraps &&
+                    lineIndent_ + penX_ + space + wWidth > lineAvail_) {
+                    newLine();
+                }
+            }
 
             if (isEllipsisActive() && lineIndent_ + penX_ + space + wWidth > lineAvail_) {
                 // The current word overflows the container line box and text-overflow: ellipsis is active.
@@ -3218,6 +3243,9 @@ private:
         float lineIndent_ = 0.0f;
         float lineAvail_ = 0.0f;
         bool lineHasContent_ = false;
+        // Set by a `<wbr/>`: the next word starts a fresh line when anything
+        // is already on this one. Cleared by every word, taken or not.
+        bool breakAllowed_ = false;
         bool ellipsisAdded_ = false;
         std::size_t lineRunStartIndex_ = 0;
         Spacing spacing_ = spacingFor(ComputedStyle::WrapText);
