@@ -119,6 +119,9 @@ struct GroupFrame {
     // A `filter: drop-shadow()`: a recoloured, blurred silhouette of the
     // readback, blitted offset under the content.
     DropShadowFilter dropShadow{};
+    // A `mix-blend-mode` compositing the finished surface against whatever is
+    // already on the target behind it.
+    ComputedStyle::MixBlendMode blend = ComputedStyle::MixBlendMode::Normal;
     // A `clip-path` shape in window coordinates, rebased into the surface
     // before masking. The mask runs after blur (filters first, then the clip)
     // so the shadow pass traces the clipped silhouette.
@@ -4741,6 +4744,7 @@ bool Application::renderFrame(WindowId id) {
                         frame.blur = op.blur;
                         frame.shift = op.shift;
                         frame.dropShadow = op.dropShadow;
+                        frame.blend = op.blend;
                         frame.clip = op.item.clipShape.kind != ResolvedClip::Kind::None;
                         frame.clipShape = op.item.clipShape;
                         frame.mask = hasMaskSurface(op.item.maskImages) ||
@@ -4922,6 +4926,46 @@ bool Application::renderFrame(WindowId id) {
                                                 if (shadow) {
                                                     SDL_SetTextureBlendMode(shadow,
                                                                             SDL_BLENDMODE_BLEND);
+                                                }
+                                            }
+                                        }
+                                        // A `mix-blend-mode` composites the finished
+                                        // surface against whatever is already on
+                                        // the previous target behind it, in the
+                                        // surface's own pixels, so the affine
+                                        // and projective blits below work
+                                        // unchanged. The region is the texture's
+                                        // own size from the bounds origin; a
+                                        // backdrop that comes back a different
+                                        // size (a screen edge) skips blending
+                                        // rather than misaligning pixels.
+                                        if (frame.blend !=
+                                            ComputedStyle::MixBlendMode::Normal) {
+                                            SDL_Texture* current =
+                                                SDL_GetRenderTarget(sdlRenderer);
+                                            SDL_SetRenderTarget(sdlRenderer,
+                                                                frame.previous);
+                                            const SDL_Rect region{
+                                                static_cast<int>(std::floor(frame.bounds.x)),
+                                                static_cast<int>(std::floor(frame.bounds.y)),
+                                                conv->w, conv->h};
+                                            SDL_Surface* behind =
+                                                SDL_RenderReadPixels(sdlRenderer, &region);
+                                            SDL_SetRenderTarget(sdlRenderer, current);
+                                            if (behind) {
+                                                SDL_Surface* backConv = SDL_ConvertSurface(
+                                                    behind, SDL_PIXELFORMAT_ABGR8888);
+                                                SDL_DestroySurface(behind);
+                                                if (backConv && backConv->w == conv->w &&
+                                                    backConv->h == conv->h) {
+                                                    sui::blendImage(
+                                                        pixels, conv->w, conv->h,
+                                                        static_cast<const std::uint8_t*>(
+                                                            backConv->pixels),
+                                                        frame.blend);
+                                                }
+                                                if (backConv) {
+                                                    SDL_DestroySurface(backConv);
                                                 }
                                             }
                                         }

@@ -262,4 +262,48 @@ void applyBackdropDropShadow(std::uint8_t* rgba, int width, int height, float dx
     }
 }
 
+void blendImage(std::uint8_t* source, int width, int height, const std::uint8_t* backdrop,
+                ComputedStyle::MixBlendMode mode) {
+    using Blend = ComputedStyle::MixBlendMode;
+    if (!source || !backdrop || width <= 0 || height <= 0 || mode == Blend::Normal) {
+        return;
+    }
+    const int pixels = width * height;
+    for (int p = 0; p < pixels; ++p) {
+        const int i = p * 4;
+        const float as = source[i + 3] / 255.0f;
+        if (as <= 0.0f) {
+            continue;
+        }
+        const float ab = backdrop[i + 3] / 255.0f;
+        const float outA = as + ab * (1.0f - as);
+        if (outA <= 0.0f) {
+            source[i + 3] = 0;
+            continue;
+        }
+        for (int c = 0; c < 3; ++c) {
+            const float cs = source[i + c] / 255.0f;
+            const float cb = backdrop[i + c] / 255.0f;
+            float blended = 0.0f;
+            switch (mode) {
+                case Blend::Multiply: blended = cs * cb; break;
+                case Blend::Screen: blended = cs + cb - cs * cb; break;
+                case Blend::Darken: blended = std::min(cs, cb); break;
+                case Blend::Lighten: blended = std::max(cs, cb); break;
+                case Blend::Difference: blended = std::fabs(cs - cb); break;
+                case Blend::Exclusion: blended = cs + cb - 2.0f * cs * cb; break;
+                case Blend::Normal: blended = cs; break;
+            }
+            // The blended colour shows through both alphas; where either side
+            // is clear its own colour shows instead.
+            const float outC = (blended * as * ab + cs * as * (1.0f - ab) +
+                                cb * ab * (1.0f - as)) /
+                               outA;
+            source[i + c] =
+                static_cast<std::uint8_t>(std::lround(std::clamp(outC * 255.0f, 0.0f, 255.0f)));
+        }
+        source[i + 3] = static_cast<std::uint8_t>(std::lround(std::clamp(outA * 255.0f, 0.0f, 255.0f)));
+    }
+}
+
 }  // namespace sui

@@ -568,6 +568,43 @@ void testGroupBecomesOffscreenBlit() {
     checkNear(ops[begin].bounds.h, 60.0f, 2.0f, "group bounds fit the vertical extent");
 }
 
+// A blended box composites offscreen like an opacity group, carrying its mode
+// on the BeginGroup op for the executor; a plain box opens nothing.
+void testBlendGroup() {
+    auto document = parseOrNull(R"(<sui><body>
+        <div id="g" style="mix-blend-mode:multiply;width:100px;height:60px">
+            <div id="c" style="width:40px;height:20px"></div>
+        </div>
+        <div id="p" style="width:10px;height:10px"></div>
+    </body></sui>)");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*document, resolver);
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+    Element* g = document->getElementById("g");
+    Element* p = document->getElementById("p");
+    if (!g || !p) {
+        check(false, "blend document parsed");
+        return;
+    }
+    const std::size_t begin = beginGroupAt(ops);
+    check(begin != ops.size() && ops[begin].item.el == g,
+          "a blended box opens a group");
+    check(begin != ops.size() &&
+              ops[begin].blend == sui::ComputedStyle::MixBlendMode::Multiply,
+          "the blend mode rides the BeginGroup op");
+    bool plainGrouped = false;
+    for (const auto& op : ops) {
+        if (op.kind == sui::PaintOp::Kind::BeginGroup && op.item.el == p) {
+            plainGrouped = true;
+        }
+    }
+    check(!plainGrouped, "a plain box opens no group of its own");
+}
+
 // Nested alphas composite in nested surfaces: each BeginGroup carries only its
 // own alpha, and flattening the sequence multiplies them back together.
 void testNestedGroupAlphas() {
@@ -1417,6 +1454,7 @@ int main() {
     testTransform3D();
     testEffectsDontCompound();
     testGroupBecomesOffscreenBlit();
+    testBlendGroup();
     testNestedGroupAlphas();
     testGroupBoundsIncludePaint();
     testGroupClampedToClip();

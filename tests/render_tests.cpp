@@ -1291,6 +1291,54 @@ void testBoxBlur() {
 // The CPU affine colour matrix the `filter:` shift chain hands the executor.
 // `filterColorMatrix` composes the chain into one matrix; `applyColorMatrix`
 // maps each pixel through it, rounding to the nearest byte and clipping.
+// A blended surface over its backdrop, per channel with source-over alpha.
+// One opaque pixel over one opaque pixel tells each mode apart.
+void testBlendImage() {
+    auto blend = [](std::uint8_t sr, std::uint8_t sg, std::uint8_t sb, std::uint8_t sa,
+                    std::uint8_t br, std::uint8_t bg, std::uint8_t bb, std::uint8_t ba,
+                    sui::ComputedStyle::MixBlendMode mode) {
+        std::vector<std::uint8_t> src{sr, sg, sb, sa};
+        const std::vector<std::uint8_t> back{br, bg, bb, ba};
+        sui::blendImage(src.data(), 1, 1, back.data(), mode);
+        return src;
+    };
+    using Blend = sui::ComputedStyle::MixBlendMode;
+    // Mid-grey over mid-grey: multiply darkens, screen lightens.
+    check(blend(128, 128, 128, 255, 128, 128, 128, 255, Blend::Multiply)[0] == 64,
+          "multiply squares the channel");
+    check(blend(128, 128, 128, 255, 128, 128, 128, 255, Blend::Screen)[0] == 192,
+          "screen lifts the channel");
+    // Order-sensitive extremes.
+    check(blend(200, 0, 0, 255, 100, 0, 0, 255, Blend::Darken)[0] == 100,
+          "darken keeps the darker");
+    check(blend(200, 0, 0, 255, 100, 0, 0, 255, Blend::Lighten)[0] == 200,
+          "lighten keeps the lighter");
+    check(blend(200, 0, 0, 255, 100, 0, 0, 255, Blend::Difference)[0] == 100,
+          "difference takes the distance");
+    check(blend(255, 0, 0, 255, 255, 0, 0, 255, Blend::Difference)[0] == 0,
+          "identical differences cancel");
+    check(blend(128, 0, 0, 255, 128, 0, 0, 255, Blend::Exclusion)[0] == 127,
+          "exclusion halves identical mid-greys");
+    // Alpha: a clear source leaves the backdrop alone, and a clear backdrop
+    // leaves the source alone.
+    const std::vector<std::uint8_t> keep =
+        blend(0, 0, 0, 0, 10, 20, 30, 40, Blend::Multiply);
+    check(keep[0] == 0 && keep[1] == 0 && keep[2] == 0 && keep[3] == 0,
+          "a clear source paints nothing");
+    const std::vector<std::uint8_t> alone =
+        blend(10, 20, 30, 40, 0, 0, 0, 0, Blend::Screen);
+    check(alone[0] == 10 && alone[1] == 20 && alone[2] == 30 && alone[3] == 40,
+          "a clear backdrop keeps the source");
+    // A half source over an opaque backdrop mixes the formula halfway.
+    const std::vector<std::uint8_t> half =
+        blend(255, 255, 255, 128, 0, 0, 0, 255, Blend::Screen);
+    check(half[0] == 128 && half[3] == 255, "screened white halves over black");
+    const std::vector<std::uint8_t> grey =
+        blend(0, 0, 0, 128, 255, 255, 255, 255, Blend::Multiply);
+    check(grey[0] > 120 && grey[0] < 136 && grey[3] == 255,
+          "a half black multiply greys the backdrop");
+}
+
 // Backdrop opacity fades every alpha and leaves colours alone; drop shadows
 // composite a shifted, tinted silhouette underneath the content.
 void testBackdropFilters() {
@@ -1558,6 +1606,7 @@ int main() {
     testFontSizeIsTheEmSquare();
     testBoxBlur();
     testBackdropFilters();
+    testBlendImage();
     testColorMatrix();
     testClipCoverage();
     testClipMask();

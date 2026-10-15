@@ -1,5 +1,7 @@
 #pragma once
 
+#include "CSS/Style.h"
+
 #include <cstdint>
 #include <string_view>
 
@@ -30,5 +32,13 @@ void applyBackdropOpacity(std::uint8_t* rgba, int width, int height, float amoun
 void applyBackdropDropShadow(std::uint8_t* rgba, int width, int height, float dx, float dy,
                              int blurRadius, std::uint8_t r, std::uint8_t g,
                              std::uint8_t b, std::uint8_t a);
+
+// Blends a group surface over its backdrop in place, both tightly packed
+// row-major RGBA bytes of the same size. The separable formula per channel is
+// picked by `mode` (multiply, screen, darken, lighten, difference, exclusion);
+// alpha composites source-over around it. `Normal` is a no-op for callers that
+// did not filter it out.
+void blendImage(std::uint8_t* source, int width, int height, const std::uint8_t* backdrop,
+                ComputedStyle::MixBlendMode mode);
 
 }  // namespace sui

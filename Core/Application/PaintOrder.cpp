@@ -97,6 +97,8 @@ struct PaintEntry {
     // A `filter: drop-shadow()` silhouette to blit under the content; forces a
     // surface so the executor can trace the group's own shape.
     DropShadowFilter dropShadow{};
+    // A `mix-blend-mode` compositing the group against its backdrop.
+    ComputedStyle::MixBlendMode blend = ComputedStyle::MixBlendMode::Normal;
     std::vector<PaintEntry> inner;
 };
 
@@ -821,7 +823,8 @@ bool declares(const std::string& value) {
 // differs from CSS only where a positioned descendant would rejoin the context
 // around it -- CSS lets it, the engine keeps it inside.
 GroupKind classifyGroup(const ComputedStyle& s) {
-    if (s.opacity < 1.0f || declares(s.transform) || declares(s.filter)) {
+    if (s.opacity < 1.0f || declares(s.transform) || declares(s.filter) ||
+        s.mixBlendMode != ComputedStyle::MixBlendMode::Normal) {
         return GroupKind::Real;
     }
     // A `clip-path` composites its subtree through a surface to mask it, so it
@@ -849,7 +852,7 @@ PaintOp boxOp(const PaintItem& item) {
 // hands it a `filter: drop-shadow()` silhouette to blit under the content.
 PaintOp groupStart(const PaintItem& item, float alpha, bool transformed, const float m[6],
                    SDL_FPoint origin, float blur, bool shift, const float filter[12],
-                   const DropShadowFilter& dropShadow) {
+                   const DropShadowFilter& dropShadow, ComputedStyle::MixBlendMode blend) {
     PaintOp op;
     op.kind = PaintOp::Kind::BeginGroup;
     op.item = item;
@@ -865,6 +868,7 @@ PaintOp groupStart(const PaintItem& item, float alpha, bool transformed, const f
     op.blur = blur;
     op.shift = shift;
     op.dropShadow = dropShadow;
+    op.blend = blend;
     for (int i = 0; i < 6; ++i) {
         op.m[i] = m[i];
     }
@@ -1111,6 +1115,8 @@ struct Collector {
         float filter[12] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
                             0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
         DropShadowFilter dropShadow{};
+        // A `mix-blend-mode` that composites the group against its backdrop.
+        ComputedStyle::MixBlendMode blend = ComputedStyle::MixBlendMode::Normal;
         PaintItem item;
         PaintEnv child;
     };
@@ -1173,8 +1179,10 @@ struct Collector {
         // they hold paint at full strength into that surface. A box that never
         // paints (say `display:none`) still hands its alpha on, as it always did,
         // since there is no surface for it.
-        const bool composited = drawable && (groupAlpha < 1.0f || hasMatrix || hasProjective ||
-                                             blur > 0.0f || hasShift || dropShadow.present);
+        const bool composited =
+            drawable && (groupAlpha < 1.0f || hasMatrix || hasProjective || blur > 0.0f ||
+                         hasShift || dropShadow.present ||
+                         s.mixBlendMode != ComputedStyle::MixBlendMode::Normal);
         if (!composited) {
             box.child.opacity *= groupAlpha;
         }
@@ -1207,6 +1215,7 @@ struct Collector {
         box.projective = hasProjective;
         box.blur = composited ? blur : 0.0f;
         box.dropShadow = composited ? dropShadow : DropShadowFilter{};
+        box.blend = composited ? s.mixBlendMode : ComputedStyle::MixBlendMode::Normal;
         box.m[0] = matrix.a;
         box.m[1] = matrix.b;
         box.m[2] = matrix.c;
@@ -1344,6 +1353,7 @@ struct Collector {
         entry.blur = box.blur;
         entry.shift = box.shift;
         entry.dropShadow = box.dropShadow;
+        entry.blend = box.blend;
         for (int i = 0; i < 12; ++i) {
             entry.filter[i] = box.filter[i];
         }
@@ -1380,12 +1390,13 @@ struct Collector {
             if (entry.group &&
                 (entry.groupAlpha < 1.0f || entry.transformed || entry.projective ||
                  entry.blur > 0.0f || entry.shift || entry.dropShadow.present ||
+                 entry.blend != ComputedStyle::MixBlendMode::Normal ||
                  entry.item.clipShape.kind != ResolvedClip::Kind::None ||
                  hasMaskSurface(entry.item.maskImages) ||
                  hasMaskBorderSurface(entry.item.maskBorder))) {
                 out.push_back(groupStart(entry.item, entry.groupAlpha, entry.transformed, entry.m,
                                         entry.origin, entry.blur, entry.shift, entry.filter,
-                                        entry.dropShadow));
+                                        entry.dropShadow, entry.blend));
                 out.push_back(boxOp(entry.item));
                 emit(entry.inner, out);
                 out.push_back(PaintOp{PaintOp::Kind::EndGroup, entry.item, {}, 1.0f});
@@ -1633,13 +1644,17 @@ std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolve
     // root that composites (say `opacity` on the whole document) brackets the
     // whole frame.
     const Collector::BoxState box = collector.resolve(root, PaintEnv{});
+    const ComputedStyle::MixBlendMode rootBlend =
+        box.item.el ? resolver.resolve(*box.item.el).mixBlendMode
+                    : ComputedStyle::MixBlendMode::Normal;
     if (box.paints && (box.groupAlpha < 1.0f || box.transformed || box.projective ||
                        box.blur > 0.0f || box.shift || box.dropShadow.present ||
+                       rootBlend != ComputedStyle::MixBlendMode::Normal ||
                        box.item.clipShape.kind != ResolvedClip::Kind::None ||
                        hasMaskSurface(box.item.maskImages) ||
                        hasMaskBorderSurface(box.item.maskBorder))) {
         out.push_back(groupStart(box.item, box.groupAlpha, box.transformed, box.m, box.origin,
-                                box.blur, box.shift, box.filter, box.dropShadow));
+                                box.blur, box.shift, box.filter, box.dropShadow, rootBlend));
     }
     if (box.paints) {
         out.push_back(boxOp(box.item));

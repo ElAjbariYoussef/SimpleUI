@@ -4196,6 +4196,29 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.fontKerning = true;
             s.specified |= ComputedStyle::SpecifiedFontKerning;
         }
+    } else if (property == "mix-blend-mode") {
+        // Separable modes composite; overlay, soft-light, and the rest parse
+        // as normal, which isolates nothing (the spec's invalid-value fallback).
+        // Anything else keeps the previous cascade winner.
+        using Blend = ComputedStyle::MixBlendMode;
+        if (value == "normal" || value == "overlay" || value == "soft-light" ||
+            value == "hard-light" || value == "color-dodge" || value == "color-burn" ||
+            value == "hue" || value == "saturation" || value == "color" ||
+            value == "luminosity") {
+            s.mixBlendMode = Blend::Normal;
+        } else if (value == "multiply") {
+            s.mixBlendMode = Blend::Multiply;
+        } else if (value == "screen") {
+            s.mixBlendMode = Blend::Screen;
+        } else if (value == "darken") {
+            s.mixBlendMode = Blend::Darken;
+        } else if (value == "lighten") {
+            s.mixBlendMode = Blend::Lighten;
+        } else if (value == "difference") {
+            s.mixBlendMode = Blend::Difference;
+        } else if (value == "exclusion") {
+            s.mixBlendMode = Blend::Exclusion;
+        }
     } else if (property == "accent-color") {
         if (value == "auto") {
             s.hasAccentColor = false;
@@ -5849,6 +5872,17 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "accent-color") {
         return style.hasAccentColor ? color(style.accentColor) : "auto";
+    }
+    if (property == "mix-blend-mode") {
+        switch (style.mixBlendMode) {
+            case ComputedStyle::MixBlendMode::Multiply: return "multiply";
+            case ComputedStyle::MixBlendMode::Screen: return "screen";
+            case ComputedStyle::MixBlendMode::Darken: return "darken";
+            case ComputedStyle::MixBlendMode::Lighten: return "lighten";
+            case ComputedStyle::MixBlendMode::Difference: return "difference";
+            case ComputedStyle::MixBlendMode::Exclusion: return "exclusion";
+            default: return "normal";
+        }
     }
     if (property == "background-color") return color(style.backgroundColor);
     if (property == "border-color") return color(style.borderColor);

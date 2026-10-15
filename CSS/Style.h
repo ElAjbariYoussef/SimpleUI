@@ -844,6 +844,20 @@ struct ComputedStyle {
 
     // Visibility
     bool visible = true;
+    // How this box blends with what is already painted behind it. Only the
+    // separable modes composite here; anything else parses as normal (which
+    // isolates nothing). Not inherited. A non-normal mode opens a group so the
+    // subtree blends as one unit.
+    enum class MixBlendMode : std::uint8_t {
+        Normal,
+        Multiply,
+        Screen,
+        Darken,
+        Lighten,
+        Difference,
+        Exclusion
+    };
+    MixBlendMode mixBlendMode = MixBlendMode::Normal;
     // Float and clear (block layout)
     enum FloatType : std::uint8_t { FloatNone, FloatLeft, FloatRight };
     FloatType floatType = FloatNone;

@@ -2474,7 +2474,7 @@ void testUnknownPropertyIsReported() {
     auto document = parseOrNull("<sui><body><div id=\"x\">x</div></body></sui>");
     if (document) {
         sui::StyleResolver resolver;
-        resolver.setRules(sui::CSSParser::parse("div { mix-blend-mode: multiply; width: 10px }"));
+        resolver.setRules(sui::CSSParser::parse("div { background-blend-mode: multiply; width: 10px }"));
         resolver.resolve(*document->getElementById("x"));
         resolvedLog = capturedLog;
         const std::size_t afterFirst = capturedLog.size();
@@ -2495,7 +2495,7 @@ void testUnknownPropertyIsReported() {
         }
         return false;
     };
-    check(mentions("mix-blend-mode"), "an unsupported property is logged by name");
+    check(mentions("background-blend-mode"), "an unsupported property is logged by name");
     check(!mentions("width"), "a supported property is not reported");
 
     // A different unsupported property is its own report; dedupe is per name.
@@ -6076,6 +6076,45 @@ void testTextSizeAdjust() {
     check(std::string(serial("h")) == "auto", "the default serializes as auto");
 }
 
+// `mix-blend-mode` parses the separable set, folds the rest to normal, never
+// inherits, and serializes back.
+void testMixBlendMode() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"p\" style=\"mix-blend-mode:multiply\"><span id=\"c\">x</span></div>"
+        "<div id=\"o\" style=\"mix-blend-mode:overlay\">x</div>"
+        "<div id=\"g\" style=\"mix-blend-mode:banana\">x</div>"
+        "<div id=\"h\">x</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* p = el("p");
+    Element* c = el("c");
+    Element* o = el("o");
+    Element* g = el("g");
+    Element* h = el("h");
+    check(p && c && o && g && h, "blend elements found");
+    if (!p || !c || !o || !g || !h) {
+        return;
+    }
+    using Blend = ComputedStyle::MixBlendMode;
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    check(resolver.resolve(*p).mixBlendMode == Blend::Multiply, "multiply parses");
+    check(resolver.resolve(*c).mixBlendMode == Blend::Normal, "blending never inherits");
+    check(resolver.resolve(*o).mixBlendMode == Blend::Normal, "overlay folds to normal");
+    check(resolver.resolve(*g).mixBlendMode == Blend::Normal, "garbage keeps normal");
+    check(resolver.resolve(*h).mixBlendMode == Blend::Normal, "the default is normal");
+    const auto serial = [&](const char* id) {
+        return sui::StyleResolver::propertyValue(resolver.resolve(*el(id)),
+                                                 "mix-blend-mode");
+    };
+    check(std::string(serial("p")) == "multiply", "multiply serializes");
+    check(std::string(serial("h")) == "normal", "the default serializes as normal");
+}
+
 void testFontStretch() {
     auto document = parseOrNull(
         "<sui><body>"
@@ -8246,6 +8285,7 @@ int main() {
     testTextSizeAdjust();
     testSvgUse();
     testScrollBehavior();
+    testMixBlendMode();
     testColorScheme();
     testPrefersColorScheme();
     testCurrentColor();

@@ -141,6 +141,9 @@ struct PaintOp {
     float filter[12] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
                         0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
     DropShadowFilter dropShadow{};
+    // A `mix-blend-mode` compositing the group against its backdrop, set from
+    // the group root's style at emission.
+    ComputedStyle::MixBlendMode blend = ComputedStyle::MixBlendMode::Normal;
 };
 
 // True when `overflow` on this style crops anything, so its boxes are clipped to
