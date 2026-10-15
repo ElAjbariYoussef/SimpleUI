@@ -2866,13 +2866,34 @@ private:
                 return;
             }
             const bool rtl = style_.direction == ComputedStyle::Direction::RTL;
+            // The last line answers `text-align-last`: `auto` repeats the block
+            // alignment, except a justified block starts its last line over.
             ComputedStyle::TextAlign align = style_.textAlign;
+            if (last) {
+                const auto lastAlign = style_.textAlignLast;
+                using Last = ComputedStyle::TextAlignLast;
+                if (lastAlign == Last::Auto) {
+                    if (align == ComputedStyle::Justify) {
+                        align = ComputedStyle::Start;
+                    }
+                } else if (lastAlign == Last::Left) {
+                    align = ComputedStyle::Left;
+                } else if (lastAlign == Last::Center) {
+                    align = ComputedStyle::Center;
+                } else if (lastAlign == Last::Right) {
+                    align = ComputedStyle::Right;
+                } else if (lastAlign == Last::Justify) {
+                    align = ComputedStyle::Justify;
+                } else if (lastAlign == Last::Start) {
+                    align = ComputedStyle::Start;
+                } else {
+                    align = ComputedStyle::End;
+                }
+            }
             if (align == ComputedStyle::Start) {
                 align = rtl ? ComputedStyle::Right : ComputedStyle::Left;
             } else if (align == ComputedStyle::End) {
                 align = rtl ? ComputedStyle::Left : ComputedStyle::Right;
-            } else if (align == ComputedStyle::Justify && last) {
-                align = rtl ? ComputedStyle::Right : ComputedStyle::Left;
             }
             const float leftover = lineAvail_ - penX_;
             if (!(leftover > 0.0f)) {

@@ -786,6 +786,10 @@ struct ComputedStyle {
     // Text alignment
     enum TextAlign : std::uint8_t { Left, Center, Right, Justify, Start, End };
     TextAlign textAlign = Start;
+    // How the last (or only) line aligns when `text-align` justifies: `auto`
+    // follows the block alignment, so a lone justified line still starts over.
+    enum class TextAlignLast : std::uint8_t { Auto, Left, Center, Right, Justify, Start, End };
+    TextAlignLast textAlignLast = TextAlignLast::Auto;
     // Base writing direction. Inherited. Apart from resolving `start`/`end`
     // alignment, it sets the base direction bidirectional lines reorder
     // around: `rtl` flips mixed-script lines even when Latin leads.
@@ -1023,6 +1027,7 @@ struct ComputedStyle {
         SpecifiedDirection = 1ULL << 32,
         SpecifiedTextSizeAdjust = 1ULL << 33,
         SpecifiedCaretColor = 1ULL << 34,
+        SpecifiedTextAlignLast = 1ULL << 35,
         SpecifiedScrollBehavior = 1u << 25,
         SpecifiedColorScheme = 1u << 26,
         // A marker, not a property: the element still carries the user-agent
@@ -1228,6 +1233,9 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     }
     if (!(style.specified & ComputedStyle::SpecifiedTextAlign)) {
         style.textAlign = parent.textAlign;
+    if (!(style.specified & ComputedStyle::SpecifiedTextAlignLast)) {
+        style.textAlignLast = parent.textAlignLast;
+    }
     if (!(style.specified & ComputedStyle::SpecifiedDirection)) {
         style.direction = parent.direction;
     }

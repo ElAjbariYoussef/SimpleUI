@@ -6907,6 +6907,75 @@ void testTextAlign() {
           "rtl serializes");
     check(sui::StyleResolver::propertyValue(resolver.resolve(*s), "text-align") == "start",
           "start serializes");
+}
+
+// The last line answers `text-align-last`: centering, right-aligning, or even
+// justifying where the block would start over.
+void testTextAlignLast() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"c\" style=\"width:100px;text-align:justify;text-align-last:center\">"
+        "aa bb cc dd ee ff gg</div>"
+        "<div id=\"r\" style=\"width:100px;text-align:justify;text-align-last:right\">"
+        "aa bb cc dd ee ff gg</div>"
+        "<div id=\"j\" style=\"width:100px;text-align:justify;text-align-last:justify\">"
+        "aa bb cc dd ee ff gg</div>"
+        "<div id=\"p\" style=\"text-align-last:right\"><span id=\"k\">x</span></div>"
+        "<div id=\"g\" style=\"text-align-last:banana\">x</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* c = el("c");
+    Element* r = el("r");
+    Element* j = el("j");
+    Element* p = el("p");
+    Element* k = el("k");
+    Element* g = el("g");
+    check(c && r && j && p && k && g, "last-line elements found");
+    if (!c || !r || !j || !p || !k || !g) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+    layoutRoot(*document, resolver, 400.0f);
+    const auto lastX = [](Element& e) {
+        float y = -1.0f;
+        float x = -1.0f;
+        for (const auto& run : e.textRuns()) {
+            if (run.y > y) {
+                y = run.y;
+                x = run.x;
+            }
+        }
+        return x;
+    };
+    // Five 16px words fill 96 of 100px; the last line holds "ff gg".
+    check(lastX(*c) == 32.0f, "a centred last line splits its leftover");
+    check(lastX(*r) == 64.0f, "a right last line pins its end");
+    {
+        float y = -1.0f;
+        float right = 0.0f;
+        for (const auto& run : j->textRuns()) {
+            if (run.y >= y) {
+                y = run.y;
+                right = run.x + run.width;
+            }
+        }
+        check(right == 100.0f, "a justified last line spreads too");
+    }
+
+    using Last = ComputedStyle::TextAlignLast;
+    check(resolver.resolve(*p).textAlignLast == Last::Right, "right last parses");
+    check(resolver.resolve(*k).textAlignLast == Last::Right, "the last-line rule inherits");
+    check(resolver.resolve(*g).textAlignLast == Last::Auto, "garbage keeps auto");
+    const auto serial = [&](const char* id) {
+        return sui::StyleResolver::propertyValue(resolver.resolve(*el(id)),
+                                                 "text-align-last");
+    };
+    check(std::string(serial("p")) == "right", "right serializes");
+    check(std::string(serial("g")) == "auto", "the default serializes as auto");
 }void testBackdropFilter() {
     auto document = parseOrNull("<sui><body><div id=\"x\">hi</div></body></sui>");
     if (!document) {
@@ -8531,6 +8600,7 @@ int main() {
     testValidationApi();
     testBidiOrder();
     testTextAlign();
+    testTextAlignLast();
     testValidationPseudos();
     testGaugeDefaults();
     testFocusVisible();

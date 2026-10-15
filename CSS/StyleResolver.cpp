@@ -4844,6 +4844,31 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         s.specified |= ComputedStyle::SpecifiedFilter;
     } else if (property == "backdrop-filter") {
         s.backdropFilter = std::string(value);
+    } else if (property == "text-align-last") {
+        // Garbage keeps the previous cascade winner, like every other keyword
+        // property.
+        if (value == "left") {
+            s.textAlignLast = ComputedStyle::TextAlignLast::Left;
+            s.specified |= ComputedStyle::SpecifiedTextAlignLast;
+        } else if (value == "center" || isCentre(value)) {
+            s.textAlignLast = ComputedStyle::TextAlignLast::Center;
+            s.specified |= ComputedStyle::SpecifiedTextAlignLast;
+        } else if (value == "right") {
+            s.textAlignLast = ComputedStyle::TextAlignLast::Right;
+            s.specified |= ComputedStyle::SpecifiedTextAlignLast;
+        } else if (value == "justify") {
+            s.textAlignLast = ComputedStyle::TextAlignLast::Justify;
+            s.specified |= ComputedStyle::SpecifiedTextAlignLast;
+        } else if (value == "start") {
+            s.textAlignLast = ComputedStyle::TextAlignLast::Start;
+            s.specified |= ComputedStyle::SpecifiedTextAlignLast;
+        } else if (value == "end") {
+            s.textAlignLast = ComputedStyle::TextAlignLast::End;
+            s.specified |= ComputedStyle::SpecifiedTextAlignLast;
+        } else if (value == "auto") {
+            s.textAlignLast = ComputedStyle::TextAlignLast::Auto;
+            s.specified |= ComputedStyle::SpecifiedTextAlignLast;
+        }
     } else if (property == "text-align") {
         if (isCentre(value)) {
             s.textAlign = ComputedStyle::Center;
@@ -6107,6 +6132,17 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "direction") {
         return style.direction == ComputedStyle::Direction::RTL ? "rtl" : "ltr";
+    }
+    if (property == "text-align-last") {
+        switch (style.textAlignLast) {
+            case ComputedStyle::TextAlignLast::Left: return "left";
+            case ComputedStyle::TextAlignLast::Center: return "center";
+            case ComputedStyle::TextAlignLast::Right: return "right";
+            case ComputedStyle::TextAlignLast::Justify: return "justify";
+            case ComputedStyle::TextAlignLast::Start: return "start";
+            case ComputedStyle::TextAlignLast::End: return "end";
+            default: return "auto";
+        }
     }
     if (property == "width") return length(style.width, "auto");
     if (property == "height") return length(style.height, "auto");
