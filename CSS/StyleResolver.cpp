@@ -7091,6 +7091,10 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
     if (element.tag() == "input") {
         applyInputTypeStyle(style, element.attribute("type"));
     }
+    if (element.tag() == "button" && element.hasAttribute("disabled")) {
+        // A disabled button dims; an author opacity still overrides below.
+        style.opacity = 0.5f;
+    }
     if (element.tag() == "select" && element.listboxRows() > 0) {
         // An open list scrolls its rows: the UA default clips and scrolls,
         // which author overflow still overrides below.
@@ -7104,6 +7108,7 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
         style.display = ComputedStyle::Block;
     }
     inheritInto(style, parent);
+    applyPhrasingStyle(style, element.tag(), parent);
 
     // `!important` is a cascade level of its own, not a tiebreak: it outranks a
     // stronger selector at an ordinary weight. So the declarations are applied in

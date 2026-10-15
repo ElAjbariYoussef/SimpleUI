@@ -23,6 +23,20 @@ const UaCanvas& uaCanvas(bool dark) noexcept {
     return dark ? kDark : kLight;
 }
 
+void applyPhrasingStyle(ComputedStyle& style, std::string_view tag,
+                        const ComputedStyle& parent) {
+    const bool smaller = tag == "small" || tag == "sub" || tag == "sup";
+    if ((smaller || tag == "big") && !(style.specified & ComputedStyle::SpecifiedFontSize) &&
+        parent.fontSize > 0.0f) {
+        style.fontSize = parent.fontSize * (tag == "big" ? 1.2f : 0.8f);
+    }
+    if ((tag == "sub" || tag == "sup") &&
+        !(style.specified & ComputedStyle::SpecifiedVerticalAlign)) {
+        style.verticalAlign =
+            tag == "sub" ? ComputedStyle::VAlignSub : ComputedStyle::VAlignSuper;
+    }
+}
+
 ComputedStyle defaultStyleFor(std::string_view tag) {
     // A generated box joins the inline flow of the element it hangs off, which is
     // what `content` on `::before`/`::after` is for.
@@ -82,8 +96,20 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
     }
 
     if (tag == "span" || tag == "label" || tag == "br" || tag == "code" ||
-        tag == "em" || tag == "i" || tag == "small" || tag == "sub" ||
-        tag == "sup") {
+        tag == "em" || tag == "i" || tag == "var" || tag == "cite" ||
+        tag == "dfn") {
+        // Emphasis is italic. Sizes and shifts need the parent font, so they
+        // land in applyPhrasingStyle instead of here.
+        Style s;
+        s.display = Style::Inline;
+        s.fontStyle = Style::FontItalic;
+        s.specified = Style::SpecifiedFontStyle;
+        return s;
+    }
+
+    if (tag == "small" || tag == "sub" || tag == "sup" || tag == "big") {
+        // Sized relative to the parent in applyPhrasingStyle; sub and sup also
+        // shift the baseline there.
         Style s;
         s.display = Style::Inline;
         return s;
@@ -99,24 +125,43 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
 
     // Phrasing tags. They have to stay inline: defaulted to block, each one forces a
     // line break and the text either side of it lays out into no run at all, so it is
-    // never drawn. That made these the one gap here that damages correct markup
-    // rather than merely failing to decorate it.
-    //
-    // Deliberately only `mark`: `text-decoration` and `font-style` are unimplemented,
-    // and `font-family` is stored but never used to choose a font, so UA rules for
-    // underline, italic and monospace would be declarations that do nothing -- which
-    // is the failure mode this milestone exists to remove.
-    if (tag == "u" || tag == "s" || tag == "big" || tag == "kbd" || tag == "samp" ||
-        tag == "var" || tag == "q" || tag == "cite" || tag == "abbr" || tag == "mark" ||
-        tag == "del" || tag == "ins" || tag == "time" || tag == "data" || tag == "bdi" ||
-        tag == "bdo" || tag == "wbr") {
+    // never drawn.
+    if (tag == "u" || tag == "ins") {
         Style s;
         s.display = Style::Inline;
-        if (tag == "mark") {
-            s.backgroundColor = {255, 255, 0, 255};
-            s.color = {0, 0, 0, 255};
-            s.specified = Style::SpecifiedColor;
-        }
+        s.textDecorationLine = Style::DecUnderline;
+        s.specified = Style::SpecifiedTextDecorationLine;
+        return s;
+    }
+
+    if (tag == "s" || tag == "strike" || tag == "del") {
+        Style s;
+        s.display = Style::Inline;
+        s.textDecorationLine = Style::DecLineThrough;
+        s.specified = Style::SpecifiedTextDecorationLine;
+        return s;
+    }
+
+    if (tag == "kbd" || tag == "samp" || tag == "q" || tag == "abbr" ||
+        tag == "time" || tag == "data" || tag == "bdi" || tag == "bdo" || tag == "wbr") {
+        Style s;
+        s.display = Style::Inline;
+        return s;
+    }
+
+    if (tag == "mark") {
+        Style s;
+        s.display = Style::Inline;
+        s.backgroundColor = {255, 255, 0, 255};
+        s.color = {0, 0, 0, 255};
+        s.specified = Style::SpecifiedColor;
+        return s;
+    }
+
+    // A template's contents are inert: they never lay out, paint, or match.
+    if (tag == "template") {
+        Style s;
+        s.display = Style::None;
         return s;
     }
 

@@ -6976,6 +6976,65 @@ void testTextAlignLast() {
     };
     check(std::string(serial("p")) == "right", "right serializes");
     check(std::string(serial("g")) == "auto", "the default serializes as auto");
+}
+
+// Phrasing elements carry their semantic styles: emphasis is italic, small and
+// big scale off the parent, sub/sup shift the baseline, struck text strikes
+// through and inserted text underlines, templates stay inert, and a disabled
+// button dims unless the author sets its opacity.
+void testPhrasingStyles() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<p id=\"t\">x<em id=\"e\">e</em><i id=\"i\">i</i><small id=\"sm\">s</small>"
+        "<sub id=\"sub\">2</sub><sup id=\"sup\">2</sup><big id=\"big\">b</big>"
+        "<s id=\"s\">s</s><del id=\"del\">d</del><ins id=\"ins\">i</ins>"
+        "<u id=\"u\">u</u><var id=\"v\">v</var></p>"
+        "<template id=\"tp\"><div id=\"inner\">x</div></template>"
+        "<button id=\"b\" disabled=\"\">x</button>"
+        "<button id=\"be\">x</button>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 20px }"));
+    const auto styleOf = [&](const char* id) {
+        return resolver.resolve(*document->getElementById(id));
+    };
+    check(styleOf("e").fontStyle == ComputedStyle::FontItalic, "em is italic");
+    check(styleOf("i").fontStyle == ComputedStyle::FontItalic, "i is italic");
+    check(styleOf("v").fontStyle == ComputedStyle::FontItalic, "var is italic");
+    check(styleOf("sm").fontSize == 16.0f, "small scales off the parent");
+    check(styleOf("big").fontSize == 24.0f, "big grows off the parent");
+    check(styleOf("sub").verticalAlign == ComputedStyle::VAlignSub, "sub sinks");
+    check(styleOf("sub").fontSize == 16.0f, "sub shrinks too");
+    check(styleOf("sup").verticalAlign == ComputedStyle::VAlignSuper, "sup rises");
+    check(styleOf("s").textDecorationLine == ComputedStyle::DecLineThrough,
+          "s strikes through");
+    check(styleOf("del").textDecorationLine == ComputedStyle::DecLineThrough,
+          "del strikes through");
+    check(styleOf("ins").textDecorationLine == ComputedStyle::DecUnderline,
+          "ins underlines");
+    check(styleOf("u").textDecorationLine == ComputedStyle::DecUnderline,
+          "u underlines");
+    check(styleOf("tp").display == ComputedStyle::None, "a template takes no box");
+    check(styleOf("b").opacity == 0.5f, "a disabled button dims");
+    check(styleOf("be").opacity == 1.0f, "an enabled button keeps full opacity");
+
+    // An author declaration still wins over every user-agent default here.
+    sui::StyleResolver author;
+    author.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } em { font-style: normal } button { opacity: 0.8 }"));
+    auto document2 = parseOrNull(
+        "<sui><body><em id=\"e\">x</em><button id=\"b\" disabled=\"\">x</button></body></sui>");
+    if (!document2) {
+        return;
+    }
+    check(author.resolve(*document2->getElementById("e")).fontStyle ==
+              ComputedStyle::FontNormal,
+          "an author normal beats emphasis");
+    check(author.resolve(*document2->getElementById("b")).opacity == 0.8f,
+          "an author opacity beats the dimming");
 }void testBackdropFilter() {
     auto document = parseOrNull("<sui><body><div id=\"x\">hi</div></body></sui>");
     if (!document) {
@@ -8594,6 +8653,7 @@ int main() {
     testMixBlendMode();
     testObjectPosition();
     testCaretColor();
+    testPhrasingStyles();
     testColorScheme();
     testPrefersColorScheme();
     testCurrentColor();
