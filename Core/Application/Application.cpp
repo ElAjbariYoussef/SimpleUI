@@ -2902,10 +2902,12 @@ void Application::bindPage(std::size_t index) {
     selectEdge_ = page.selectEdge_;
     smoothScrolls_ = std::move(page.smoothScrolls_);
     scriptsAfterBodyRun_ = page.scriptsAfterBodyRun;
+    std::swap(scriptContext_.generation, page.scriptGeneration);
     boundPage_ = static_cast<int>(index);
     scriptContext_.document = document_.get();
     scriptContext_.styles = &resolver_;
     scriptContext_.application = this;
+    scriptContext_.page = &page;
     script::setContext(&scriptContext_);
 }
 
@@ -2938,12 +2940,14 @@ void Application::flushBound() {
     page.selectEdge_ = selectEdge_;
     page.smoothScrolls_ = std::move(smoothScrolls_);
     page.scriptsAfterBodyRun = scriptsAfterBodyRun_;
+    std::swap(scriptContext_.generation, page.scriptGeneration);
     boundPage_ = -1;
     // The context keeps pointing at the page's own members, so a script read
     // between frames still sees a live page rather than moved-from holders.
     scriptContext_.document = page.document.get();
     scriptContext_.styles = &page.resolver;
     scriptContext_.application = this;
+    scriptContext_.page = &page;
     script::setContext(&scriptContext_);
 }
 
@@ -3038,6 +3042,9 @@ void Application::installPageAt(std::size_t index, std::unique_ptr<Document> doc
         }
         page.resolver.addKeyframes(std::move(keyframes));
     }
+    // Navigation retires the old page's timers: a callback that captured the
+    // previous tree must not fire into the new one.
+    sui::script::cancelForPage(&page);
     page.document = std::move(document);
     // A new tree starts with no focus, no caret, and no open popups: nothing
     // from the page this one replaces carries over.
@@ -3148,24 +3155,53 @@ WindowId Application::openPage(std::string_view href, std::string& error) {
     return id;
 }
 
+bool Application::closePage() {
+    if (!platform_) {
+        return false;
+    }
+    // The caller's own window while handling one of its events or frames, else
+    // the primary window's. A headless page has no window to close.
+    WindowId window = kInvalidWindow;
+    if (boundPage_ >= 0) {
+        for (const auto& [id, index] : bindings_) {
+            if (index == static_cast<std::size_t>(boundPage_)) {
+                window = id;
+                break;
+            }
+        }
+    } else {
+        window = platform_->primaryWindow();
+    }
+    if (window == kInvalidWindow || !platform_->hasWindow(window)) {
+        return false;
+    }
+    platform_->closeWindow(window);
+    return true;
+}
+
 void Application::dropClosedPages() {
     if (!platform_) {
         return;
     }
     flushBound();
-    for (WindowId id : platform_->closedWindows()) {
-        const auto bound = bindings_.find(id);
-        if (bound == bindings_.end()) {
+    // Any binding whose window no longer exists goes: closed windows report
+    // through `closedWindows`, while a direct `closeWindow` (including
+    // `closePage`) simply leaves no window behind. Both read the same way.
+    for (auto bound = bindings_.begin(); bound != bindings_.end();) {
+        if (platform_->hasWindow(bound->first)) {
+            ++bound;
             continue;
         }
         const std::size_t gone = bound->second;
-        bindings_.erase(bound);
-        if (gone < pages_.size()) {
-            pages_.erase(pages_.begin() + static_cast<std::ptrdiff_t>(gone));
-            for (auto& [window, index] : bindings_) {
-                if (index > gone) {
-                    --index;
-                }
+        bound = bindings_.erase(bound);
+        if (gone >= pages_.size()) {
+            continue;
+        }
+        sui::script::cancelForPage(pages_[gone].get());
+        pages_.erase(pages_.begin() + static_cast<std::ptrdiff_t>(gone));
+        for (auto& [window, index] : bindings_) {
+            if (index > gone) {
+                --index;
             }
         }
     }

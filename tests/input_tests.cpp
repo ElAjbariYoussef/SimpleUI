@@ -4,6 +4,7 @@
 // test failing. Events are pushed onto SDL's own queue so the real pump runs.
 #include "Platform/Platform.h"
 #include "Core/Application/Application.h"
+#include "SUI/Script/Timers.h"
 #include "Layout/BlockLayout.h"
 #include "SUI/DOM/Document.h"
 #include "SUI/DOM/Element.h"
@@ -55,6 +56,17 @@ void drain() {
 
 sui::Application* g_navApp = nullptr;
 std::string g_navSeen;
+
+// A timer probe: fires into whichever element it was armed with.
+sui::Element* g_timerTarget = nullptr;
+bool g_timerFired = false;
+
+void fireTimerProbe() {
+    g_timerFired = true;
+    if (g_timerTarget) {
+        g_timerTarget->setValue("timer");
+    }
+}
 
 void recordNavPage() {
     if (g_navApp) {
@@ -2050,6 +2062,93 @@ int main() {
         press("nestinner", 1, primary);
         check(app.currentPage() == "pages/settings.sui", "a nested press follows out");
         g_navApp = nullptr;
+        fs::remove_all(root);
+    }
+
+    // Timers belong to the page that scheduled them: they fire in that page's
+    // frame and never in another's. Invalidating one page never repaints
+    // another, navigating retires a page's timers, and `closePage` closes the
+    // caller's window.
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "sui-timer-check";
+        fs::remove_all(root);
+        fs::create_directories(root);
+        const auto write = [](const fs::path& at, const char* text) {
+            std::ofstream out(at, std::ios::binary);
+            out << text;
+        };
+        write(root / "index.sui",
+              "<sui><body><input id=\"a\" value=\"\"/></body></sui>");
+        write(root / "other.sui", "<sui><body><p id=\"where\">other</p></body></sui>");
+
+        const fs::path previous = fs::current_path();
+        fs::current_path(root);
+        struct RestoreTimer {
+            fs::path previous;
+            ~RestoreTimer() {
+                std::error_code ec;
+                fs::current_path(previous, ec);
+            }
+        } restoreTimer{previous};
+
+        sui::Application app;
+        std::string error;
+        check(app.start("index.sui", error), "a timed project starts");
+        const sui::WindowId primary = app.platform()->primaryWindow();
+        check(app.renderFrame(primary), "the timed page frames");
+        std::string timerError;
+        const sui::WindowId other = app.openPage("index.sui", timerError);
+        check(other != sui::kInvalidWindow, "a second timed window opens");
+        check(app.renderFrame(other), "the second timed page frames");
+
+        sui::Element* inputA = app.pageDocument(primary)->getElementById("a");
+        sui::Element* inputB = app.pageDocument(other)->getElementById("a");
+        check(inputA && inputB && inputA != inputB, "each timed window owns its field");
+        if (!inputA || !inputB) {
+            fs::remove_all(root);
+        } else {
+            // Arm a timer from the primary page: focusing binds it, and the
+            // schedule inherits the binding.
+            sui::InputEvent press(sui::InputKind::PointerDown, inputA->layoutX() + 2.0f,
+                                  inputA->layoutY() + 2.0f, 1, 0.0f, 0.0f, 0, {}, 0, 0,
+                                  primary);
+            app.dispatch(press);
+            g_timerTarget = inputA;
+            g_timerFired = false;
+            check(sui::script::setTimeout(fireTimerProbe, 0) != 0, "a timer arms");
+
+            // The other page's frame leaves it alone.
+            check(!app.renderFrame(other), "the other page skips while idle");
+            check(!g_timerFired, "another page's frame fires nothing");
+            // Its own page's frame fires it, into its own field.
+            check(app.renderFrame(primary), "the owning page picks up its timer");
+            check(g_timerFired, "the owning page fires its timer");
+            check(inputA->value() == "timer" && inputB->value().empty(),
+                  "a timer writes into its own page only");
+
+            // Invalidating one page never repaints another.
+            ::document.invalidate();
+            check(!app.renderFrame(other), "an invalidation stays on its page");
+            check(app.renderFrame(primary), "the invalidated page repaints");
+
+            // Navigating retires the page's timers.
+            g_timerTarget = nullptr;
+            g_timerFired = false;
+            check(sui::script::setTimeout(fireTimerProbe, 0) != 0, "a second timer arms");
+            check(app.navigate("other.sui"), "the primary page navigates away");
+            check(app.renderFrame(primary), "the navigated page paints");
+            check(!g_timerFired, "navigation retires the old page's timers");
+
+            // `closePage` closes the caller's window: bind the other one first.
+            // Both pages are settled, so both frames below correctly skip.
+            check(!app.renderFrame(other), "the other page stays quiet");
+            check(app.closePage(), "the bound page's window closes");
+            check(!app.platform()->hasWindow(other), "the other window is gone");
+            check(!app.renderFrame(primary), "the primary stays quiet");
+            check(app.pageDocument(other) == nullptr, "the closed page dropped");
+            g_timerTarget = nullptr;
+        }
         fs::remove_all(root);
     }
 

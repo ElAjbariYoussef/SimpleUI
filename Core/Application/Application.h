@@ -38,6 +38,10 @@ struct Page {
     StyleResolver resolver;
     // The href the page was loaded from, named by `currentPage()`.
     std::string href;
+    // The script-invalidations this page caused. Swapped with the working
+    // context's generation on bind/flush, so one page's invalidation never
+    // repaints another window.
+    std::uint64_t scriptGeneration = 0;
     // Before-body scripts run once per page, the first time it frames -- a page
     // opened later must run its own, not inherit the entry page having run.
     bool scriptsBeforeRun = false;
@@ -144,6 +148,12 @@ public:
     // load or no window opens. This is the call behind `<a target="_blank">`;
     // `navigate` stays the same-window one.
     WindowId openPage(std::string_view href, std::string& error);
+
+    // Closes the calling page's window: the bound page's window while handling
+    // one of its events or frames, else the primary window's. The window closes
+    // at once; its page (and the page's timers) drops on the next pump. False
+    // when there is no window to close.
+    bool closePage();
 
     // Advances every `scroll-behavior: smooth` scroll one frame and reports
     // whether one is still moving. The frame loop calls it before deciding the

@@ -41,6 +41,10 @@ double unixTimeMs() noexcept;
 // from looping inside one pump forever.
 bool pumpTimers();
 
+// Drops every timer and frame callback a dead page owned, so a closed page's
+// work never fires anywhere. The application calls this when it drops a page.
+void cancelForPage(const void* page);
+
 // Web-named readable clocks.
 struct PerformanceApi {
     double now() const noexcept { return sui::script::now(); }

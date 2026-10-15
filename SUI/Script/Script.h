@@ -39,6 +39,10 @@ struct Context {
     // The running application, or null before start and after shutdown. A page
     // reaches navigation and the rest of the host through this.
     Application* application = nullptr;
+    // Which page this context belongs to, as an opaque token. Timers remember
+    // it when they are scheduled and only fire for it, so a background page's
+    // timer never acts on the page in front.
+    const void* page = nullptr;
 
     void invalidate() noexcept { generation += 1; }
 

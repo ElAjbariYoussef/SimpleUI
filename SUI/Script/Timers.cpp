@@ -1,5 +1,7 @@
 #include "SUI/Script/Timers.h"
 
+#include "SUI/Script/Script.h"
+
 #include <algorithm>
 #include <chrono>
 #include <utility>
@@ -8,6 +10,13 @@
 namespace sui {
 namespace script {
 namespace {
+
+// The page scheduling right now, or null with no page in context. Every entry
+// remembers its page so pumping one page never fires another's timers.
+const void* schedulingPage() noexcept {
+    const Context* context = sui::script::context();
+    return context ? context->page : nullptr;
+}
 
 double monotonicMs() noexcept {
     const auto t = std::chrono::steady_clock::now().time_since_epoch();
@@ -20,6 +29,12 @@ struct Entry {
     double deadlineMs = 0.0;  // monotonic time of the next fire
     double periodMs = 0.0;    // 0 = one-shot
     bool cancelled = false;
+    // The page that scheduled this entry, as an opaque token. Entries remember
+    // the page whose callback scheduled them and only fire while that page is
+    // the one being pumped, so a background page never acts on the page in
+    // front. Null when scheduled with no page in context; those fire wherever
+    // no page is active, which is the headless and test case.
+    const void* owner = nullptr;
 };
 
 struct Scheduler {
@@ -68,6 +83,7 @@ std::uint64_t setTimeout(TimerCallback callback, std::uint64_t delayMs) {
     Scheduler& s = scheduler();
     Entry entry;
     entry.id = s.nextId++;
+    entry.owner = schedulingPage();
     entry.callback = callback;
     entry.deadlineMs = monotonicMs() + static_cast<double>(delayMs);
     const std::uint64_t id = entry.id;
@@ -82,6 +98,7 @@ std::uint64_t setInterval(TimerCallback callback, std::uint64_t periodMs) {
     Scheduler& s = scheduler();
     Entry entry;
     entry.id = s.nextId++;
+    entry.owner = schedulingPage();
     entry.callback = callback;
     entry.periodMs = static_cast<double>(periodMs);
     entry.deadlineMs = monotonicMs() + static_cast<double>(periodMs);
@@ -107,6 +124,7 @@ std::uint64_t requestAnimationFrame(TimerCallback callback) {
     Scheduler& s = scheduler();
     Entry entry;
     entry.id = s.nextId++;
+    entry.owner = schedulingPage();
     entry.callback = callback;
     const std::uint64_t id = entry.id;
     s.raf.push_back(std::move(entry));
@@ -126,23 +144,55 @@ double unixTimeMs() noexcept {
     return std::chrono::duration<double, std::milli>(t).count();
 }
 
+// Drops every entry a dead page owned. The application calls this when it
+// drops the page, so a closed page's timers never fire anywhere.
+void cancelForPage(const void* page) {
+    if (!page) {
+        return;
+    }
+    Scheduler& s = scheduler();
+    for (Entry& entry : s.timeouts) {
+        if (entry.owner == page) {
+            entry.cancelled = true;
+        }
+    }
+    for (Entry& entry : s.raf) {
+        if (entry.owner == page) {
+            entry.cancelled = true;
+        }
+    }
+}
+
 bool pumpTimers() {
     Scheduler& s = scheduler();
     bool fired = false;
+    // Only this page's entries fire: the pump runs inside one page's frame,
+    // and an entry for another page waits for its own. Unowned entries (no
+    // page in context when scheduled) fire wherever none is active.
+    const void* active = schedulingPage();
 
     // Timeouts first, earliest deadline first, until none are due. A callback
     // that schedules more work is picked up here too; the guard keeps a
-    // self-re-arming interval from looping inside one pump forever.
+    // self-re-arming interval from looping inside one pump forever. Entries for
+    // another page are left in line for its own pump.
     for (int guard = 0; guard < 10000; ++guard) {
-        if (s.timeouts.empty()) {
-            break;
-        }
         const double ms = monotonicMs();
-        if (s.timeouts.front().deadlineMs > ms) {
+        std::size_t at = s.timeouts.size();
+        for (std::size_t i = 0; i < s.timeouts.size(); ++i) {
+            const Entry& candidate = s.timeouts[i];
+            if (candidate.deadlineMs > ms) {
+                break;
+            }
+            if (candidate.cancelled || candidate.owner == active) {
+                at = i;
+                break;
+            }
+        }
+        if (at == s.timeouts.size()) {
             break;
         }
-        Entry entry = std::move(s.timeouts.front());
-        s.timeouts.erase(s.timeouts.begin());
+        Entry entry = std::move(s.timeouts[at]);
+        s.timeouts.erase(s.timeouts.begin() + static_cast<std::ptrdiff_t>(at));
         if (entry.cancelled) {
             continue;
         }
@@ -168,6 +218,11 @@ bool pumpTimers() {
         s.raf.reserve(due.size());
         for (const Entry& entry : due) {
             if (entry.cancelled) {
+                continue;
+            }
+            if (entry.owner != active) {
+                // Another page's frame: hold it for its own pump.
+                s.raf.push_back(entry);
                 continue;
             }
             entry.callback();
