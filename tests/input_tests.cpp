@@ -1827,7 +1827,12 @@ int main() {
         fs::create_directories(root);
         {
             std::ofstream out(root / "index.sui", std::ios::binary);
-            out << "<sui><body><p id=\"where\">frame</p></body></sui>";
+            out << "<sui><body><p id=\"where\">frame</p>"
+                      "<input id=\"a\" value=\"\"/></body></sui>";
+        }
+        {
+            std::ofstream out(root / "other.sui", std::ios::binary);
+            out << "<sui><body><p id=\"where\">other</p></body></sui>";
         }
         const fs::path previous = fs::current_path();
         fs::current_path(root);
@@ -1848,14 +1853,9 @@ int main() {
             check(app.renderFrame(primary), "the first frame paints");
             check(!app.renderFrame(primary), "an unchanged frame is skipped");
 
-            sui::WindowConfig second;
-            int primaryW = 0, primaryH = 0;
-            app.platform()->windowSize(primary, primaryW, primaryH);
-            // Same size as the primary: viewports are still resolver-global until
-            // pages own them (M3), so a different size would legitimately restyle.
-            second.width = primaryW > 0 ? primaryW : 400;
-            second.height = primaryH > 0 ? primaryH : 300;
-            const sui::WindowId other = app.platform()->openWindow(second, error);
+            // A second copy of the same page in its own window: each window
+            // keeps its own skip state over its own page.
+            const sui::WindowId other = app.openPage("index.sui", error);
             check(other != sui::kInvalidWindow && other != primary,
                   "a second headed window opens");
             check(app.platform()->windows().size() == 2, "two windows are open");
@@ -1863,6 +1863,35 @@ int main() {
             check(!app.renderFrame(other), "the second window skips when idle");
             check(!app.renderFrame(primary), "the primary stays quiet while idle");
             check(!app.renderFrame(sui::kInvalidWindow), "no window paints nothing");
+
+            // Focus and typing stay in their own window: each window holds its
+            // own elements, its own focus, and its own field values.
+            sui::Element* inputA = app.pageDocument(primary)->getElementById("a");
+            sui::Element* inputB = app.pageDocument(other)->getElementById("a");
+            check(inputA && inputB && inputA != inputB, "each window owns its input");
+            if (inputA && inputB) {
+                sui::InputEvent pressA(sui::InputKind::PointerDown, inputA->layoutX() + 2.0f,
+                                       inputA->layoutY() + 2.0f, 1, 0.0f, 0.0f, 0, {}, 0, 0,
+                                       primary);
+                app.dispatch(pressA);
+                check(app.pageDocument(primary)->focused() == inputA,
+                      "clicking focuses the primary window's field");
+                check(app.pageDocument(other)->focused() == nullptr,
+                      "the other window takes no focus from it");
+                sui::InputEvent pressB(sui::InputKind::PointerDown, inputB->layoutX() + 2.0f,
+                                       inputB->layoutY() + 2.0f, 1, 0.0f, 0.0f, 0, {}, 0, 0,
+                                       other);
+                app.dispatch(pressB);
+                check(app.pageDocument(other)->focused() == inputB,
+                      "clicking focuses the other window's field");
+                check(app.pageDocument(primary)->focused() == inputA,
+                      "the primary window keeps its own focus");
+                sui::InputEvent type(sui::InputKind::TextInput, 0.0f, 0.0f, 0, 0.0f, 0.0f,
+                                     0, "x", 0, 0, other);
+                app.dispatch(type);
+                check(inputB->value() == "x" && inputA->value().empty(),
+                      "typing lands in the typed window's field only");
+            }
 
             // A mutation repaints the window it is shown in.
             sui::Element* where = app.document().getElementById("where");
@@ -1873,7 +1902,29 @@ int main() {
                 check(!app.renderFrame(primary), "and then goes quiet again");
             }
 
-            app.platform()->closeWindow(other);
+            // Settle the other window after its focus and typing, so the
+            // navigate below is the only thing that could wake it.
+            check(app.renderFrame(other), "the other window repaints its focus");
+            check(!app.renderFrame(other), "and then goes quiet");
+            // Replacing the primary page leaves the other window alone: its
+            // document and resolver never moved, so its next frame skips.
+            check(app.navigate("other.sui"), "the primary window navigates away");
+            check(app.currentPage() == "other.sui", "the primary page is the new one");
+            check(app.renderFrame(primary), "the navigated window repaints");
+            check(!app.renderFrame(other), "the untouched window stays quiet");
+
+            // Closing a window drops its page with it.
+            drain();
+            SDL_Event close{};
+            close.type = SDL_EVENT_WINDOW_CLOSE_REQUESTED;
+            close.window.windowID = SDL_GetWindowID(app.platform()->window(other));
+            SDL_PushEvent(&close);
+            check(app.platform()->pumpEvents(), "closing one window keeps the app up");
+            check(!app.renderFrame(primary), "the surviving window stays quiet");
+            check(app.pageDocument(primary) != nullptr &&
+                      app.currentPage() == "other.sui",
+                  "the surviving window keeps its page");
+            check(app.pageDocument(other) == nullptr, "the closed window's page is gone");
             check(!app.renderFrame(other), "a closed window paints nothing");
         }
         fs::remove_all(root);

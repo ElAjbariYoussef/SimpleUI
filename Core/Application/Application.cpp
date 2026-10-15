@@ -2755,14 +2755,14 @@ void Application::openFileDialog(Element& input) {
 // Applies queued file picks where their inputs still live. Runs on the main
 // thread before layout so a new value measures and paints the same frame.
 void Application::queueSmoothScroll(Element& box, float left, float top) {
-    for (SmoothScroll& scroll : smoothScrolls_) {
+    for (Page::SmoothScroll& scroll : smoothScrolls_) {
         if (scroll.box == &box) {
             scroll.left = left;
             scroll.top = top;
             return;
         }
     }
-    smoothScrolls_.push_back(SmoothScroll{&box, left, top});
+    smoothScrolls_.push_back(Page::SmoothScroll{&box, left, top});
 }
 
 bool Application::tickScrolling() {
@@ -2771,13 +2771,13 @@ bool Application::tickScrolling() {
     Element* root = document_ ? document_->root() : nullptr;
     smoothScrolls_.erase(
         std::remove_if(smoothScrolls_.begin(), smoothScrolls_.end(),
-                       [root](const SmoothScroll& scroll) {
+                       [root](const Page::SmoothScroll& scroll) {
                            return !scroll.box || !root || !isReachable(*root, scroll.box);
                        }),
         smoothScrolls_.end());
     bool moving = false;
     for (std::size_t i = 0; i < smoothScrolls_.size();) {
-        SmoothScroll& scroll = smoothScrolls_[i];
+        Page::SmoothScroll& scroll = smoothScrolls_[i];
         const float left = smoothScrollStep(scroll.box->scrollLeft(), scroll.left);
         const float top = smoothScrollStep(scroll.box->scrollTop(), scroll.top);
         scroll.box->setScrollLeft(left);
@@ -2823,27 +2823,150 @@ void Application::resetCaretBlink() {
 }
 
 Document& Application::document() const {
-    return *document_;
+    // The working copy holds the bound page's document; otherwise the primary
+    // page's does. Either way this names the primary page, as before.
+    if (boundPage_ == 0) {
+        return *document_;
+    }
+    return *pages_.at(0)->document;
 }
 
-void Application::setDocument(std::unique_ptr<Document> document) {
-    document_ = std::move(document);
+Document* Application::pageDocument(WindowId id) const {
+    const int page = pageForWindow(id);
+    if (page < 0 || static_cast<std::size_t>(page) >= pages_.size()) {
+        return nullptr;
+    }
+    // The bound page's document is the working copy.
+    if (page == boundPage_) {
+        return document_.get();
+    }
+    return pages_[static_cast<std::size_t>(page)]->document.get();
+}
+
+const std::string& Application::currentPage() const {
+    static const std::string kEmpty;
+    if (pages_.empty()) {
+        return kEmpty;
+    }
+    return pages_[0]->href;
+}
+
+Page& Application::ensurePrimary() {
+    if (pages_.empty()) {
+        pages_.push_back(std::make_unique<Page>());
+    }
+    return *pages_[0];
+}
+
+int Application::pageForWindow(WindowId id) const {
+    const auto found = bindings_.find(id);
+    if (found == bindings_.end() || found->second >= pages_.size()) {
+        return -1;
+    }
+    return static_cast<int>(found->second);
+}
+
+int Application::pageForEvent(const InputEvent& event) const {
+    if (event.window == kInvalidWindow) {
+        return pages_.empty() ? -1 : 0;
+    }
+    return pageForWindow(event.window);
+}
+
+void Application::bindPage(std::size_t index) {
+    if (boundPage_ >= 0 && static_cast<std::size_t>(boundPage_) == index) {
+        return;
+    }
+    flushBound();
+    Page& page = *pages_.at(index);
+    document_ = std::move(page.document);
+    resolver_ = std::move(page.resolver);
+    lastFocused_ = page.lastFocused_;
+    caretBytePos_ = page.caretBytePos_;
+    selectionAnchor_ = page.selectionAnchor_;
+    caretBlinkStart_ = page.caretBlinkStart_;
+    caretBlinkResets_ = page.caretBlinkResets_;
+    compositionText_ = std::move(page.compositionText_);
+    compositionCursor_ = page.compositionCursor_;
+    openSelect_ = page.openSelect_;
+    selectHighlight_ = page.selectHighlight_;
+    openDatalist_ = page.openDatalist_;
+    datalistHighlight_ = page.datalistHighlight_;
+    scrollDrag_ = page.scrollDrag_;
+    scrollDragX_ = page.scrollDragX_;
+    scrollGrab_ = page.scrollGrab_;
+    scrollTrack_ = page.scrollTrack_;
+    scrollTravel_ = page.scrollTravel_;
+    scrollMax_ = page.scrollMax_;
+    selectAnchor_ = page.selectAnchor_;
+    selectEdge_ = page.selectEdge_;
+    smoothScrolls_ = std::move(page.smoothScrolls_);
+    scriptsAfterBodyRun_ = page.scriptsAfterBodyRun;
+    boundPage_ = static_cast<int>(index);
     scriptContext_.document = document_.get();
     scriptContext_.styles = &resolver_;
     scriptContext_.application = this;
     script::setContext(&scriptContext_);
+}
+
+void Application::flushBound() {
+    if (boundPage_ < 0 || static_cast<std::size_t>(boundPage_) >= pages_.size()) {
+        boundPage_ = -1;
+        return;
+    }
+    Page& page = *pages_[static_cast<std::size_t>(boundPage_)];
+    page.document = std::move(document_);
+    page.resolver = std::move(resolver_);
+    page.lastFocused_ = lastFocused_;
+    page.caretBytePos_ = caretBytePos_;
+    page.selectionAnchor_ = selectionAnchor_;
+    page.caretBlinkStart_ = caretBlinkStart_;
+    page.caretBlinkResets_ = caretBlinkResets_;
+    page.compositionText_ = std::move(compositionText_);
+    page.compositionCursor_ = compositionCursor_;
+    page.openSelect_ = openSelect_;
+    page.selectHighlight_ = selectHighlight_;
+    page.openDatalist_ = openDatalist_;
+    page.datalistHighlight_ = datalistHighlight_;
+    page.scrollDrag_ = scrollDrag_;
+    page.scrollDragX_ = scrollDragX_;
+    page.scrollGrab_ = scrollGrab_;
+    page.scrollTrack_ = scrollTrack_;
+    page.scrollTravel_ = scrollTravel_;
+    page.scrollMax_ = scrollMax_;
+    page.selectAnchor_ = selectAnchor_;
+    page.selectEdge_ = selectEdge_;
+    page.smoothScrolls_ = std::move(smoothScrolls_);
+    page.scriptsAfterBodyRun = scriptsAfterBodyRun_;
+    boundPage_ = -1;
+    // The context keeps pointing at the page's own members, so a script read
+    // between frames still sees a live page rather than moved-from holders.
+    scriptContext_.document = page.document.get();
+    scriptContext_.styles = &page.resolver;
+    scriptContext_.application = this;
+    script::setContext(&scriptContext_);
+}
+
+void Application::setDocument(std::unique_ptr<Document> document) {
+    flushBound();
+    Page& page = ensurePrimary();
+    page.document = std::move(document);
     // The open popup points into the old tree.
-    openSelect_ = nullptr;
-    selectHighlight_ = 0;
-    selectAnchor_ = 0;
-    selectEdge_ = 0;
-    openDatalist_ = nullptr;
-    datalistHighlight_ = 0;
-    scrollDrag_ = nullptr;
+    page.openSelect_ = nullptr;
+    page.selectHighlight_ = 0;
+    page.selectAnchor_ = 0;
+    page.selectEdge_ = 0;
+    page.openDatalist_ = nullptr;
+    page.datalistHighlight_ = 0;
+    page.scrollDrag_ = nullptr;
+    page.smoothScrolls_.clear();
     // A picked file for the old tree must never land in the new one.
     std::lock_guard<std::mutex> lock(fileMutex_);
     pendingFileInput_ = nullptr;
     pendingFiles_.clear();
+    // Tests drive `dispatch` straight after, which binds page 0 and picks this
+    // up; bind it now so reads between the two see the new page already.
+    bindPage(0);
 }
 
 // A page's title comes from its <window title>. A page without one leaves the
@@ -2877,10 +3000,19 @@ WindowConfig Application::windowConfigFrom(Document& document) {
     return config;
 }
 
-void Application::installPage(std::unique_ptr<Document> document, std::string_view href) {
+void Application::installPageAt(std::size_t index, std::unique_ptr<Document> document,
+                                std::string_view href) {
+    flushBound();
+    if (index >= pages_.size()) {
+        pages_.resize(index + 1);
+    }
+    if (!pages_[index]) {
+        pages_[index] = std::make_unique<Page>();
+    }
+    Page& page = *pages_[index];
     // A page brings its own stylesheets and nothing else does: the previous
     // page's rules go first, or a style it declared would outlive it.
-    resolver_.clearStyles();
+    page.resolver.clearStyles();
     for (const auto& link : document->stylesheets()) {
         auto css = resources_->readText(link.href);
         if (!css) {
@@ -2899,32 +3031,74 @@ void Application::installPage(std::unique_ptr<Document> document, std::string_vi
             },
             link.href);
         for (auto& rule : rules) {
-            resolver_.addRule(std::move(rule));
+            page.resolver.addRule(std::move(rule));
         }
-        resolver_.addKeyframes(std::move(keyframes));
+        page.resolver.addKeyframes(std::move(keyframes));
     }
-
-    setDocument(std::move(document));
+    page.document = std::move(document);
+    // A new tree starts with no focus, no caret, and no open popups: nothing
+    // from the page this one replaces carries over.
+    page.lastFocused_ = nullptr;
+    page.caretBytePos_ = 0;
+    page.selectionAnchor_ = 0;
+    page.caretBlinkStart_ = 0;
+    page.caretBlinkResets_ = 0;
+    page.compositionText_.clear();
+    page.compositionCursor_ = 0;
+    page.openSelect_ = nullptr;
+    page.selectHighlight_ = 0;
+    page.openDatalist_ = nullptr;
+    page.datalistHighlight_ = 0;
+    page.scrollDrag_ = nullptr;
+    page.selectAnchor_ = 0;
+    page.selectEdge_ = 0;
+    page.smoothScrolls_.clear();
 
     // `rem` and `font-size: <percentage>` on the root resolve against the new
     // page's own font size, so it has to be known before its first layout.
-    if (Element* body = document_->querySelector("body")) {
-        resolver_.setRootFontSize(resolver_.resolve(*body).fontSize);
+    if (Element* body = page.document->querySelector("body")) {
+        page.resolver.setRootFontSize(page.resolver.resolve(*body).fontSize);
     }
+    page.href = std::string(href);
+    // Neither script phase ran for this tree yet.
+    page.scriptsBeforeRun = false;
+    page.scriptsAfterBodyRun = false;
     if (platform_) {
-        const std::string title = windowTitleFrom(*document_);
+        // The title follows the page into whichever window shows it. With no
+        // binding yet (the entry page, or a headless load) that is the primary
+        // window, which is also what the old single-page path did.
+        const std::string title = windowTitleFrom(*page.document);
         if (!title.empty()) {
-            platform_->setWindowTitle(title);
+            WindowId target = platform_->primaryWindow();
+            for (const auto& [window, bound] : bindings_) {
+                if (bound == index) {
+                    target = window;
+                    break;
+                }
+            }
+            platform_->setWindowTitle(target, title);
         }
     }
-    currentPage_ = std::string(href);
-    // The new page's after-body scripts have not run yet.
-    scriptsAfterBodyRun_ = false;
     SDL_Log("loaded %s (%zu stylesheets, %zu scripts)", std::string(href).c_str(),
-            document_->stylesheets().size(), document_->scripts().size());
+            page.document->stylesheets().size(), page.document->scripts().size());
+    // Leave the working copy holding the new page, so reads between here and
+    // the next frame or event see it without waiting for a bind.
+    bindPage(index);
 }
 
-bool Application::loadPage(std::string_view href, std::string& error) {
+// The page `navigate` replaces: the primary window's page when there is one,
+// else the primary page. Other windows keep whatever they show.
+std::size_t Application::navigateIndex() const {
+    if (platform_) {
+        const int bound = pageForWindow(platform_->primaryWindow());
+        if (bound >= 0) {
+            return static_cast<std::size_t>(bound);
+        }
+    }
+    return 0;
+}
+
+bool Application::loadPageAt(std::size_t index, std::string_view href, std::string& error) {
     if (!resources_) {
         error = "no project to load " + std::string(href) + " from";
         return false;
@@ -2941,8 +3115,57 @@ bool Application::loadPage(std::string_view href, std::string& error) {
                 parseError.message;
         return false;
     }
-    installPage(std::move(document), href);
+    installPageAt(index, std::move(document), href);
     return true;
+}
+
+bool Application::loadPage(std::string_view href, std::string& error) {
+    return loadPageAt(navigateIndex(), href, error);
+}
+
+WindowId Application::openPage(std::string_view href, std::string& error) {
+    if (!platform_) {
+        error = "no windows to open " + std::string(href) + " in";
+        return kInvalidWindow;
+    }
+    const std::size_t index = pages_.size();
+    if (!loadPageAt(index, href, error)) {
+        return kInvalidWindow;
+    }
+    // `loadPageAt` leaves the new page bound, so its document is the working
+    // copy -- the page slot itself holds a null until the next flush.
+    WindowId id = platform_->openWindow(windowConfigFrom(*document_), error);
+    if (id == kInvalidWindow) {
+        // The page loaded but no window did: leave no unreachable page behind.
+        flushBound();
+        pages_.pop_back();
+        return kInvalidWindow;
+    }
+    bindings_[id] = index;
+    return id;
+}
+
+void Application::dropClosedPages() {
+    if (!platform_) {
+        return;
+    }
+    flushBound();
+    for (WindowId id : platform_->closedWindows()) {
+        const auto bound = bindings_.find(id);
+        if (bound == bindings_.end()) {
+            continue;
+        }
+        const std::size_t gone = bound->second;
+        bindings_.erase(bound);
+        if (gone < pages_.size()) {
+            pages_.erase(pages_.begin() + static_cast<std::ptrdiff_t>(gone));
+            for (auto& [window, index] : bindings_) {
+                if (index > gone) {
+                    --index;
+                }
+            }
+        }
+    }
 }
 
 bool Application::navigate(std::string_view href) {
@@ -2991,10 +3214,15 @@ bool Application::start(std::string_view entrySuiPath, std::string& error) {
     platform_ = makePlatform();
     if (!platform_->initialize(windowConfigFrom(*document_), error)) {
         platform_.reset();
+        flushBound();
+        pages_.clear();
+        bindings_.clear();
         document_.reset();
         script::setContext(nullptr);
         return false;
     }
+    // The entry window shows the entry page. Later pages bind when they open.
+    bindings_[platform_->primaryWindow()] = 0;
     return true;
 }
 
@@ -3036,6 +3264,14 @@ void Application::updateCursor(Element* target) {
 }
 
 void Application::dispatch(const InputEvent& event) {
+    // The event belongs to its window's page; a synthetic event with no window
+    // belongs to the primary page. The working copy stays bound afterwards, so
+    // reads between events see the page they just touched.
+    const int page = pageForEvent(event);
+    if (page < 0) {
+        return;
+    }
+    bindPage(static_cast<std::size_t>(page));
     if (!document_ || !document_->root()) {
         return;
     }
@@ -3899,9 +4135,6 @@ void Application::ensureFrameStartup() {
         SDL_Log("no font available; text will not render");
     }
 
-    // Scripts placed before <body> run before anything is drawn.
-    runScripts(false);
-
     // `@media` is evaluated against the viewport and the resolver starts with
     // none, so an unreported size would read as 0x0 and let every `max-width`
     // rule through. Report it before the first resolve, not after it.
@@ -4050,6 +4283,22 @@ bool Application::renderFrame(WindowId id) {
         return false;
     }
     const bool isPrimary = (id == platform_->primaryWindow());
+    dropClosedPages();
+    const int page = pageForWindow(id);
+    if (page < 0) {
+        // A window with no page shows a panel, like a page with no root. Flush
+        // first, so no other page's tree paints into it.
+        flushBound();
+    } else {
+        bindPage(static_cast<std::size_t>(page));
+        // A page opened later runs its own before-body scripts, not the entry
+        // page's again.
+        Page& shown = *pages_[static_cast<std::size_t>(page)];
+        if (!shown.scriptsBeforeRun) {
+            runScripts(false);
+            shown.scriptsBeforeRun = true;
+        }
+    }
         int width = 0;
         int height = 0;
         platform_->windowSize(id, width, height);
@@ -4635,6 +4884,12 @@ void Application::run() {
     while (platform_ && platform_->pumpEvents()) {
         ++framesPumped_;
         dropClosedFrames();
+        dropClosedPages();
+        if (platform_->windows().empty()) {
+            // The last window closed: a running loop with nothing to show is a
+            // hang, so the app quits the way a last-window close always has.
+            break;
+        }
         // One frame per open window. Each window keeps its own skip state, so an
         // idle window repaints nothing while its neighbour paints.
         for (WindowId id : platform_->windows()) {
@@ -4660,6 +4915,7 @@ void Application::run() {
 }
 
 void Application::shutdown() {
+    flushBound();
     script::setContext(nullptr);
     if (platform_) {
         platform_->shutdown();

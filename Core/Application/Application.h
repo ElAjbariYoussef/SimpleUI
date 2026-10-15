@@ -25,6 +25,50 @@ class Element;
 class TextFont;
 class Renderer;
 
+// One page: a document plus everything that belongs to showing it. A page that
+// is bound to a window paints there; a page with no window is headless (a test
+// driving `dispatch` directly, or a page between windows). The application
+// keeps one working copy of this state as its own members -- the fields below
+// mirror them -- and `bindPage` / `flushBound` move the working copy in and out
+// of the page the current event or frame belongs to, so the fifty methods that
+// read the working copy never learn pages exist. `boundPage_` says which page
+// the working copy currently holds (-1: none, freshly flushed).
+struct Page {
+    std::unique_ptr<Document> document;
+    StyleResolver resolver;
+    // The href the page was loaded from, named by `currentPage()`.
+    std::string href;
+    // Before-body scripts run once per page, the first time it frames -- a page
+    // opened later must run its own, not inherit the entry page having run.
+    bool scriptsBeforeRun = false;
+    bool scriptsAfterBodyRun = false;
+    Element* lastFocused_ = nullptr;
+    std::size_t caretBytePos_ = 0;
+    std::size_t selectionAnchor_ = 0;
+    std::uint64_t caretBlinkStart_ = 0;
+    std::uint64_t caretBlinkResets_ = 0;
+    std::string compositionText_;
+    int compositionCursor_ = 0;
+    Element* openSelect_ = nullptr;
+    std::size_t selectHighlight_ = 0;
+    Element* openDatalist_ = nullptr;
+    std::size_t datalistHighlight_ = 0;
+    Element* scrollDrag_ = nullptr;
+    bool scrollDragX_ = false;
+    float scrollGrab_ = 0.0f;
+    float scrollTrack_ = 0.0f;
+    float scrollTravel_ = 0.0f;
+    float scrollMax_ = 0.0f;
+    std::size_t selectAnchor_ = 0;
+    std::size_t selectEdge_ = 0;
+    struct SmoothScroll {
+        Element* box = nullptr;
+        float left = 0.0f;
+        float top = 0.0f;
+    };
+    std::vector<SmoothScroll> smoothScrolls_;
+};
+
 // Where a list item's outside marker lands. An image that loaded takes its own
 // size, vertically centred in the item box and a gap left of it; a zero size
 // (no image, or one that failed to load) falls back to the glyph, whose size
@@ -82,8 +126,20 @@ public:
     // the page loaded. This is what navigation goes through.
     bool navigate(std::string_view href);
 
-    // The href of the page on screen, empty before the first load.
-    const std::string& currentPage() const noexcept { return currentPage_; }
+    // The href of the primary page on screen, empty before the first load.
+    const std::string& currentPage() const;
+
+    // The document a window shows, or null when it shows none (or there is no
+    // such window). Null is also what a window shows right after its page was
+    // dropped, before anything binds another.
+    Document* pageDocument(WindowId id) const;
+
+    // Opens a page in a new window: loads it like `loadPage`, shows it in a
+    // window built from its own `<window>` element, and binds the two. Returns
+    // the window, or `kInvalidWindow` (with an error) when the page will not
+    // load or no window opens. This is the call behind `<a target="_blank">`;
+    // `navigate` stays the same-window one.
+    WindowId openPage(std::string_view href, std::string& error);
 
     // Advances every `scroll-behavior: smooth` scroll one frame and reports
     // whether one is still moving. The frame loop calls it before deciding the
@@ -159,10 +215,14 @@ private:
     static WindowConfig windowConfigFrom(Document& document);
     // A page's title bar text, empty when it declares none.
     static std::string windowTitleFrom(Document& document);
-    // Makes an already-parsed document the live page. Everything a page brings
-    // with it is loaded here, so the entry file and every navigation take the
-    // same path.
-    void installPage(std::unique_ptr<Document> document, std::string_view href);
+    // Makes an already-parsed document the live page at `index`, loading
+    // everything the page brings with it. The entry file and every navigation
+    // take the same path; the working copy is left holding the new page.
+    void installPageAt(std::size_t index, std::unique_ptr<Document> document,
+                       std::string_view href);
+    bool loadPageAt(std::size_t index, std::string_view href, std::string& error);
+    // The page `navigate` replaces: the primary window's, else the primary.
+    std::size_t navigateIndex() const;
 
     // Resolves `target`'s `cursor` and, when it changed, hands the keyword to the
     // platform. Called on every pointer move, so an unchanged hover is a no-op.
@@ -212,7 +272,6 @@ private:
         int width = -1;
         int height = -1;
     };
-    FrameStamp stamp_;
     // One window's skip state. The stamp is per window so an idle window stays
     // quiet while another paints; the renderer is per window because it caches
     // clip state and mesh scratch that belong to one SDL renderer.
@@ -247,9 +306,6 @@ private:
     bool resizeRequested_ = false;
     // The drawable size the renderer's logical canvas is currently set to, which is
     // also what made the frame loop mark a size change as stale.
-    int viewportWidth_ = -1;
-    int viewportHeight_ = -1;
-    bool frameDrawn_ = false;
     bool scriptsAfterBodyRun_ = false;
 
     // Only observable through SUI_LOG_FRAMES, which exists so the skip path can
@@ -312,16 +368,33 @@ private:
     // jumps it, and the marks always span anchor..edge.
     std::size_t selectEdge_ = 0;
     // One box easing toward a scroll target, for `scroll-behavior: smooth`. A
-    // second notch on the same box retargets it rather than queueing.
-    struct SmoothScroll {
-        Element* box = nullptr;
-        float left = 0.0f;
-        float top = 0.0f;
-    };
-    std::vector<SmoothScroll> smoothScrolls_;
+    // second notch on the same box retargets it rather than queueing. The
+    // working copy of the bound page's scrolls; see `bindPage`.
+    std::vector<Page::SmoothScroll> smoothScrolls_;
     void queueSmoothScroll(Element& box, float left, float top);
-    // The href of the page on screen, set by installPage.
-    std::string currentPage_;
+    // Every live page, headless or window-bound. `pages_[0]` is the primary
+    // page: the one `setDocument` fills, `document()` returns, and `navigate`
+    // replaces when no window names another.
+    std::vector<std::unique_ptr<Page>> pages_;
+    // Which page each window shows. A window with no entry shows a panel.
+    std::map<WindowId, std::size_t> bindings_;
+    // Which page the working copy currently holds, or -1 for none.
+    int boundPage_ = -1;
+    // The primary page, creating it when nothing loaded yet.
+    Page& ensurePrimary();
+    // The page an event belongs to: its window's page, or the primary page for
+    // a synthetic event with no window. -1 when the window shows no page.
+    int pageForEvent(const InputEvent& event) const;
+    // The page a window shows, or -1 for a panel.
+    int pageForWindow(WindowId id) const;
+    // Moves the working copy into the named page (`bindPage`) or back out of
+    // whichever page holds it (`flushBound`). The script context follows the
+    // working copy so handlers always see the page they belong to.
+    void bindPage(std::size_t index);
+    void flushBound();
+    // Drops the pages whose windows the platform just closed. The working copy
+    // is flushed first, so a page being painted is never erased from under it.
+    void dropClosedPages();
 };
 
 }  // namespace sui
