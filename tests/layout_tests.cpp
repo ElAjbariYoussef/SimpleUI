@@ -5157,6 +5157,9 @@ void testScrollSnap() {
         .l { scroll-padding-top: 5px }
         .m { scroll-padding: banana }
         .n { scroll-padding: 1px 2px 3px 4px }
+        .o { scroll-margin: 5px 6px }
+        .p { scroll-margin-left: 7px }
+        .q { scroll-margin: banana }
     )");
     sui::StyleResolver resolver;
     resolver.setRules(rules);
@@ -5165,13 +5168,14 @@ void testScrollSnap() {
         "<div class=\"d\"></div><div class=\"e\"></div><div class=\"f\"></div>"
         "<div class=\"g\"></div><div class=\"h\"></div><div class=\"i\"></div>"
         "<div class=\"j\"></div><div class=\"k\"></div><div class=\"l\"></div>"
-        "<div class=\"m\"></div><div class=\"n\"></div>";
+        "<div class=\"m\"></div><div class=\"n\"></div><div class=\"o\"></div>"
+        "<div class=\"p\"></div><div class=\"q\"></div>";
     auto body = parseOrNull((std::string("<sui><body>") + kClasses + "</body></sui>").c_str());
     if (!body) {
         return;
     }
     const std::vector<ComputedStyle> styles = bodyStyles(*body, resolver);
-    if (styles.size() < 14) {
+    if (styles.size() < 17) {
         check(false, "snap elements found");
         return;
     }
@@ -5208,6 +5212,15 @@ void testScrollSnap() {
               styles[13].scrollPadding.bottom.value == 3.0f &&
               styles[13].scrollPadding.left.value == 4.0f,
           "four paddings expand clockwise");
+    check(styles[14].scrollMargin.top.value == 5.0f &&
+              styles[14].scrollMargin.bottom.value == 5.0f &&
+              styles[14].scrollMargin.left.value == 6.0f &&
+              styles[14].scrollMargin.right.value == 6.0f,
+          "two margins expand vertical and horizontal");
+    check(styles[15].scrollMargin.left.value == 7.0f &&
+              styles[15].scrollMargin.top.value == 0.0f,
+          "a left longhand sets one side");
+    check(styles[16].scrollMargin.top.value == 0.0f, "a bad margin drops");
 }
 
 // `border-image` describes a 9-patch like the mask border but paints it:

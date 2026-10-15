@@ -2859,6 +2859,30 @@ std::pair<float, float> Application::snapOffsets(Element& scroller,
     const auto alignX = [&](Element* area) {
         return resolver_.resolve(*area).snapAlignX;
     };
+    // Each snap area carries its own margins: start positions measure from
+    // outside the leading margin, end positions to outside the trailing one.
+    // Percentages ride the scroller, like padding; negatives pull the snap
+    // point back across the area's edge.
+    const auto marginLeft = [&](Element* area) {
+        const ComputedStyle style = resolver_.resolve(*area);
+        return style.scrollMargin.left.resolve(scroller.clientWidth(), style.fontSize,
+                                               rootFontSize);
+    };
+    const auto marginRight = [&](Element* area) {
+        const ComputedStyle style = resolver_.resolve(*area);
+        return style.scrollMargin.right.resolve(scroller.clientWidth(), style.fontSize,
+                                                rootFontSize);
+    };
+    const auto marginTop = [&](Element* area) {
+        const ComputedStyle style = resolver_.resolve(*area);
+        return style.scrollMargin.top.resolve(scroller.clientHeight(), style.fontSize,
+                                              rootFontSize);
+    };
+    const auto marginBottom = [&](Element* area) {
+        const ComputedStyle style = resolver_.resolve(*area);
+        return style.scrollMargin.bottom.resolve(scroller.clientHeight(), style.fontSize,
+                                                 rootFontSize);
+    };
     const auto alignY = [&](Element* area) {
         return resolver_.resolve(*area).snapAlignY;
     };
@@ -2902,17 +2926,19 @@ std::pair<float, float> Application::snapOffsets(Element& scroller,
     if ((scrolled.snapAxis == Axis::X || scrolled.snapAxis == Axis::Both) && movedX) {
         const float max = scroller.scrollWidth() - scroller.clientWidth();
         left = settle(true, fromX, scroller.clientWidth(), max, alignX,
-                      [&](Element* area) { return area->layoutX() - portX; },
+                      [&](Element* area) { return area->layoutX() - marginLeft(area) - portX; },
                       [&](Element* area) {
-                          return area->layoutX() + area->layoutWidth() - (portX + portW);
+                          return area->layoutX() + area->layoutWidth() + marginRight(area) -
+                                 (portX + portW);
                       });
     }
     if ((scrolled.snapAxis == Axis::Y || scrolled.snapAxis == Axis::Both) && movedY) {
         const float max = scroller.scrollHeight() - scroller.clientHeight();
         top = settle(true, fromY, scroller.clientHeight(), max, alignY,
-                     [&](Element* area) { return area->layoutY() - portY; },
+                     [&](Element* area) { return area->layoutY() - marginTop(area) - portY; },
                      [&](Element* area) {
-                         return area->layoutY() + area->layoutHeight() - (portY + portH);
+                         return area->layoutY() + area->layoutHeight() + marginBottom(area) -
+                                (portY + portH);
                      });
     }
     return {left, top};

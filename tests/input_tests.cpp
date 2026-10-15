@@ -840,6 +840,13 @@ int main() {
             "<div style=\"height:60px;scroll-snap-align:start\"></div>"
             "<div style=\"height:60px;scroll-snap-align:start\"></div>"
             "</div>"
+            "<div id=\"g\" style=\"height:100px;overflow-y:auto;scroll-snap-type:y "
+            "mandatory\">"
+            "<div style=\"height:60px;scroll-snap-align:start\"></div>"
+            "<div style=\"height:60px;scroll-snap-align:start;scroll-margin-top:10px\">"
+            "</div>"
+            "<div style=\"height:60px;scroll-snap-align:start\"></div>"
+            "</div>"
             "</body></sui>", err);
         check(doc != nullptr, "snap document parsed");
         if (doc) {
@@ -847,8 +854,9 @@ int main() {
             sui::Element* p = doc->getElementById("p");
             sui::Element* n = doc->getElementById("n");
             sui::Element* d = doc->getElementById("d");
-            check(m && p && n && d, "snap elements found");
-            if (m && p && n && d) {
+            sui::Element* g = doc->getElementById("g");
+            check(m && p && n && d && g, "snap elements found");
+            if (m && p && n && d && g) {
                 app.setDocument(std::move(doc));
 
                 sui::StyleResolver layoutResolver;
@@ -881,6 +889,9 @@ int main() {
                 // Padding insets the snapport: the 60px starts snap at 40.
                 wheel(d, 0.0f, -1.0f);
                 check(d->scrollTop() == 40.0f, "padding shifts snap points");
+                // A margin offsets its own area: the second 60px start snaps at 50.
+                wheel(g, 0.0f, -1.0f);
+                check(g->scrollTop() == 50.0f, "margins shift snap points");
             }
         }
     }

@@ -681,6 +681,11 @@ struct ComputedStyle {
         Length left;
     };
     ScrollPadding scrollPadding;
+    // The snap offset around each snap area, per side. Start positions shift
+    // by the leading margin, end positions by the trailing one, and centres
+    // split the expanded box. Percentages resolve against the scroller, like
+    // padding. Not inherited.
+    ScrollPadding scrollMargin;
 
     // Grid track sizing from `grid-template-columns` / `grid-template-rows`. A
     // track is a fixed length, an `fr` share of the leftover space, or `auto`
