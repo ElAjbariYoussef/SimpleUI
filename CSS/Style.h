@@ -592,6 +592,9 @@ struct ComputedStyle {
     // only knows bold-or-not from the single font file, so intermediate steps
     // have no gradated rendering.
     int fontWeight = 400;
+    // Small capitals: lowercase renders as shrunken uppercase. Inherited.
+    enum class FontVariant : std::uint8_t { Normal, SmallCaps };
+    FontVariant fontVariant = FontVariant::Normal;
     float lineHeight = 1.2f;  // multiplier
     // Pair kerning in shaped runs. Inherited; `none` keeps ligatures and
     // marks but sets pairs unkerned.
@@ -965,6 +968,7 @@ struct ComputedStyle {
         SpecifiedFontKerning = 1u << 22,
         SpecifiedListStyleImage = 1u << 23,
         SpecifiedFontStretch = 1u << 24,
+        SpecifiedFontVariant = 1u << 28,
         SpecifiedScrollBehavior = 1u << 25,
         SpecifiedColorScheme = 1u << 26,
         // A marker, not a property: the element still carries the user-agent
@@ -1134,6 +1138,9 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     }
     if (!(style.specified & ComputedStyle::SpecifiedFontKerning)) {
         style.fontKerning = parent.fontKerning;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedFontVariant)) {
+        style.fontVariant = parent.fontVariant;
     }
     if (!(style.specified & ComputedStyle::SpecifiedFontStretch)) {
         style.fontStretch = parent.fontStretch;

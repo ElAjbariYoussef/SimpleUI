@@ -18,7 +18,28 @@ struct ShapedGlyph {
     float advance = 0.0f;
     float xOffset = 0.0f;
     float yOffset = 0.0f;
+    // Set when `font-variant: small-caps` shrank this glyph: it rasterizes an
+    // uppercase letter at small-cap size to match its shrunken advance.
+    bool small = false;
 };
+
+// Synthetic small caps shrink uppercase-substituted glyphs to this of their
+// size, which is what the-sized-down capitals of print read as.
+inline constexpr float kSmallCapScale = 0.8f;
+
+// A Latin lowercase codepoint's uppercase, or 0 when it has none here. Only
+// ASCII and Latin-1 are mapped, so other scripts render unchanged; the length
+// rule in the shaper (same byte length or no substitution) keeps clusters
+// aligned without a locale.
+inline unsigned int smallCapUpper(unsigned int cp) noexcept {
+    if (cp >= 'a' && cp <= 'z') {
+        return cp - 32u;
+    }
+    if ((cp >= 0xE0u && cp <= 0xF6u) || (cp >= 0xF8u && cp <= 0xFEu)) {
+        return cp - 32u;
+    }
+    return 0;
+}
 
 // Cached glyph metrics for a codepoint at a given font size. stb_truetype gives
 // per-glyph advance; we track horizontal advance and vertical metrics.
@@ -60,13 +81,14 @@ public:
     // (anything past ASCII) go through HarfBuzz so ligatures, kerning, and
     // mark positioning measure what renders. `kern` follows `font-kerning`.
     float measureText(std::string_view text, float size, bool kern = true,
-                   float stretch = 1.0f) const;
+                   float stretch = 1.0f, bool smallCaps = false) const;
 
     // Shapes a run with HarfBuzz: glyph ids with clusters, advances, and mark
     // offsets. Empty when there is no font. Direction stays left-to-right;
     // bidirectional reordering is not shaped yet.
     std::vector<ShapedGlyph> shapeText(std::string_view text, float size, bool kern = true,
-                                       float stretch = 1.0f) const;
+                                       float stretch = 1.0f,
+                                       bool smallCaps = false) const;
 
     // Whether a run contains complex script content (anything past ASCII),
     // where ligatures, marks, and non-Latin scripts live. Informational: all
@@ -83,14 +105,15 @@ public:
     // glyphs to match its stretched advances rather than just spreading them.
     // False for a glyph that draws nothing (a space, or no font).
     bool glyphBitmapBox(unsigned int glyphId, float size, float stretch, int& x0, int& y0,
-                        int& width, int& height) const;
+                        int& width, int& height, bool smallCaps = false) const;
 
     // Renders a string to a texture for a given color and size. Caller owns the
     // returned texture (SDL_DestroyTexture). The texture is exactly
     // (measureText(text, size), verticalMetrics(size).height) pixels.
     SDL_Texture* renderText(SDL_Renderer* renderer, std::string_view text, float size,
                             SDL_Color color, bool bold = false, bool italic = false,
-                            bool kern = true, float stretch = 1.0f) const;
+                            bool kern = true, float stretch = 1.0f,
+                            bool smallCaps = false) const;
 
     bool hasFont() const noexcept { return font_ != nullptr; }
 

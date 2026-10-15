@@ -5839,6 +5839,44 @@ void testFontWeight() {
     check(std::string(serial("h")) == "400", "the default serializes as 400");
 }
 
+// `font-variant` switches synthetic small caps on and off, inherits, and
+// serializes. Anything but the two keywords keeps the previous winner.
+void testFontVariant() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"a\" style=\"font-variant:small-caps\"><span id=\"c\">hi</span></div>"
+        "<div id=\"b\" style=\"font-variant:normal\">hi</div>"
+        "<div id=\"g\" style=\"font-variant:banana\">hi</div>"
+        "<div id=\"h\">hi</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* a = el("a");
+    Element* c = el("c");
+    Element* b = el("b");
+    Element* g = el("g");
+    Element* h = el("h");
+    check(a && c && b && g && h, "variant elements found");
+    if (!a || !c || !b || !g || !h) {
+        return;
+    }
+    using Variant = ComputedStyle::FontVariant;
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    check(resolver.resolve(*a).fontVariant == Variant::SmallCaps, "small-caps parses");
+    check(resolver.resolve(*c).fontVariant == Variant::SmallCaps, "the variant inherits");
+    check(resolver.resolve(*b).fontVariant == Variant::Normal, "normal parses");
+    check(resolver.resolve(*g).fontVariant == Variant::Normal, "garbage keeps normal");
+    check(resolver.resolve(*h).fontVariant == Variant::Normal, "the default is normal");
+    const auto serial = [&](const char* id) {
+        return sui::StyleResolver::propertyValue(resolver.resolve(*el(id)), "font-variant");
+    };
+    check(std::string(serial("a")) == "small-caps", "small-caps serializes");
+    check(std::string(serial("h")) == "normal", "the default serializes as normal");
+}
+
 void testFontStretch() {
     auto document = parseOrNull(
         "<sui><body>"
@@ -8004,6 +8042,7 @@ int main() {
     testFontKerning();
     testFontStretch();
     testFontWeight();
+    testFontVariant();
     testScrollBehavior();
     testColorScheme();
     testPrefersColorScheme();

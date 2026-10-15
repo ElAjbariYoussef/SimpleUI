@@ -70,6 +70,47 @@ unsigned int decodeUtf8(std::string_view text, std::size_t& i) {
 // scale has to come from the em. `stbtt_ScaleForPixelHeight` would map the full font
 // height onto the size instead, which for DejaVu Sans (2384 units of ascent+descent on
 // a 2048 em) draws every glyph 16% smaller than the stylesheet asked for.
+// Encodes one codepoint as UTF-8, returning the byte count.
+int encodeUtf8(unsigned int cp, char out[4]) {
+    if (cp < 0x80) {
+        out[0] = static_cast<char>(cp);
+        return 1;
+    }
+    if (cp < 0x800) {
+        out[0] = static_cast<char>(0xC0 | (cp >> 6));
+        out[1] = static_cast<char>(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        out[0] = static_cast<char>(0xE0 | (cp >> 12));
+        out[1] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = static_cast<char>(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    out[0] = static_cast<char>(0xF0 | (cp >> 18));
+    out[1] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = static_cast<char>(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+// A small-caps substitution for one decoded codepoint: its uppercase when that
+// encodes to the same byte length (so clusters stay aligned), or 0 to leave it.
+// Only the mapped Latin ranges substitute; every other script renders unchanged.
+bool smallCapSub(unsigned int cp, std::size_t length, unsigned int& out) {
+    const unsigned int upper = smallCapUpper(cp);
+    if (!upper) {
+        return false;
+    }
+    char encoded[4] = {0, 0, 0, 0};
+    if (encodeUtf8(upper, encoded) != static_cast<int>(length)) {
+        return false;
+    }
+    out = upper;
+    return true;
+}
+
+
 float emScale(const stbtt_fontinfo* info, float size) {
     return stbtt_ScaleForMappingEmToPixels(info, size);
 }
@@ -214,13 +255,13 @@ TextFont::VerticalMetrics TextFont::verticalMetrics(float size) const {
 }
 
 float TextFont::measureText(std::string_view text, float size, bool kern,
-                          float stretch) const {
+                          float stretch, bool smallCaps) const {
     if (!font_ || size <= 0.0f) {
         return 0.0f;
     }
     if (hbFont_) {
         float total = 0.0f;
-        for (const ShapedGlyph& glyph : shapeText(text, size, kern, stretch)) {
+        for (const ShapedGlyph& glyph : shapeText(text, size, kern, stretch, smallCaps)) {
             total += glyph.advance;
         }
         return total;
@@ -228,8 +269,18 @@ float TextFont::measureText(std::string_view text, float size, bool kern,
     float total = 0.0f;
     std::size_t i = 0;
     while (i < text.size()) {
+        const std::size_t start = i;
         const unsigned int cp = decodeUtf8(text, i);
-        total += metrics(cp, size).advance;
+        unsigned int shaped = cp;
+        float cap = 1.0f;
+        if (smallCaps) {
+            unsigned int upper = 0;
+            if (smallCapSub(cp, i - start, upper)) {
+                shaped = upper;
+                cap = kSmallCapScale;
+            }
+        }
+        total += metrics(shaped, size).advance * cap;
     }
     return total;
 }
@@ -244,7 +295,8 @@ bool TextFont::needsShaping(std::string_view text) {
 }
 
 bool TextFont::glyphBitmapBox(unsigned int glyphId, float size, float stretch, int& x0,
-                              int& y0, int& width, int& height) const {
+                              int& y0, int& width, int& height,
+                              bool smallCaps) const {
     x0 = 0;
     y0 = 0;
     width = 0;
@@ -253,7 +305,8 @@ bool TextFont::glyphBitmapBox(unsigned int glyphId, float size, float stretch, i
         return false;
     }
     auto* info = static_cast<stbtt_fontinfo*>(font_);
-    const float scale = emScale(info, size);
+    const float cap = smallCaps ? kSmallCapScale : 1.0f;
+    const float scale = emScale(info, size) * cap;
     int x1 = 0, y1 = 0;
     stbtt_GetGlyphBitmapBox(info, static_cast<int>(glyphId), scale * stretch, scale, &x0, &y0,
                             &x1, &y1);
@@ -277,10 +330,39 @@ std::size_t TextFont::glyphCount(std::string_view text, bool kern,
 }
 
 std::vector<ShapedGlyph> TextFont::shapeText(std::string_view text, float size,
-                                              bool kern, float stretch) const {
+                                              bool kern, float stretch,
+                                              bool smallCaps) const {
     std::vector<ShapedGlyph> out;
     if (!hbFont_ || text.empty() || size <= 0.0f) {
         return out;
+    }
+    // Small caps shape the uppercase: every Latin lowercase becomes its capital
+    // at the same byte length (anything that would change length stays as-is),
+    // so clusters still index the text the caller holds. The flags mark which
+    // bytes were lowered, and their advances shrink to match the smaller caps.
+    std::string shaped;
+    std::vector<bool> lowered;
+    if (smallCaps) {
+        shaped.reserve(text.size());
+        std::size_t i = 0;
+        while (i < text.size()) {
+            const std::size_t start = i;
+            const unsigned int cp = decodeUtf8(text, i);
+            const std::size_t length = i - start;
+            unsigned int upper = 0;
+            const bool flag = smallCapSub(cp, length, upper);
+            if (flag) {
+                char encoded[4] = {0, 0, 0, 0};
+                const int bytes = encodeUtf8(upper, encoded);
+                shaped.append(encoded, static_cast<std::size_t>(bytes));
+            } else {
+                shaped.append(text.substr(start, length));
+            }
+            for (std::size_t k = 0; k < length; ++k) {
+                lowered.push_back(flag);
+            }
+        }
+        text = shaped;
     }
     hb_font_t* font = static_cast<hb_font_t*>(hbFont_);
     // 26.6 fixed point: advances come back in px after one divide.
@@ -309,6 +391,12 @@ std::vector<ShapedGlyph> TextFont::shapeText(std::string_view text, float size,
         glyph.advance = static_cast<float>(positions[i].x_advance) / 64.0f;
         glyph.xOffset = static_cast<float>(positions[i].x_offset) / 64.0f;
         glyph.yOffset = static_cast<float>(positions[i].y_offset) / 64.0f;
+        if (!lowered.empty() && infos[i].cluster < lowered.size() &&
+            lowered[infos[i].cluster]) {
+            glyph.small = true;
+            glyph.advance *= kSmallCapScale;
+            glyph.xOffset *= kSmallCapScale;
+        }
         out.push_back(glyph);
     }
     hb_buffer_destroy(buffer);
@@ -317,7 +405,8 @@ std::vector<ShapedGlyph> TextFont::shapeText(std::string_view text, float size,
 
 SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
                                   float size, SDL_Color color, bool bold,
-                                  bool italic, bool kern, float stretch) const {
+                                  bool italic, bool kern, float stretch,
+                                  bool smallCaps) const {
     if (!font_ || !renderer || text.empty() || size <= 0.0f) {
         return nullptr;
     }
@@ -336,8 +425,9 @@ SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
     const int boldRight = bold ? 1 : 0;
 
     const int h = static_cast<int>(std::ceil(vm.height));
-    const int w = static_cast<int>(std::ceil(measureText(text, size, kern, stretch))) +
-                  italicLeft +
+    const int w =
+        static_cast<int>(std::ceil(measureText(text, size, kern, stretch, smallCaps))) +
+        italicLeft +
                   italicRight + boldRight;
     if (w <= 0 || h <= 0) {
         return nullptr;
@@ -370,7 +460,7 @@ SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
     float penX = 0.0f;
     const bool shaped = hbFont_ != nullptr;
     const std::vector<ShapedGlyph> glyphs =
-        shaped ? shapeText(text, size, kern, stretch) : std::vector<ShapedGlyph>{};
+        shaped ? shapeText(text, size, kern, stretch, smallCaps) : std::vector<ShapedGlyph>{};
     if (shaped && !glyphs.empty()) {
         // Shaped blit: glyph ids with advances and mark offsets from the
         // shaper, rasterized by stb from the same font bytes. stb takes the
@@ -379,10 +469,13 @@ SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
         const float scaleX = scale * stretch;
         for (const ShapedGlyph& glyph : glyphs) {
             int x0 = 0, y0 = 0, gw = 0, gh = 0;
-            if (glyphBitmapBox(glyph.glyph, size, stretch, x0, y0, gw, gh)) {
+            if (glyphBitmapBox(glyph.glyph, size, stretch, x0, y0, gw, gh, glyph.small)) {
                 std::vector<unsigned char> bmp(static_cast<std::size_t>(gw) *
                                                static_cast<std::size_t>(gh));
-                stbtt_MakeGlyphBitmap(info, bmp.data(), gw, gh, gw, scaleX, scale,
+                // A small cap rasterizes at its shrunken scale, matching the box
+                // above and the advance the shaper handed back.
+                const float cap = glyph.small ? kSmallCapScale : 1.0f;
+                stbtt_MakeGlyphBitmap(info, bmp.data(), gw, gh, gw, scaleX * cap, scale * cap,
                                        static_cast<int>(glyph.glyph));
                 for (int gy = 0; gy < gh; ++gy) {
                     const int destY = ascentPx + y0 + gy -
@@ -410,16 +503,28 @@ SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
     } else {
         std::size_t i = 0;
         while (i < text.size()) {
+        const std::size_t start = i;
         const unsigned int cp = decodeUtf8(text, i);
-        const GlyphMetrics gm = metrics(cp, size);
-        const int x0 = gm.x0;
-        const int y0 = gm.y0;
-        const int gw = gm.x1 - x0;
-        const int gh = gm.y1 - y0;
+        unsigned int shaped = cp;
+        float cap = 1.0f;
+        if (smallCaps) {
+            unsigned int upper = 0;
+            if (smallCapSub(cp, i - start, upper)) {
+                shaped = upper;
+                cap = kSmallCapScale;
+            }
+        }
+        const GlyphMetrics gm = metrics(shaped, size);
+        // A substituted cap shrinks its box and raster to match the advance the
+        // measurer handed back, the way the shaped path does.
+        const int x0 = static_cast<int>(std::lround(gm.x0 * cap));
+        const int y0 = static_cast<int>(std::lround(gm.y0 * cap));
+        const int gw = static_cast<int>(std::lround((gm.x1 - gm.x0) * cap));
+        const int gh = static_cast<int>(std::lround((gm.y1 - gm.y0) * cap));
         if (gw > 0 && gh > 0) {
             std::vector<unsigned char> bmp(static_cast<std::size_t>(gw) * static_cast<std::size_t>(gh));
-            stbtt_MakeCodepointBitmap(info, bmp.data(), gw, gh, gw, scale, scale,
-                                      static_cast<int>(cp));
+            stbtt_MakeCodepointBitmap(info, bmp.data(), gw, gh, gw, scale * cap, scale * cap,
+                                      static_cast<int>(shaped));
             for (int gy = 0; gy < gh; ++gy) {
                 const int destY = ascentPx + y0 + gy;
                 // Distance above the baseline; used by the italic shear.
@@ -438,7 +543,7 @@ SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
                 }
             }
         }
-        penX += gm.advance;
+        penX += gm.advance * cap;
         }
     }
 

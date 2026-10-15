@@ -4178,6 +4178,16 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.fontStretch = factor;
             s.specified |= ComputedStyle::SpecifiedFontStretch;
         }
+    } else if (property == "font-variant") {
+        // Only `small-caps` renders differently; anything else keeps normal.
+        // Garbage keeps the previous cascade winner.
+        if (value == "small-caps") {
+            s.fontVariant = ComputedStyle::FontVariant::SmallCaps;
+            s.specified |= ComputedStyle::SpecifiedFontVariant;
+        } else if (value == "normal") {
+            s.fontVariant = ComputedStyle::FontVariant::Normal;
+            s.specified |= ComputedStyle::SpecifiedFontVariant;
+        }
     } else if (property == "font-kerning") {
         if (value == "none") {
             s.fontKerning = false;
@@ -5762,6 +5772,10 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "color") return color(style.color);
     if (property == "font-kerning") return style.fontKerning ? "normal" : "none";
+    if (property == "font-variant") {
+        return style.fontVariant == ComputedStyle::FontVariant::SmallCaps ? "small-caps"
+                                                                          : "normal";
+    }
     if (property == "scroll-behavior") {
         return style.scrollBehavior == ComputedStyle::ScrollBehavior::Smooth ? "smooth"
                                                                             : "auto";

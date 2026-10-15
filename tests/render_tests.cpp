@@ -1137,6 +1137,33 @@ void testShaping() {
     check(wide / kerned > 1.4f && wide / kerned < 1.6f, "expansion scales by the factor");
     check(narrow / kerned > 0.4f && narrow / kerned < 0.6f, "condensation scales by the factor");
     check(font.measureText("AV", 16.0f, true, 1.0f) == kerned, "a normal stretch is identity");
+    // Small caps substitute uppercase and shrink to four fifths: already-upper
+    // text measures identical, lowered text measures 0.8x its capitals.
+    const float caps = font.measureText("ABC", 16.0f, false);
+    const float small = font.measureText("abc", 16.0f, false, 1.0f, true);
+    check(font.measureText("ABC", 16.0f, false, 1.0f, true) == caps,
+          "capitals ignore small caps");
+    check(std::fabs(small / caps - 0.8f) < 0.05f, "lowercase shrinks to its capitals");
+    const auto smallGlyphs = font.shapeText("abc", 16.0f, false, 1.0f, true);
+    const auto capGlyphs = font.shapeText("ABC", 16.0f, false);
+    check(smallGlyphs.size() == capGlyphs.size(), "substitution keeps glyph count");
+    bool sameIds = !smallGlyphs.empty();
+    bool allSmall = !smallGlyphs.empty();
+    for (std::size_t i = 0; i < smallGlyphs.size() && i < capGlyphs.size(); ++i) {
+        sameIds = sameIds && smallGlyphs[i].glyph == capGlyphs[i].glyph;
+        allSmall = allSmall && smallGlyphs[i].small;
+    }
+    check(sameIds, "lowercase shapes to capital glyph ids");
+    check(allSmall, "substituted glyphs carry the small flag");
+    check(!font.shapeText("ABC", 16.0f).front().small, "capitals carry no flag");
+    // Latin-1 lowers too; anything unmapped measures untouched.
+    const float grave = font.measureText("\xC3\x80", 16.0f, false);
+    check(std::fabs(font.measureText("\xC3\xA0", 16.0f, false, 1.0f, true) / grave - 0.8f) <
+              0.05f,
+          "latin-1 lowercase shrinks as well");
+    check(font.measureText("\xCE\xB1", 16.0f, false, 1.0f, true) ==
+              font.measureText("\xCE\xB1", 16.0f, false),
+          "greek renders unchanged");
     // The raster follows the advances: the glyphs themselves widen and narrow.
     const unsigned int lamGlyph = font.shapeText("\xD9\x84", 16.0f).front().glyph;
     int lx = 0, ly = 0, lw = 0, lh = 0;
