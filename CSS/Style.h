@@ -256,7 +256,12 @@ struct ComputedStyle {
     // progress); `auto` leaves `hasAccentColor` clear and the controls paint
     // their defaults. Inherited like `color`.
     SDL_Color accentColor = {0, 0, 0, 255};
+    // An explicit `caret-color` for text insertion carets; `auto` leaves
+    // `hasCaretColor` clear and the caret paints the text `color`. Inherited
+    // like `color`.
+    SDL_Color caretColor = {0, 0, 0, 255};
     bool hasAccentColor = false;
+    bool hasCaretColor = false;
 
     // How a border edge is drawn. Prefixed because `Solid`, `Dashed` and friends
     // read too loosely on their own next to the other unscoped enumerators here.
@@ -1017,6 +1022,7 @@ struct ComputedStyle {
         SpecifiedOverflowWrap = 1u << 30,
         SpecifiedDirection = 1ULL << 32,
         SpecifiedTextSizeAdjust = 1ULL << 33,
+        SpecifiedCaretColor = 1ULL << 34,
         SpecifiedScrollBehavior = 1u << 25,
         SpecifiedColorScheme = 1u << 26,
         // A marker, not a property: the element still carries the user-agent
@@ -1183,6 +1189,10 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     if (!(style.specified & ComputedStyle::SpecifiedAccentColor)) {
         style.accentColor = parent.accentColor;
         style.hasAccentColor = parent.hasAccentColor;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedCaretColor)) {
+        style.caretColor = parent.caretColor;
+        style.hasCaretColor = parent.hasCaretColor;
     }
     if (!(style.specified & ComputedStyle::SpecifiedFontKerning)) {
         style.fontKerning = parent.fontKerning;

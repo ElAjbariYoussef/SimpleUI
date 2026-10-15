@@ -6150,6 +6150,49 @@ void testObjectPosition() {
     check(std::string(serial("h")) == "50% 50%", "the default serializes centred");
 }
 
+// `caret-color` recolors the text caret, defaults to the text color, inherits,
+// and serializes. Garbage keeps the previous winner.
+void testCaretColor() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"p\" style=\"caret-color:#ff0000\"><span id=\"c\">x</span></div>"
+        "<div id=\"a\" style=\"caret-color:auto\">x</div>"
+        "<div id=\"g\" style=\"caret-color:banana\">x</div>"
+        "<div id=\"h\">x</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* p = el("p");
+    Element* c = el("c");
+    Element* a = el("a");
+    Element* g = el("g");
+    Element* h = el("h");
+    check(p && c && a && g && h, "caret elements found");
+    if (!p || !c || !a || !g || !h) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0; color: #112233 }"));
+    const ComputedStyle red = resolver.resolve(*p);
+    check(red.hasCaretColor && red.caretColor.r == 255, "an explicit caret parses");
+    check(resolver.resolve(*c).caretColor.r == 255, "the caret color inherits");
+    check(!resolver.resolve(*a).hasCaretColor, "auto clears the caret");
+    check(!resolver.resolve(*g).hasCaretColor, "garbage keeps auto");
+    check(!resolver.resolve(*h).hasCaretColor, "the default is auto");
+    const auto serial = [&](const char* id) {
+        return sui::StyleResolver::propertyValue(resolver.resolve(*el(id)), "caret-color");
+    };
+    check(std::string(serial("p")) == "#ff0000", "an explicit caret serializes");
+    check(std::string(serial("h")) == "auto", "the default serializes as auto");
+
+    // The helper answers auto with the text color and explicit with itself.
+    check(sui::caretColorFor(red).r == 255, "an explicit caret wins");
+    check(sui::caretColorFor(resolver.resolve(*h)).r == 0x11,
+          "auto answers the text color");
+}
+
 // `mix-blend-mode` parses the separable set, folds the rest to normal, never
 // inherits, and serializes back.
 void testMixBlendMode() {
@@ -8481,6 +8524,7 @@ int main() {
     testScrollBehavior();
     testMixBlendMode();
     testObjectPosition();
+    testCaretColor();
     testColorScheme();
     testPrefersColorScheme();
     testCurrentColor();

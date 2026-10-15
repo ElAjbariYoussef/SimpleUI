@@ -2774,7 +2774,8 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         }
         if (showCaret) {
             const SDL_FRect caretRect{caretX, caretY, 1.5f, caretH};
-            const sui::Color caretCol = multiplyAlpha(toColor(s.color), opacity);
+            const sui::Color caretCol =
+                multiplyAlpha(toColor(caretColorFor(s)), opacity);
             SDL_SetRenderDrawColor(sdlRenderer, caretCol.r, caretCol.g, caretCol.b, caretCol.a);
             SDL_RenderFillRect(sdlRenderer, &caretRect);
         }

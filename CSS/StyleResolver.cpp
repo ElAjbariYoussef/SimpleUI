@@ -4219,6 +4219,18 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         } else if (value == "exclusion") {
             s.mixBlendMode = Blend::Exclusion;
         }
+    } else if (property == "caret-color") {
+        if (trim(value) == "auto") {
+            s.hasCaretColor = false;
+            s.specified |= ComputedStyle::SpecifiedCaretColor;
+        } else {
+            SDL_Color color{};
+            if (parseColorValue(value, color)) {
+                s.caretColor = color;
+                s.hasCaretColor = true;
+                s.specified |= ComputedStyle::SpecifiedCaretColor;
+            }
+        }
     } else if (property == "accent-color") {
         if (value == "auto") {
             s.hasAccentColor = false;
@@ -5975,6 +5987,9 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "accent-color") {
         return style.hasAccentColor ? color(style.accentColor) : "auto";
     }
+    if (property == "caret-color") {
+        return style.hasCaretColor ? color(style.caretColor) : "auto";
+    }
     if (property == "mix-blend-mode") {
         switch (style.mixBlendMode) {
             case ComputedStyle::MixBlendMode::Multiply: return "multiply";
@@ -7017,6 +7032,9 @@ void substituteCurrentColor(ComputedStyle& style) {
     swap(style.borderColor);
     swap(style.accentColor);
     swap(style.textDecorationColor);
+    if (style.hasCaretColor) {
+        swap(style.caretColor);
+    }
     swap(style.outline.color);
     for (auto& shadow : style.boxShadows) {
         swap(shadow.color);

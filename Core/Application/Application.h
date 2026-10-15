@@ -83,6 +83,12 @@ struct ListMarkerSlot {
 };
 ListMarkerSlot listMarkerSlot(const SDL_FRect& box, float imageWidth, float imageHeight);
 
+// The color a text caret paints: an explicit `caret-color`, else the text
+// `color` (`auto`). Pure so tests pin it without a window.
+inline SDL_Color caretColorFor(const ComputedStyle& style) noexcept {
+    return style.hasCaretColor ? style.caretColor : style.color;
+}
+
 // Where a replaced element's content lands: fitted by `fit`, then offset
 // inside the leftover by the `object-position` lengths (percentages ride the
 // leftover, lengths offset as-is). Cover and none may overflow; clipping that
