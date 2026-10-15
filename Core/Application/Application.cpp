@@ -80,6 +80,26 @@ ListMarkerSlot listMarkerSlot(const SDL_FRect& box, float imageWidth, float imag
     return slot;
 }
 
+SDL_FRect objectFitDst(ComputedStyle::ObjectFit fit, Length posX, Length posY, float contentW,
+                       float contentH, float imageW, float imageH) {
+    using Fit = ComputedStyle::ObjectFit;
+    if (fit == Fit::ObjFill) {
+        return SDL_FRect{0.0f, 0.0f, contentW, contentH};
+    }
+    float scale = 1.0f;
+    if (fit == Fit::ObjCover) {
+        scale = std::max(contentW / imageW, contentH / imageH);
+    } else if (fit == Fit::ObjContain) {
+        scale = std::min(contentW / imageW, contentH / imageH);
+    } else if (fit == Fit::ObjScaleDown) {
+        scale = std::min(std::min(contentW / imageW, contentH / imageH), 1.0f);
+    }
+    // ObjNone keeps the intrinsic size: a scale of 1.
+    const float dw = imageW * scale;
+    const float dh = imageH * scale;
+    return SDL_FRect{posX.resolve(contentW - dw), posY.resolve(contentH - dh), dw, dh};
+}
+
 namespace {
 
 // One open group on the paint stack. A composited group renders into `texture`;
@@ -1976,32 +1996,10 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                         SDL_FRect* src_clip = nullptr;
                         SDL_FRect clip_rect{};
                         const ComputedStyle::ObjectFit fit = s.objectFit;
-                        if (fit == ComputedStyle::ObjFill) {
-                            // Stretch to fill; ignore aspect ratio.
-                            dst = content;
-                        } else if (fit == ComputedStyle::ObjCover) {
-                            // Scale up/down to cover the whole box, then crop.
-                            const float scale = std::max(content.w / iw, content.h / ih);
-                            const float dw = iw * scale;
-                            const float dh = ih * scale;
-                            dst = {content.x + (content.w - dw) * 0.5f,
-                                   content.y + (content.h - dh) * 0.5f, dw, dh};
-                        } else if (fit == ComputedStyle::ObjNone) {
-                            // Intrinsic size, centred; may overflow or be smaller than box.
-                            dst = {content.x + (content.w - iw) * 0.5f,
-                                   content.y + (content.h - ih) * 0.5f, iw, ih};
-                        } else {
-                            // ObjContain or ObjScaleDown: aspect-fit (scale down only for
-                            // scale-down).
-                            float scale = std::min(content.w / iw, content.h / ih);
-                            if (fit == ComputedStyle::ObjScaleDown) {
-                                scale = std::min(scale, 1.0f);
-                            }
-                            const float dw = iw * scale;
-                            const float dh = ih * scale;
-                            dst = {content.x + (content.w - dw) * 0.5f,
-                                   content.y + (content.h - dh) * 0.5f, dw, dh};
-                        }
+                        const SDL_FRect fitted =
+                            objectFitDst(fit, s.objectPositionX, s.objectPositionY, content.w,
+                                         content.h, iw, ih);
+                        dst = {content.x + fitted.x, content.y + fitted.y, fitted.w, fitted.h};
                         // For cover and none the destination may overflow; clip to content box.
                         if (fit == ComputedStyle::ObjCover || fit == ComputedStyle::ObjNone) {
                             // Compute what portion of the *texture* maps to the clipped rect.

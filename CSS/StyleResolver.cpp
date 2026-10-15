@@ -4917,7 +4917,59 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.objectFit = ComputedStyle::ObjContain;
         }
     } else if (property == "object-position") {
-        // Accepted; position-within-box alignment is not yet applied by the paint engine.
+        // One value takes the horizontal slot unless it names a vertical edge;
+        // `center` takes whichever slot is still free. Two same-axis keywords
+        // invalidate the whole declaration, as does a length with nowhere to
+        // go; anything else keeps the previous cascade winner. (`left 10px`
+        // leniently lands the length vertically rather than dropping.)
+        const std::vector<std::string_view> parts = splitTokens(value);
+        Length x{Length::Percent, 50.0f};
+        Length y{Length::Percent, 50.0f};
+        bool xTaken = false;
+        bool yTaken = false;
+        bool xKeyword = false;
+        bool ok = parts.size() == 1 || parts.size() == 2;
+        for (std::string_view token : parts) {
+            if (!ok) {
+                break;
+            }
+            if (token == "left" || token == "right") {
+                ok = !xTaken;
+                x = Length{Length::Percent, token == "left" ? 0.0f : 100.0f};
+                xTaken = true;
+                xKeyword = true;
+            } else if (token == "top" || token == "bottom") {
+                ok = !yTaken;
+                y = Length{Length::Percent, token == "top" ? 0.0f : 100.0f};
+                yTaken = true;
+            } else if (token == "center") {
+                if (!xTaken) {
+                    x = Length{Length::Percent, 50.0f};
+                    xTaken = true;
+                } else if (!yTaken) {
+                    y = Length{Length::Percent, 50.0f};
+                    yTaken = true;
+                } else {
+                    ok = false;
+                }
+            } else {
+                const Length length = parseLength(token);
+                ok = !length.isAuto() && length.unit != Length::Number;
+                if (ok && !xTaken) {
+                    x = length;
+                    xTaken = true;
+                } else if (ok && !yTaken && xKeyword) {
+                    y = length;
+                    yTaken = true;
+                } else {
+                    ok = false;
+                }
+            }
+        }
+        if (ok) {
+            s.objectPositionX = x;
+            s.objectPositionY = y;
+        }
     } else if (property == "list-style-type") {
         s.specified |= ComputedStyle::SpecifiedListStyleType;
         if (value == "none") {
@@ -6288,6 +6340,18 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "overflow-wrap" || property == "word-wrap") {
         return style.overflowWrap == ComputedStyle::OverflowWrap::BreakWord ? "break-word"
                                                                             : "normal";
+    }
+    if (property == "object-position") {
+        const auto length = [](const Length& l) {
+            switch (l.unit) {
+                case Length::Percent: return unitless(l.value) + "%";
+                case Length::Px: return unitless(l.value) + "px";
+                case Length::Em: return unitless(l.value) + "em";
+                case Length::Rem: return unitless(l.value) + "rem";
+                default: return unitless(l.value);
+            }
+        };
+        return length(style.objectPositionX) + " " + length(style.objectPositionY);
     }
     if (property == "text-size-adjust") {
         switch (style.textSizeAdjust) {

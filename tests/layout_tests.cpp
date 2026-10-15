@@ -6076,6 +6076,67 @@ void testTextSizeAdjust() {
     check(std::string(serial("h")) == "auto", "the default serializes as auto");
 }
 
+// `object-position` plants the fitted content: keywords, lengths, and
+// percentages in one or two slots, serialized back. Not inherited.
+void testObjectPosition() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"p\" style=\"object-position:left top\"><span id=\"c\">x</span></div>"
+        "<div id=\"o\" style=\"object-position:right 10px\">x</div>"
+        "<div id=\"s\" style=\"object-position:10px\">x</div>"
+        "<div id=\"t\" style=\"object-position:top\">x</div>"
+        "<div id=\"g\" style=\"object-position:left right\">x</div>"
+        "<div id=\"b\" style=\"object-position:banana\">x</div>"
+        "<div id=\"h\">x</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* p = el("p");
+    Element* c = el("c");
+    Element* o = el("o");
+    Element* s = el("s");
+    Element* t = el("t");
+    Element* g = el("g");
+    Element* b = el("b");
+    Element* h = el("h");
+    check(p && c && o && s && t && g && b && h, "position elements found");
+    if (!p || !c || !o || !s || !t || !g || !b || !h) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    const auto xy = [&](Element& e) {
+        const ComputedStyle style = resolver.resolve(e);
+        return std::pair<sui::Length, sui::Length>(style.objectPositionX, style.objectPositionY);
+    };
+    const auto isPct = [&](const sui::Length& l, float v) {
+        return l.unit == sui::Length::Percent && l.value == v;
+    };
+    auto [px, py] = xy(*p);
+    check(isPct(px, 0.0f) && isPct(py, 0.0f), "two edges pin the corner");
+    check(xy(*c).first.value == 50.0f, "positioning never inherits");
+    auto [ox, oy] = xy(*o);
+    check(isPct(ox, 100.0f) && oy.unit == sui::Length::Px && oy.value == 10.0f,
+          "an edge and a length share the slots");
+    auto [sx, sy] = xy(*s);
+    check(sx.unit == sui::Length::Px && sx.value == 10.0f && isPct(sy, 50.0f),
+          "a lone length takes x and centres y");
+    auto [tx, ty] = xy(*t);
+    check(isPct(tx, 50.0f) && isPct(ty, 0.0f), "a lone edge centres the other half");
+    check(xy(*g).first.value == 50.0f, "same-axis keywords drop the declaration");
+    check(xy(*b).first.value == 50.0f, "garbage keeps centring");
+    check(xy(*h).first.value == 50.0f, "the default centres");
+    const auto serial = [&](const char* id) {
+        return sui::StyleResolver::propertyValue(resolver.resolve(*el(id)),
+                                                 "object-position");
+    };
+    check(std::string(serial("p")) == "0% 0%", "edges serialize as percentages");
+    check(std::string(serial("s")) == "10px 50%", "a length round-trips");
+    check(std::string(serial("h")) == "50% 50%", "the default serializes centred");
+}
+
 // `mix-blend-mode` parses the separable set, folds the rest to normal, never
 // inherits, and serializes back.
 void testMixBlendMode() {
@@ -8286,6 +8347,7 @@ int main() {
     testSvgUse();
     testScrollBehavior();
     testMixBlendMode();
+    testObjectPosition();
     testColorScheme();
     testPrefersColorScheme();
     testCurrentColor();

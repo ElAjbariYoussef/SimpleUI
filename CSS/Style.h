@@ -833,6 +833,10 @@ struct ComputedStyle {
     // `None` keeps the image at its intrinsic size; `ScaleDown` is `min(none, contain)`.
     enum ObjectFit : std::uint8_t { ObjContain, ObjCover, ObjFill, ObjNone, ObjScaleDown };
     ObjectFit objectFit = ObjContain;
+    // Where the fitted content sits in the leftover space. Percentages ride
+    // the leftover; lengths offset as-is. Centered by default, not inherited.
+    Length objectPositionX{Length::Percent, 50.0f};
+    Length objectPositionY{Length::Percent, 50.0f};
 
     // List bullet / counter style. `Disc` (•) for unordered, `Decimal` for ordered.
     enum ListStyleType : std::uint8_t { LSTDisc, LSTCircle, LSTSquare, LSTDecimal, LSTNone };

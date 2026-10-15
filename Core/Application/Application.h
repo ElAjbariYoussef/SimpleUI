@@ -83,6 +83,13 @@ struct ListMarkerSlot {
 };
 ListMarkerSlot listMarkerSlot(const SDL_FRect& box, float imageWidth, float imageHeight);
 
+// Where a replaced element's content lands: fitted by `fit`, then offset
+// inside the leftover by the `object-position` lengths (percentages ride the
+// leftover, lengths offset as-is). Cover and none may overflow; clipping that
+// to the box stays the caller's job, as does a degenerate source or box.
+SDL_FRect objectFitDst(ComputedStyle::ObjectFit fit, Length posX, Length posY, float contentW,
+                       float contentH, float imageW, float imageH);
+
 // The element a `<use>` clones: the same-document `#id` its href names. Null
 // for anything else -- a missing id, an external URL, no document, or a text
 // node -- so callers paint nothing instead of guessing.

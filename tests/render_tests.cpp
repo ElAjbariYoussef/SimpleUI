@@ -1291,6 +1291,55 @@ void testBoxBlur() {
 // The CPU affine colour matrix the `filter:` shift chain hands the executor.
 // `filterColorMatrix` composes the chain into one matrix; `applyColorMatrix`
 // maps each pixel through it, rounding to the nearest byte and clipping.
+// `object-position` plants the fitted content in the leftover space:
+// percentages ride the leftover, lengths offset as-is.
+void testObjectFitDst() {
+    using Fit = sui::ComputedStyle::ObjectFit;
+    const sui::Length c50{sui::Length::Percent, 50.0f};
+    const sui::Length c0{sui::Length::Percent, 0.0f};
+    const sui::Length c100{sui::Length::Percent, 100.0f};
+    // Fill ignores everything and takes the box.
+    const SDL_FRect fill = sui::objectFitDst(Fit::ObjFill, c0, c0, 200.0f, 100.0f, 10.0f, 10.0f);
+    check(fill.x == 0.0f && fill.y == 0.0f && fill.w == 200.0f && fill.h == 100.0f,
+          "fill takes the content box");
+    // A square image in a wide box contains at 100x100, centred by default.
+    const SDL_FRect contain =
+        sui::objectFitDst(Fit::ObjContain, c50, c50, 200.0f, 100.0f, 100.0f, 100.0f);
+    check(contain.x == 50.0f && contain.y == 0.0f && contain.w == 100.0f &&
+              contain.h == 100.0f,
+          "contain centres by default");
+    const SDL_FRect leftTop =
+        sui::objectFitDst(Fit::ObjContain, c0, c0, 200.0f, 100.0f, 100.0f, 100.0f);
+    check(leftTop.x == 0.0f && leftTop.y == 0.0f, "left top pins the corner");
+    const SDL_FRect rightBottom =
+        sui::objectFitDst(Fit::ObjContain, c100, c100, 200.0f, 100.0f, 100.0f, 100.0f);
+    check(rightBottom.x == 100.0f && rightBottom.y == 0.0f, "right bottom pins out");
+    // Cover overflows: the 200x200 scaled square centres its crop.
+    const SDL_FRect cover =
+        sui::objectFitDst(Fit::ObjCover, c50, c50, 200.0f, 100.0f, 100.0f, 100.0f);
+    check(cover.x == 0.0f && cover.y == -50.0f && cover.w == 200.0f && cover.h == 200.0f,
+          "cover centres the overflow");
+    const SDL_FRect coverTop =
+        sui::objectFitDst(Fit::ObjCover, c50, c0, 200.0f, 100.0f, 100.0f, 100.0f);
+    check(coverTop.y == 0.0f, "cover top pins the crop");
+    // None keeps intrinsic size; scale-down only ever shrinks.
+    const SDL_FRect none =
+        sui::objectFitDst(Fit::ObjNone, c50, c50, 200.0f, 100.0f, 100.0f, 100.0f);
+    check(none.x == 50.0f && none.w == 100.0f, "none centres the intrinsic size");
+    const SDL_FRect big =
+        sui::objectFitDst(Fit::ObjScaleDown, c50, c50, 200.0f, 100.0f, 400.0f, 400.0f);
+    check(big.w == 100.0f && big.h == 100.0f && big.x == 50.0f,
+          "scale-down shrinks a big image");
+    const SDL_FRect small =
+        sui::objectFitDst(Fit::ObjScaleDown, c50, c50, 200.0f, 100.0f, 50.0f, 50.0f);
+    check(small.w == 50.0f && small.x == 75.0f, "scale-down never grows");
+    // Pixel offsets land as-is.
+    const SDL_FRect px = sui::objectFitDst(Fit::ObjContain, sui::Length{10.0f},
+                                           sui::Length{20.0f}, 200.0f, 100.0f, 100.0f,
+                                           100.0f);
+    check(px.x == 10.0f && px.y == 20.0f, "lengths offset directly");
+}
+
 // A blended surface over its backdrop, per channel with source-over alpha.
 // One opaque pixel over one opaque pixel tells each mode apart.
 void testBlendImage() {
@@ -1607,6 +1656,7 @@ int main() {
     testBoxBlur();
     testBackdropFilters();
     testBlendImage();
+    testObjectFitDst();
     testColorMatrix();
     testClipCoverage();
     testClipMask();
