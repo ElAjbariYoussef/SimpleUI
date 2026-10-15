@@ -5241,8 +5241,28 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         if (parseClipPath(value, parsed)) {
             s.clipPath = parsed;
         }
-    } else if (property == "tab-size" || property == "hyphens" ||
-               property == "word-break" || property == "overflow-wrap") {
+    } else if (property == "word-break") {
+        // `keep-all` behaves as normal here: only spaces break lines either way.
+        // Garbage keeps the previous cascade winner.
+        if (value == "normal" || value == "keep-all") {
+            s.wordBreak = value == "normal" ? ComputedStyle::WordBreak::Normal
+                                            : ComputedStyle::WordBreak::KeepAll;
+            s.specified |= ComputedStyle::SpecifiedWordBreak;
+        } else if (value == "break-all") {
+            s.wordBreak = ComputedStyle::WordBreak::BreakAll;
+            s.specified |= ComputedStyle::SpecifiedWordBreak;
+        }
+    } else if (property == "overflow-wrap" || property == "word-wrap") {
+        // `anywhere` breaks like `break-word` for wrapping purposes; the two
+        // only differ in intrinsic sizing, which never breaks lines here.
+        if (value == "normal") {
+            s.overflowWrap = ComputedStyle::OverflowWrap::Normal;
+            s.specified |= ComputedStyle::SpecifiedOverflowWrap;
+        } else if (value == "break-word" || value == "anywhere") {
+            s.overflowWrap = ComputedStyle::OverflowWrap::BreakWord;
+            s.specified |= ComputedStyle::SpecifiedOverflowWrap;
+        }
+    } else if (property == "tab-size" || property == "hyphens") {
         // Text shaping hints that the layout engine does not yet implement.
     } else if (property == "text-overflow") {
         std::string_view val = trim(value);
@@ -6204,6 +6224,17 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "text-overflow") {
         return style.textOverflow == ComputedStyle::TextOverflowEllipsis ? "ellipsis" : "clip";
+    }
+    if (property == "word-break") {
+        switch (style.wordBreak) {
+            case ComputedStyle::WordBreak::BreakAll: return "break-all";
+            case ComputedStyle::WordBreak::KeepAll: return "keep-all";
+            default: return "normal";
+        }
+    }
+    if (property == "overflow-wrap" || property == "word-wrap") {
+        return style.overflowWrap == ComputedStyle::OverflowWrap::BreakWord ? "break-word"
+                                                                            : "normal";
     }
     if (property == "aspect-ratio") {
         if (style.aspectRatioW <= 0.0f || style.aspectRatioH <= 0.0f) {

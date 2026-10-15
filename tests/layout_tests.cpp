@@ -5918,6 +5918,118 @@ void testFontVariant() {
     check(std::string(serial("h")) == "normal", "the default serializes as normal");
 }
 
+// `word-break` and `overflow-wrap` break overlong words across lines at
+// codepoint boundaries, each piece its own run. `break-all` always breaks;
+// `break-word` only breaks a word longer than a full line. Both inherit and
+// serialize; a textarea never breaks, keeping one run per word for caret
+// mapping.
+void testWordBreak() {
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+    const auto widths = [](Element& e) {
+        std::vector<float> out;
+        for (const auto& run : e.textRuns()) {
+            out.push_back(run.width);
+        }
+        return out;
+    };
+    // A 36-char word at 8px a glyph overflows a 100px box whole.
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"n\" style=\"width:100px\">abcdefghijklmnopqrstuvwxyz0123456789</div>"
+        "<div id=\"w\" style=\"width:100px;overflow-wrap:break-word\">"
+        "abcdefghijklmnopqrstuvwxyz0123456789</div>"
+        "<div id=\"a\" style=\"width:50px;word-break:break-all\">abcdefghij</div>"
+        "<div id=\"m\" style=\"width:100px;overflow-wrap:break-word\">hi "
+        "abcdefghijklmnopqrstuvwxyz0123456789</div>"
+        "<textarea id=\"t\" style=\"width:100px;overflow-wrap:break-word\">"
+        "abcdefghijklmnopqrstuvwxyz0123456789</textarea>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    layoutRoot(*document, resolver, 400.0f);
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* n = el("n");
+    Element* w = el("w");
+    Element* a = el("a");
+    Element* m = el("m");
+    Element* t = el("t");
+    check(n && w && a && m && t, "break elements found");
+    if (!n || !w || !a || !m || !t) {
+        return;
+    }
+    check(widths(*n).size() == 1 && widths(*n)[0] > 100.0f,
+          "normal overflow keeps one wide run");
+    // Three full lines of twelve glyphs.
+    const std::vector<float> broke = widths(*w);
+    check(broke.size() == 3, "break-word splits across three lines");
+    bool fits = true;
+    for (float width : broke) {
+        fits = fits && width <= 100.0f;
+    }
+    check(fits, "every break-word piece fits its line");
+    bool stacked = w->textRuns().size() == 3 && w->textRuns()[0].y < w->textRuns()[1].y &&
+                   w->textRuns()[1].y < w->textRuns()[2].y;
+    check(stacked, "the pieces stack down the box");
+    // Six glyphs fill 48 of 50px, four finish the word.
+    const std::vector<float> all = widths(*a);
+    check(all.size() == 2, "break-all splits a fitting word too");
+    if (all.size() == 2) {
+        check(all[0] == 48.0f && all[1] == 32.0f, "break-all fills each line");
+    }
+    // After "hi" the long word breaks across the following lines: five runs in
+    // all, "hi" first, every piece inside the box, and nothing lost.
+    const std::vector<float> mid = widths(*m);
+    check(mid.size() == 5, "a mid-line word breaks after wrapping");
+    if (mid.size() == 5) {
+        float total = 0.0f;
+        bool inside = true;
+        for (float width : mid) {
+            total += width;
+            inside = inside && width <= 100.0f;
+        }
+        check(mid[0] == 16.0f && total == 304.0f && inside,
+              "the pieces keep every glyph inside the box");
+    }
+    check(widths(*t).size() == 1, "a textarea never breaks its words");
+
+    // Parsing, inheritance, and serialization.
+    auto document2 = parseOrNull(
+        "<sui><body><div id=\"p\" style=\"word-break:break-all\">"
+        "<span id=\"c\">x</span></div>"
+        "<div id=\"o\" style=\"overflow-wrap:anywhere\">x</div>"
+        "<div id=\"g\" style=\"word-break:banana\">x</div>"
+        "<div id=\"h\">x</div></body></sui>");
+    if (!document2) {
+        return;
+    }
+    const auto el2 = [&](const char* id) { return document2->getElementById(id); };
+    Element* p = el2("p");
+    Element* c = el2("c");
+    Element* o = el2("o");
+    Element* g = el2("g");
+    Element* h = el2("h");
+    check(p && c && o && g && h, "break parse elements found");
+    if (!p || !c || !o || !g || !h) {
+        return;
+    }
+    using WB = ComputedStyle::WordBreak;
+    using OW = ComputedStyle::OverflowWrap;
+    check(resolver.resolve(*p).wordBreak == WB::BreakAll, "break-all parses");
+    check(resolver.resolve(*c).wordBreak == WB::BreakAll, "breaking inherits");
+    check(resolver.resolve(*o).overflowWrap == OW::BreakWord, "anywhere breaks words");
+    check(resolver.resolve(*g).wordBreak == WB::Normal, "garbage keeps normal");
+    check(resolver.resolve(*h).overflowWrap == OW::Normal, "the default wraps nothing");
+    const auto serial = [&](const char* id, const char* property) {
+        return sui::StyleResolver::propertyValue(resolver.resolve(*el2(id)), property);
+    };
+    check(std::string(serial("p", "word-break")) == "break-all", "break-all serializes");
+    check(std::string(serial("o", "overflow-wrap")) == "break-word",
+          "anywhere serializes as break-word");
+    check(std::string(serial("h", "word-break")) == "normal", "normal serializes");
+}
+
 void testFontStretch() {
     auto document = parseOrNull(
         "<sui><body>"
@@ -8084,6 +8196,7 @@ int main() {
     testFontStretch();
     testFontWeight();
     testFontVariant();
+    testWordBreak();
     testSvgUse();
     testScrollBehavior();
     testColorScheme();

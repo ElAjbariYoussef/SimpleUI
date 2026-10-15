@@ -889,6 +889,15 @@ struct ComputedStyle {
     // inside the element's content box.
     enum ListStylePosition : std::uint8_t { LSPOutside, LSPInside };
     ListStylePosition listStylePosition = LSPOutside;
+    // Word breaking. `BreakAll` fills lines character by character;
+    // `BreakWord` only breaks a word that overflows its own line. `KeepAll`
+    // behaves as normal here (only spaces break lines either way). Both
+    // inherit. Breaking never applies inside a textarea, where one run per
+    // word keeps caret mapping working.
+    enum class WordBreak : std::uint8_t { Normal, BreakAll, KeepAll };
+    WordBreak wordBreak = WordBreak::Normal;
+    enum class OverflowWrap : std::uint8_t { Normal, BreakWord };
+    OverflowWrap overflowWrap = OverflowWrap::Normal;
 
     // Pointer events: when true (from `pointer-events: none`), the element does not
     // intercept pointer events during hit testing.
@@ -969,6 +978,8 @@ struct ComputedStyle {
         SpecifiedListStyleImage = 1u << 23,
         SpecifiedFontStretch = 1u << 24,
         SpecifiedFontVariant = 1u << 28,
+        SpecifiedWordBreak = 1u << 29,
+        SpecifiedOverflowWrap = 1u << 30,
         SpecifiedScrollBehavior = 1u << 25,
         SpecifiedColorScheme = 1u << 26,
         // A marker, not a property: the element still carries the user-agent
@@ -1141,6 +1152,12 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     }
     if (!(style.specified & ComputedStyle::SpecifiedFontVariant)) {
         style.fontVariant = parent.fontVariant;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedWordBreak)) {
+        style.wordBreak = parent.wordBreak;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedOverflowWrap)) {
+        style.overflowWrap = parent.overflowWrap;
     }
     if (!(style.specified & ComputedStyle::SpecifiedFontStretch)) {
         style.fontStretch = parent.fontStretch;

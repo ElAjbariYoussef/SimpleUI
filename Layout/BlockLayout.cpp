@@ -2920,11 +2920,97 @@ private:
                    maxWidth_ < kUnbounded;
         }
 
+        // Breaks one overlong word across lines at codepoint boundaries, one run
+        // per piece. The first piece keeps the inter-word space; continuations
+        // start flush. A piece that fits nowhere on a fresh line still takes a
+        // single codepoint, so the loop always progresses.
+        void breakAcrossLines(std::string_view w, const ComputedStyle& s, const Metrics& m,
+                              float ascentDelta) {
+            const std::string wt = transformText(s, w);
+            // Codepoint boundaries up front, so the longest fitting prefix is a
+            // binary search rather than a reshape per character.
+            std::vector<std::size_t> bounds{0};
+            for (std::size_t i = 0; i < wt.size();) {
+                ++i;
+                while (i < wt.size() &&
+                       (static_cast<unsigned char>(wt[i]) & 0xC0) == 0x80) {
+                    ++i;
+                }
+                bounds.push_back(i);
+            }
+            std::size_t from = 0;
+            bool first = true;
+            while (from < bounds.size() - 1) {
+                float space = 0.0f;
+                if (first && lineHasContent_) {
+                    space = metrics_.spaceWidth;
+                    if (s.wordSpacing.unit != sui::Length::Auto) {
+                        space += s.wordSpacing.resolve(s.fontSize, s.fontSize, 16.0f);
+                    }
+                }
+                float avail = lineAvail_ - lineIndent_ - penX_ - space;
+                if (avail <= 0.0f && lineHasContent_) {
+                    newLine();
+                    continue;
+                }
+                // Longest piece fitting avail; at least one codepoint on a fresh
+                // line so a zero-width slot still progresses.
+                std::size_t lo = from + 1, hi = bounds.size() - 1, best = from;
+                while (lo <= hi) {
+                    const std::size_t mid = lo + (hi - lo) / 2;
+                    if (textWidth(owner_.font_, s, std::string_view(wt).substr(from, bounds[mid] - from)) <=
+                        avail) {
+                        best = mid;
+                        lo = mid + 1;
+                    } else if (mid == 0) {
+                        break;
+                    } else {
+                        hi = mid - 1;
+                    }
+                }
+                if (best == from) {
+                    if (lineHasContent_) {
+                        newLine();
+                        continue;
+                    }
+                    best = from + 1;
+                }
+                const std::string piece = wt.substr(bounds[from], bounds[best] - bounds[from]);
+                const float pieceWidth = textWidth(owner_.font_, s, piece);
+                ownerEl_.addTextRun(
+                    {piece, originX_ + lineIndent_ + penX_ + space,
+                     originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), pieceWidth,
+                     metrics_.lineHeight, metrics_.ascent + ascentDelta, s.fontSize, s.color.r,
+                     s.color.g, s.color.b, s.color.a, s.fontBold,
+                     s.fontStyle != ComputedStyle::FontNormal});
+                penX_ += space + pieceWidth;
+                lineHasContent_ = true;
+                widest_ = std::max(widest_, penX_);
+                from = best;
+                first = false;
+                if (from < bounds.size() - 1) {
+                    newLine();
+                }
+            }
+        }
+
         void word(std::string_view w, const ComputedStyle& s, const Metrics& m, float ascentDelta) {
             if (ellipsisAdded_) {
                 return;
             }
             const float wWidth = textWidth(owner_.font_, s, w);
+            // `break-all` fills lines character by character; `break-word` only
+            // breaks a word that overflows its own line. Either way the pieces
+            // become their own runs. An ellipsis truncates instead, and a
+            // textarea keeps one run per word so caret mapping keeps working.
+            const bool breakAll = s.wordBreak == ComputedStyle::WordBreak::BreakAll;
+            const bool breakWord =
+                !breakAll && s.overflowWrap == ComputedStyle::OverflowWrap::BreakWord;
+            if (spacing_.wraps && !isEllipsisActive() && ownerEl_.tag() != "textarea" &&
+                (breakAll || (breakWord && wWidth > lineAvail_ - lineIndent_))) {
+                breakAcrossLines(w, s, m, ascentDelta);
+                return;
+            }
             if (spacing_.wraps && lineHasContent_ &&
                 lineIndent_ + penX_ + metrics_.spaceWidth + wWidth > lineAvail_) {
                 newLine();
