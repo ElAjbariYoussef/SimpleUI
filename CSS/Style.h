@@ -898,6 +898,13 @@ struct ComputedStyle {
     WordBreak wordBreak = WordBreak::Normal;
     enum class OverflowWrap : std::uint8_t { Normal, BreakWord };
     OverflowWrap overflowWrap = OverflowWrap::Normal;
+    // Mobile browsers inflate small text on wide blocks; this engine never
+    // inflates, so every value renders identically at authored sizes. The value
+    // is still parsed, inherited, and serialized. `none` and `auto` both mean
+    // no adjustment here; a percentage scales the (absent) adjustment.
+    enum class TextSizeAdjust : std::uint8_t { Auto, None, Percent };
+    TextSizeAdjust textSizeAdjust = TextSizeAdjust::Auto;
+    float textSizeAdjustPercent = 100.0f;
 
     // Pointer events: when true (from `pointer-events: none`), the element does not
     // intercept pointer events during hit testing.
@@ -980,6 +987,7 @@ struct ComputedStyle {
         SpecifiedFontVariant = 1u << 28,
         SpecifiedWordBreak = 1u << 29,
         SpecifiedOverflowWrap = 1u << 30,
+        SpecifiedTextSizeAdjust = 1u << 31,
         SpecifiedScrollBehavior = 1u << 25,
         SpecifiedColorScheme = 1u << 26,
         // A marker, not a property: the element still carries the user-agent
@@ -1158,6 +1166,10 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     }
     if (!(style.specified & ComputedStyle::SpecifiedOverflowWrap)) {
         style.overflowWrap = parent.overflowWrap;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedTextSizeAdjust)) {
+        style.textSizeAdjust = parent.textSizeAdjust;
+        style.textSizeAdjustPercent = parent.textSizeAdjustPercent;
     }
     if (!(style.specified & ComputedStyle::SpecifiedFontStretch)) {
         style.fontStretch = parent.fontStretch;

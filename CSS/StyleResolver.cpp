@@ -5262,6 +5262,25 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.overflowWrap = ComputedStyle::OverflowWrap::BreakWord;
             s.specified |= ComputedStyle::SpecifiedOverflowWrap;
         }
+    } else if (property == "text-size-adjust") {
+        // Accepted and carried, never applied: see the field comment.
+        // Garbage keeps the previous cascade winner.
+        if (value == "auto") {
+            s.textSizeAdjust = ComputedStyle::TextSizeAdjust::Auto;
+            s.textSizeAdjustPercent = 100.0f;
+            s.specified |= ComputedStyle::SpecifiedTextSizeAdjust;
+        } else if (value == "none") {
+            s.textSizeAdjust = ComputedStyle::TextSizeAdjust::None;
+            s.textSizeAdjustPercent = 100.0f;
+            s.specified |= ComputedStyle::SpecifiedTextSizeAdjust;
+        } else {
+            const Length length = parseLength(value);
+            if (length.unit == Length::Percent && length.value >= 0.0f) {
+                s.textSizeAdjust = ComputedStyle::TextSizeAdjust::Percent;
+                s.textSizeAdjustPercent = length.value;
+                s.specified |= ComputedStyle::SpecifiedTextSizeAdjust;
+            }
+        }
     } else if (property == "tab-size" || property == "hyphens") {
         // Text shaping hints that the layout engine does not yet implement.
     } else if (property == "text-overflow") {
@@ -6235,6 +6254,14 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "overflow-wrap" || property == "word-wrap") {
         return style.overflowWrap == ComputedStyle::OverflowWrap::BreakWord ? "break-word"
                                                                             : "normal";
+    }
+    if (property == "text-size-adjust") {
+        switch (style.textSizeAdjust) {
+            case ComputedStyle::TextSizeAdjust::None: return "none";
+            case ComputedStyle::TextSizeAdjust::Percent:
+                return unitless(style.textSizeAdjustPercent) + "%";
+            default: return "auto";
+        }
     }
     if (property == "aspect-ratio") {
         if (style.aspectRatioW <= 0.0f || style.aspectRatioH <= 0.0f) {

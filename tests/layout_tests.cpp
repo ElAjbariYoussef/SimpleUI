@@ -6030,6 +6030,52 @@ void testWordBreak() {
     check(std::string(serial("h", "word-break")) == "normal", "normal serializes");
 }
 
+// `text-size-adjust` is parsed, inherited, and serialized, but never applied:
+// it only scales a mobile browser's automatic text inflation, and this engine
+// never inflates, so every value renders at authored sizes.
+void testTextSizeAdjust() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"p\" style=\"text-size-adjust:none\"><span id=\"c\">x</span></div>"
+        "<div id=\"a\" style=\"text-size-adjust:auto\">x</div>"
+        "<div id=\"d\" style=\"text-size-adjust:150%\">x</div>"
+        "<div id=\"g\" style=\"text-size-adjust:banana\">x</div>"
+        "<div id=\"h\">x</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* p = el("p");
+    Element* c = el("c");
+    Element* a = el("a");
+    Element* d = el("d");
+    Element* g = el("g");
+    Element* h = el("h");
+    check(p && c && a && d && g && h, "adjust elements found");
+    if (!p || !c || !a || !d || !g || !h) {
+        return;
+    }
+    using TSA = ComputedStyle::TextSizeAdjust;
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    check(resolver.resolve(*p).textSizeAdjust == TSA::None, "none parses");
+    check(resolver.resolve(*c).textSizeAdjust == TSA::None, "the value inherits");
+    check(resolver.resolve(*a).textSizeAdjust == TSA::Auto, "auto parses");
+    const ComputedStyle sized = resolver.resolve(*d);
+    check(sized.textSizeAdjust == TSA::Percent && sized.textSizeAdjustPercent == 150.0f,
+          "a percentage parses with its factor");
+    check(resolver.resolve(*g).textSizeAdjust == TSA::Auto, "garbage keeps auto");
+    check(resolver.resolve(*h).textSizeAdjust == TSA::Auto, "the default is auto");
+    const auto serial = [&](const char* id) {
+        return sui::StyleResolver::propertyValue(resolver.resolve(*el(id)),
+                                                 "text-size-adjust");
+    };
+    check(std::string(serial("p")) == "none", "none serializes");
+    check(std::string(serial("d")) == "150%", "a percentage serializes");
+    check(std::string(serial("h")) == "auto", "the default serializes as auto");
+}
+
 void testFontStretch() {
     auto document = parseOrNull(
         "<sui><body>"
@@ -8197,6 +8243,7 @@ int main() {
     testFontWeight();
     testFontVariant();
     testWordBreak();
+    testTextSizeAdjust();
     testSvgUse();
     testScrollBehavior();
     testColorScheme();
