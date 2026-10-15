@@ -3002,6 +3002,9 @@ WindowConfig Application::windowConfigFrom(Document& document) {
 
 void Application::installPageAt(std::size_t index, std::unique_ptr<Document> document,
                                 std::string_view href) {
+    // The href often views into the very document this call replaces (a link's
+    // own `href` attribute), so it is copied before that document dies below.
+    const std::string owned(href);
     flushBound();
     if (index >= pages_.size()) {
         pages_.resize(index + 1);
@@ -3059,7 +3062,7 @@ void Application::installPageAt(std::size_t index, std::unique_ptr<Document> doc
     if (Element* body = page.document->querySelector("body")) {
         page.resolver.setRootFontSize(page.resolver.resolve(*body).fontSize);
     }
-    page.href = std::string(href);
+    page.href = owned;
     // Neither script phase ran for this tree yet.
     page.scriptsBeforeRun = false;
     page.scriptsAfterBodyRun = false;
@@ -3079,7 +3082,7 @@ void Application::installPageAt(std::size_t index, std::unique_ptr<Document> doc
             platform_->setWindowTitle(target, title);
         }
     }
-    SDL_Log("loaded %s (%zu stylesheets, %zu scripts)", std::string(href).c_str(),
+    SDL_Log("loaded %s (%zu stylesheets, %zu scripts)", owned.c_str(),
             page.document->stylesheets().size(), page.document->scripts().size());
     // Leave the working copy holding the new page, so reads between here and
     // the next frame or event see it without waiting for a bind.
@@ -3169,6 +3172,11 @@ void Application::dropClosedPages() {
 }
 
 bool Application::navigate(std::string_view href) {
+    const WindowId primary = platform_ ? platform_->primaryWindow() : kInvalidWindow;
+    return navigateInWindow(primary, href, false);
+}
+
+bool Application::navigateInWindow(WindowId window, std::string_view href, bool blank) {
     if (href.empty()) {
         return false;
     }
@@ -3179,8 +3187,26 @@ bool Application::navigate(std::string_view href) {
                       ": only .sui pages inside the project are supported");
         return false;
     }
+    if (blank) {
+        std::string error;
+        if (openPage(href, error) != kInvalidWindow) {
+            return true;
+        }
+        script::error(error);
+        return false;
+    }
+    // The click's own window is the one that navigates. A synthetic event with
+    // no window, or a window showing no page, falls back to whatever `navigate`
+    // would replace.
+    int index = -1;
+    if (window != kInvalidWindow && platform_) {
+        index = pageForWindow(window);
+    }
+    if (index < 0) {
+        index = static_cast<int>(navigateIndex());
+    }
     std::string error;
-    if (loadPage(href, error)) {
+    if (loadPageAt(static_cast<std::size_t>(index), href, error)) {
         return true;
     }
     // Whatever page was live stays live: a broken link must not blank the app.
@@ -3639,6 +3665,25 @@ void Application::dispatch(const InputEvent& event) {
                             }
                         }
                     }
+                }
+            }
+            // A link navigates on press, before any `onclick` handler so the
+            // handler observes the page it landed on -- the same order every
+            // control action above uses. `data-navigate="false"` opts out for a
+            // handler that drives navigation itself; `target="_blank"` opens a
+            // new window instead of replacing this one. Only the left button
+            // navigates; other buttons are for the host to interpret.
+            if (target && event.button == 1) {
+                for (Element* anchor = target; anchor; anchor = anchor->parent()) {
+                    if (anchor->tag() != "a") {
+                        continue;
+                    }
+                    const std::string_view href = anchor->attribute("href");
+                    if (!href.empty() && anchor->attribute("data-navigate") != "false") {
+                        navigateInWindow(event.window, href,
+                                         anchor->attribute("target") == "_blank");
+                    }
+                    break;
                 }
             }
             break;

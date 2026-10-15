@@ -53,6 +53,15 @@ void drain() {
     }
 }
 
+sui::Application* g_navApp = nullptr;
+std::string g_navSeen;
+
+void recordNavPage() {
+    if (g_navApp) {
+        g_navSeen = g_navApp->currentPage();
+    }
+}
+
 // Pumps once and asserts the queue held exactly the one event the test pushed.
 void expectOne(sui::Platform& platform, sui::InputKind kind, float x, float y, int button,
                const char* what) {
@@ -1927,6 +1936,120 @@ int main() {
             check(app.pageDocument(other) == nullptr, "the closed window's page is gone");
             check(!app.renderFrame(other), "a closed window paints nothing");
         }
+        fs::remove_all(root);
+    }
+
+    // Links navigate on press: plain same-window by default, a new window for
+    // `target="_blank"`, nothing for opted-out, broken, external, or non-left
+    // presses. Navigation runs before `onclick`, so a handler observes the page
+    // it landed on.
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "sui-link-check";
+        fs::remove_all(root);
+        fs::create_directories(root / "pages");
+        const auto write = [](const fs::path& at, const char* text) {
+            std::ofstream out(at, std::ios::binary);
+            out << text;
+        };
+        // Links are sized boxes: purely inline elements carry no hit-testable
+        // box in this engine (the same reason `:hover` never fires on bare
+        // inline text), so the press needs a box to land in.
+        write(root / "index.sui",
+              "<sui><body>"
+              "<a id=\"self\" style=\"display:inline-block;width:80px;height:20px\" "
+              "href=\"pages/settings.sui\" onclick=\"recordNavPage()\">go</a>"
+              "<a id=\"blank\" style=\"display:inline-block;width:80px;height:20px\" "
+              "href=\"pages/settings.sui\" target=\"_blank\">new</a>"
+              "<a id=\"opt\" style=\"display:inline-block;width:80px;height:20px\" "
+              "href=\"pages/settings.sui\" data-navigate=\"false\">stay</a>"
+              "<a id=\"broken\" style=\"display:inline-block;width:80px;height:20px\" "
+              "href=\"pages/missing.sui\">broken</a>"
+              "<a id=\"ext\" style=\"display:inline-block;width:80px;height:20px\" "
+              "href=\"https://example.com/\">out</a>"
+              "<a id=\"mid\" style=\"display:inline-block;width:80px;height:20px\" "
+              "href=\"pages/settings.sui\">middle</a>"
+              "<a id=\"nest\" style=\"display:inline-block;width:80px;height:20px\" "
+              "href=\"pages/settings.sui\">"
+              "<b id=\"nestinner\" style=\"display:inline-block;width:40px;height:10px\">"
+              "deep</b></a>"
+              "</body></sui>");
+        write(root / "pages" / "settings.sui",
+              "<sui><body><p id=\"where\">settings</p></body></sui>");
+
+        const fs::path previous = fs::current_path();
+        fs::current_path(root);
+        struct RestoreLink {
+            fs::path previous;
+            ~RestoreLink() {
+                std::error_code ec;
+                fs::current_path(previous, ec);
+            }
+        } restoreLink{previous};
+
+        sui::Application app;
+        std::string error;
+        check(app.start("index.sui", error), "a linked project starts");
+        g_navApp = &app;
+        sui::script::registerHandler("recordNavPage", recordNavPage);
+        const sui::WindowId primary = app.platform()->primaryWindow();
+        check(app.renderFrame(primary), "the linked page frames");
+        // Looks the target up fresh every time: a navigation replaces the
+        // tree, so an element from before it would dangle.
+        const auto press = [&](const char* id, int button, sui::WindowId window) {
+            sui::Element* el = app.document().getElementById(id);
+            if (!el) {
+                check(false, "link target still on screen");
+                return;
+            }
+            sui::InputEvent event(sui::InputKind::PointerDown, el->layoutX() + 2.0f,
+                                  el->layoutY() + 2.0f, button, 0.0f, 0.0f, 0, {}, 0, 0,
+                                  window);
+            app.dispatch(event);
+        };
+        const auto home = [&]() {
+            check(app.navigate("index.sui"), "back home");
+            check(app.renderFrame(primary), "home reframed");
+        };
+
+        // A plain press replaces the window's page, and the handler already saw
+        // the new one: navigation runs before `onclick`.
+        press("self", 1, primary);
+        check(app.currentPage() == "pages/settings.sui", "a press follows the link");
+        check(g_navSeen == "pages/settings.sui", "the handler observes the new page");
+        home();
+
+        // `_blank` opens instead of replacing.
+        press("blank", 1, primary);
+        check(app.platform()->windows().size() == 2, "blank opens a second window");
+        check(app.currentPage() == "index.sui", "blank leaves the window's page");
+        {
+            sui::WindowId second = sui::kInvalidWindow;
+            for (sui::WindowId id : app.platform()->windows()) {
+                if (id != primary) {
+                    second = id;
+                }
+            }
+            sui::Element* where =
+                second != sui::kInvalidWindow ? app.pageDocument(second)->getElementById("where")
+                                             : nullptr;
+            check(where != nullptr, "the new window shows the linked page");
+        }
+
+        // Everything else stays put.
+        press("opt", 1, primary);
+        check(app.currentPage() == "index.sui", "an opted-out link stays");
+        press("broken", 1, primary);
+        check(app.currentPage() == "index.sui" &&
+                  app.document().getElementById("self") != nullptr,
+              "a broken link keeps the live page");
+        press("ext", 1, primary);
+        check(app.currentPage() == "index.sui", "an external link stays");
+        press("mid", 2, primary);
+        check(app.currentPage() == "index.sui", "a non-left press stays");
+        press("nestinner", 1, primary);
+        check(app.currentPage() == "pages/settings.sui", "a nested press follows out");
+        g_navApp = nullptr;
         fs::remove_all(root);
     }
 

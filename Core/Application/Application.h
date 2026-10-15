@@ -125,6 +125,10 @@ public:
     // `loadPage` without a caller for the error: reports it and answers whether
     // the page loaded. This is what navigation goes through.
     bool navigate(std::string_view href);
+    // `navigate` in one window: `blank` opens a new window (`target="_blank"`)
+    // instead of replacing the window's page. This is what a link press goes
+    // through; scripts use `navigate` / `openPage` directly.
+    bool navigateInWindow(WindowId window, std::string_view href, bool blank);
 
     // The href of the primary page on screen, empty before the first load.
     const std::string& currentPage() const;
