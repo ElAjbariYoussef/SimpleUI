@@ -959,6 +959,32 @@ bool parseSvgViewBox(std::string_view text, float box[4]) {
     return true;
 }
 
+float svgTextPxSize(std::string_view size, float cssSize, float scaleX) {
+    // A parsed, positive attribute in user units wins; anything else is the
+    // CSS size the element would have used as an HTML box.
+    std::size_t first = size.find_first_not_of(" \t\n\r\f");
+    if (first != std::string_view::npos) {
+        const std::string number(size.substr(first));
+        char* stop = nullptr;
+        const float value = std::strtof(number.c_str(), &stop);
+        if (stop != number.c_str() && value > 0.0f && scaleX > 0.0f) {
+            return value * scaleX;
+        }
+    }
+    return cssSize;
+}
+
+SDL_FPoint svgTextOrigin(const SvgView& view, float x, float y, std::string_view anchor,
+                         float width, float ascent) {
+    float px = view.x + x * view.sx;
+    if (anchor == "middle") {
+        px -= width * 0.5f;
+    } else if (anchor == "end") {
+        px -= width;
+    }
+    return SDL_FPoint{px, view.y + y * view.sy - ascent};
+}
+
 SvgView svgViewport(float vw, float vh, float vbx, float vby, float vbw, float vbh,
                     bool none) {
     SvgView view;

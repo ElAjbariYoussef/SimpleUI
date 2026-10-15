@@ -1059,6 +1059,33 @@ void testSvgViewport() {
     check(shifted.x == -20.0f && shifted.y == -10.0f, "min offsets shift scaled");
 }
 
+// An SVG `<text>` run sizes from its attribute in user units and lands through
+// the viewport: `text-anchor` shifts it and y names the baseline.
+void testSvgText() {
+    // A 10-unit font-size in a 2x view renders twenty pixels; without one the
+    // CSS size passes through untouched.
+    check(sui::svgTextPxSize("10", 16.0f, 2.0f) == 20.0f, "an attribute scales");
+    check(sui::svgTextPxSize("", 16.0f, 2.0f) == 16.0f, "a missing size keeps CSS");
+    check(sui::svgTextPxSize("banana", 16.0f, 2.0f) == 16.0f, "garbage keeps CSS");
+    check(sui::svgTextPxSize("0", 16.0f, 2.0f) == 16.0f, "a zero size keeps CSS");
+    check(sui::svgTextPxSize("-5", 16.0f, 2.0f) == 16.0f, "a negative size keeps CSS");
+    check(sui::svgTextPxSize(" 12 ", 16.0f, 2.0f) == 24.0f, "stray spaces parse");
+
+    // Origin math on a 2x view at an offset: start keeps x, middle and end
+    // pull left by half and all of the run, and y lifts by the ascent.
+    const sui::SvgView view = sui::svgViewport(200.0f, 100.0f, 0.0f, 0.0f, 100.0f,
+                                               50.0f, false);
+    const SDL_FPoint start = sui::svgTextOrigin(view, 10.0f, 20.0f, "start", 30.0f, 8.0f);
+    check(start.x == 20.0f && start.y == 32.0f, "a start run keeps its x");
+    const SDL_FPoint middle =
+        sui::svgTextOrigin(view, 10.0f, 20.0f, "middle", 30.0f, 8.0f);
+    check(middle.x == 5.0f && middle.y == 32.0f, "middle centres the run");
+    const SDL_FPoint end = sui::svgTextOrigin(view, 10.0f, 20.0f, "end", 30.0f, 8.0f);
+    check(end.x == -10.0f, "end right-aligns the run");
+    const SDL_FPoint plain = sui::svgTextOrigin(view, 10.0f, 20.0f, "", 30.0f, 8.0f);
+    check(plain.x == 20.0f, "no anchor reads as start");
+}
+
 // HarfBuzz shaping: ligatures fuse codepoints into single glyphs, marks ride
 // with zero advance, and clusters map glyphs back to source bytes. ASCII
 // stays on the fast path; anything past it shapes. Needs a real font, so the
@@ -1397,6 +1424,7 @@ int main() {
     testShaping();
     testSvgPath();
     testSvgViewport();
+    testSvgText();
     testListMarkerSlot();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

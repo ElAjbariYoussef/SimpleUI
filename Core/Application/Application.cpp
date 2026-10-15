@@ -1494,8 +1494,33 @@ std::vector<SDL_FPoint> svgPoints(std::string_view text) {
     return points;
 }
 
+// SVG text collapses whitespace the way XML does: newlines and tabs become
+// spaces, runs of spaces become one, and the ends are stripped. An element
+// with nothing left paints nothing.
+std::string collapseSvgText(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    bool pendingSpace = false;
+    bool started = false;
+    for (char c : text) {
+        const bool space = c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+        if (space) {
+            pendingSpace = started;
+            continue;
+        }
+        if (pendingSpace) {
+            out += ' ';
+            pendingSpace = false;
+        }
+        out += c;
+        started = true;
+    }
+    return out;
+}
+
 void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
-                    float opacity) {
+                    const ComputedStyle& style, const TextFont& font,
+                    SDL_Renderer* sdlRenderer, float opacity) {
     struct Frame {
         const Element* node;
         float opacity;
@@ -1647,15 +1672,50 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
             if (paint.hasStroke && paint.strokeWidth > 0.0f) {
                 renderer.strokePath(path, tint(paint.stroke), paint.strokeWidth, closed);
             }
+        } else if (tag == "text") {
+            // One text run at x/y, which names the baseline's start, painted in
+            // the fill. A stroke never outlines glyphs here; tspans, text on a
+            // path, and per-glyph shifts stay out of scope.
+            const std::string content = collapseSvgText(el.textContent());
+            if (content.empty() || !paint.hasFill || !font.hasFont()) {
+                continue;
+            }
+            const float pxSize = svgTextPxSize(el.attribute("font-size"), style.fontSize,
+                                              view.sx);
+            if (!(pxSize > 0.0f)) {
+                continue;
+            }
+            const float width = font.measureText(content, pxSize, style.fontKerning,
+                                                style.fontStretch);
+            const float ascent = font.verticalMetrics(pxSize).ascent;
+            const SDL_FPoint origin =
+                svgTextOrigin(view, svgNumber(el.attribute("x"), 0.0f),
+                              svgNumber(el.attribute("y"), 0.0f),
+                              svgToken(el.attribute("text-anchor")), width, ascent);
+            const Color tinted = tint(paint.fill);
+            SDL_Texture* text = font.renderText(
+                sdlRenderer, content, pxSize,
+                SDL_Color{tinted.r, tinted.g, tinted.b, tinted.a}, style.fontBold,
+                style.fontStyle != ComputedStyle::FontNormal, style.fontKerning,
+                style.fontStretch);
+            if (!text) {
+                continue;
+            }
+            float texW = 0.0f, texH = 0.0f;
+            SDL_GetTextureSize(text, &texW, &texH);
+            const SDL_FRect dst{std::floor(origin.x), std::floor(origin.y), texW, texH};
+            SDL_RenderTexture(sdlRenderer, text, nullptr, &dst);
+            SDL_DestroyTexture(text);
         }
-        // Text, use, and image stay unpainted: glyph runs and sub-resource
-        // fetching are their own milestones.
+        // Use and image stay unpainted: sub-resource fetching is its own
+        // milestone.
     }
 }
 
 // Paints an svg viewport: user units map through the viewBox (or 1:1),
 // then every supported shape draws from its attributes.
 void paintSvg(Element& el, const SDL_FRect& content, Renderer& renderer,
+              const ComputedStyle& style, const TextFont& font, SDL_Renderer* sdlRenderer,
               float opacity) {
     if (content.w <= 0.0f || content.h <= 0.0f) {
         return;
@@ -1668,7 +1728,7 @@ void paintSvg(Element& el, const SDL_FRect& content, Renderer& renderer,
     }
     view.x += content.x;
     view.y += content.y;
-    paintSvgShapes(el, view, renderer, opacity);
+    paintSvgShapes(el, view, renderer, style, font, sdlRenderer, opacity);
 }
 
 void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
@@ -1759,7 +1819,7 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
             paintSvg(el,
                      SDL_FRect{el.contentX() - offX, el.contentY() - offY,
                                el.contentWidth(), el.contentHeight()},
-                     renderer, opacity);
+                     renderer, s, font, sdlRenderer, opacity);
         }
         if (el.tag() == "img" || el.tag() == "video") {
             std::string_view src = el.attribute("src");

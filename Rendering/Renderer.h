@@ -310,4 +310,17 @@ struct SvgSubpath {
 // the close. False when nothing parsed; a partial path keeps what it read.
 bool parseSvgPath(std::string_view d, std::vector<SvgSubpath>& out);
 
+// The pixel size of an SVG `<text>` run: its `font-size` attribute in user
+// units scaled by the viewport, or the CSS font size when the attribute is
+// missing or nonsense. Non-uniform viewports (`none`) scale by the horizontal
+// axis, which keeps advances honest while the height follows along.
+float svgTextPxSize(std::string_view size, float cssSize, float scaleX);
+
+// Where an SVG `<text>` run starts: user x/y through the viewport, shifted by
+// `text-anchor` (`middle` centres, `end` right-aligns) and lifted by the
+// ascent because y names the baseline. The caller sizes the box from the
+// rasterized texture; the run's measured width only anchors it.
+SDL_FPoint svgTextOrigin(const SvgView& view, float x, float y, std::string_view anchor,
+                         float width, float ascent);
+
 }  // namespace sui
