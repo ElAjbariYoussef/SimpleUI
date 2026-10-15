@@ -2800,7 +2800,13 @@ private:
             if (!rtl) {
                 return;
             }
-            FriBidiParType base = fribidi_get_par_direction(types.data(), len);
+            // The base direction is the block's own: `rtl` flips mixed-script
+            // lines even when Latin leads, and `ltr` (the default) never moves
+            // runs -- first-strong guessing would flip Latin-led RTL text that
+            // CSS lays out straight.
+            FriBidiParType base = style_.direction == ComputedStyle::Direction::RTL
+                                      ? FRIBIDI_PAR_RTL
+                                      : FRIBIDI_PAR_LTR;
             std::vector<FriBidiBracketType> brackets(static_cast<std::size_t>(len));
             fribidi_get_bracket_types(ustr.data(), len, types.data(), brackets.data());
             std::vector<FriBidiLevel> levels(static_cast<std::size_t>(len));
@@ -2848,8 +2854,65 @@ private:
             }
         }
 
+        // Spreads one finished line across its width: center and right shift
+        // every run, justify spreads the leftover across the gaps in visual
+        // order, and anything else stays put. The last line justifies as
+        // start, and unbounded (max-content) probes never distribute at all.
+        // Only run positions move; pen widths stay, so shrink-to-fit and caret
+        // mapping measure content, not placement.
+        void distributeLine(bool last) {
+            auto& runs = ownerEl_.textRuns();
+            if (lineRunStartIndex_ >= runs.size() || lineAvail_ >= kUnbounded / 2) {
+                return;
+            }
+            const bool rtl = style_.direction == ComputedStyle::Direction::RTL;
+            ComputedStyle::TextAlign align = style_.textAlign;
+            if (align == ComputedStyle::Start) {
+                align = rtl ? ComputedStyle::Right : ComputedStyle::Left;
+            } else if (align == ComputedStyle::End) {
+                align = rtl ? ComputedStyle::Left : ComputedStyle::Right;
+            } else if (align == ComputedStyle::Justify && last) {
+                align = rtl ? ComputedStyle::Right : ComputedStyle::Left;
+            }
+            const float leftover = lineAvail_ - penX_;
+            if (!(leftover > 0.0f)) {
+                return;
+            }
+            if (align == ComputedStyle::Justify) {
+                const std::size_t count = runs.size() - lineRunStartIndex_;
+                if (count < 2) {
+                    return;
+                }
+                std::vector<std::size_t> order;
+                order.reserve(count);
+                for (std::size_t k = lineRunStartIndex_; k < runs.size(); ++k) {
+                    order.push_back(k);
+                }
+                std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+                    return runs[a].x < runs[b].x;
+                });
+                const float each = leftover / static_cast<float>(count - 1);
+                for (std::size_t k = 1; k < count; ++k) {
+                    runs[order[k]].x += each * static_cast<float>(k);
+                }
+                return;
+            }
+            float shift = 0.0f;
+            if (align == ComputedStyle::Center) {
+                shift = leftover * 0.5f;
+            } else if (align == ComputedStyle::Right) {
+                shift = leftover;
+            } else {
+                return;
+            }
+            for (std::size_t k = lineRunStartIndex_; k < runs.size(); ++k) {
+                runs[k].x += shift;
+            }
+        }
+
         void newLine() {
             reorderBidiLine();
+            distributeLine(false);
             cursorY_ += metrics_.lineHeight;
             penX_ = 0.0f;
             lineHasContent_ = false;
@@ -2860,6 +2923,7 @@ private:
 
         void finish() {
             reorderBidiLine();
+            distributeLine(true);
         }
 
         float cursorY() const {

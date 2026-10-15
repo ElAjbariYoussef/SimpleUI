@@ -4839,8 +4839,20 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.textAlign = ComputedStyle::Right;
         } else if (value == "justify") {
             s.textAlign = ComputedStyle::Justify;
+        } else if (value == "start") {
+            s.textAlign = ComputedStyle::Start;
+        } else if (value == "end") {
+            s.textAlign = ComputedStyle::End;
         } else {
             s.textAlign = ComputedStyle::Left;
+        }
+    } else if (property == "direction") {
+        if (value == "ltr") {
+            s.direction = ComputedStyle::Direction::LTR;
+            s.specified |= ComputedStyle::SpecifiedDirection;
+        } else if (value == "rtl") {
+            s.direction = ComputedStyle::Direction::RTL;
+            s.specified |= ComputedStyle::SpecifiedDirection;
         }
     } else if (property == "visibility") {
         s.visible = parseBool(value);
@@ -6073,8 +6085,13 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             case ComputedStyle::Center: return "center";
             case ComputedStyle::Right: return "right";
             case ComputedStyle::Justify: return "justify";
+            case ComputedStyle::Start: return "start";
+            case ComputedStyle::End: return "end";
         }
         return {};
+    }
+    if (property == "direction") {
+        return style.direction == ComputedStyle::Direction::RTL ? "rtl" : "ltr";
     }
     if (property == "width") return length(style.width, "auto");
     if (property == "height") return length(style.height, "auto");

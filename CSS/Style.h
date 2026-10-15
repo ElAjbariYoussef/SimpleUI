@@ -779,8 +779,13 @@ struct ComputedStyle {
     std::vector<std::uint8_t> animationPaused;
 
     // Text alignment
-    enum TextAlign : std::uint8_t { Left, Center, Right, Justify };
-    TextAlign textAlign = Left;
+    enum TextAlign : std::uint8_t { Left, Center, Right, Justify, Start, End };
+    TextAlign textAlign = Start;
+    // Base writing direction. Inherited. Apart from resolving `start`/`end`
+    // alignment, it sets the base direction bidirectional lines reorder
+    // around: `rtl` flips mixed-script lines even when Latin leads.
+    enum class Direction : std::uint8_t { LTR, RTL };
+    Direction direction = Direction::LTR;
 
     // Positioning (minimal for now)
     enum Position : std::uint8_t { Static, Relative, Absolute, Fixed, Sticky };
@@ -981,7 +986,7 @@ struct ComputedStyle {
     // Which inheritable properties the user-agent style set on its own. Anything
     // not flagged here flows down from the parent. Author rules and inline
     // styles apply after inheritance, so they always win.
-    enum Specified : std::uint32_t {
+    enum Specified : std::uint64_t {
         SpecifiedColor = 1u << 0,
         SpecifiedFontSize = 1u << 1,
         SpecifiedFontFamily = 1u << 2,
@@ -1010,14 +1015,15 @@ struct ComputedStyle {
         SpecifiedFontVariant = 1u << 28,
         SpecifiedWordBreak = 1u << 29,
         SpecifiedOverflowWrap = 1u << 30,
-        SpecifiedTextSizeAdjust = 1u << 31,
+        SpecifiedDirection = 1ULL << 32,
+        SpecifiedTextSizeAdjust = 1ULL << 33,
         SpecifiedScrollBehavior = 1u << 25,
         SpecifiedColorScheme = 1u << 26,
         // A marker, not a property: the element still carries the user-agent
         // canvas colours, which `color-scheme` may re-pick.
         SpecifiedUACanvas = 1u << 27,
     };
-    std::uint32_t specified = 0;
+    std::uint64_t specified = 0;
 };
 
 // The CSS cursor keyword set, as one name/value table so the parser and the
@@ -1212,6 +1218,9 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     }
     if (!(style.specified & ComputedStyle::SpecifiedTextAlign)) {
         style.textAlign = parent.textAlign;
+    if (!(style.specified & ComputedStyle::SpecifiedDirection)) {
+        style.direction = parent.direction;
+    }
     }
     if (!(style.specified & ComputedStyle::SpecifiedFontStyle)) {
         style.fontStyle = parent.fontStyle;

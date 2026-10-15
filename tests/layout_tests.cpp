@@ -6684,9 +6684,10 @@ void testValidationApi() {
 void testBidiOrder() {
     auto document = parseOrNull(
         "<sui><body>"
-        "<div id=\"rtl\">\xD8\xB9\xD8\xA7\xD9\x84\xD9\x85 hello</div>"
+        "<div id=\"rtl\" style=\"direction:rtl\">\xD8\xB9\xD8\xA7\xD9\x84\xD9\x85 hello</div>"
         "<div id=\"ltr\">one \xD7\xA9\xD7\xA0\xD7\x99 three</div>"
-        "<div id=\"num\">\xD8\xB3\xD9\x86\xD8\xA9 2024</div>"
+        "<div id=\"num\" style=\"direction:rtl\">\xD8\xB3\xD9\x86\xD8\xA9 2024</div>"
+        "<div id=\"auto\">\xD8\xB9\xD8\xA7\xD9\x84\xD9\x85 hello</div>"
         "<div id=\"plain\">just ascii here</div>"
         "</body></sui>");
     if (!document) {
@@ -6696,9 +6697,10 @@ void testBidiOrder() {
     Element* rtl = el("rtl");
     Element* ltr = el("ltr");
     Element* num = el("num");
+    Element* autoEl = el("auto");
     Element* plain = el("plain");
-    check(rtl && ltr && num && plain, "bidi elements found");
-    if (!rtl || !ltr || !num || !plain) {
+    check(rtl && ltr && num && autoEl && plain, "bidi elements found");
+    if (!rtl || !ltr || !num || !autoEl || !plain) {
         return;
     }
     sui::StyleResolver resolver;
@@ -6711,7 +6713,8 @@ void testBidiOrder() {
         }
         return out;
     };
-    // RTL paragraph: the trailing latin word prints left of the arabic one.
+    // An rtl base flips the line: the trailing latin word prints left of the
+    // arabic one, even though Latin leads nowhere here.
     {
         const std::vector<float> at = xs(*rtl);
         check(at.size() == 2, "two runs share the rtl line");
@@ -6735,6 +6738,15 @@ void testBidiOrder() {
             check(at[1] < at[0], "digits print left of arabic");
         }
     }
+    // The default base is ltr, not first-strong: Latin-led RTL text lays out
+    // straight, the way browsers set it.
+    {
+        const std::vector<float> at = xs(*autoEl);
+        check(at.size() == 2, "two runs share the default line");
+        if (at.size() == 2) {
+            check(at[0] < at[1], "a default base never flips runs");
+        }
+    }
     // Pure ASCII never reorders.
     {
         const std::vector<float> at = xs(*plain);
@@ -6744,6 +6756,114 @@ void testBidiOrder() {
         }
         check(ordered, "ascii runs stay put");
     }
+}
+
+// Lines distribute across their width: center and right shift runs,
+// justify spreads the leftover across the gaps (all but the last line), and
+// `start`/`end` read through `direction`. `direction` itself parses,
+// inherits, and sets the bidi base.
+void testTextAlign() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"l\" style=\"width:200px\">hi</div>"
+        "<div id=\"c\" style=\"width:200px;text-align:center\">hi</div>"
+        "<div id=\"r\" style=\"width:200px;text-align:right\">hi</div>"
+        "<div id=\"s\" style=\"width:200px;text-align:start\">hi</div>"
+        "<div id=\"e\" style=\"width:200px;text-align:end\">hi</div>"
+        "<div id=\"sr\" style=\"width:200px;direction:rtl;text-align:start\">hi</div>"
+        "<div id=\"er\" style=\"width:200px;direction:rtl;text-align:end\">hi</div>"
+        "<div id=\"j\" style=\"width:100px;text-align:justify\">aa bb cc dd ee</div>"
+        "<div id=\"jl\" style=\"width:100px;text-align:justify\">aa bb cc dd ee ff gg</div>"
+        "<div id=\"d\" style=\"direction:rtl\"><span id=\"dc\">x</span></div>"
+        "<div id=\"g\" style=\"direction:banana\">x</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* l = el("l");
+    Element* c = el("c");
+    Element* r = el("r");
+    Element* s = el("s");
+    Element* e = el("e");
+    Element* sr = el("sr");
+    Element* er = el("er");
+    Element* j = el("j");
+    Element* jl = el("jl");
+    Element* d = el("d");
+    Element* dc = el("dc");
+    Element* g = el("g");
+    check(l && c && r && s && e && sr && er && j && jl && d && dc && g,
+          "align elements found");
+    if (!l || !c || !r || !s || !e || !sr || !er || !j || !jl || !d || !dc || !g) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+    layoutRoot(*document, resolver, 400.0f);
+    const auto x0 = [](Element& e) {
+        return e.textRuns().empty() ? -1.0f : e.textRuns()[0].x;
+    };
+    // "hi" measures 16px in a 200px box.
+    check(x0(*l) == 0.0f, "left starts at the edge");
+    check(x0(*c) == 92.0f, "center splits the leftover");
+    check(x0(*r) == 184.0f, "right pins the end");
+    check(x0(*s) == 0.0f, "start reads left to right");
+    check(x0(*e) == 184.0f, "end reads right to left");
+    check(x0(*sr) == 184.0f, "start reads right under rtl");
+    check(x0(*er) == 0.0f, "end reads left under rtl");
+    // A lone justified line is its own last line, so it starts over.
+    check(j->textRuns().size() == 5, "five words share the line");
+    if (j->textRuns().size() == 5) {
+        bool plain = true;
+        for (std::size_t k = 0; k < 5; ++k) {
+            plain = plain && j->textRuns()[k].x == static_cast<float>(k * 20);
+        }
+        check(plain, "a last line never justifies");
+    }
+    // Seven words wrap five and two: the full line spreads edge to edge.
+    {
+        // Group runs by line.
+        std::vector<float> lineEnd;
+        float lineY = -1.0f;
+        float lineRight = 0.0f;
+        for (const auto& run : jl->textRuns()) {
+            if (run.y != lineY) {
+                if (lineY >= 0.0f) {
+                    lineEnd.push_back(lineRight);
+                }
+                lineY = run.y;
+                lineRight = 0.0f;
+            }
+            lineRight = run.x + run.width;
+        }
+        lineEnd.push_back(lineRight);
+        check(lineEnd.size() == 2, "seven words wrap two lines");
+        if (lineEnd.size() == 2) {
+            check(lineEnd[0] == 100.0f, "the full line spreads edge to edge");
+        }
+        bool lastLeft = false;
+        for (const auto& run : jl->textRuns()) {
+            if (run.y == lineY && run.x == 0.0f) {
+                lastLeft = true;
+            }
+        }
+        check(lastLeft, "the last line starts over");
+        if (jl->textRuns().size() == 7) {
+            check(jl->textRuns()[0].x == 0.0f && jl->textRuns()[1].x == 21.0f &&
+                      jl->textRuns()[4].x == 84.0f,
+                  "the full line spreads its gaps evenly");
+        }
+    }
+
+    using Direction = ComputedStyle::Direction;
+    check(resolver.resolve(*d).direction == Direction::RTL, "rtl parses");
+    check(resolver.resolve(*dc).direction == Direction::RTL, "direction inherits");
+    check(resolver.resolve(*g).direction == Direction::LTR, "garbage keeps ltr");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*d), "direction") == "rtl",
+          "rtl serializes");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*s), "text-align") == "start",
+          "start serializes");
 }void testBackdropFilter() {
     auto document = parseOrNull("<sui><body><div id=\"x\">hi</div></body></sui>");
     if (!document) {
@@ -8366,6 +8486,7 @@ int main() {
     testCurrentColor();
     testValidationApi();
     testBidiOrder();
+    testTextAlign();
     testValidationPseudos();
     testGaugeDefaults();
     testFocusVisible();
