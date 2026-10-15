@@ -3905,6 +3905,46 @@ void testCssCounters() {
               "an increment with no reset creates the counter");
     }
 
+    // `counter-set` parses and serializes like its siblings, defaulting a
+    // missing value to 0, and wins over an increment on the same element.
+    {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("#a { counter-set: section 5 other }"));
+        auto document = parseOrNull("<sui><body><div id=\"a\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        const ComputedStyle a = resolver.resolve(*document->getElementById("a"));
+        check(a.counterSet.size() == 2, "counter-set parses every name");
+        check(a.counterSet[0].name == "section" && a.counterSet[0].value == 5,
+              "counter-set keeps an explicit value");
+        check(a.counterSet[1].name == "other" && a.counterSet[1].value == 0,
+              "counter-set defaults a missing value to 0");
+        check(sui::StyleResolver::propertyValue(a, "counter-set") == "section 5 other 0",
+              "counter-set serializes back");
+    }
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"a\"></div><div id=\"b\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "#a { counter-increment: c 1; counter-set: c 9 } #a::after { content: counter(c) }"
+            "#b { counter-set: k 4 } #b::after { content: counter(k) }"));
+        sui::generatePseudoElements(*document, resolver);
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        if (!a || !b) {
+            return;
+        }
+        check(a->children().size() == 1 && a->children()[0]->textContent() == "9",
+              "a set wins over an increment on the same element");
+        check(b->children().size() == 1 && b->children()[0]->textContent() == "4",
+              "a set with no increment creates the counter");
+    }
+
     // `counters(name, sep)` joins every counter of that name in scope, outermost
     // first, so nested lists number as 1, 1.1, and so on.
     {

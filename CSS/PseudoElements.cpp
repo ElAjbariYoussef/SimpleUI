@@ -68,10 +68,10 @@ std::string countersValue(CounterStack& stack, std::string_view name,
     return out;
 }
 
-// Applies one element's `counter-reset` and then `counter-increment`, in that
-// order, as CSS specifies. Both create their counter in the parent scope; an
-// increment that finds an existing counter updates it where it lives so the
-// value carries on to the following siblings.
+// Applies one element's `counter-reset`, then `counter-increment`, then
+// `counter-set`, in that order, as CSS specifies. Resets and sets create their
+// counter in the parent scope; an increment that finds an existing counter
+// updates it where it lives so the value carries on to the following siblings.
 void applyCounters(const ComputedStyle& style, CounterStack& stack) {
     if (stack.scopes.size() < 2) {
         return;
@@ -94,6 +94,19 @@ void applyCounters(const ComputedStyle& style, CounterStack& stack) {
         if (int* value = findCounter(stack, op.name)) {
             *value += op.value;
         } else {
+            scope.values.push_back({op.name, op.value});
+        }
+    }
+    for (const auto& op : style.counterSet) {
+        bool found = false;
+        for (auto& entry : scope.values) {
+            if (entry.first == op.name) {
+                entry.second = op.value;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
             scope.values.push_back({op.name, op.value});
         }
     }

@@ -871,13 +871,16 @@ struct ComputedStyle {
     bool isTableCell() const noexcept { return display == Display::TableCell; }
 
     // CSS counters, keyed by name. `counterReset` sets the counter to `value` on
-    // the element that declares it; `counterIncrement` adds `value` to it.
+    // the element that declares it; `counterIncrement` adds `value` to it;
+    // `counterSet` sets it afterwards, so a set wins over an increment on the
+    // same element.
     struct CounterOp {
         std::string name;
         int value = 0;
     };
     std::vector<CounterOp> counterReset;
     std::vector<CounterOp> counterIncrement;
+    std::vector<CounterOp> counterSet;
 
     // List marker position: whether the bullet/number sits outside (default) or
     // inside the element's content box.

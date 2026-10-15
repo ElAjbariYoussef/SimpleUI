@@ -5033,6 +5033,8 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         s.counterReset = parseCounterList(value, 0);
     } else if (property == "counter-increment") {
         s.counterIncrement = parseCounterList(value, 1);
+    } else if (property == "counter-set") {
+        s.counterSet = parseCounterList(value, 0);
     } else if (property == "resize" || property == "appearance" ||
                property == "-webkit-appearance") {
         // Accepted; these control browser chrome that this engine does not draw.
@@ -6135,9 +6137,12 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "cursor") {
         return std::string(cursorName(style.cursor));
     }
-    if (property == "counter-reset" || property == "counter-increment") {
+    if (property == "counter-reset" || property == "counter-increment" ||
+        property == "counter-set") {
         const std::vector<ComputedStyle::CounterOp>& ops =
-            property == "counter-reset" ? style.counterReset : style.counterIncrement;
+            property == "counter-reset"     ? style.counterReset
+            : property == "counter-increment" ? style.counterIncrement
+                                              : style.counterSet;
         std::string out;
         for (const auto& op : ops) {
             if (!out.empty()) {
