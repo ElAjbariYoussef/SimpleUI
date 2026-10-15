@@ -5738,6 +5738,67 @@ void testFontKerning() {
 
 // `font-stretch` names nine steps and takes raw percentages, inherits, and
 // serializes. Nonsense widths and garbage drop.
+// `font-weight` keeps the whole 1-1000 scale: keywords, relative keywords
+// against the inherited weight, and plain numbers. `fontBold` follows the 600
+// threshold, the number serializes back, and garbage keeps the previous winner.
+void testFontWeight() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"a\" style=\"font-weight:bold\"><span id=\"c\">x</span></div>"
+        "<div id=\"b\" style=\"font-weight:300\">x</div>"
+        "<div id=\"d\" style=\"font-weight:650\">x</div>"
+        "<div id=\"e\" style=\"font-weight:bolder\">x</div>"
+        "<div id=\"g\" style=\"font-weight:banana\">x</div>"
+        "<div id=\"h\">x</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* a = el("a");
+    Element* c = el("c");
+    Element* b = el("b");
+    Element* d = el("d");
+    Element* e = el("e");
+    Element* g = el("g");
+    Element* h = el("h");
+    check(a && c && b && d && e && g && h, "weight elements found");
+    if (!a || !c || !b || !d || !e || !g || !h) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    check(resolver.resolve(*a).fontWeight == 700, "bold is 700");
+    check(resolver.resolve(*a).fontBold, "700 renders bold");
+    check(resolver.resolve(*c).fontWeight == 700, "the number inherits");
+    check(resolver.resolve(*b).fontWeight == 300, "a light number parses");
+    check(!resolver.resolve(*b).fontBold, "300 renders regular");
+    check(resolver.resolve(*d).fontWeight == 650, "off-step numbers keep their value");
+    check(resolver.resolve(*d).fontBold, "650 renders bold");
+    check(resolver.resolve(*e).fontWeight == 700, "bolder steps 400 up to 700");
+    check(resolver.resolve(*g).fontWeight == 400, "garbage keeps normal");
+    check(resolver.resolve(*h).fontWeight == 400, "the default is 400");
+
+    // Relative keywords read the inherited weight, not a fixed answer.
+    sui::StyleResolver rel;
+    rel.setRules(sui::CSSParser::parse(
+        "body { margin: 0; font-weight: 700 } #l { font-weight: lighter }"));
+    auto relDoc = parseOrNull("<sui><body><div id=\"l\">x</div></body></sui>");
+    if (relDoc) {
+        Element* l = relDoc->getElementById("l");
+        if (l) {
+            check(rel.resolve(*l).fontWeight == 400, "lighter steps 700 down to 400");
+            check(!rel.resolve(*l).fontBold, "400 renders regular");
+        }
+    }
+    const auto serial = [&](const char* id) {
+        return sui::StyleResolver::propertyValue(resolver.resolve(*el(id)), "font-weight");
+    };
+    check(std::string(serial("a")) == "700", "bold serializes as its number");
+    check(std::string(serial("b")) == "300", "a light number round-trips");
+    check(std::string(serial("h")) == "400", "the default serializes as 400");
+}
+
 void testFontStretch() {
     auto document = parseOrNull(
         "<sui><body>"
@@ -7902,6 +7963,7 @@ int main() {
     testListStyleImage();
     testFontKerning();
     testFontStretch();
+    testFontWeight();
     testScrollBehavior();
     testColorScheme();
     testPrefersColorScheme();

@@ -4428,8 +4428,33 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             }
         }
     } else if (property == "font-weight") {
-        s.fontBold = value == "bold" || value == "bolder" ||
-                     std::strtof(std::string(value).c_str(), nullptr) >= 600.0f;
+        // Keywords, relative keywords against the inherited weight, and plain
+        // numbers. The number survives for the cascade and `fontBold` follows
+        // the 600 threshold; garbage keeps the previous cascade winner.
+        int weight = s.fontWeight;
+        bool ok = true;
+        if (value == "normal") {
+            weight = 400;
+        } else if (value == "bold") {
+            weight = 700;
+        } else if (value == "bolder") {
+            weight = weight < 400 ? 400 : (weight < 600 ? 700 : 900);
+        } else if (value == "lighter") {
+            weight = weight <= 500 ? 100 : (weight <= 700 ? 400 : 700);
+        } else {
+            char* stop = nullptr;
+            const long parsed = std::strtol(std::string(value).c_str(), &stop, 10);
+            if (!stop || *stop != '\0' || parsed < 1 || parsed > 1000) {
+                ok = false;
+            } else {
+                weight = static_cast<int>(parsed);
+            }
+        }
+        if (ok) {
+            s.fontWeight = weight;
+            s.fontBold = weight >= 600;
+            s.specified |= ComputedStyle::SpecifiedFontBold;
+        }
     } else if (property == "font-family") {
         std::string_view family = value;
         if (const std::size_t comma = family.find(','); comma != std::string_view::npos) {
@@ -5775,7 +5800,7 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "font-size") return number(style.fontSize);
     // line-height is kept as a multiplier, so it serialises without a unit.
     if (property == "line-height") return unitless(style.lineHeight);
-    if (property == "font-weight") return style.fontBold ? "bold" : "normal";
+    if (property == "font-weight") return std::to_string(style.fontWeight);
     if (property == "font-family") return style.fontFamily;
     if (property == "font-style") {
         switch (style.fontStyle) {

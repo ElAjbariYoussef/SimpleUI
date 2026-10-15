@@ -587,6 +587,11 @@ struct ComputedStyle {
     float fontSize = 16.0f;  // px
     std::string fontFamily;   // empty = default
     bool fontBold = false;
+    // The 100-900 weight the cascade settled on (400 normal, 700 bold).
+    // `fontBold` follows it at the 600 threshold browsers use; the rasterizer
+    // only knows bold-or-not from the single font file, so intermediate steps
+    // have no gradated rendering.
+    int fontWeight = 400;
     float lineHeight = 1.2f;  // multiplier
     // Pair kerning in shaped runs. Inherited; `none` keeps ligatures and
     // marks but sets pairs unkerned.
@@ -1138,6 +1143,7 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     }
     if (!(style.specified & ComputedStyle::SpecifiedFontBold)) {
         style.fontBold = parent.fontBold;
+        style.fontWeight = parent.fontWeight;
     }
     if (!(style.specified & ComputedStyle::SpecifiedLineHeight)) {
         style.lineHeight = parent.lineHeight;
