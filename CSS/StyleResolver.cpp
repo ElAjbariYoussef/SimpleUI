@@ -5275,6 +5275,20 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
     } else if (property == "table-layout") {
         s.tableLayout = value == "fixed" ? ComputedStyle::TableLayoutFixed
                                          : ComputedStyle::TableLayoutAuto;
+    } else if (property == "line-clamp" || property == "-webkit-line-clamp") {
+        // `none` lifts the cap; otherwise a bare integer of at least 1. Zero,
+        // negatives, and anything but digits drop the declaration outright.
+        if (trim(value) == "none") {
+            s.lineClamp = 0;
+            s.specified |= ComputedStyle::SpecifiedLineClamp;
+        } else {
+            char* stop = nullptr;
+            const long parsed = std::strtol(std::string(trim(value)).c_str(), &stop, 10);
+            if (stop && *stop == '\0' && parsed >= 1 && parsed <= 1000) {
+                s.lineClamp = static_cast<int>(parsed);
+                s.specified |= ComputedStyle::SpecifiedLineClamp;
+            }
+        }
     } else if (property == "empty-cells") {
         if (value == "show" || value == "hide") {
             s.emptyCells = value == "hide" ? ComputedStyle::EmptyCellsHide
@@ -6531,6 +6545,9 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "table-layout") {
         return style.tableLayout == ComputedStyle::TableLayoutFixed ? "fixed" : "auto";
+    }
+    if (property == "line-clamp") {
+        return style.lineClamp > 0 ? std::to_string(style.lineClamp) : "none";
     }
     if (property == "empty-cells") {
         return style.emptyCells == ComputedStyle::EmptyCellsHide ? "hide" : "show";

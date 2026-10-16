@@ -4121,6 +4121,169 @@ void testEmptyCells() {
     }
 }
 
+// `line-clamp` caps a block at N lines with an ellipsis: `none` lifts the cap,
+// anything but a positive integer drops the declaration, and the property does
+// not inherit. Content past the cap lays out nothing; an ellipsis that nothing
+// proves needed is taken back.
+void testLineClamp() {
+    // Parsing, the webkit alias, serialization, and no inheritance.
+    {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "#a { line-clamp: 2 } #n { line-clamp: none } "
+            "#w { -webkit-line-clamp: 3 } #z { line-clamp: 0 } "
+            "#g { line-clamp: banana } #f { line-clamp: 2.5 }"));
+        auto document = parseOrNull(
+            "<sui><body><div id=\"a\"><span id=\"c\">x</span></div><div id=\"n\"></div>"
+            "<div id=\"w\"></div><div id=\"z\"></div><div id=\"g\"></div>"
+            "<div id=\"f\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        const auto el = [&](const char* id) { return document->getElementById(id); };
+        Element* a = el("a");
+        Element* c = el("c");
+        check(a && c && el("n") && el("w") && el("z") && el("g") && el("f"),
+              "clamp elements found");
+        if (!a || !c) {
+            return;
+        }
+        check(resolver.resolve(*a).lineClamp == 2, "an integer parses");
+        check(resolver.resolve(*c).lineClamp == 0, "the cap does not inherit");
+        check(resolver.resolve(*el("n")).lineClamp == 0, "none lifts the cap");
+        check(resolver.resolve(*el("w")).lineClamp == 3, "the webkit alias parses");
+        check(resolver.resolve(*el("z")).lineClamp == 0, "zero drops out");
+        check(resolver.resolve(*el("g")).lineClamp == 0, "garbage drops out");
+        check(resolver.resolve(*el("f")).lineClamp == 0, "a fraction drops out");
+        check(resolver.resolve(*a).clampsLines(), "a positive cap clamps");
+        check(!resolver.resolve(*c).clampsLines(), "zero clamps nothing");
+        check(sui::StyleResolver::propertyValue(resolver.resolve(*a), "line-clamp") == "2",
+              "the cap serializes");
+        check(sui::StyleResolver::propertyValue(resolver.resolve(*el("n")), "line-clamp") ==
+                  "none",
+              "none serializes");
+        check(resolver.resolve(*a).display == ComputedStyle::Block,
+              "the cap changes no display");
+    }
+
+    const auto lineCount = [](Element& e) {
+        std::vector<float> ys;
+        for (const auto& run : e.textRuns()) {
+            if (ys.empty() || run.y != ys.back()) {
+                ys.push_back(run.y);
+            }
+        }
+        return ys.size();
+    };
+    const auto endsEllipsis = [](Element& e) {
+        if (e.textRuns().empty()) {
+            return false;
+        }
+        const std::string& text = e.textRuns().back().text;
+        return text.size() >= 3 && text.compare(text.size() - 3, 3, "\xE2\x80\xA6") == 0;
+    };
+    const std::string words =
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi "
+        "omicron pi rho sigma tau upsilon phi chi psi omega aleph beth gimel daleth";
+
+    // A long paragraph capped at two lines: two line levels, cut with ellipsis.
+    {
+        const std::string markup =
+            std::string("<sui><body><div id=\"c\" style=\"width:100px;line-clamp:2\">") + words +
+            "</div><div id=\"u\" style=\"width:100px\">" + words + "</div></body></sui>";
+        auto document = parseOrNull(markup.c_str());
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* c = document->getElementById("c");
+        Element* u = document->getElementById("u");
+        check(c && u, "clamp layout elements found");
+        if (!c || !u) {
+            return;
+        }
+        check(lineCount(*u) > 2, "the paragraph wants more than two lines");
+        check(lineCount(*c) == 2, "the cap holds two lines");
+        check(endsEllipsis(*c), "cut content ends with an ellipsis");
+        check(c->textRuns().size() < u->textRuns().size(), "cut runs never lay out");
+    }
+
+    // One line, and an atomic box past the cap zeroes out instead of painting on.
+    {
+        const std::string markup =
+            std::string("<sui><body><div id=\"o\" style=\"width:100px;line-clamp:1\">") + words +
+            "<div id=\"b\" style=\"display:inline-block;width:50px;height:10px\"></div></div>"
+            "</body></sui>";
+        auto document = parseOrNull(markup.c_str());
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* o = document->getElementById("o");
+        Element* b = document->getElementById("b");
+        check(o && b, "single-line elements found");
+        if (!o || !b) {
+            return;
+        }
+        check(lineCount(*o) == 1, "one line survives");
+        check(endsEllipsis(*o), "one line still earns its ellipsis");
+        check(b->layoutWidth() == 0.0f && b->layoutHeight() == 0.0f,
+              "an atomic past the cap takes no box");
+        check(b->textRuns().empty(), "and lays out no runs");
+    }
+
+    // What fits needs no ellipsis: exact fit, and a trailing break after one.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"e\" style=\"width:200px;line-clamp:2\">hi yo</div>"
+            "<div id=\"t\" style=\"width:200px;line-clamp:1\">hi yo<br/></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* e = document->getElementById("e");
+        Element* t = document->getElementById("t");
+        check(e && t, "exact-fit elements found");
+        if (!e || !t) {
+            return;
+        }
+        check(lineCount(*e) == 1, "short text stays one line");
+        check(!endsEllipsis(*e), "fitting text earns no ellipsis");
+        check(!endsEllipsis(*t), "a trailing break earns none either");
+    }
+
+    // An atomic box that itself crosses the cap lays out nowhere either.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"k\" style=\"width:100px;line-clamp:1\">alpha"
+            "<div id=\"a\" style=\"display:inline-block;width:90px;height:10px\"></div></div>"
+            "<div id=\"w\" style=\"width:100px\">alpha"
+            "<div id=\"f\" style=\"display:inline-block;width:90px;height:10px\"></div></div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* a = document->getElementById("a");
+        Element* f = document->getElementById("f");
+        check(a && f, "wrapping atomic elements found");
+        if (!a || !f) {
+            return;
+        }
+        check(a->layoutWidth() == 0.0f && a->layoutHeight() == 0.0f,
+              "a wrapping atomic takes no box");
+        check(f->layoutWidth() > 0.0f, "unclamped it keeps its box");
+    }
+}
+
 // Counter styles number markers and `counter()` values: roman subtracts,
 // alpha rolls over, and anything unrepresentable reads as decimal.
 void testCounterStyles() {
@@ -9086,6 +9249,7 @@ int main() {
     testQuotes();
     testBreakSpaces();
     testEmptyCells();
+    testLineClamp();
     testColorScheme();
     testPrefersColorScheme();
     testCurrentColor();

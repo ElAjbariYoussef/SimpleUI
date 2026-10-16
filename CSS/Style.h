@@ -915,6 +915,9 @@ struct ComputedStyle {
     // visible content, in the separated model only. Inherited.
     enum EmptyCells : std::uint8_t { EmptyCellsShow, EmptyCellsHide };
     EmptyCells emptyCells = EmptyCellsShow;
+    // `line-clamp` caps the block at N lines with an ellipsis; 0 is `none`.
+    // Not inherited: each container declares its own cap.
+    int lineClamp = 0;
 
     bool isTableContainer() const noexcept {
         return display == Display::Table || display == Display::InlineTable;
@@ -932,6 +935,9 @@ struct ComputedStyle {
     bool showsCellDecoration(bool tableCollapsed, bool cellEmpty) const noexcept {
         return !(cellEmpty && !tableCollapsed && emptyCells == EmptyCellsHide);
     }
+
+    // Whether the block caps its lines: a positive `line-clamp` count.
+    bool clampsLines() const noexcept { return lineClamp > 0; }
 
     // CSS counters, keyed by name. `counterReset` sets the counter to `value` on
     // the element that declares it; `counterIncrement` adds `value` to it;
@@ -1053,6 +1059,7 @@ struct ComputedStyle {
         SpecifiedTextAlignLast = 1ULL << 35,
         SpecifiedQuotes = 1ULL << 36,
         SpecifiedEmptyCells = 1ULL << 37,
+        SpecifiedLineClamp = 1ULL << 38,
         SpecifiedScrollBehavior = 1u << 25,
         SpecifiedColorScheme = 1u << 26,
         // A marker, not a property: the element still carries the user-agent

@@ -1008,6 +1008,22 @@ private:
         return cursorY;
     }
 
+    // Zeroes a subtree past a `line-clamp` cap: no box, no runs, nothing to
+    // paint or hit. Layout never ran here, so whatever geometry lingers is
+    // from an earlier pass and must go.
+    static void clearSubtree(Element& el) {
+        el.clearTextRuns();
+        el.setLayoutX(0.0f);
+        el.setLayoutY(0.0f);
+        el.setLayoutWidth(0.0f);
+        el.setLayoutHeight(0.0f);
+        for (const auto& child : el.children()) {
+            if (child) {
+                clearSubtree(*child);
+            }
+        }
+    }
+
     // Widest the element's own contents want when nothing wraps. The layout
     // this writes is discarded: run() repeats it at the real width.
     float probeWidth(Element& el, const UsedBox& box) {
@@ -2492,7 +2508,8 @@ private:
               maxWidth_(maxWidth),
               originX_(originX),
               originY_(originY),
-              spacing_(spacingFor(s.whiteSpace)) {
+              spacing_(spacingFor(s.whiteSpace)),
+              lineClamp_(maxWidth >= kUnbounded / 2 ? 0 : s.lineClamp) {
             lineRunStartIndex_ = owner_el.textRuns().size();
             if (s.textIndent.unit != sui::Length::Auto) {
                 penX_ = std::max(0.0f, s.textIndent.resolve(s.fontSize, s.fontSize, 16.0f));
@@ -2662,6 +2679,11 @@ private:
                 if (!owner_.isLaidOut(*child)) {
                     continue;
                 }
+                if (clamped_) {
+                    owner_.clearSubtree(*child);
+                    clampSuppressed_ = true;
+                    continue;
+                }
                 const ComputedStyle cs = owner_.resolveStyle(*child);
                 // A floated child leaves the line and reserves space beside it
                 // for every following line.
@@ -2709,6 +2731,12 @@ private:
             }
             if (lineHasContent_ && lineIndent_ + penX_ + outerW > lineAvail_) {
                 newLine();
+            }
+            if (clamped_) {
+                // The break above spent the cap: the box lays out nowhere.
+                owner_.clearSubtree(child);
+                clampSuppressed_ = true;
+                return;
             }
             const float lineTop = originY_ + cursorY_;
             const float top = lineTop + box.margin.top + verticalAlignShift(cs);
@@ -2951,8 +2979,28 @@ private:
         }
 
         void newLine() {
+            if (clamped_) {
+                // Past the cap there are no more lines: swallow the break. A
+                // break with content on the would-be line means something real
+                // was cut, which keeps the speculative ellipsis.
+                if (lineHasContent_) {
+                    clampSuppressed_ = true;
+                }
+                lineHasContent_ = false;
+                return;
+            }
             reorderBidiLine();
             distributeLine(false);
+            ++linesCommitted_;
+            if (lineClamp_ > 0 && linesCommitted_ >= lineClamp_) {
+                // The line just finished is the last allowed: end it with an
+                // ellipsis and swallow everything after. finish() takes the
+                // ellipsis back when nothing was actually cut.
+                appendClampEllipsis();
+                clamped_ = true;
+                lineHasContent_ = false;
+                return;
+            }
             breakAllowed_ = false;
             cursorY_ += metrics_.lineHeight;
             penX_ = 0.0f;
@@ -2963,8 +3011,53 @@ private:
         }
 
         void finish() {
+            if (clamped_ && !clampSuppressed_) {
+                retractClampEllipsis();
+            }
             reorderBidiLine();
             distributeLine(true);
+        }
+
+        // Ends the last allowed line with an ellipsis, dropping whole tail
+        // runs until it fits. Speculative: finish() retracts it when nothing
+        // past the cap was actually cut.
+        void appendClampEllipsis() {
+            auto& runs = ownerEl_.textRuns();
+            const std::string kEllipsis = "\xE2\x80\xA6";
+            const float ellWidth = textWidth(owner_.font_, style_, kEllipsis);
+            const float lineEnd = originX_ + lineIndent_ + lineAvail_;
+            float endX = originX_ + lineIndent_;
+            for (std::size_t k = lineRunStartIndex_; k < runs.size(); ++k) {
+                endX = std::max(endX, runs[k].x + runs[k].width);
+            }
+            while (runs.size() > lineRunStartIndex_ && endX + ellWidth > lineEnd) {
+                droppedClampRuns_.push_back(runs.back());
+                runs.pop_back();
+                endX = originX_ + lineIndent_;
+                for (std::size_t k = lineRunStartIndex_; k < runs.size(); ++k) {
+                    endX = std::max(endX, runs[k].x + runs[k].width);
+                }
+            }
+            ownerEl_.addTextRun(
+                {kEllipsis, endX,
+                 originY_ + cursorY_ + verticalAlignShift(style_, &metrics_, &metrics_), ellWidth,
+                 metrics_.lineHeight, metrics_.ascent, style_.fontSize, style_.color.r,
+                 style_.color.g, style_.color.b, style_.color.a, style_.fontBold,
+                 style_.fontStyle != ComputedStyle::FontNormal});
+            penX_ = endX - originX_ - lineIndent_ + ellWidth;
+        }
+
+        // Takes the speculative ellipsis back out: the content fit the cap, so
+        // the dropped tail runs go home in order.
+        void retractClampEllipsis() {
+            auto& runs = ownerEl_.textRuns();
+            if (!runs.empty() && runs.back().text == "\xE2\x80\xA6") {
+                runs.pop_back();
+            }
+            for (auto it = droppedClampRuns_.rbegin(); it != droppedClampRuns_.rend(); ++it) {
+                runs.push_back(*it);
+            }
+            droppedClampRuns_.clear();
         }
 
         float cursorY() const {
@@ -3055,8 +3148,16 @@ private:
             if (ellipsisAdded_) {
                 return;
             }
+            if (clamped_) {
+                clampSuppressed_ = true;
+                return;
+            }
             if (lineHasContent_ && lineIndent_ + penX_ + metrics_.spaceWidth > lineAvail_) {
                 newLine();
+                if (clamped_) {
+                    clampSuppressed_ = true;
+                    return;
+                }
             }
             ownerEl_.addTextRun({" ", originX_ + lineIndent_ + penX_,
                                  originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m),
@@ -3130,6 +3231,10 @@ private:
                     }
                     best = from + 1;
                 }
+                if (clamped_) {
+                    clampSuppressed_ = true;
+                    return;
+                }
                 const std::string piece = wt.substr(bounds[from], bounds[best] - bounds[from]);
                 const float pieceWidth = textWidth(owner_.font_, s, piece);
                 ownerEl_.addTextRun(
@@ -3153,6 +3258,12 @@ private:
             if (ellipsisAdded_) {
                 return;
             }
+            if (clamped_) {
+                // Past the cap words are cut content, which keeps the ellipsis.
+                breakAllowed_ = false;
+                clampSuppressed_ = true;
+                return;
+            }
             const float wWidth = textWidth(owner_.font_, s, w);
             // `break-all` fills lines character by character; `break-word` only
             // breaks a word that overflows its own line. Either way the pieces
@@ -3169,6 +3280,10 @@ private:
             if (spacing_.wraps && lineHasContent_ &&
                 lineIndent_ + penX_ + metrics_.spaceWidth + wWidth > lineAvail_) {
                 newLine();
+                if (clamped_) {
+                    clampSuppressed_ = true;
+                    return;
+                }
             }
             // Gaps come from space runs in break-spaces mode, never from word().
             float space = 0.0f;
@@ -3186,6 +3301,10 @@ private:
                 if (lineHasContent_ && !spacing_.wraps &&
                     lineIndent_ + penX_ + space + wWidth > lineAvail_) {
                     newLine();
+                    if (clamped_) {
+                        clampSuppressed_ = true;
+                        return;
+                    }
                 }
             }
 
@@ -3308,6 +3427,14 @@ private:
         bool ellipsisAdded_ = false;
         std::size_t lineRunStartIndex_ = 0;
         Spacing spacing_ = spacingFor(ComputedStyle::WrapText);
+        // `line-clamp`: lines committed so far, the cap (0 while probing, so
+        // max-content measurement never clamps), and the clamp state. The
+        // ellipsis is speculative until content past the cap proves it needed.
+        const int lineClamp_ = 0;
+        int linesCommitted_ = 0;
+        bool clamped_ = false;
+        bool clampSuppressed_ = false;
+        std::vector<Element::TextRun> droppedClampRuns_;
     };
 
     const StyleResolver& resolver_;
