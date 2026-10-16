@@ -207,6 +207,10 @@ public:
     void fillRect(const SDL_FRect& rect, const Shader& shader, const Radii& radii = {});
     void fillPolygon(const std::vector<SDL_FPoint>& points, const Color& color);
     void fillPolygon(const std::vector<SDL_FPoint>& points, const Shader& shader);
+    // A triangle soup, three points per triangle: what scanline tessellation
+    // emits for fills a fan cannot cover. Empty and degenerate lists paint
+    // nothing.
+    void fillTriangles(const std::vector<SDL_FPoint>& triangles, const Color& color);
     void fillCircle(float cx, float cy, float radius, const Color& color);
 
     // Strokes. The band runs inward from the path, not centred on it, because that is

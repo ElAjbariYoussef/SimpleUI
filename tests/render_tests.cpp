@@ -5,6 +5,10 @@
 #include "Core/Application/Background.h"
 #include "Rendering/ClipMask.h"
 #include "Rendering/ColorMatrix.h"
+#include "Rendering/Tessellate.h"
+#include "SUI/DOM/Document.h"
+#include "SUI/DOM/Element.h"
+#include "SUI/Markup/Parser.h"
 #include "Rendering/ImageBlur.h"
 #include "Rendering/Renderer.h"
 #include "Rendering/Text.h"
@@ -1340,6 +1344,92 @@ void testObjectFitDst() {
     check(px.x == 10.0f && px.y == 20.0f, "lengths offset directly");
 }
 
+// Scanline tessellation fills loops jointly under a fill rule: even-odd
+// pairs crossings, nonzero counts winding, and convex loops stay fans.
+void testTessellate() {
+    const auto loop = [](std::initializer_list<SDL_FPoint> pts) {
+        return std::vector<SDL_FPoint>(pts);
+    };
+    // Triangle-soup area: every triangle contributes half its cross.
+    const auto area = [](const std::vector<SDL_FPoint>& tris) {
+        float total = 0.0f;
+        for (std::size_t k = 0; k + 2 < tris.size() + 1; k += 3) {
+            const SDL_FPoint& a = tris[k];
+            const SDL_FPoint& b = tris[k + 1];
+            const SDL_FPoint& c = tris[k + 2];
+            total += std::fabs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) *
+                     0.5f;
+        }
+        return total;
+    };
+    const std::vector<SDL_FPoint> outer = loop({{0, 0}, {10, 0}, {10, 10}, {0, 10}});
+    const std::vector<SDL_FPoint> inner = loop({{3, 3}, {7, 3}, {7, 7}, {3, 7}});
+    const std::vector<SDL_FPoint> innerBackwards = loop({{3, 3}, {3, 7}, {7, 7}, {7, 3}});
+    // A donut: even-odd cuts the hole whatever the windings say.
+    check(std::fabs(area(sui::tessellateFill({outer, inner}, true)) - 84.0f) < 0.01f,
+          "even-odd cuts the hole");
+    check(std::fabs(area(sui::tessellateFill({outer, innerBackwards}, true)) - 84.0f) <
+              0.01f,
+          "even-odd ignores winding");
+    // Nonzero unions like windings and cuts opposing ones.
+    check(std::fabs(area(sui::tessellateFill({outer, inner}, false)) - 100.0f) < 0.01f,
+          "nonzero unions like windings");
+    check(std::fabs(area(sui::tessellateFill({outer, innerBackwards}, false)) - 84.0f) <
+              0.01f,
+          "nonzero cuts opposing windings");
+    // A concave L fills its own area, where a fan from a vertex would not.
+    const std::vector<SDL_FPoint> ell =
+        loop({{0, 0}, {6, 0}, {6, 2}, {2, 2}, {2, 6}, {0, 6}});
+    check(std::fabs(area(sui::tessellateFill({ell}, false)) - 20.0f) < 0.01f,
+          "a concave loop fills its own area");
+    // Overlapping squares xor under even-odd and union under nonzero.
+    const std::vector<SDL_FPoint> left = loop({{0, 0}, {4, 0}, {4, 4}, {0, 4}});
+    const std::vector<SDL_FPoint> right = loop({{2, 2}, {6, 2}, {6, 6}, {2, 6}});
+    check(std::fabs(area(sui::tessellateFill({left, right}, true)) - 24.0f) < 0.01f,
+          "even-odd xors the overlap");
+    check(std::fabs(area(sui::tessellateFill({left, right}, false)) - 28.0f) < 0.01f,
+          "nonzero unions the overlap");
+    // Degenerate input tessellates to nothing, without crashing.
+    check(sui::tessellateFill({}, true).empty(), "no loops means no triangles");
+    check(sui::tessellateFill({loop({{0, 0}, {1, 1}})}, false).empty(),
+          "an open pair means no triangles");
+    check(sui::tessellateFill({loop({{0, 0}, {5, 0}, {9, 0}})}, true).empty(),
+          "a flat loop means no triangles");
+    // Convexity: squares and triangles fan, L-shapes do not, and straight
+    // runs along an edge do not fool the turn counting.
+    check(sui::isConvexLoop(outer), "a square is convex");
+    check(sui::isConvexLoop(loop({{0, 0}, {4, 0}, {0, 4}})), "a triangle is convex");
+    check(!sui::isConvexLoop(ell), "an L is not convex");
+    check(sui::isConvexLoop(loop({{0, 0}, {5, 0}, {10, 0}, {10, 10}, {0, 10}})),
+          "a straight run stays convex");
+    check(!sui::isConvexLoop(loop({{0, 0}, {1, 1}})), "a pair is never a loop");
+    // `fill-rule` inherits through `g`: the nearest authored rule wins,
+    // garbage keeps searching, and nothing authored means nonzero.
+    sui::ParseError fillErr;
+    auto fillDoc = sui::MarkupParser::parse(
+        "<sui><body><svg><g id=\"g\" fill-rule=\"evenodd\">"
+        "<path id=\"a\" d=\"M0 0 L1 0 L1 1 Z\"/>"
+        "<path id=\"o\" d=\"M0 0 L1 0 L1 1 Z\" fill-rule=\"nonzero\"/>"
+        "<path id=\"w\" d=\"M0 0 L1 0 L1 1 Z\" fill-rule=\" evenodd \"/>"
+        "<path id=\"x\" d=\"M0 0 L1 0 L1 1 Z\" fill-rule=\"banana\"/>"
+        "</g><path id=\"b\" d=\"M0 0 L1 0 L1 1 Z\"/></svg></body></sui>",
+        fillErr);
+    if (!fillDoc) {
+        check(false, "fill-rule document parsed");
+        return;
+    }
+    const auto fel = [&](const char* id) { return fillDoc->getElementById(id); };
+    check(fel("a") && fel("o") && fel("w") && fel("x") && fel("b"),
+          "fill-rule elements found");
+    if (fel("a") && fel("o") && fel("w") && fel("x") && fel("b")) {
+        check(sui::svgFillEvenOdd(*fel("a")), "a group rule inherits down");
+        check(!sui::svgFillEvenOdd(*fel("o")), "a nearer rule wins");
+        check(sui::svgFillEvenOdd(*fel("w")), "surrounding space trims away");
+        check(sui::svgFillEvenOdd(*fel("x")), "garbage keeps searching upward");
+        check(!sui::svgFillEvenOdd(*fel("b")), "nothing authored means nonzero");
+    }
+}
+
 // A blended surface over its backdrop, per channel with source-over alpha.
 // One opaque pixel over one opaque pixel tells each mode apart.
 void testBlendImage() {
@@ -1716,6 +1806,7 @@ int main() {
     testBoxBlur();
     testBackdropFilters();
     testBlendImage();
+    testTessellate();
     testObjectFitDst();
     testColorMatrix();
     testClipCoverage();

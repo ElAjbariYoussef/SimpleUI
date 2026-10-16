@@ -12,6 +12,7 @@
 #include "Rendering/ImageBlur.h"
 #include "Rendering/ImageCache.h"
 #include "Rendering/Renderer.h"
+#include "Rendering/Tessellate.h"
 #include "Rendering/Text.h"
 #include "SUI/DOM/Document.h"
 #include "SUI/DOM/Element.h"
@@ -1740,6 +1741,7 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
             if (!parseSvgPath(el.attribute("d"), subpaths)) {
                 continue;
             }
+            std::vector<std::vector<SDL_FPoint>> loops;
             for (const SvgSubpath& sub : subpaths) {
                 if (sub.points.size() < 2) {
                     continue;
@@ -1750,11 +1752,20 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                     path.push_back(place(point.x, point.y));
                 }
                 if (sub.closed && paint.hasFill) {
-                    renderer.fillPolygon(path, tint(paint.fill));
+                    loops.push_back(path);
                 }
                 if (paint.hasStroke && paint.strokeWidth > 0.0f) {
                     renderer.strokePath(path, tint(paint.stroke), paint.strokeWidth,
                                         sub.closed);
+                }
+            }
+            if (!loops.empty()) {
+                const bool evenOdd = svgFillEvenOdd(el);
+                if (!evenOdd && loops.size() == 1 && isConvexLoop(loops[0])) {
+                    renderer.fillPolygon(loops[0], tint(paint.fill));
+                } else {
+                    renderer.fillTriangles(tessellateFill(loops, evenOdd),
+                                           tint(paint.fill));
                 }
             }
         } else if (tag == "line") {
@@ -1778,7 +1789,13 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
             }
             const bool closed = tag == "polygon";
             if (closed && paint.hasFill) {
-                renderer.fillPolygon(path, tint(paint.fill));
+                const bool evenOdd = svgFillEvenOdd(el);
+                if (!evenOdd && isConvexLoop(path)) {
+                    renderer.fillPolygon(path, tint(paint.fill));
+                } else {
+                    renderer.fillTriangles(tessellateFill({path}, evenOdd),
+                                           tint(paint.fill));
+                }
             }
             if (paint.hasStroke && paint.strokeWidth > 0.0f) {
                 renderer.strokePath(path, tint(paint.stroke), paint.strokeWidth, closed);

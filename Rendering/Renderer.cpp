@@ -578,6 +578,24 @@ void Renderer::fillPolygon(const std::vector<SDL_FPoint>& points, const Shader& 
     emit(points, shader);
 }
 
+void Renderer::fillTriangles(const std::vector<SDL_FPoint>& triangles, const Color& color) {
+    if (color.a == 0 || triangles.size() < 3) {
+        return;
+    }
+    std::vector<SDL_Vertex> vertices;
+    vertices.reserve(triangles.size());
+    for (const SDL_FPoint& p : triangles) {
+        vertices.push_back(SDL_Vertex{p, toFColor(color), {0.0f, 0.0f}});
+    }
+    std::vector<int> indices(vertices.size());
+    for (std::size_t k = 0; k < indices.size(); ++k) {
+        indices[k] = static_cast<int>(k);
+    }
+    SDL_RenderGeometry(renderer_, nullptr, vertices.data(),
+                       static_cast<int>(vertices.size()), indices.data(),
+                       static_cast<int>(indices.size()));
+}
+
 void Renderer::fillCircle(float cx, float cy, float radius, const Color& color) {
     if (radius <= 0.0f || color.a == 0) {
         return;
