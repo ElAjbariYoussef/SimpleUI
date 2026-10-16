@@ -258,46 +258,112 @@ AnimatableValue blendValues(const AnimatableValue& from, const AnimatableValue& 
     return v;
 }
 
-void blendInto(ComputedStyle& style, std::string_view property,
-               const AnimatableValue& from, const AnimatableValue& to, float t) {
-    const AnimatableValue blended = blendValues(from, to, t);
-    if (blended.kind == AnimatableValue::Kind::None) {
+AnimatableValue addValues(const AnimatableValue& a, const AnimatableValue& b) {
+    using Kind = AnimatableValue::Kind;
+    if (a.kind == Kind::None || a.kind != b.kind) {
+        return AnimatableValue{};
+    }
+    if (a.kind == Kind::Number) {
+        AnimatableValue v;
+        v.kind = Kind::Number;
+        v.number = a.number + b.number;
+        return v;
+    }
+    if (a.kind == Kind::Length) {
+        if (a.length.unit != b.length.unit || a.length.unit == Length::Calc ||
+            a.length.unit == Length::Auto) {
+            return AnimatableValue{};
+        }
+        AnimatableValue v;
+        v.kind = Kind::Length;
+        v.length = Length{a.length.unit, a.length.value + b.length.value};
+        return v;
+    }
+    AnimatableValue v;
+    v.kind = Kind::Color;
+    const auto sat = [](int x) {
+        return static_cast<std::uint8_t>(std::clamp(x, 0, 255));
+    };
+    v.color = {sat(a.color.r + b.color.r), sat(a.color.g + b.color.g),
+               sat(a.color.b + b.color.b), sat(a.color.a + b.color.a)};
+    return v;
+}
+
+AnimatableValue subValues(const AnimatableValue& a, const AnimatableValue& b) {
+    using Kind = AnimatableValue::Kind;
+    if (a.kind == Kind::None || a.kind != b.kind) {
+        return AnimatableValue{};
+    }
+    if (a.kind == Kind::Number) {
+        AnimatableValue v;
+        v.kind = Kind::Number;
+        v.number = a.number - b.number;
+        return v;
+    }
+    if (a.kind == Kind::Length) {
+        if (a.length.unit != b.length.unit || a.length.unit == Length::Calc ||
+            a.length.unit == Length::Auto) {
+            return AnimatableValue{};
+        }
+        AnimatableValue v;
+        v.kind = Kind::Length;
+        v.length = Length{a.length.unit, a.length.value - b.length.value};
+        return v;
+    }
+    AnimatableValue v;
+    v.kind = Kind::Color;
+    const auto sat = [](int x) {
+        return static_cast<std::uint8_t>(std::clamp(x, 0, 255));
+    };
+    v.color = {sat(a.color.r - b.color.r), sat(a.color.g - b.color.g),
+               sat(a.color.b - b.color.b), sat(a.color.a - b.color.a)};
+    return v;
+}
+
+void writeValue(ComputedStyle& style, std::string_view property,
+                const AnimatableValue& value) {
+    if (value.kind == AnimatableValue::Kind::None) {
         return;
     }
     // Mirror the readers in animatableValue.
     const std::string name(property);
-    if (name == "width") { style.width = blended.length; return; }
-    if (name == "height") { style.height = blended.length; return; }
-    if (name == "min-width") { style.minWidth = blended.length; return; }
-    if (name == "min-height") { style.minHeight = blended.length; return; }
-    if (name == "max-width") { style.maxWidth = blended.length; return; }
-    if (name == "max-height") { style.maxHeight = blended.length; return; }
-    if (name == "margin-top") { style.margin.top = blended.length; return; }
-    if (name == "margin-right") { style.margin.right = blended.length; return; }
-    if (name == "margin-bottom") { style.margin.bottom = blended.length; return; }
-    if (name == "margin-left") { style.margin.left = blended.length; return; }
-    if (name == "padding-top") { style.padding.top = blended.length; return; }
-    if (name == "padding-right") { style.padding.right = blended.length; return; }
-    if (name == "padding-bottom") { style.padding.bottom = blended.length; return; }
-    if (name == "padding-left") { style.padding.left = blended.length; return; }
-    if (name == "border-top-width") { style.borderWidth.top = blended.length; return; }
-    if (name == "border-right-width") { style.borderWidth.right = blended.length; return; }
-    if (name == "border-bottom-width") { style.borderWidth.bottom = blended.length; return; }
-    if (name == "border-left-width") { style.borderWidth.left = blended.length; return; }
-    if (name == "left") { style.left = blended.length; return; }
-    if (name == "top") { style.top = blended.length; return; }
-    if (name == "right") { style.right = blended.length; return; }
-    if (name == "bottom") { style.bottom = blended.length; return; }
-    if (name == "color") { style.color = blended.color; return; }
-    if (name == "background-color") { style.backgroundColor = blended.color; return; }
+    if (name == "width") { style.width = value.length; return; }
+    if (name == "height") { style.height = value.length; return; }
+    if (name == "min-width") { style.minWidth = value.length; return; }
+    if (name == "min-height") { style.minHeight = value.length; return; }
+    if (name == "max-width") { style.maxWidth = value.length; return; }
+    if (name == "max-height") { style.maxHeight = value.length; return; }
+    if (name == "margin-top") { style.margin.top = value.length; return; }
+    if (name == "margin-right") { style.margin.right = value.length; return; }
+    if (name == "margin-bottom") { style.margin.bottom = value.length; return; }
+    if (name == "margin-left") { style.margin.left = value.length; return; }
+    if (name == "padding-top") { style.padding.top = value.length; return; }
+    if (name == "padding-right") { style.padding.right = value.length; return; }
+    if (name == "padding-bottom") { style.padding.bottom = value.length; return; }
+    if (name == "padding-left") { style.padding.left = value.length; return; }
+    if (name == "border-top-width") { style.borderWidth.top = value.length; return; }
+    if (name == "border-right-width") { style.borderWidth.right = value.length; return; }
+    if (name == "border-bottom-width") { style.borderWidth.bottom = value.length; return; }
+    if (name == "border-left-width") { style.borderWidth.left = value.length; return; }
+    if (name == "left") { style.left = value.length; return; }
+    if (name == "top") { style.top = value.length; return; }
+    if (name == "right") { style.right = value.length; return; }
+    if (name == "bottom") { style.bottom = value.length; return; }
+    if (name == "color") { style.color = value.color; return; }
+    if (name == "background-color") { style.backgroundColor = value.color; return; }
     if (name == "border-color" || name == "border-top-color" ||
         name == "border-right-color" || name == "border-bottom-color" ||
         name == "border-left-color") {
-        style.borderColor = blended.color;
+        style.borderColor = value.color;
         return;
     }
-    if (name == "opacity") { style.opacity = blended.number; return; }
-    if (name == "font-size") { style.fontSize = blended.number; return; }
+    if (name == "opacity") { style.opacity = value.number; return; }
+    if (name == "font-size") { style.fontSize = value.number; return; }
+}
+
+void blendInto(ComputedStyle& style, std::string_view property,
+               const AnimatableValue& from, const AnimatableValue& to, float t) {
+    writeValue(style, property, blendValues(from, to, t));
 }
 
 namespace {
@@ -579,6 +645,9 @@ std::string serializeAnimation(std::string_view property, const ComputedStyle& s
             words.push_back(listAt(style.animationFills, i));
         } else if (property == "animation-play-state") {
             words.push_back(listAt(style.animationPaused, i) ? "paused" : "running");
+        } else if (property == "animation-composition") {
+            const std::string& composite = listAt(style.animationCompositions, i);
+            words.push_back(composite.empty() ? "replace" : composite);
         }
     }
     return joinWords(words);

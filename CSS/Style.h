@@ -779,6 +779,10 @@ struct ComputedStyle {
     std::vector<float> animationIterations;  // < 0 = infinite
     std::vector<std::string> animationDirections;
     std::vector<std::string> animationFills;
+    // Per-animation composite operations pairing with the names: replace, add,
+    // or accumulate. Empty entries read as replace; the shorthand never fills
+    // this list, so it only changes through the longhand.
+    std::vector<std::string> animationCompositions;
     // 0 = running, 1 = paused. A bool vector would make listAt() bind its proxy
     // temporaries to a `const bool&`, so the flags are bytes.
     std::vector<std::uint8_t> animationPaused;

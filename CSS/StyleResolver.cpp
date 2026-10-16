@@ -5075,6 +5075,13 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
                                part == "backwards" || part == "both";
             s.animationFills.push_back(known ? part : "none");
         }
+    } else if (property == "animation-composition") {
+        s.animationCompositions.clear();
+        for (const std::string& part : splitCommaList(decl.value)) {
+            const bool known =
+                part == "replace" || part == "add" || part == "accumulate";
+            s.animationCompositions.push_back(known ? part : "replace");
+        }
     } else if (property == "animation-play-state") {
         s.animationPaused.clear();
         for (const std::string& part : splitCommaList(decl.value)) {
@@ -6485,7 +6492,8 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         property == "animation-duration" || property == "animation-delay" ||
         property == "animation-timing-function" ||
         property == "animation-iteration-count" || property == "animation-direction" ||
-        property == "animation-fill-mode" || property == "animation-play-state") {
+        property == "animation-fill-mode" || property == "animation-play-state" ||
+        property == "animation-composition") {
         return serializeAnimation(property, style);
     }
     if (property == "object-fit") {
@@ -7566,6 +7574,10 @@ void applyKeyframeSegment(ComputedStyle& style, const ElementAnim::KeyframeRun& 
             properties.insert(decl.property);
         }
     }
+    // The run's composite operation, pairing with its animation name: an
+    // empty entry reads as the initial `replace`.
+    const std::string& composite = run.composite;
+    const bool additive = composite == "add" || composite == "accumulate";
     for (const std::string& property : properties) {
         // Apply the frame declarations over a copy of the current style and read
         // the property back, so keyframes parse through the same code as rules.
@@ -7583,6 +7595,26 @@ void applyKeyframeSegment(ComputedStyle& style, const ElementAnim::KeyframeRun& 
             }
         }
         const AnimatableValue to = animatableValue(property, nearB);
+        if (additive && canBlend(from, to)) {
+            // `add` builds the effect onto the underlying value; `accumulate`
+            // builds the effect's delta from its start instead. Either falls
+            // back to replace when the values are not additive together.
+            const AnimatableValue effect = blendValues(from, to, eased);
+            const AnimatableValue underlying = animatableValue(property, style);
+            AnimatableValue combined;
+            if (composite == "add") {
+                combined = addValues(underlying, effect);
+            } else {
+                const AnimatableValue delta = subValues(effect, from);
+                if (delta.kind != AnimatableValue::Kind::None) {
+                    combined = addValues(underlying, delta);
+                }
+            }
+            if (combined.kind != AnimatableValue::Kind::None) {
+                writeValue(style, property, combined);
+                continue;
+            }
+        }
         if (canBlend(from, to)) {
             blendInto(style, property, from, to, eased);
         } else if (to.kind != AnimatableValue::Kind::None) {
@@ -7699,6 +7731,7 @@ void StyleResolver::reconcileKeyframes(ComputedStyle& style, ElementAnim& anim,
         const float iterations = listAt(style.animationIterations, i);
         const std::string& direction = listAt(style.animationDirections, i);
         const std::string& fill = listAt(style.animationFills, i);
+        const std::string& composite = listAt(style.animationCompositions, i);
         const bool paused = listAt(style.animationPaused, i);
         const Easing& easing = listAt(style.animationEasings, i);
         auto existing = std::find_if(
@@ -7708,11 +7741,15 @@ void StyleResolver::reconcileKeyframes(ComputedStyle& style, ElementAnim& anim,
             existing->delayMs == delayMs && existing->iterations == iterations &&
             existing->direction == direction && existing->fill == fill &&
             existing->paused == paused && easingEqual(existing->easing, easing)) {
+            // Composition is not timing: a changed operation applies to the
+            // running timeline instead of restarting it.
+            existing->composite = composite;
             next.push_back(std::move(*existing));
             continue;
         }
         ElementAnim::KeyframeRun run;
         run.name = name;
+        run.composite = composite;
         run.startMs = now;  // a new configuration starts the timeline here
         run.durationMs = durationMs;
         run.delayMs = delayMs;

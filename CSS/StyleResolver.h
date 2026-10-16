@@ -67,6 +67,7 @@ struct ElementAnim {
         float iterations;  // < 0 = infinite
         std::string direction;  // normal/reverse/alternate/alternate-reverse
         std::string fill;       // none/forwards/backwards/both
+        std::string composite;  // replace/add/accumulate, pairing with the name
         bool paused = false;
         Easing easing;
     };

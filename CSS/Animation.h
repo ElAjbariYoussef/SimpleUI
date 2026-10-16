@@ -44,6 +44,18 @@ AnimatableValue blendValues(const AnimatableValue& from, const AnimatableValue& 
 void blendInto(ComputedStyle& style, std::string_view property,
                const AnimatableValue& from, const AnimatableValue& to, float t);
 
+// Component-wise sum and difference for `animation-composition: add` (the
+// effect builds on the underlying value) and `accumulate` (the effect's delta
+// from its start builds on it). Lengths add only in matching units and never
+// for calc(); colours saturate at the byte range, matching computed values.
+// `None` when the pair is not additive, and composition falls back to replace.
+AnimatableValue addValues(const AnimatableValue& a, const AnimatableValue& b);
+AnimatableValue subValues(const AnimatableValue& a, const AnimatableValue& b);
+
+// Writes an already-resolved value (an additive combination, never `None`).
+void writeValue(ComputedStyle& style, std::string_view property,
+                const AnimatableValue& value);
+
 // `transition-property`/`animation-name` tokens are split on top-level commas
 // (a `)`-depth that treats `var(...)` and function arguments as one unit) and
 // then trimmed, like every other comma list in the parser.

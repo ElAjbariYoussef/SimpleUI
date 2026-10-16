@@ -8525,6 +8525,138 @@ void testKeyframeAnimations() {
     checkNear(reverted.opacity, 1.0f, 0.01f, "the element returns to its own style");
 }
 
+// `animation-composition` decides how an animation's effect meets the
+// underlying value: `replace` wins, `add` sums the effect on top, and
+// `accumulate` sums the effect's delta from its start. Entries pair with
+// animation names, cycling when short.
+void testAnimationComposition() {
+    const auto width = [](const ComputedStyle& s) {
+        return s.width.resolve(0.0f, 16.0f, 16.0f);
+    };
+    // Parsing pairs entries with animation names: unknown words read as
+    // `replace`, and nothing authored serializes back as `replace`. The
+    // property never inherits.
+    {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "#a { animation: x 1s, y 1s; animation-composition: add, banana } "
+            "#b { animation: x 1s; animation-composition: accumulate } "
+            "#g { animation: x 1s; animation-composition: banana } "
+            "#c { animation: x 1s }"));
+        auto document = parseOrNull(
+            "<sui><body><div id=\"a\"><span id=\"k\">x</span></div><div id=\"b\"></div>"
+            "<div id=\"g\"></div><div id=\"c\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        const auto el = [&](const char* id) { return document->getElementById(id); };
+        check(resolver.resolve(*el("a")).animationCompositions.size() == 2 &&
+                  resolver.resolve(*el("a")).animationCompositions[0] == "add" &&
+                  resolver.resolve(*el("a")).animationCompositions[1] == "replace",
+              "entries pair with names, garbage reads replace");
+        check(resolver.resolve(*el("b")).animationCompositions.size() == 1 &&
+                  resolver.resolve(*el("b")).animationCompositions[0] == "accumulate",
+              "accumulate parses");
+        check(resolver.resolve(*el("g")).animationCompositions.size() == 1 &&
+                  resolver.resolve(*el("g")).animationCompositions[0] == "replace",
+              "a lone unknown reads replace");
+        check(resolver.resolve(*el("k")).animationCompositions.empty(),
+              "composition never inherits");
+        check(sui::StyleResolver::propertyValue(resolver.resolve(*el("a")),
+                                                 "animation-composition") == "add, replace",
+              "entries serialize in order");
+        check(sui::StyleResolver::propertyValue(resolver.resolve(*el("b")),
+                                                 "animation-composition") == "accumulate",
+              "a single entry serializes alone");
+        check(sui::StyleResolver::propertyValue(resolver.resolve(*el("c")),
+                                                 "animation-composition") == "replace",
+              "nothing authored reads as replace");
+    }
+    const std::string keys =
+        "@keyframes grow { from { width: 20px; } to { width: 100px; } } ";
+    const auto drive = [&](const char* styleAttr, double atMs) {
+        auto doc = parseOrNull(
+            "<sui><body><div id=\"k\" style=\"width:100px\">x</div></body></sui>");
+        if (!doc) {
+            return ComputedStyle{};
+        }
+        Element* k = doc->getElementById("k");
+        sui::StyleResolver resolver;
+        resolver.setTimeSource(fakeClock);
+        std::vector<sui::Rule> rules;
+        std::vector<sui::KeyframeBlock> frames;
+        sui::CSSParser::parseWithKeyframes(
+            keys + std::string("#k { animation: grow 2s linear both; ") + styleAttr + " }",
+            rules, frames);
+        resolver.setRules(std::move(rules));
+        resolver.setKeyframes(std::move(frames));
+        fakeNowMs = 0.0;
+        resolver.resolve(*k);  // anchor the timeline
+        fakeNowMs = atMs;
+        return resolver.resolve(*k);
+    };
+    // Halfway the effect is 60px: replace wins, add sums, accumulate sums the
+    // 40px delta from the 20px start.
+    checkNear(width(drive("", 1000.0)), 60.0f, 0.5f, "replace wins by default");
+    checkNear(width(drive("animation-composition: add", 1000.0)), 160.0f, 0.5f,
+              "add sums the effect onto the base");
+    checkNear(width(drive("animation-composition: accumulate", 1000.0)), 140.0f, 0.5f,
+              "accumulate sums the delta from the start");
+    // Opacity composes the same way through numbers.
+    {
+        auto doc = parseOrNull(
+            "<sui><body><div id=\"o\" style=\"opacity:0.5\">x</div></body></sui>");
+        check(doc != nullptr, "opacity document parsed");
+        if (!doc) {
+            return;
+        }
+        Element* o = doc->getElementById("o");
+        sui::StyleResolver resolver;
+        resolver.setTimeSource(fakeClock);
+        std::vector<sui::Rule> rules;
+        std::vector<sui::KeyframeBlock> frames;
+        sui::CSSParser::parseWithKeyframes(
+            "@keyframes fade { from { opacity: 0.2; } to { opacity: 1; } } "
+            "#o { animation: fade 2s linear both; animation-composition: add }",
+            rules, frames);
+        resolver.setRules(std::move(rules));
+        resolver.setKeyframes(std::move(frames));
+        fakeNowMs = 0.0;
+        resolver.resolve(*o);
+        fakeNowMs = 1000.0;
+        checkNear(resolver.resolve(*o).opacity, 1.1f, 0.01f,
+                  "add sums numbers past one");
+    }
+    // Two animations on one property composite in list order: replace lays the
+    // base, add builds on it. One entry cycles onto both.
+    {
+        auto doc = parseOrNull(
+            "<sui><body><div id=\"m\" style=\"width:100px\">x</div></body></sui>");
+        check(doc != nullptr, "stacked document parsed");
+        if (!doc) {
+            return;
+        }
+        Element* m = doc->getElementById("m");
+        sui::StyleResolver resolver;
+        resolver.setTimeSource(fakeClock);
+        std::vector<sui::Rule> rules;
+        std::vector<sui::KeyframeBlock> frames;
+        sui::CSSParser::parseWithKeyframes(
+            "@keyframes ten { from { width: 0px; } to { width: 10px; } } " + keys +
+                "#m { animation: grow 2s linear both, ten 2s linear both; "
+                "animation-composition: replace, add }",
+            rules, frames);
+        resolver.setRules(std::move(rules));
+        resolver.setKeyframes(std::move(frames));
+        fakeNowMs = 0.0;
+        resolver.resolve(*m);
+        fakeNowMs = 1000.0;
+        checkNear(width(resolver.resolve(*m)), 65.0f, 0.5f,
+                  "a later add builds on an earlier replace");
+    }
+}
+
+
 void testCalc() {
     auto document = parseOrNull(
         "<sui><body>"
@@ -9269,6 +9401,7 @@ int main() {
     testTransitionDeclarations();
     testTransitions();
     testKeyframeAnimations();
+    testAnimationComposition();
     testCalc();
     testScroll();
     testRuleParsing();
