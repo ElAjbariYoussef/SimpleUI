@@ -4135,6 +4135,42 @@ void testQuotes() {
     }
 }
 
+// A closed <details> shows only its first <summary>; everything else takes no
+// box, including bare text. `open` shows all, and details/summary lay out as
+// blocks.
+void testDetails() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<details id=\"c\"><summary id=\"s\">more</summary><div id=\"x\">hidden</div></details>"
+        "<details id=\"o\" open=\"\"><summary>more</summary><div id=\"y\">shown</div></details>"
+        "<details id=\"n\">bare</details>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* c = el("c");
+    Element* s = el("s");
+    Element* x = el("x");
+    Element* o = el("o");
+    Element* y = el("y");
+    Element* n = el("n");
+    check(c && s && x && o && y && n, "details elements found");
+    if (!c || !s || !x || !o || !y || !n) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+    check(resolver.resolve(*c).display == ComputedStyle::Block, "details lays out block");
+    check(resolver.resolve(*s).display == ComputedStyle::Block, "summary lays out block");
+    layoutRoot(*document, resolver, 400.0f);
+    const auto runs = [](Element& e) { return e.textRuns().size(); };
+    check(runs(*s) > 0, "the summary flows while closed");
+    check(runs(*x) == 0, "a closed sibling flows nothing");
+    check(runs(*y) > 0, "an open sibling flows");
+    check(runs(*n) == 0, "bare text hides with no summary");
+}
+
 // `:has()` selects an element by what it contains: a child (`>`), a descendant
 // (no combinator), or a following sibling (`+`, `~`). Each branch of the argument
 // is anchored to the element being matched.
@@ -8829,6 +8865,7 @@ int main() {
     testCaretColor();
     testPhrasingStyles();
     testWordBreakOpportunity();
+    testDetails();
     testQuotes();
     testColorScheme();
     testPrefersColorScheme();

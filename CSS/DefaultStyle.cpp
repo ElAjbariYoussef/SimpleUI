@@ -57,7 +57,9 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
         return s;
     }
 
-    if (tag == "div" || tag == "section" || tag == "article" ||
+    // Disclosure widgets lay out as plain blocks; collapsing is resolved,
+    // not defaulted, and the marker triangle paints.
+    if (tag == "details" || tag == "summary" || tag == "div" || tag == "section" || tag == "article" ||
         tag == "header" || tag == "footer" || tag == "main" ||
         tag == "nav" || tag == "aside") {
         return block();

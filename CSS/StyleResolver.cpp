@@ -7161,9 +7161,35 @@ void substituteCurrentColor(ComputedStyle& style) {
     }
 }
 
+// The first <summary> child, or null when there is none.
+const Element* disclosureSummary(const Element& details) {
+    for (const auto& child : details.children()) {
+        if (child && !child->isTextNode() && child->tag() == "summary") {
+            return child.get();
+        }
+    }
+    return nullptr;
+}
+
+// Whether the element is hidden by a closed <details>: anything but its first
+// <summary> (and with no summary, everything) takes no box.
+bool hiddenByClosedDetails(const Element& element) {
+    const Element* parent = element.parent();
+    if (!parent || parent->tag() != "details" || parent->hasAttribute("open")) {
+        return false;
+    }
+    return &element != disclosureSummary(*parent);
+}
+
 ComputedStyle StyleResolver::resolveWithParent(Element& element,
                                                const ComputedStyle& parent) const {
     ComputedStyle style = defaultStyleFor(element.tag());
+    // A closed <details> shows only its first <summary>, like the UA rule
+    // `details:not([open]) > :not(summary)`. Positioned before inheritance so
+    // author declarations still win below.
+    if (hiddenByClosedDetails(element)) {
+        style.display = ComputedStyle::None;
+    }
     if (element.tag() == "input") {
         applyInputTypeStyle(style, element.attribute("type"));
     }

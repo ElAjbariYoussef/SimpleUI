@@ -2163,6 +2163,49 @@ int main() {
         fs::remove_all(root);
     }
 
+    // A summary toggles its <details> open on click, and back closed on the
+    // next one. The tree re-lays itself out around the change.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<details id=\"d\"><summary id=\"s\">more</summary><div id=\"x\">hidden</div></details>"
+            "</body></sui>",
+            err);
+        check(doc != nullptr, "details document parsed");
+        if (doc) {
+            app.setDocument(std::move(doc));
+
+            const auto layout = [&]() {
+                sui::StyleResolver layoutResolver;
+                sui::LayoutInput input;
+                input.resolver = &layoutResolver;
+                input.viewportWidth = 400.0f;
+                input.viewportHeight = 300.0f;
+                sui::BlockLayout().layout(app.document().root(), input);
+            };
+            const auto clickSummary = [&]() {
+                sui::Element* s = app.document().getElementById("s");
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerDown,
+                                             s->layoutX() + s->layoutWidth() * 0.5f,
+                                             s->layoutY() + s->layoutHeight() * 0.5f, 1));
+            };
+            layout();
+            sui::Element* x = app.document().getElementById("x");
+            check(x && x->textRuns().empty(), "closed content lays out nothing");
+            clickSummary();
+            check(app.document().getElementById("d")->hasAttribute("open"),
+                  "a press opens the details");
+            layout();
+            check(!app.document().getElementById("x")->textRuns().empty(),
+                  "open content lays out");
+            clickSummary();
+            check(!app.document().getElementById("d")->hasAttribute("open"),
+                  "a second press closes it again");
+        }
+    }
+
     platform->shutdown();
 
     std::printf("input_tests: %d checks, %d failures\n", checks, failures);

@@ -2637,6 +2637,11 @@ private:
                     continue;
                 }
                 if (child->isTextNode()) {
+                    // Bare text directly under a closed <details> is hidden with
+                    // everything but the summary.
+                    if (el.tag() == "details" && !el.hasAttribute("open")) {
+                        continue;
+                    }
                     if (!child->text().empty()) {
                         text(child->text(), container);
                     }

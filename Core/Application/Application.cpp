@@ -2319,6 +2319,24 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         return;
     }
 
+    // Disclosure triangle left of a <summary> box: right-pointing closed,
+    // down-pointing open. Painted outside like a list marker.
+    if (el.tag() == "summary" && el.parent() && el.parent()->tag() == "details") {
+        const bool open = el.parent()->hasAttribute("open");
+        const float cx = box.x - 10.0f;
+        const float cy = box.y + s.fontSize * 0.5f;
+        const float r = 4.0f;
+        const std::vector<SDL_FPoint> tri =
+            open ? std::vector<SDL_FPoint>{{cx - r, cy - r * 0.7f},
+                                           {cx + r, cy - r * 0.7f},
+                                           {cx, cy + r * 0.7f}}
+                 : std::vector<SDL_FPoint>{{cx - r * 0.7f, cy - r},
+                                           {cx - r * 0.7f, cy + r},
+                                           {cx + r * 0.7f, cy}};
+        const sui::Color ink = multiplyAlpha(toColor(s.color), opacity);
+        renderer.fillPolygon(tri, ink);
+    }
+
     // List marker: draw bullet or ordinal to the left of <li> box. Inside
     // markers already flowed as text in layout and never reach this paint.
     if (el.tag() == "li" && s.listStyleType != ComputedStyle::LSTNone &&
@@ -3858,6 +3876,25 @@ void Application::dispatch(const InputEvent& event) {
             // so the handler observes the control's new state.
             if (target && document_->root()) {
                 activateControl(*target, *document_->root());
+            }
+            // A summary toggles its <details> open on click, the same way: the
+            // press anywhere in the summary flips the attribute and the tree
+            // re-lays itself out on the next frame.
+            if (target) {
+                for (Element* anchor = target; anchor; anchor = anchor->parent()) {
+                    if (anchor->tag() != "summary") {
+                        continue;
+                    }
+                    Element* details = anchor->parent();
+                    if (details && details->tag() == "details") {
+                        if (details->hasAttribute("open")) {
+                            details->removeAttribute("open");
+                        } else {
+                            details->setAttribute("open", "");
+                        }
+                    }
+                    break;
+                }
             }
             // A range jumps to the value under the pointer; the drag path in
             // PointerMove takes it from there.
