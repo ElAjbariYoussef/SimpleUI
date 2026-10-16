@@ -1185,6 +1185,26 @@ ContentResult parseContent(std::string_view v) {
             res.text.push_back('');
             res.text.append(name);
             res.text.push_back('');
+        } else if (v.substr(i, 10) == "open-quote" &&
+                   (i + 10 >= v.size() ||
+                    std::isspace(static_cast<unsigned char>(v[i + 10])))) {
+            res.text.push_back('');
+            i += 10;
+        } else if (v.substr(i, 11) == "close-quote" &&
+                   (i + 11 >= v.size() ||
+                    std::isspace(static_cast<unsigned char>(v[i + 11])))) {
+            res.text.push_back('');
+            i += 11;
+        } else if (v.substr(i, 13) == "no-open-quote" &&
+                   (i + 13 >= v.size() ||
+                    std::isspace(static_cast<unsigned char>(v[i + 13])))) {
+            res.text.push_back('	');
+            i += 13;
+        } else if (v.substr(i, 14) == "no-close-quote" &&
+                   (i + 14 >= v.size() ||
+                    std::isspace(static_cast<unsigned char>(v[i + 14])))) {
+            res.text.push_back('\x0A');
+            i += 14;
         } else {
             ++i;
         }
@@ -4844,6 +4864,45 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         s.specified |= ComputedStyle::SpecifiedFilter;
     } else if (property == "backdrop-filter") {
         s.backdropFilter = std::string(value);
+    } else if (property == "quotes") {
+        // Pairs of strings, or `none`. An odd trailing string, a bare word, or
+        // garbage drops the whole declaration.
+        if (trim(value) == "none") {
+            s.quotes.clear();
+            s.specified |= ComputedStyle::SpecifiedQuotes;
+        } else {
+            std::vector<std::string> pairs;
+            bool ok = true;
+            std::size_t i = 0;
+            while (i < value.size() && ok) {
+                while (i < value.size() &&
+                       std::isspace(static_cast<unsigned char>(value[i]))) {
+                    ++i;
+                }
+                if (i >= value.size()) {
+                    break;
+                }
+                const char mark = value[i];
+                if (mark != '"' && mark != '\'') {
+                    ok = false;
+                    break;
+                }
+                const std::size_t start = ++i;
+                while (i < value.size() && value[i] != mark) {
+                    ++i;
+                }
+                if (i >= value.size()) {
+                    ok = false;
+                    break;
+                }
+                pairs.emplace_back(value.substr(start, i - start));
+                ++i;
+            }
+            if (ok && pairs.size() >= 2 && pairs.size() % 2 == 0) {
+                s.quotes = std::move(pairs);
+                s.specified |= ComputedStyle::SpecifiedQuotes;
+            }
+        }
     } else if (property == "text-align-last") {
         // Garbage keeps the previous cascade winner, like every other keyword
         // property.
@@ -6133,6 +6192,21 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "direction") {
         return style.direction == ComputedStyle::Direction::RTL ? "rtl" : "ltr";
     }
+    if (property == "quotes") {
+        if (style.quotes.empty()) {
+            return "none";
+        }
+        std::string out;
+        for (const std::string& mark : style.quotes) {
+            if (!out.empty()) {
+                out += ' ';
+            }
+            out += '"';
+            out += mark;
+            out += '"';
+        }
+        return out;
+    }
     if (property == "text-align-last") {
         switch (style.textAlignLast) {
             case ComputedStyle::TextAlignLast::Left: return "left";
@@ -7014,7 +7088,9 @@ bool isInheritable(std::string_view property) {
            property == "line-height" || property == "text-align" ||
            property == "list-style-type" || property == "list-style" ||
            property == "text-decoration-color" || property == "pointer-events" ||
-           property == "cursor" || property == "list-style-position";
+           property == "cursor" || property == "list-style-position" ||
+           property == "quotes" || property == "caret-color" || property == "direction" ||
+           property == "font-variant" || property == "text-align-last";
 }
 
 // `inherit` and `unset` are the two CSS-wide keywords the engine can answer

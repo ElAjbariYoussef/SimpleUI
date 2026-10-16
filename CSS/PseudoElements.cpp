@@ -114,6 +114,37 @@ void applyCounters(const ComputedStyle& style, CounterStack& stack) {
 
 // --- generated content ---------------------------------------------------
 
+// The open or close mark at the current quote depth: the pair for the depth,
+// or the last pair when nested deeper. Empty with `quotes: none`.
+std::string quoteMark(const std::vector<std::string>& quotes, int depth, bool open) {
+    if (quotes.size() < 2) {
+        return {};
+    }
+    const std::size_t pairs = quotes.size() / 2;
+    const std::size_t at =
+        static_cast<std::size_t>(std::max(0, std::min(depth, static_cast<int>(pairs) - 1)));
+    return quotes[at * 2 + (open ? 0 : 1)];
+}
+
+// Whether `element` already carries a generated box of the named kind.
+bool hasPseudoBox(const Element& element, std::string_view tag) {
+    for (const auto& child : element.children()) {
+        if (child && child->isPseudoElement() && child->tag() == tag) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Appends a generated box carrying exactly `mark`, for quotes the element
+// implies rather than declares.
+void addMarkBox(Element& element, const char* tag, bool first, const std::string& mark) {
+    Document* document = element.document();
+    const std::size_t index = first ? 0 : element.children().size();
+    element.insertChild(std::make_unique<Element>(std::string(tag), document), index);
+    element.children()[index]->appendChild(Element::createText(mark, document));
+}
+
 // Every generated box currently in the tree. They are collected before any are
 // removed, because removing one shifts the indices the walk is holding.
 void collectGenerated(Element& element, std::vector<Element*>& out) {
@@ -132,8 +163,8 @@ void collectGenerated(Element& element, std::vector<Element*>& out) {
 // `::before` goes in front of the element's own content and `::after` behind it,
 // so the two are added in that order and each picks its slot from the current child
 // count.
-void addBox(Element& element, const StyleResolver& resolver, const char* tag,
-            bool first, CounterStack& counters) {
+void addBox(Element& element, const StyleResolver& resolver, const char* tag, bool first,
+            CounterStack& counters, const std::vector<std::string>& quotes, int& depth) {
     Document* document = element.document();
     const std::size_t index = first ? 0 : element.children().size();
     element.insertChild(std::make_unique<Element>(std::string(tag), document), index);
@@ -167,6 +198,32 @@ void addBox(Element& element, const StyleResolver& resolver, const char* tag,
                 i = end + 1;
                 continue;
             }
+        } else if (raw[i] == '\x07' || raw[i] == '\x08' || raw[i] == '\x09' ||
+                   raw[i] == '\x0A') {
+            // Quotation marks read the originating element's `quotes` at the
+            // current depth; the no- forms move the depth without emitting.
+            // A `none` list emits nothing and leaves the depth alone.
+            // An open emits at its level and descends; a close ascends
+            // first so it answers the level being closed.
+            const bool open = raw[i] == '\x07' || raw[i] == '\x09';
+            const bool emit = raw[i] == '\x07' || raw[i] == '\x08';
+            if (!quotes.empty()) {
+                if (open) {
+                    if (emit) {
+                        text += quoteMark(quotes, depth, true);
+                    }
+                    ++depth;
+                } else {
+                    if (depth > 0) {
+                        --depth;
+                    }
+                    if (emit) {
+                        text += quoteMark(quotes, depth, false);
+                    }
+                }
+            }
+            ++i;
+            continue;
         } else if (raw[i] == '\x05') {
             const std::size_t end = raw.find('\x06', i + 1);
             if (end != std::string::npos) {
@@ -208,7 +265,8 @@ void addPlaceholderBox(Element& element, const StyleResolver& resolver) {
     (void)resolver.resolve(*box);
 }
 
-void build(Element& element, const StyleResolver& resolver, CounterStack& counters) {
+void build(Element& element, const StyleResolver& resolver, CounterStack& counters,
+           int& quoteDepth) {
     for (const auto& child : element.children()) {
         if (!child || child->isTextNode() || child->isPseudoElement()) {
             continue;
@@ -219,12 +277,42 @@ void build(Element& element, const StyleResolver& resolver, CounterStack& counte
         const ComputedStyle style = resolver.resolve(*child);
         applyCounters(style, counters);
 
-        addBox(*child, resolver, "::before", true, counters);
-        addBox(*child, resolver, "::after", false, counters);
-        addPlaceholderBox(*child, resolver);
-        // Recursing after the boxes exist is safe: they are skipped above, and
-        // `::before::before` is not a thing CSS can express.
-        build(*child, resolver, counters);
+        addBox(*child, resolver, "::before", true, counters, style.quotes, quoteDepth);
+        addBox(*child, resolver, "::after", false, counters, style.quotes, quoteDepth);
+        // A <q> quotes itself the way the browser user-agent rule would, unless
+        // the author already gave it generated boxes.
+        if (child->tag() == "q") {
+            // The pair is self-contained: the close answers the depth the open
+            // saw, whatever unbalanced author content did between them. When
+            // only one side is implicit it neither opens nor closes the depth
+            // — there is no matching half to balance.
+            int openedAt = -1;
+            if (!hasPseudoBox(*child, "::before")) {
+                const std::string mark = quoteMark(style.quotes, quoteDepth, true);
+                if (!mark.empty()) {
+                    addMarkBox(*child, "::before", true, mark);
+                    openedAt = quoteDepth;
+                    ++quoteDepth;
+                }
+            }
+            addPlaceholderBox(*child, resolver);
+            build(*child, resolver, counters, quoteDepth);
+            if (!hasPseudoBox(*child, "::after")) {
+                const int level = openedAt >= 0 ? openedAt : quoteDepth;
+                const std::string mark = quoteMark(style.quotes, level, false);
+                if (!mark.empty()) {
+                    addMarkBox(*child, "::after", false, mark);
+                }
+                if (openedAt >= 0) {
+                    quoteDepth = openedAt;
+                }
+            }
+        } else {
+            addPlaceholderBox(*child, resolver);
+            // Recursing after the boxes exist is safe: they are skipped above, and
+            // `::before::before` is not a thing CSS can express.
+            build(*child, resolver, counters, quoteDepth);
+        }
         counters.scopes.pop_back();
     }
 }
@@ -251,7 +339,8 @@ void generatePseudoElements(Document& document, const StyleResolver& resolver) {
     }
     CounterStack counters;
     counters.scopes.push_back({});  // the document root's scope
-    build(*document.root(), resolver, counters);
+    int quoteDepth = 0;
+    build(*document.root(), resolver, counters, quoteDepth);
 }
 
 }  // namespace sui

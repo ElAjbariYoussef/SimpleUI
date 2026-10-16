@@ -845,6 +845,9 @@ struct ComputedStyle {
     // pseudo-element is not generated at all, unless hasContent is true.
     std::string content;
     bool hasContent = false;
+    // Quotation marks by nesting depth, open/close pairs outward in. Empty means
+    // `quotes: none`. Inherited; the initial pair is the curly double.
+    std::vector<std::string> quotes{"\xE2\x80\x9C", "\xE2\x80\x9D"};
 
     // How a replaced element (img, video) fits its content box. `Contain` is the
     // historical default (aspect-fit down to fit); `Cover` aspect-fills, cropping
@@ -1028,6 +1031,7 @@ struct ComputedStyle {
         SpecifiedTextSizeAdjust = 1ULL << 33,
         SpecifiedCaretColor = 1ULL << 34,
         SpecifiedTextAlignLast = 1ULL << 35,
+        SpecifiedQuotes = 1ULL << 36,
         SpecifiedScrollBehavior = 1u << 25,
         SpecifiedColorScheme = 1u << 26,
         // A marker, not a property: the element still carries the user-agent
@@ -1235,6 +1239,9 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
         style.textAlign = parent.textAlign;
     if (!(style.specified & ComputedStyle::SpecifiedTextAlignLast)) {
         style.textAlignLast = parent.textAlignLast;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedQuotes)) {
+        style.quotes = parent.quotes;
     }
     if (!(style.specified & ComputedStyle::SpecifiedDirection)) {
         style.direction = parent.direction;

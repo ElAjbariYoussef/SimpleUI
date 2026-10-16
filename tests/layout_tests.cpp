@@ -4000,6 +4000,141 @@ void testCssCounters() {
     }
 }
 
+// `quotes` lists open/close pairs outward in (or `none`), and `content` names
+// them with open/close/no-open/no-close-quote. Depth nests through the tree;
+// a `<q>` quotes itself unless the author already boxed it.
+void testQuotes() {
+    // Parsing, inheritance, and serialization.
+    {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "#a { quotes: \"<\" \">\" \"[\" \"]\" } #n { quotes: none }"));
+        auto document = parseOrNull(
+            "<sui><body><div id=\"a\"><span id=\"c\">x</span></div>"
+            "<div id=\"n\">x</div><div id=\"g\" style=\"quotes: banana\">x</div>"
+            "<div id=\"o\" style=\"quotes: 'a' 'b' 'c'\">x</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        const auto el = [&](const char* id) { return document->getElementById(id); };
+        Element* a = el("a");
+        Element* c = el("c");
+        Element* n = el("n");
+        Element* g = el("g");
+        Element* o = el("o");
+        check(a && c && n && g && o, "quote elements found");
+        if (!a || !c || !n || !g || !o) {
+            return;
+        }
+        check(resolver.resolve(*a).quotes.size() == 4, "two pairs parse");
+        check(resolver.resolve(*a).quotes[0] == "<", "the open mark leads");
+        check(resolver.resolve(*c).quotes.size() == 4, "quotes inherit");
+        check(resolver.resolve(*n).quotes.empty(), "none clears the list");
+        check(resolver.resolve(*g).quotes.size() == 2, "garbage keeps the default pair");
+        check(resolver.resolve(*o).quotes.size() == 2, "an odd tail keeps the default");
+        check(sui::StyleResolver::propertyValue(resolver.resolve(*a), "quotes") ==
+                  "\"<\" \">\" \"[\" \"]\"",
+              "pairs serialize back");
+        check(sui::StyleResolver::propertyValue(resolver.resolve(*n), "quotes") == "none",
+              "none serializes");
+    }
+
+    const auto quoted = [](Document& root, const char* id) {
+        Element* el = root.getElementById(id);
+        if (!el || el->children().empty()) {
+            return std::string("<missing>");
+        }
+        return el->children()[0]->textContent();
+    };
+
+    // Author keywords open, close, and skip depths in document order.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"a\"></div><div id=\"b\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "#a::before { content: open-quote \"x\" close-quote } "
+            "#b::before { content: open-quote open-quote \"y\" close-quote }"));
+        sui::generatePseudoElements(*document, resolver);
+        // Siblings each start at depth zero; nesting deepens the second mark.
+        check(quoted(*document, "a") == "\xE2\x80\x9Cx\xE2\x80\x9D",
+              "open and close wrap at depth zero");
+        check(quoted(*document, "b") == "\xE2\x80\x9C\xE2\x80\x9Cy\xE2\x80\x9D",
+              "a second open nests before closing");
+    }
+
+    // The no- forms move the depth without emitting.
+    {
+        auto document = parseOrNull("<sui><body><div id=\"a\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "#a::before { content: no-open-quote \"x\" close-quote }"));
+        sui::generatePseudoElements(*document, resolver);
+        check(quoted(*document, "a") == "x\xE2\x80\x9D",
+              "a close still emits at depth zero");
+    }
+
+    // Deeper pairs serve nested depth: the second open takes pair one.
+    {
+        auto document = parseOrNull("<sui><body><div id=\"a\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "#a { quotes: '<' '>' '[' ']' } "
+            "#a::before { content: open-quote open-quote \"y\" close-quote close-quote }"));
+        sui::generatePseudoElements(*document, resolver);
+        check(quoted(*document, "a") == "<[y]>",
+              "nested author depth takes deeper pairs");
+    }
+
+    // A <q> quotes itself; nesting uses deeper pairs; none quotes nothing.
+    {
+        auto document = parseOrNull(
+            "<sui><body><q id=\"a\">x</q>"
+            "<div id=\"w\" style=\"quotes: '<' '>' '[' ']'\">"
+            "<q id=\"o\">a<q id=\"i\">b</q>c</q></div>"
+            "<q id=\"n\" style=\"quotes:none\">x</q></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+        sui::generatePseudoElements(*document, resolver);
+        Element* a = document->getElementById("a");
+        Element* o = document->getElementById("o");
+        Element* n = document->getElementById("n");
+        check(a && o && n, "q elements found");
+        if (!a || !o || !n) {
+            return;
+        }
+        check(a->textContent() == "\xE2\x80\x9Cx\xE2\x80\x9D", "a q quotes itself");
+        check(o->textContent() == "<a[b]c>", "a nested q takes the inner pair");
+        check(n->textContent() == "x", "quotes none quotes nothing");
+    }
+
+    // An author box wins over the implied one, on whichever side it takes.
+    {
+        auto document = parseOrNull("<sui><body><q id=\"a\">x</q></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(
+            sui::CSSParser::parse("q::before { content: \"Q:\" }"));
+        sui::generatePseudoElements(*document, resolver);
+        Element* a = document->getElementById("a");
+        check(a && a->textContent() == "Q:x\xE2\x80\x9D", "one side each, no doubling");
+    }
+}
+
 // `:has()` selects an element by what it contains: a child (`>`), a descendant
 // (no combinator), or a following sibling (`+`, `~`). Each branch of the argument
 // is anchored to the element being matched.
@@ -8694,6 +8829,7 @@ int main() {
     testCaretColor();
     testPhrasingStyles();
     testWordBreakOpportunity();
+    testQuotes();
     testColorScheme();
     testPrefersColorScheme();
     testCurrentColor();
