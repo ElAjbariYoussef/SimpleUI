@@ -827,7 +827,7 @@ struct ComputedStyle {
     // `white-space: nowrap` and `pre` stop the formatter breaking at spaces. `pre`
     // additionally keeps newlines and runs of spaces. Prefixed because `NoWrap`
     // already belongs to FlexWrap.
-    enum WhiteSpace : std::uint8_t { WrapText, WrapNone, WrapPre, WrapPreWrap };
+    enum WhiteSpace : std::uint8_t { WrapText, WrapNone, WrapPre, WrapPreWrap, WrapBreakSpaces };
     WhiteSpace whiteSpace = WrapText;
 
     // How overflow text is rendered when clipped: `Clip` (default) or `Ellipsis`.

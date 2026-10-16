@@ -2524,6 +2524,10 @@ private:
                 words(text, s, m, ascentDelta);
                 return;
             }
+            if (spacing_.breakSpaces) {
+                breakSpaced(text, s, m, ascentDelta);
+                return;
+            }
             // A newline in the text ends the line instead of collapsing to a space.
             std::size_t start = 0;
             while (start <= text.size()) {
@@ -2980,6 +2984,9 @@ private:
             bool wraps = true;
             bool keepsWhitespace = false;
             bool keepsNewlines = false;
+            // break-spaces: every space is its own run (wrapping after any of
+            // them), so inter-word gaps come from runs, never from word().
+            bool breakSpaces = false;
         };
 
         static Spacing spacingFor(ComputedStyle::WhiteSpace value) {
@@ -2990,6 +2997,8 @@ private:
                     return {false, true, true};
                 case ComputedStyle::WrapPreWrap:
                     return {true, false, true};
+                case ComputedStyle::WrapBreakSpaces:
+                    return {true, false, true, true};
                 case ComputedStyle::WrapText:
                     break;
             }
@@ -3013,6 +3022,51 @@ private:
                 }
                 word(text.substr(start, i - start), s, m, ascentDelta);
             }
+        }
+
+        // Tokenizes like words(), but every space becomes its own run taking
+        // room, so lines wrap after any space and trailing spaces hang onto the
+        // next line instead of vanishing.
+        void breakSpaced(std::string_view text, const ComputedStyle& s, const Metrics& m,
+                         float ascentDelta) {
+            std::size_t i = 0;
+            while (i < text.size()) {
+                if (text[i] == '\n') {
+                    newLine();
+                    ++i;
+                    continue;
+                }
+                if (std::isspace(static_cast<unsigned char>(text[i]))) {
+                    preservedSpace(s, m, ascentDelta);
+                    ++i;
+                    continue;
+                }
+                const std::size_t start = i;
+                while (i < text.size() && !std::isspace(static_cast<unsigned char>(text[i]))) {
+                    ++i;
+                }
+                word(text.substr(start, i - start), s, m, ascentDelta);
+            }
+        }
+
+        // One blank run a space wide. Wraps like a word when it overflows, so a
+        // trailing space starts the next line instead of hanging past the edge.
+        void preservedSpace(const ComputedStyle& s, const Metrics& m, float ascentDelta) {
+            if (ellipsisAdded_) {
+                return;
+            }
+            if (lineHasContent_ && lineIndent_ + penX_ + metrics_.spaceWidth > lineAvail_) {
+                newLine();
+            }
+            ownerEl_.addTextRun({" ", originX_ + lineIndent_ + penX_,
+                                 originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m),
+                                 metrics_.spaceWidth, metrics_.lineHeight,
+                                 metrics_.ascent + ascentDelta, s.fontSize, s.color.r, s.color.g,
+                                 s.color.b, s.color.a, s.fontBold,
+                                 s.fontStyle != ComputedStyle::FontNormal});
+            penX_ += metrics_.spaceWidth;
+            lineHasContent_ = true;
+            widest_ = std::max(widest_, penX_);
         }
 
         bool isEllipsisActive() const {
@@ -3116,9 +3170,13 @@ private:
                 lineIndent_ + penX_ + metrics_.spaceWidth + wWidth > lineAvail_) {
                 newLine();
             }
-            float space = lineHasContent_ ? metrics_.spaceWidth : 0.0f;
-            if (lineHasContent_ && s.wordSpacing.unit != sui::Length::Auto) {
-                space += s.wordSpacing.resolve(s.fontSize, s.fontSize, 16.0f);
+            // Gaps come from space runs in break-spaces mode, never from word().
+            float space = 0.0f;
+            if (lineHasContent_ && !spacing_.breakSpaces) {
+                space = metrics_.spaceWidth;
+                if (s.wordSpacing.unit != sui::Length::Auto) {
+                    space += s.wordSpacing.resolve(s.fontSize, s.fontSize, 16.0f);
+                }
             }
             // A pending soft break matters only where ordinary wrapping is
             // off: under normal wrapping the overflow check below reaches the

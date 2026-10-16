@@ -4000,6 +4000,47 @@ void testCssCounters() {
     }
 }
 
+// `white-space: break-spaces` keeps every space as its own run: runs of
+// spaces take room, lines wrap after any space, and trailing spaces start the
+// next line instead of vanishing.
+void testBreakSpaces() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"b\" style=\"width:200px;white-space:break-spaces\">a  b</div>"
+        "<div id=\"t\" style=\"width:35px;white-space:break-spaces\">aaaa </div>"
+        "<div id=\"p\" style=\"width:200px;white-space:pre-wrap\">a  b</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* b = el("b");
+    Element* t = el("t");
+    Element* p = el("p");
+    check(b && t && p, "break-spaces elements found");
+    if (!b || !t || !p) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+    layoutRoot(*document, resolver, 400.0f);
+    // Two spaces make two runs: nothing collapses.
+    check(b->textRuns().size() == 4, "every space takes a run");
+    if (b->textRuns().size() == 4) {
+        check(b->textRuns()[0].text == "a" && b->textRuns()[1].text == " " &&
+                  b->textRuns()[2].text == " " && b->textRuns()[3].text == "b",
+              "words and spaces alternate");
+        check(b->textRuns()[1].width == 4.0f, "a space run is a space wide");
+    }
+    // A trailing space that overflows starts the next line.
+    check(t->textRuns().size() == 2, "a trailing space wraps alone");
+    if (t->textRuns().size() == 2) {
+        check(t->textRuns()[1].y > t->textRuns()[0].y, "the space drops a line");
+    }
+    // pre-wrap still collapses the run.
+    check(p->textRuns().size() == 2, "pre-wrap collapses spaces");
+}
+
 // Counter styles number markers and `counter()` values: roman subtracts,
 // alpha rolls over, and anything unrepresentable reads as decimal.
 void testCounterStyles() {
@@ -8963,6 +9004,7 @@ int main() {
     testDetails();
     testCounterStyles();
     testQuotes();
+    testBreakSpaces();
     testColorScheme();
     testPrefersColorScheme();
     testCurrentColor();

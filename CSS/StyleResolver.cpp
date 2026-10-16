@@ -4490,6 +4490,8 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.whiteSpace = ComputedStyle::WrapPre;
         } else if (value == "pre-wrap") {
             s.whiteSpace = ComputedStyle::WrapPreWrap;
+        } else if (value == "break-spaces") {
+            s.whiteSpace = ComputedStyle::WrapBreakSpaces;
         } else {
             s.whiteSpace = ComputedStyle::WrapText;
         }
