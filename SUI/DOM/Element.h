@@ -167,6 +167,11 @@ public:
     // markup. Its tag is the pseudo-element name, so it takes part in layout and
     // paint but is never reachable from script or from a plain type selector.
     bool isPseudoElement() const noexcept { return tag_.rfind("::", 0) == 0; }
+
+    // Whether the element's own children give it visible content: text with a
+    // non-space character, or a real child box. Generated boxes count only when
+    // they carry such text. `empty-cells` reads this to find blank cells.
+    bool hasVisibleContent() const;
     void setVisual(bool visual) noexcept { visual_ = visual; }
 
     // Depth-first walk over this node and its descendants.

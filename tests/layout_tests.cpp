@@ -4041,6 +4041,86 @@ void testBreakSpaces() {
     check(p->textRuns().size() == 2, "pre-wrap collapses spaces");
 }
 
+// `empty-cells: hide` blanks the background and borders of a table cell with
+// no visible content, in the separated borders model only.
+void testEmptyCells() {
+    // The decision table for one cell.
+    {
+        sui::ComputedStyle s;
+        s.emptyCells = sui::ComputedStyle::EmptyCellsHide;
+        check(!s.showsCellDecoration(false, true), "hide blanks an empty separate cell");
+        check(s.showsCellDecoration(true, true), "a collapsing table ignores hide");
+        check(s.showsCellDecoration(false, false), "content keeps its decoration");
+        s.emptyCells = sui::ComputedStyle::EmptyCellsShow;
+        check(s.showsCellDecoration(false, true), "show keeps it too");
+    }
+
+    // Parse, inherit through the row, override on the cell, and serialize.
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "table { empty-cells: hide } td#o { empty-cells: show } "
+        "td#g { empty-cells: banana }"));
+    auto document = parseOrNull(
+        "<sui><body><table id=\"t\"><tr id=\"r\"><td id=\"a\"></td>"
+        "<td id=\"o\"></td><td id=\"g\"></td></tr></table></body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* r = el("r");
+    Element* a = el("a");
+    Element* o = el("o");
+    Element* g = el("g");
+    check(r && a && o && g, "cell elements found");
+    if (!r || !a || !o || !g) {
+        return;
+    }
+    check(resolver.resolve(*r).emptyCells == ComputedStyle::EmptyCellsHide,
+          "the row inherits hide");
+    check(resolver.resolve(*a).emptyCells == ComputedStyle::EmptyCellsHide,
+          "a cell inherits hide through the row");
+    check(resolver.resolve(*o).emptyCells == ComputedStyle::EmptyCellsShow,
+          "a cell overrides it");
+    check(resolver.resolve(*g).emptyCells == ComputedStyle::EmptyCellsHide,
+          "garbage keeps the inherited value");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*a), "empty-cells") == "hide",
+          "hide serializes");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*o), "empty-cells") == "show",
+          "show serializes");
+
+    // What counts as visible content: text with a non-space character, or a
+    // real child box; an empty generated box counts for nothing.
+    {
+        auto content = parseOrNull(
+            "<sui><body><div id=\"e\"></div><div id=\"w\"> \n </div>"
+            "<div id=\"t\">x</div><div id=\"c\"><span></span></div>"
+            "<div id=\"pe\"></div><div id=\"pt\"></div></body></sui>");
+        if (!content) {
+            return;
+        }
+        const auto cel = [&](const char* id) { return content->getElementById(id); };
+        Element* e = cel("e");
+        Element* w = cel("w");
+        Element* t = cel("t");
+        Element* c = cel("c");
+        Element* pe = cel("pe");
+        Element* pt = cel("pt");
+        check(e && w && t && c && pe && pt, "content elements found");
+        if (!e || !w || !t || !c || !pe || !pt) {
+            return;
+        }
+        check(!e->hasVisibleContent(), "an empty element has none");
+        check(!w->hasVisibleContent(), "whitespace-only text is none");
+        check(t->hasVisibleContent(), "text counts");
+        check(c->hasVisibleContent(), "a child box counts");
+        pe->appendChild(std::make_unique<Element>("::before", content.get()));
+        check(!pe->hasVisibleContent(), "an empty generated box is no content");
+        pt->appendChild(std::make_unique<Element>("::before", content.get()));
+        pt->children().back()->appendChild(Element::createText("q", content.get()));
+        check(pt->hasVisibleContent(), "a generated box with text counts");
+    }
+}
+
 // Counter styles number markers and `counter()` values: roman subtracts,
 // alpha rolls over, and anything unrepresentable reads as decimal.
 void testCounterStyles() {
@@ -9005,6 +9085,7 @@ int main() {
     testCounterStyles();
     testQuotes();
     testBreakSpaces();
+    testEmptyCells();
     testColorScheme();
     testPrefersColorScheme();
     testCurrentColor();

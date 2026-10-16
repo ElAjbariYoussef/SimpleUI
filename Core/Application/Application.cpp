@@ -1967,7 +1967,28 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
              el.paddingHeight()},
             {el.contentX() - offX, el.contentY() - offY, el.contentWidth(),
              el.contentHeight()}};
-        paintBackground(s, boxes, s.fontSize, rootFontSize, opacity, renderer, images, radii);
+
+        // `empty-cells: hide` blanks the background and borders of a table cell
+        // with no visible content, in the separated borders model the spec names
+        // (a collapsing table ignores it).
+        bool blankCellDecoration = false;
+        if (s.isTableCell() && s.emptyCells == ComputedStyle::EmptyCellsHide &&
+            !el.hasVisibleContent()) {
+            bool tableCollapsed = false;
+            for (Element* par = el.parent(); par; par = par->parent()) {
+                const ComputedStyle parentStyle = resolver.resolve(*par);
+                if (parentStyle.isTableContainer()) {
+                    tableCollapsed =
+                        parentStyle.borderCollapse == ComputedStyle::CollapseCollapse;
+                    break;
+                }
+            }
+            blankCellDecoration = !s.showsCellDecoration(tableCollapsed, true);
+        }
+        if (!blankCellDecoration) {
+            paintBackground(s, boxes, s.fontSize, rootFontSize, opacity, renderer, images,
+                            radii);
+        }
 
         // An <img> or <video> paints its decoded source into the content box, honoring
         // the `object-fit` property (contain / cover / fill / none / scale-down).
@@ -2061,10 +2082,11 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
 
         // A border image replaces the border rings: it paints the sliced
         // source over the border area instead of stroking it.
-        if (s.borderImage.source.kind != ComputedStyle::BackgroundImage::None) {
+        if (!blankCellDecoration &&
+            s.borderImage.source.kind != ComputedStyle::BackgroundImage::None) {
             paintBorderImage(s.borderImage, boxes, s.fontSize, rootFontSize, opacity,
                              renderer, images);
-        } else if (border.a > 0) {
+        } else if (!blankCellDecoration && border.a > 0) {
             // A side CSS leaves invisible is dropped outright rather than drawn with a
             // zero width, and four sides that disagree about width or pattern are drawn
             // one at a time so they are not forced into a single ring.

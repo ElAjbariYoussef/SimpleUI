@@ -911,6 +911,10 @@ struct ComputedStyle {
     TableLayoutKind tableLayout = TableLayoutAuto;
     enum CaptionSide : std::uint8_t { CaptionTop, CaptionBottom };
     CaptionSide captionSide = CaptionTop;
+    // `empty-cells: hide` blanks the background and borders of a cell with no
+    // visible content, in the separated model only. Inherited.
+    enum EmptyCells : std::uint8_t { EmptyCellsShow, EmptyCellsHide };
+    EmptyCells emptyCells = EmptyCellsShow;
 
     bool isTableContainer() const noexcept {
         return display == Display::Table || display == Display::InlineTable;
@@ -922,6 +926,12 @@ struct ComputedStyle {
                display == Display::TableFooterGroup;
     }
     bool isTableCell() const noexcept { return display == Display::TableCell; }
+
+    // Whether a cell paints its own background and borders: `empty-cells: hide`
+    // blanks an empty one, and the collapsing model ignores the property.
+    bool showsCellDecoration(bool tableCollapsed, bool cellEmpty) const noexcept {
+        return !(cellEmpty && !tableCollapsed && emptyCells == EmptyCellsHide);
+    }
 
     // CSS counters, keyed by name. `counterReset` sets the counter to `value` on
     // the element that declares it; `counterIncrement` adds `value` to it;
@@ -1042,6 +1052,7 @@ struct ComputedStyle {
         SpecifiedCaretColor = 1ULL << 34,
         SpecifiedTextAlignLast = 1ULL << 35,
         SpecifiedQuotes = 1ULL << 36,
+        SpecifiedEmptyCells = 1ULL << 37,
         SpecifiedScrollBehavior = 1u << 25,
         SpecifiedColorScheme = 1u << 26,
         // A marker, not a property: the element still carries the user-agent
@@ -1354,6 +1365,9 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     }
     if (!(style.specified & ComputedStyle::SpecifiedQuotes)) {
         style.quotes = parent.quotes;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedEmptyCells)) {
+        style.emptyCells = parent.emptyCells;
     }
     if (!(style.specified & ComputedStyle::SpecifiedDirection)) {
         style.direction = parent.direction;

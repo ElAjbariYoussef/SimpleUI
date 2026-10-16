@@ -5275,6 +5275,12 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
     } else if (property == "table-layout") {
         s.tableLayout = value == "fixed" ? ComputedStyle::TableLayoutFixed
                                          : ComputedStyle::TableLayoutAuto;
+    } else if (property == "empty-cells") {
+        if (value == "show" || value == "hide") {
+            s.emptyCells = value == "hide" ? ComputedStyle::EmptyCellsHide
+                                           : ComputedStyle::EmptyCellsShow;
+            s.specified |= ComputedStyle::SpecifiedEmptyCells;
+        }
     } else if (property == "caption-side") {
         s.captionSide = value == "bottom" ? ComputedStyle::CaptionBottom
                                           : ComputedStyle::CaptionTop;
@@ -6526,6 +6532,9 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "table-layout") {
         return style.tableLayout == ComputedStyle::TableLayoutFixed ? "fixed" : "auto";
     }
+    if (property == "empty-cells") {
+        return style.emptyCells == ComputedStyle::EmptyCellsHide ? "hide" : "show";
+    }
     if (property == "caption-side") {
         return style.captionSide == ComputedStyle::CaptionBottom ? "bottom" : "top";
     }
@@ -7112,7 +7121,8 @@ bool isInheritable(std::string_view property) {
            property == "text-decoration-color" || property == "pointer-events" ||
            property == "cursor" || property == "list-style-position" ||
            property == "quotes" || property == "caret-color" || property == "direction" ||
-           property == "font-variant" || property == "text-align-last";
+           property == "font-variant" || property == "text-align-last" ||
+           property == "empty-cells";
 }
 
 // `inherit` and `unset` are the two CSS-wide keywords the engine can answer

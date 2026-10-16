@@ -245,6 +245,23 @@ std::string Element::textContent() const {
     return out;
 }
 
+bool Element::hasVisibleContent() const {
+    for (const auto& child : children_) {
+        if (!child) {
+            continue;
+        }
+        if (!child->isTextNode() && !child->isPseudoElement()) {
+            return true;
+        }
+        for (const char c : child->textContent()) {
+            if (!std::isspace(static_cast<unsigned char>(c))) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 void Element::setTextContent(std::string text) {
     children_.clear();
     touch();
