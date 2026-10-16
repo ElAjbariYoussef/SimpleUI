@@ -66,6 +66,11 @@ struct Page {
     // A resize grip drag: the box, the grab point, and the content size the
     // grab remembers. Moves write inline width/height, so the next layout grows.
     Element* resizeDrag_ = nullptr;
+    // The modal dialog on top, if any, and who held focus before it opened.
+    // A mutation-gated walk keeps this pointed at the flagged dialog.
+    Element* modalDialog_ = nullptr;
+    Element* modalReturnFocus_ = nullptr;
+    std::uint64_t modalSyncMutations_ = 0;
     float resizeGrabX_ = 0.0f;
     float resizeGrabY_ = 0.0f;
     float resizeGrabW_ = 0.0f;
@@ -270,6 +275,13 @@ private:
     // Resolves `target`'s `cursor` and, when it changed, hands the keyword to the
     // platform. Called on every pointer move, so an unchanged hover is a no-op.
     void updateCursor(Element* target, float x, float y);
+    // Points modal state at the flagged dialog, focusing it and remembering
+    // who to restore; drops a dialog that closed, left the tree, or demoted.
+    // A mutation counter gates the tree walk, so idle frames pay nothing.
+    void syncModalDialog();
+    // Closes the modal dialog after firing `oncancel` when there is one,
+    // then restores the remembered focus.
+    void closeModalDialog();
     // The resize grip: a 12px square in the border box's bottom-right corner.
     static constexpr float kResizeGrip = 12.0f;
     // Whether the point lands on the element's own grip.
@@ -408,6 +420,10 @@ private:
     // A resize grip drag: the box, the grab point, and the content size the
     // grab remembers. Moves retarget the inline size; release drops the drag.
     Element* resizeDrag_ = nullptr;
+    // The modal dialog on top, if any, and who held focus before it opened.
+    Element* modalDialog_ = nullptr;
+    Element* modalReturnFocus_ = nullptr;
+    std::uint64_t modalSyncMutations_ = 0;
     float resizeGrabX_ = 0.0f;
     float resizeGrabY_ = 0.0f;
     float resizeGrabW_ = 0.0f;

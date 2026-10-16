@@ -61,6 +61,13 @@ std::string g_navSeen;
 sui::Element* g_timerTarget = nullptr;
 bool g_timerFired = false;
 
+// Modal dialog event flags.
+bool g_modalCancel = false;
+bool g_modalShut = false;
+
+void flagModalCancel() { g_modalCancel = true; }
+void flagModalShut() { g_modalShut = true; }
+
 void fireTimerProbe() {
     g_timerFired = true;
     if (g_timerTarget) {
@@ -2307,6 +2314,74 @@ int main() {
                 check(d->dialogOpen(), "escape leaves a modeless dialog open");
                 d->close();
                 check(!d->dialogOpen(), "close shuts it");
+            }
+        }
+    }
+
+    // A modal dialog takes focus, traps Tab, swallows outside presses, fires
+    // cancel then close on Escape, and hands focus back afterwards.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<input id=\"before\" value=\"\"/>"
+            "<dialog id=\"m\" oncancel=\"flagCancel()\" onclose=\"flagShut()\">"
+            "<button id=\"ok\">ok</button><button id=\"away\">away</button>"
+            "</dialog>"
+            "</body></sui>",
+            err);
+        check(doc != nullptr, "modal document parsed");
+        if (doc) {
+            app.setDocument(std::move(doc));
+            const auto layout = [&]() {
+                sui::StyleResolver layoutResolver;
+                sui::LayoutInput input;
+                input.resolver = &layoutResolver;
+                input.viewportWidth = 400.0f;
+                input.viewportHeight = 300.0f;
+                sui::BlockLayout().layout(app.document().root(), input);
+            };
+            sui::script::registerHandler("flagCancel", flagModalCancel);
+            sui::script::registerHandler("flagShut", flagModalShut);
+            sui::Element* m = app.document().getElementById("m");
+            sui::Element* before = app.document().getElementById("before");
+            sui::Element* ok = app.document().getElementById("ok");
+            check(m && before && ok, "modal elements found");
+            if (m && before && ok) {
+                layout();
+                // Focusing the field first gives the modal a place to return to.
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerDown,
+                                             before->layoutX() + 2.0f,
+                                             before->layoutY() + 2.0f, 1));
+                check(app.document().focused() == before, "the field takes focus");
+                m->showModal();
+                layout();
+                sui::BlockLayout::centerInViewport(*m, 400.0f, 300.0f);
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerMove,
+                                             m->layoutX() + 2.0f, m->layoutY() + 2.0f,
+                                             0));
+                check(app.document().focused() == m, "showModal focuses the dialog");
+                // An outside press changes nothing: still open, focus unmoved.
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerDown, 2.0f,
+                                             2.0f, 1));
+                check(m->dialogOpen(), "an outside press never closes");
+                check(app.document().focused() == m, "nor steals focus");
+                // Tab cycles the dialog's own buttons, wrapping at either end.
+                app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0,
+                                             0, 0x09));
+                check(app.document().focused() == ok, "tab enters the dialog");
+                app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0,
+                                             0, 0x09));
+                check(app.document().focused() != before, "tab never leaves");
+                // Escape fires cancel then close, and hands focus back.
+                g_modalCancel = false;
+                g_modalShut = false;
+                app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0,
+                                             0, 0x1B));
+                check(g_modalCancel && g_modalShut, "escape fires cancel then close");
+                check(!m->dialogOpen(), "escape shuts the dialog");
+                check(app.document().focused() == before, "focus returns outside");
             }
         }
     }

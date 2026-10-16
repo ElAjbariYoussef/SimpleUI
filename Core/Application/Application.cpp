@@ -3419,6 +3419,9 @@ void Application::bindPage(std::size_t index) {
     scrollDrag_ = page.scrollDrag_;
     scrollDragX_ = page.scrollDragX_;
     resizeDrag_ = page.resizeDrag_;
+    modalDialog_ = page.modalDialog_;
+    modalReturnFocus_ = page.modalReturnFocus_;
+    modalSyncMutations_ = page.modalSyncMutations_;
     resizeGrabX_ = page.resizeGrabX_;
     resizeGrabY_ = page.resizeGrabY_;
     resizeGrabW_ = page.resizeGrabW_;
@@ -3462,6 +3465,9 @@ void Application::flushBound() {
     page.scrollDrag_ = scrollDrag_;
     page.scrollDragX_ = scrollDragX_;
     page.resizeDrag_ = resizeDrag_;
+    page.modalDialog_ = modalDialog_;
+    page.modalReturnFocus_ = modalReturnFocus_;
+    page.modalSyncMutations_ = modalSyncMutations_;
     page.resizeGrabX_ = resizeGrabX_;
     page.resizeGrabY_ = resizeGrabY_;
     page.resizeGrabW_ = resizeGrabW_;
@@ -3498,6 +3504,8 @@ void Application::setDocument(std::unique_ptr<Document> document) {
     page.datalistHighlight_ = 0;
     page.scrollDrag_ = nullptr;
     page.resizeDrag_ = nullptr;
+    page.modalDialog_ = nullptr;
+    page.modalReturnFocus_ = nullptr;
     page.smoothScrolls_.clear();
     // A picked file for the old tree must never land in the new one.
     std::lock_guard<std::mutex> lock(fileMutex_);
@@ -3596,6 +3604,8 @@ void Application::installPageAt(std::size_t index, std::unique_ptr<Document> doc
     page.datalistHighlight_ = 0;
     page.scrollDrag_ = nullptr;
     page.resizeDrag_ = nullptr;
+    page.modalDialog_ = nullptr;
+    page.modalReturnFocus_ = nullptr;
     page.selectAnchor_ = 0;
     page.selectEdge_ = 0;
     page.smoothScrolls_.clear();
@@ -3867,6 +3877,111 @@ Element* Application::resizeGripTarget(Element* target, float x, float y) const 
     return nullptr;
 }
 
+namespace {
+
+const Element* findModalDialog(const Element& root) {
+    for (const auto& child : root.children()) {
+        if (!child || child->isTextNode()) {
+            continue;
+        }
+        if (child->dialogModal()) {
+            return child.get();
+        }
+        if (const Element* found = findModalDialog(*child)) {
+            return found;
+        }
+    }
+    return nullptr;
+}
+
+bool withinSubtree(const Element* el, const Element* root) {
+    for (const Element* at = el; at; at = at->parent()) {
+        if (at == root) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+void Application::syncModalDialog() {
+    if (!document_ || !document_->root()) {
+        modalDialog_ = nullptr;
+        modalReturnFocus_ = nullptr;
+        return;
+    }
+    // A live modal needs no walk: only a mutation can have moved it.
+    if (modalDialog_ && modalSyncMutations_ == document_->mutationCount() &&
+        isReachable(*document_->root(), modalDialog_) && modalDialog_->dialogModal()) {
+        return;
+    }
+    modalSyncMutations_ = document_->mutationCount();
+    const Element* found = findModalDialog(*document_->root());
+    if (found == modalDialog_) {
+        if (modalDialog_ && (!isReachable(*document_->root(), modalDialog_) ||
+                             !modalDialog_->dialogModal())) {
+            modalDialog_ = nullptr;
+            modalReturnFocus_ = nullptr;
+        }
+        return;
+    }
+    // The previous modal goes back to whatever held focus, when that box is
+    // still around; a removed focus target simply stays lost.
+    if (modalDialog_ && modalReturnFocus_ &&
+        isReachable(*document_->root(), modalReturnFocus_)) {
+        document_->setFocused(modalReturnFocus_);
+        resolver_.setFocused(modalReturnFocus_);
+        lastFocused_ = modalReturnFocus_;
+    }
+    modalDialog_ = const_cast<Element*>(found);
+    modalReturnFocus_ = nullptr;
+    if (modalDialog_) {
+        // Popups belong to the page below; a modal rise closes them.
+        openSelect_ = nullptr;
+        openDatalist_ = nullptr;
+        Element* focused = document_->focused();
+        if (focused != modalDialog_ && !withinSubtree(focused, modalDialog_)) {
+            modalReturnFocus_ = focused;
+        }
+        document_->setFocused(modalDialog_);
+        resolver_.setFocused(modalDialog_);
+        resolver_.setFocusVisible(true);
+        lastFocused_ = modalDialog_;
+    }
+}
+
+void Application::closeModalDialog() {
+    if (!modalDialog_ || !document_ || !document_->root() ||
+        !isReachable(*document_->root(), modalDialog_)) {
+        modalDialog_ = nullptr;
+        return;
+    }
+    // Cancel first, then close: with no event objects nothing can prevent the
+    // close, so both handlers always run in order.
+    const std::string_view cancel = modalDialog_->attribute("oncancel");
+    if (!cancel.empty()) {
+        script::invokeInlineHandler(cancel, modalDialog_);
+        if (!isReachable(*document_->root(), modalDialog_)) {
+            modalDialog_ = nullptr;
+            return;
+        }
+    }
+    Element* closing = modalDialog_;
+    closing->close();
+    modalDialog_ = nullptr;
+    if (modalReturnFocus_ && isReachable(*document_->root(), modalReturnFocus_)) {
+        document_->setFocused(modalReturnFocus_);
+        resolver_.setFocused(modalReturnFocus_);
+        lastFocused_ = modalReturnFocus_;
+    } else if (document_->focused() == closing) {
+        document_->setFocused(document_->root());
+        resolver_.setFocused(document_->root());
+        lastFocused_ = document_->root();
+    }
+    modalReturnFocus_ = nullptr;
+}
+
 void Application::updateCursor(Element* target, float x, float y) {
     ComputedStyle::Cursor cursor = ComputedStyle::CursorAuto;
     if (target) {
@@ -3916,6 +4031,17 @@ void Application::dispatch(const InputEvent& event) {
     if (keyboard) {
         target = document_->focused();
     } else {
+        syncModalDialog();
+        if (modalDialog_ && isReachable(*document_->root(), modalDialog_) &&
+            (event.kind == InputKind::PointerDown || event.kind == InputKind::PointerUp ||
+             event.kind == InputKind::PointerMove || event.kind == InputKind::Wheel)) {
+            const float left = modalDialog_->layoutX();
+            const float top = modalDialog_->layoutY();
+            if (event.x < left || event.x >= left + modalDialog_->layoutWidth() ||
+                event.y < top || event.y >= top + modalDialog_->layoutHeight()) {
+                return;
+            }
+        }
         const auto ops = computePaintOps(*document_->root(), resolver_);
         target = hitTestPaintOrder(ops, event.x, event.y);
         if (openSelect_ && !isReachable(*document_->root(), openSelect_)) {
@@ -4403,7 +4529,12 @@ void Application::dispatch(const InputEvent& event) {
             // the key, so focus moves instead of typing a tab.
             if (event.key == 0x09 && document_ && document_->root()) {
                 std::vector<Element*> order;
-                collectFocusable(*document_->root(), order);
+                syncModalDialog();
+                if (modalDialog_ && isReachable(*document_->root(), modalDialog_)) {
+                    collectFocusable(*modalDialog_, order);
+                } else {
+                    collectFocusable(*document_->root(), order);
+                }
                 if (!order.empty()) {
                     Element* focused = document_->focused();
                     std::size_t at = order.size();
@@ -4764,6 +4895,16 @@ void Application::dispatch(const InputEvent& event) {
     }
 
     // An open datalist popup eats arrows, Enter, and Escape: arrows move the
+    // Escape dismisses the modal dialog, after popups had their turn: an
+    // open select or datalist eats the key first, so a popup inside a dialog
+    // closes before the dialog itself does.
+    syncModalDialog();
+    if (modalDialog_ && isReachable(*document_->root(), modalDialog_) &&
+        event.kind == InputKind::KeyDown && event.key == 0x1B && !openSelect_ &&
+        openDatalist_ != document_->focused()) {
+        closeModalDialog();
+        return;
+    }
     // highlight through enabled suggestions, Enter picks into the value, and
     // Escape closes. Left/Right keep editing the field.
     if (target && event.kind == InputKind::KeyDown && openDatalist_ == target &&
@@ -5075,6 +5216,13 @@ bool Application::renderFrame(WindowId id) {
                 generatePseudoElements(*document_, resolver_);
 
                 layout.layout(document_->root(), input);
+                syncModalDialog();
+                if (modalDialog_ &&
+                    isReachable(*document_->root(), modalDialog_)) {
+                    BlockLayout::centerInViewport(
+                        *modalDialog_, static_cast<float>(width),
+                        static_cast<float>(height));
+                }
 
                 // Events are routed after layout so hit tests use this frame's
                 // geometry rather than the previous frame's.
@@ -5108,6 +5256,13 @@ bool Application::renderFrame(WindowId id) {
                     // change.
                     generatePseudoElements(*document_, resolver_);
                     layout.layout(document_->root(), input);
+                    syncModalDialog();
+                    if (modalDialog_ &&
+                        isReachable(*document_->root(), modalDialog_)) {
+                        BlockLayout::centerInViewport(
+                            *modalDialog_, static_cast<float>(width),
+                            static_cast<float>(height));
+                    }
                 }
 
                 if (SDL_getenv("SUI_DUMP_LAYOUT")) {

@@ -4124,6 +4124,76 @@ void testEmptyCells() {
     }
 }
 
+// A modal dialog fixes above the page with a backdrop: showModal flags it,
+// the user-agent rule pins and layers it, and close() demotes it back.
+void testModalDialog() {
+    auto document = parseOrNull(
+        "<sui><body><dialog id=\"d\">hi</dialog><dialog id=\"e\">yo</dialog></body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* d = el("d");
+    Element* e = el("e");
+    check(d && e, "modal elements found");
+    if (!d || !e) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+    check(!d->dialogModal(), "a dialog starts modeless");
+    // showModal flags; a second showModal demotes the first.
+    d->showModal();
+    check(d->dialogOpen() && d->dialogModal(), "showModal flags the dialog");
+    e->showModal();
+    check(e->dialogModal() && !d->dialogModal() && d->dialogOpen(),
+          "a second modal demotes the first to plain open");
+    e->close();
+    check(!e->dialogModal() && !e->dialogOpen(), "close demotes and shuts");
+    // show() never promotes; showModal never reopens.
+    d->show();
+    check(d->dialogOpen() && !d->dialogModal(), "show leaves a dialog modeless");
+    d->close();
+    d->showModal();
+    d->show();
+    check(d->dialogModal(), "show on an open dialog changes nothing");
+    // The top layer is un-overridable UA: fixed above every z-index.
+    const ComputedStyle modal = resolver.resolve(*d);
+    check(modal.position == ComputedStyle::Fixed, "a modal dialog fixes");
+    check(modal.zIndex == 1000000, "a modal dialog tops every z-index");
+    d->close();
+    const ComputedStyle plain = resolver.resolve(*d);
+    check(plain.position == ComputedStyle::Static && plain.zIndex == 0,
+          "a shut dialog lays out normally again");
+    // The backdrop generates while modal, sweeps on close, and covers the
+    // viewport by default.
+    d->showModal();
+    sui::generatePseudoElements(*document, resolver);
+    check(d->children().size() == 2 && d->children()[0]->tag() == "::backdrop",
+          "a modal dialog grows a backdrop");
+    const ComputedStyle veil = resolver.resolve(*d->children()[0]);
+    check(veil.position == ComputedStyle::Fixed, "the veil fixes too");
+    check(veil.zIndex == 999999, "the veil sits under the dialog");
+    check(veil.backgroundColor.r == 0 && veil.backgroundColor.a == 128,
+          "the veil dims by default");
+    layoutRoot(*document, resolver, 400.0f);
+    Element* veilBox = d->children()[0].get();
+    check(veilBox->layoutWidth() == 400.0f, "the veil covers the viewport");
+    check(veilBox->layoutX() == 0.0f && veilBox->layoutY() == 0.0f,
+          "the veil starts at the origin");
+    // Centering moves every box and run, so hit-testing follows the dialog.
+    const float wasX = d->layoutX();
+    sui::BlockLayout::centerInViewport(*d, 400.0f, 300.0f);
+    check(d->layoutX() == (400.0f - d->layoutWidth()) * 0.5f,
+          "centering lands the dialog mid-viewport");
+    check(d->layoutX() != wasX || d->layoutWidth() == 400.0f,
+          "centering actually moved the dialog");
+    d->close();
+    sui::generatePseudoElements(*document, resolver);
+    check(d->children().size() == 1 && !d->children()[0]->isPseudoElement(),
+          "close sweeps the backdrop");
+}
+
 // A <dialog> without `open` takes no box; show() opens it in place and
 // close() shuts it firing `onclose`. Non-modal only: showModal is queued
 // behind the top-layer paint milestone.
@@ -9524,6 +9594,7 @@ int main() {
     testLineClamp();
     testResize();
     testDialog();
+    testModalDialog();
     testColorScheme();
     testPrefersColorScheme();
     testCurrentColor();

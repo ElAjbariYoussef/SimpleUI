@@ -46,6 +46,20 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
         return s;
     }
 
+    if (tag == "::backdrop") {
+        // The modal veil: fixed over the viewport, under the dialog, dimming
+        // the page. Author `dialog::backdrop` rules restyle it from here.
+        Style s = block();
+        s.position = Style::Fixed;
+        s.top = Length(0.0f);
+        s.left = Length(0.0f);
+        s.width = Length(Length::Percent, 100.0f);
+        s.height = Length(Length::Percent, 100.0f);
+        s.zIndex = 999999;
+        s.backgroundColor = {0, 0, 0, 128};
+        return s;
+    }
+
     if (tag == "body") {
         // The document root paints the canvas, so it is the one element whose
         // user-agent colours `color-scheme` gets to re-pick.

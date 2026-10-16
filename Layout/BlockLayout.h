@@ -21,6 +21,10 @@ struct LayoutInput {
 class BlockLayout {
 public:
     void layout(Element* root, const LayoutInput& input);
+    // Centers an already-laid-out subtree in the viewport: every box and run
+    // moves, so hit-testing and painting follow without further offsets. The
+    // frame recomputes it from a fresh layout, so nothing accumulates.
+    static void centerInViewport(Element& el, float viewportWidth, float viewportHeight);
 };
 
 }  // namespace sui

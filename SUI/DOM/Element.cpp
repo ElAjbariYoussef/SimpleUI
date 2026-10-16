@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <functional>
 #include <limits>
 #include <regex>
 #include <string_view>
@@ -383,10 +384,37 @@ void Element::show() {
     setAttribute("open", "");
 }
 
+void Element::showModal() {
+    if (tag_ != "dialog" || hasAttribute("open")) {
+        return;
+    }
+    // One modal at a time: a dialog showing modally demotes whatever held
+    // the top layer, which falls back to a plain open dialog in place.
+    if (document_) {
+        if (Element* root = document_->root()) {
+            std::function<void(Element&)> demote = [&](Element& el) {
+                for (const auto& child : el.children()) {
+                    if (!child || child->isTextNode()) {
+                        continue;
+                    }
+                    if (child->tag() == "dialog" && child.get() != this) {
+                        child->modalShown_ = false;
+                    }
+                    demote(*child);
+                }
+            };
+            demote(*root);
+        }
+    }
+    modalShown_ = true;
+    setAttribute("open", "");
+}
+
 void Element::close() {
     if (tag_ != "dialog" || !hasAttribute("open")) {
         return;
     }
+    modalShown_ = false;
     removeAttribute("open");
     // The close event fires on the dialog that just shut. An empty handler
     // is no call at all, which also skips the focus-taking an invocation
@@ -399,6 +427,10 @@ void Element::close() {
 
 bool Element::dialogOpen() const {
     return tag_ == "dialog" && hasAttribute("open");
+}
+
+bool Element::dialogModal() const {
+    return tag_ == "dialog" && hasAttribute("open") && modalShown_;
 }
 
 std::string Element::fileName() const {

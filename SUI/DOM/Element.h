@@ -124,12 +124,14 @@ public:
     // `gaugeIndeterminate()` for the animated case.
     float gaugeFraction() const;
     // A <dialog> opens non-modally with show() (no-op when already open) and
-    // closes with close(), which fires the `onclose` handler when there is
-    // one. Modal presentation (`showModal`) is a later milestone; these two
-    // are the DOM half every dialog needs.
+    // modally with showModal() (no-op when already open, demoting any other
+    // modal dialog). close() shuts either and fires `onclose` when there is
+    // one. Modal dialogs paint above the page, centered, with a backdrop.
     void show();
+    void showModal();
     void close();
     bool dialogOpen() const;
+    bool dialogModal() const;
     // A valueless <progress> shows indeterminate instead of a fraction.
     bool gaugeIndeterminate() const;
     // A <meter> colour zone from low/high/optimum: 0 beside the optimum, 1
@@ -285,6 +287,10 @@ private:
     float scrollTop_ = 0.0f;
     bool scrollsX_ = false;
     bool scrollsY_ = false;
+    // A <dialog> showing modally: painted above the page, centered, with a
+    // backdrop. Only the topmost dialog holds this; opening another demotes
+    // the first back to a plain open dialog.
+    bool modalShown_ = false;
     float clientW_ = 0.0f;
     float clientH_ = 0.0f;
     float scrollW_ = 0.0f;

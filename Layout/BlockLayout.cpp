@@ -3525,6 +3525,39 @@ void clearHiddenBoxes(Element& el, const StyleResolver& resolver) {
 
 }  // namespace
 
+namespace {
+
+void shiftTree(Element& el, float dx, float dy) {
+    if (dx == 0.0f && dy == 0.0f) {
+        return;
+    }
+    el.setLayoutX(el.layoutX() + dx);
+    el.setLayoutY(el.layoutY() + dy);
+    el.setPaddingX(el.paddingX() + dx);
+    el.setPaddingY(el.paddingY() + dy);
+    el.setContentX(el.contentX() + dx);
+    el.setContentY(el.contentY() + dy);
+    for (Element::TextRun& run : el.textRuns()) {
+        run.x += dx;
+        run.y += dy;
+    }
+    for (const auto& child : el.children()) {
+        if (child && !child->isTextNode()) {
+            shiftTree(*child, dx, dy);
+        }
+    }
+}
+
+}  // namespace
+
+void BlockLayout::centerInViewport(Element& el, float viewportWidth,
+                                   float viewportHeight) {
+    // A modal dialog centers itself every frame from a fresh layout, so the
+    // move never accumulates and hit-testing and painting follow the boxes.
+    shiftTree(el, (viewportWidth - el.layoutWidth()) * 0.5f - el.layoutX(),
+              (viewportHeight - el.layoutHeight()) * 0.5f - el.layoutY());
+}
+
 void BlockLayout::layout(Element* root, const LayoutInput& input) {
     if (!root || !input.resolver) {
         return;

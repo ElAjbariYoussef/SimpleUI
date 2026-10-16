@@ -7487,6 +7487,14 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
             style.backgroundColor = now.background;
         }
     }
+    if (element.dialogModal()) {
+        // The top layer is not overridable: a modal dialog fixes to the
+        // viewport above every z-index, centered by the frame after layout.
+        // Author position and z-index lose here the way they lose to the
+        // browser's top layer.
+        style.position = ComputedStyle::Fixed;
+        style.zIndex = 1000000;
+    }
     animateStyle(element, style);
     return style;
 }

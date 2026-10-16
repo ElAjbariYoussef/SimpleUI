@@ -256,6 +256,19 @@ void addBox(Element& element, const StyleResolver& resolver, const char* tag, bo
 // A `::placeholder` box carries the `placeholder` attribute as its text, but
 // only while the field is empty. Stale boxes are swept with the rest, so a
 // field that gains a value loses its box on the next rebuild.
+// A modal dialog's `::backdrop` veil: generated while the dialog shows
+// modally, swept with everything else when it closes. First child, so it
+// paints under the dialog's content; fixed positioning keeps it out of the
+// flow and over the viewport.
+void addBackdropBox(Element& element, const StyleResolver& resolver) {
+    if (!element.dialogModal() || hasPseudoBox(element, "::backdrop")) {
+        return;
+    }
+    Document* document = element.document();
+    element.insertChild(std::make_unique<Element>("::backdrop", document), 0);
+    (void)resolver.resolve(*element.children()[0]);
+}
+
 void addPlaceholderBox(Element& element, const StyleResolver& resolver) {
     if (element.tag() != "input" && element.tag() != "textarea") {
         return;
@@ -305,6 +318,7 @@ void build(Element& element, const StyleResolver& resolver, CounterStack& counte
                 }
             }
             addPlaceholderBox(*child, resolver);
+            addBackdropBox(*child, resolver);
             build(*child, resolver, counters, quoteDepth);
             if (!hasPseudoBox(*child, "::after")) {
                 const int level = openedAt >= 0 ? openedAt : quoteDepth;
@@ -318,6 +332,7 @@ void build(Element& element, const StyleResolver& resolver, CounterStack& counte
             }
         } else {
             addPlaceholderBox(*child, resolver);
+            addBackdropBox(*child, resolver);
             // Recursing after the boxes exist is safe: they are skipped above, and
             // `::before::before` is not a thing CSS can express.
             build(*child, resolver, counters, quoteDepth);
