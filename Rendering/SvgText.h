@@ -28,10 +28,13 @@ struct SvgTextStyle {
 SvgTextStyle svgTextStyle(const Element& node, float cssFontSize, float scaleX);
 
 // One paintable run: collapsed text, the node styling it, and an optional
-// absolute start plus relative shift, all in pixels.
+// absolute start plus relative shift, all in pixels. A chunk inside a
+// <textPath> carries that ancestor and lays its glyphs along the path
+// instead of the straight pen.
 struct SvgTextChunk {
     std::string text;
     const Element* styleNode = nullptr;
+    const Element* pathNode = nullptr;
     bool positioned = false;
     float x = 0.0f;
     float y = 0.0f;
@@ -48,5 +51,18 @@ struct SvgTextChunk {
 std::vector<SvgTextChunk> collectSvgTextChunks(const Element& text, float cssFontSize,
                                                float scaleX, float scaleY, float baseW,
                                                float baseH);
+
+// Arc-length parameterization of flattened loops for text on a path: total
+// length plus the point and tangent at a distance, looping closed shapes
+// through their seam. Concatenated loops run end to end.
+struct SvgPathPoint {
+    float x = 0.0f;
+    float y = 0.0f;
+    float angleDeg = 0.0f;
+};
+
+float svgLoopsLength(const std::vector<std::vector<SDL_FPoint>>& loops);
+bool svgPointAtDistance(const std::vector<std::vector<SDL_FPoint>>& loops, float distance,
+                        SvgPathPoint& out);
 
 }  // namespace sui

@@ -1,5 +1,6 @@
 #include "Rendering/SvgText.h"
 
+#include <cmath>
 #include <cstdlib>
 
 namespace sui {
@@ -102,6 +103,7 @@ std::vector<SvgTextChunk> collectSvgTextChunks(const Element& text, float cssFon
     bool suppressLeading = false;
     std::string current;
     const Element* currentNode = &text;
+    const Element* currentPath = nullptr;
     bool currentPositioned = false;
     float currentX = 0.0f, currentY = 0.0f, currentDx = 0.0f, currentDy = 0.0f;
 
@@ -119,6 +121,7 @@ std::vector<SvgTextChunk> collectSvgTextChunks(const Element& text, float cssFon
             SvgTextChunk chunk;
             chunk.text = current;
             chunk.styleNode = currentNode;
+            chunk.pathNode = currentPath;
             chunk.positioned = currentPositioned;
             chunk.x = currentX;
             chunk.y = currentY;
@@ -181,15 +184,24 @@ std::vector<SvgTextChunk> collectSvgTextChunks(const Element& text, float cssFon
                 feed(child->text());
                 continue;
             }
-            // A chunk boundary: tspan (and textPath, painted straight while
-            // path following stays out of scope) positions and styles. Any
-            // other element lends its text to the running chunk, which keeps
-            // the surrounding style.
+            // A chunk boundary: tspan positions and styles; textPath does too,
+            // and everything under it rides the path. Any other element lends
+            // its text to the running chunk, which keeps the surrounding style.
             if (child->tag() == "tspan" || child->tag() == "textPath") {
                 boundary(*child);
+                const Element* savedPath = currentPath;
+                if (child->tag() == "textPath") {
+                    // Positioning lists belong to straight text: a path and
+                    // its startOffset place these chunks instead.
+                    currentPositioned = false;
+                    currentDx = 0.0f;
+                    currentDy = 0.0f;
+                    currentPath = child.get();
+                }
                 walk(*child);
                 flush(false);
                 currentNode = &el;
+                currentPath = savedPath;
             } else {
                 walk(*child);
             }
@@ -201,6 +213,45 @@ std::vector<SvgTextChunk> collectSvgTextChunks(const Element& text, float cssFon
     walk(text);
     flush(true);
     return chunks;
+}
+
+float svgLoopsLength(const std::vector<std::vector<SDL_FPoint>>& loops) {
+    float total = 0.0f;
+    for (const auto& loop : loops) {
+        for (std::size_t k = 1; k < loop.size(); ++k) {
+            const float dx = loop[k].x - loop[k - 1].x;
+            const float dy = loop[k].y - loop[k - 1].y;
+            total += std::sqrt(dx * dx + dy * dy);
+        }
+    }
+    return total;
+}
+
+bool svgPointAtDistance(const std::vector<std::vector<SDL_FPoint>>& loops, float distance,
+                        SvgPathPoint& out) {
+    if (distance < 0.0f) {
+        return false;
+    }
+    for (const auto& loop : loops) {
+        for (std::size_t k = 1; k < loop.size(); ++k) {
+            const float dx = loop[k].x - loop[k - 1].x;
+            const float dy = loop[k].y - loop[k - 1].y;
+            const float span = std::sqrt(dx * dx + dy * dy);
+            if (span <= 0.0f) {
+                continue;
+            }
+            if (distance <= span) {
+                const float t = distance / span;
+                out.x = loop[k - 1].x + dx * t;
+                out.y = loop[k - 1].y + dy * t;
+                out.angleDeg =
+                    std::atan2(dy, dx) * 180.0f / static_cast<float>(M_PI);
+                return true;
+            }
+            distance -= span;
+        }
+    }
+    return false;
 }
 
 }  // namespace sui

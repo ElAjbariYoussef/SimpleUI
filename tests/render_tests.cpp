@@ -1564,6 +1564,63 @@ void testSvgMarkers() {
           "a nowhere path reads as zero");
 }
 
+// Text on a path parameterizes flattened loops by arc length and attributes
+// chunks to their textPath ancestor.
+void testTextOnPath() {
+    const auto pt = [](float x, float y) { return SDL_FPoint{x, y}; };
+    // An L: 10 across, 10 down.
+    const std::vector<std::vector<SDL_FPoint>> ell = {{pt(0, 0), pt(10, 0), pt(10, 10)}};
+    check(sui::svgLoopsLength(ell) == 20.0f, "an L measures its legs");
+    sui::SvgPathPoint at;
+    check(sui::svgPointAtDistance(ell, 5.0f, at) && at.x == 5.0f && at.y == 0.0f &&
+              at.angleDeg == 0.0f,
+          "halfway along the first leg");
+    check(sui::svgPointAtDistance(ell, 15.0f, at) && at.x == 10.0f && at.y == 5.0f &&
+              at.angleDeg == 90.0f,
+          "past the corner the tangent turns down");
+    check(sui::svgPointAtDistance(ell, 20.0f, at) && at.x == 10.0f && at.y == 10.0f,
+          "the exact end still resolves");
+    check(!sui::svgPointAtDistance(ell, 21.0f, at), "past the end resolves nothing");
+    check(!sui::svgPointAtDistance(ell, -1.0f, at), "before the start resolves nothing");
+    // A closed square loops through its seam; concatenated loops run end to end.
+    const std::vector<std::vector<SDL_FPoint>> shut = {
+        {pt(0, 0), pt(10, 0), pt(10, 10), pt(0, 10), pt(0, 0)}};
+    check(sui::svgLoopsLength(shut) == 40.0f, "a closed square measures all sides");
+    check(sui::svgPointAtDistance(shut, 35.0f, at) && at.x == 0.0f && at.y == 5.0f &&
+              at.angleDeg == -90.0f,
+          "the closing edge heads back up");
+    const std::vector<std::vector<SDL_FPoint>> two = {{pt(0, 0), pt(4, 0)},
+                                                      {pt(10, 10), pt(10, 14)}};
+    check(sui::svgLoopsLength(two) == 8.0f, "concatenated loops add up");
+    check(sui::svgPointAtDistance(two, 6.0f, at) && at.x == 10.0f && at.y == 12.0f,
+          "distance carries into the second loop");
+    // Chunks under a textPath carry it; styled tspans inside keep their style
+    // node; text outside rides the straight pen.
+    sui::ParseError err;
+    auto doc = sui::MarkupParser::parse(
+        "<sui><body><svg><text id=\"t\">a<textPath id=\"p\" href=\"#r\">b"
+        "<tspan id=\"s\">c</tspan></textPath>d</text>"
+        "<path id=\"r\" d=\"M0 0 L10 0\"/></svg></body></sui>",
+        err);
+    check(doc != nullptr, "path text parsed");
+    if (!doc) {
+        return;
+    }
+    const auto chunks =
+        sui::collectSvgTextChunks(*doc->getElementById("t"), 16.0f, 1.0f, 1.0f, 100.0f, 100.0f);
+    check(chunks.size() == 4, "path text chunks in order");
+    if (chunks.size() == 4) {
+        check(chunks[0].pathNode == nullptr && chunks[0].text == "a", "leading text rides straight");
+        check(chunks[1].pathNode == doc->getElementById("p") && chunks[1].text == "b",
+              "path text carries its path");
+        check(chunks[2].pathNode == doc->getElementById("p") &&
+                  chunks[2].styleNode == doc->getElementById("s"),
+              "a tspan inside keeps its style on the path");
+        check(chunks[3].pathNode == nullptr && chunks[3].text == "d",
+              "trailing text rides straight");
+    }
+}
+
 // Scanline tessellation fills loops jointly under a fill rule: even-odd
 // pairs crossings, nonzero counts winding, and convex loops stay fans.
 void testTessellate() {
@@ -2029,6 +2086,7 @@ int main() {
     testTessellate();
     testSvgTextChunks();
     testSvgMarkers();
+    testTextOnPath();
     testObjectFitDst();
     testColorMatrix();
     testClipCoverage();

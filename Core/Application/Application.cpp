@@ -1876,7 +1876,146 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
             const SDL_FPoint base = place(0.0f, 0.0f);
             float penX = origin.x;
             float penY = origin.y;
+            // Text on a path keeps one distance per textPath element, so
+            // styled chunks inside it continue along the same curve. The pen
+            // after a path chunk sits at the path's end.
+            struct PathState {
+                std::vector<std::vector<SDL_FPoint>> loops;
+                float total = 0.0f;
+                float at = 0.0f;
+                SDL_FPoint end{0.0f, 0.0f};
+            };
+            std::map<const Element*, PathState> pathStates;
+            const auto pathFor = [&](const Element* pathNode) -> PathState* {
+                auto it = pathStates.find(pathNode);
+                if (it != pathStates.end()) {
+                    return &it->second;
+                }
+                const Element* target = nullptr;
+                const std::string_view href = pathNode->attribute("href");
+                if (!href.empty()) {
+                    target = resolveSvgUse(svg, href);
+                }
+                if (!target) {
+                    const std::string_view legacy = pathNode->attribute("xlink:href");
+                    if (!legacy.empty()) {
+                        target = resolveSvgUse(svg, legacy);
+                    }
+                }
+                if (!target || target->tag() != "path") {
+                    return nullptr;
+                }
+                std::vector<SvgSubpath> subpaths;
+                if (!parseSvgPath(target->attribute("d"), subpaths)) {
+                    return nullptr;
+                }
+                PathState state;
+                for (const SvgSubpath& sub : subpaths) {
+                    if (sub.points.size() < 2) {
+                        continue;
+                    }
+                    std::vector<SDL_FPoint> loop;
+                    for (const SDL_FPoint& point : sub.points) {
+                        loop.push_back(place(point.x, point.y));
+                    }
+                    if (sub.closed && !loop.empty()) {
+                        loop.push_back(loop.front());
+                    }
+                    state.loops.push_back(std::move(loop));
+                }
+                state.total = svgLoopsLength(state.loops);
+                if (state.total <= 0.0f) {
+                    return nullptr;
+                }
+                float start = 0.0f;
+                const std::string_view offset =
+                    pathNode->attribute("startOffset");
+                if (!offset.empty()) {
+                    const std::size_t last =
+                        offset.find_last_not_of(" \t\n\r\f");
+                    if (last != std::string_view::npos) {
+                        if (offset[last] == '%') {
+                            start = state.total *
+                                    std::strtof(std::string(offset.substr(0, last)).c_str(),
+                                                nullptr) *
+                                    0.01f;
+                        } else {
+                            start = std::strtof(std::string(offset).c_str(), nullptr) *
+                                    frame.view.sx;
+                        }
+                    }
+                }
+                state.at = std::max(0.0f, start);
+                state.end = state.loops.back().back();
+                return &pathStates.emplace(pathNode, std::move(state)).first->second;
+            };
             for (const SvgTextChunk& chunk : chunks) {
+                // A path chunk rides its curve glyph by glyph, rotated onto
+                // the tangent; spaces advance without painting. Per-codepoint
+                // measurement approximates complex scripts, and side, method,
+                // and spacing stay out of scope.
+                if (chunk.pathNode) {
+                    PathState* pathState = pathFor(chunk.pathNode);
+                    if (pathState && chunk.style.pxSize > 0.0f &&
+                        chunk.style.hasFill) {
+                        const float chunkAscent =
+                            font.verticalMetrics(chunk.style.pxSize).ascent;
+                        const Color tinted = multiplyAlpha(
+                            Color{chunk.style.fill.r, chunk.style.fill.g,
+                                  chunk.style.fill.b, chunk.style.fill.a},
+                            alpha);
+                        const SDL_Color color{tinted.r, tinted.g, tinted.b,
+                                              tinted.a};
+                        std::size_t i = 0;
+                        while (i < chunk.text.size()) {
+                            std::size_t next = i + 1;
+                            while (next < chunk.text.size() &&
+                                   (static_cast<unsigned char>(chunk.text[next]) &
+                                    0xC0) == 0x80) {
+                                ++next;
+                            }
+                            const std::string glyph = chunk.text.substr(i, next - i);
+                            i = next;
+                            if (glyph == " ") {
+                                pathState->at += font.measureText(
+                                    glyph, chunk.style.pxSize, style.fontKerning,
+                                    style.fontStretch, small);
+                                continue;
+                            }
+                            const float advance = font.measureText(
+                                glyph, chunk.style.pxSize, style.fontKerning,
+                                style.fontStretch, small);
+                            SvgPathPoint at;
+                            if (!svgPointAtDistance(pathState->loops,
+                                                    pathState->at + advance * 0.5f, at)) {
+                                break;
+                            }
+                            pathState->at += advance;
+                            SDL_Texture* text = font.renderText(
+                                sdlRenderer, glyph, chunk.style.pxSize, color,
+                                style.fontBold,
+                                style.fontStyle != ComputedStyle::FontNormal,
+                                style.fontKerning, style.fontStretch, small);
+                            if (!text) {
+                                continue;
+                            }
+                            float texW = 0.0f, texH = 0.0f;
+                            SDL_GetTextureSize(text, &texW, &texH);
+                            const SDL_FRect dst{std::floor(at.x - texW * 0.5f),
+                                                std::floor(at.y - chunkAscent), texW,
+                                                texH};
+                            const SDL_FPoint center{texW * 0.5f, chunkAscent};
+                            SDL_RenderTextureRotated(sdlRenderer, text, nullptr, &dst,
+                                                     at.angleDeg, &center, SDL_FLIP_NONE);
+                            SDL_DestroyTexture(text);
+                        }
+                    }
+                    if (pathState) {
+                        penX = pathState->end.x;
+                        penY = pathState->end.y;
+                    }
+                    continue;
+                }
                 // An absolute start ignores the anchored origin; a relative
                 // shift applies on top of wherever the pen sits.
                 if (chunk.positioned) {
