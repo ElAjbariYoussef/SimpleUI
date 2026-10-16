@@ -7,6 +7,7 @@
 #include "Rendering/ColorMatrix.h"
 #include "Rendering/Tessellate.h"
 #include "Rendering/SvgText.h"
+#include "Rendering/SvgMarker.h"
 #include "SUI/DOM/Document.h"
 #include "SUI/DOM/Element.h"
 #include "SUI/Markup/Parser.h"
@@ -1451,6 +1452,118 @@ void testSvgTextChunks() {
     }
 }
 
+// SVG markers resolve by url(#id) and place by viewport, ref, and orient.
+void testSvgMarkers() {
+    const auto parse = [](const char* markup) {
+        sui::ParseError err;
+        return sui::MarkupParser::parse(markup, err);
+    };
+    auto doc = parse(
+        "<sui><body><svg>"
+        "<marker id=\"a\"/>"
+        "<marker id=\"box\" viewBox=\"0 0 10 10\"/>"
+        "<marker id=\"ref\" viewBox=\"0 0 10 10\" refX=\"10\" refY=\"10\"/>"
+        "<marker id=\"user\" viewBox=\"0 0 10 10\" markerUnits=\"userSpaceOnUse\"/>"
+        "<marker id=\"rot\" orient=\"90\"/>"
+        "<marker id=\"auto\" orient=\"auto\"/>"
+        "<marker id=\"rev\" orient=\"auto-start-reverse\"/>"
+        "<marker id=\"bad\" markerUnits=\"banana\" markerWidth=\"banana\"/>"
+        "<rect id=\"r\"/>"
+        "</svg></body></sui>");
+    check(doc != nullptr, "marker document parsed");
+    if (!doc) {
+        return;
+    }
+    sui::Document& document = *doc;
+    const auto placed = [](const sui::SvgMarkerFrame& frame, float mx, float my) {
+        return sui::svgMarkerPlace(frame, mx, my);
+    };
+    // References: url(#id) resolves, quotes strip, anything else is nothing.
+    check(sui::resolveMarkerRef(document, "url(#a)") == document.getElementById("a"),
+          "a bare fragment resolves");
+    check(sui::resolveMarkerRef(document, "url(\"#a\")") == document.getElementById("a"),
+          "a quoted fragment resolves");
+    check(sui::resolveMarkerRef(document, "none") == nullptr, "none resolves nothing");
+    check(sui::resolveMarkerRef(document, "banana") == nullptr,
+          "garbage resolves nothing");
+    check(sui::resolveMarkerRef(document, "url(#missing)") == nullptr,
+          "a missing id resolves nothing");
+    check(sui::resolveMarkerRef(document, "url(#r)") == nullptr,
+          "a non-marker resolves nothing");
+    // A default marker scales by the stroke width around the vertex.
+    {
+        const sui::SvgMarkerFrame frame =
+            sui::svgMarkerFrame(*document.getElementById("a"), 100.0f, 50.0f, 0.0f, 2.0f, false);
+        check(frame.scale == 2.0f, "stroke width scales the marker");
+        const SDL_FPoint p = placed(frame, 1.0f, 0.0f);
+        check(p.x == 102.0f && p.y == 50.0f, "one unit lands one scaled step out");
+    }
+    // A viewBox meets into the markerWidth/markerHeight viewport: 10 units
+    // across 6 pixels with a width-2 stroke.
+    {
+        const sui::SvgMarkerFrame frame = sui::svgMarkerFrame(
+            *document.getElementById("box"), 0.0f, 0.0f, 0.0f, 2.0f, false);
+        check(frame.scale == 0.6f, "the viewBox meets into the viewport");
+        const SDL_FPoint p = placed(frame, 10.0f, 10.0f);
+        check(std::fabs(p.x - 6.0f) < 0.01f && std::fabs(p.y - 6.0f) < 0.01f,
+              "the far corner lands on the viewport edge");
+    }
+    // refX/refY land on the vertex; userSpaceOnUse ignores the stroke width.
+    {
+        const sui::SvgMarkerFrame frame = sui::svgMarkerFrame(
+            *document.getElementById("ref"), 7.0f, 8.0f, 0.0f, 2.0f, false);
+        const SDL_FPoint p = placed(frame, 10.0f, 10.0f);
+        check(std::fabs(p.x - 7.0f) < 0.01f && std::fabs(p.y - 8.0f) < 0.01f,
+              "the ref point lands on the vertex");
+        const sui::SvgMarkerFrame raw = sui::svgMarkerFrame(
+            *document.getElementById("user"), 0.0f, 0.0f, 0.0f, 2.0f, false);
+        check(raw.scale == 0.3f, "user units meet raw");
+    }
+    // Orient: auto follows the tangent (reversed for a start under
+    // auto-start-reverse), a number is degrees, garbage holds 0.
+    {
+        sui::SvgMarkerFrame turn = sui::svgMarkerFrame(*document.getElementById("auto"),
+                                                        0.0f, 0.0f, 30.0f, 1.0f, false);
+        check(std::fabs(turn.cosA - 0.866f) < 0.01f && std::fabs(turn.sinA - 0.5f) < 0.01f,
+              "auto follows the tangent");
+        sui::SvgMarkerFrame back = sui::svgMarkerFrame(*document.getElementById("rev"),
+                                                        0.0f, 0.0f, 30.0f, 1.0f, true);
+        check(std::fabs(back.cosA + 0.866f) < 0.01f && std::fabs(back.sinA + 0.5f) < 0.01f,
+              "a reversed start turns around");
+        sui::SvgMarkerFrame still = sui::svgMarkerFrame(*document.getElementById("a"),
+                                                         0.0f, 0.0f, 30.0f, 1.0f, false);
+        check(still.cosA == 1.0f && still.sinA == 0.0f, "no orient holds zero");
+        const SDL_FPoint p = placed(
+            sui::svgMarkerFrame(*document.getElementById("rot"), 5.0f, 5.0f, 30.0f, 1.0f, false),
+            0.0f, 0.0f);
+        check(std::fabs(p.x - 5.0f) < 0.01f && std::fabs(p.y - 5.0f) < 0.01f,
+              "a bare number ignores the tangent");
+        const sui::SvgMarkerFrame flat = sui::svgMarkerFrame(
+            *document.getElementById("bad"), 0.0f, 0.0f, 45.0f, 2.0f, false);
+        check(flat.cosA == 1.0f && flat.sinA == 0.0f, "garbage units hold no rotation");
+    }
+    // Vertex tangents: outgoing for starts and middles, incoming for ends,
+    // wrapping around closed seams and skipping zero-length segments.
+    const auto pt = [](float x, float y) { return SDL_FPoint{x, y}; };
+    const std::vector<SDL_FPoint> open = {pt(0, 0), pt(10, 0), pt(10, 10)};
+    check(sui::svgVertexAngle(open, 0, false, false) == 0.0f, "a start looks ahead");
+    check(sui::svgVertexAngle(open, 1, false, false) == 90.0f,
+          "a middle looks down its outgoing segment");
+    check(sui::svgVertexAngle(open, 1, true, false) == 0.0f,
+          "incoming reads the segment behind");
+    check(sui::svgVertexAngle(open, 2, true, false) == 90.0f, "an end looks back");
+    const std::vector<SDL_FPoint> shut = {pt(0, 0), pt(10, 0), pt(10, 10), pt(0, 10)};
+    check(sui::svgVertexAngle(shut, 3, false, true) == -90.0f,
+          "a closed middle wraps past the seam");
+    check(sui::svgVertexAngle(shut, 0, true, true) == -90.0f,
+          "a closed start takes the seam incoming");
+    const std::vector<SDL_FPoint> dupe = {pt(0, 0), pt(0, 0), pt(10, 0)};
+    check(sui::svgVertexAngle(dupe, 0, false, false) == 0.0f,
+          "zero-length segments are skipped");
+    check(sui::svgVertexAngle({pt(5, 5), pt(5, 5)}, 0, false, false) == 0.0f,
+          "a nowhere path reads as zero");
+}
+
 // Scanline tessellation fills loops jointly under a fill rule: even-odd
 // pairs crossings, nonzero counts winding, and convex loops stay fans.
 void testTessellate() {
@@ -1915,6 +2028,7 @@ int main() {
     testBlendImage();
     testTessellate();
     testSvgTextChunks();
+    testSvgMarkers();
     testObjectFitDst();
     testColorMatrix();
     testClipCoverage();

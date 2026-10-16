@@ -12,6 +12,7 @@
 #include "Rendering/ImageBlur.h"
 #include "Rendering/ImageCache.h"
 #include "Rendering/Renderer.h"
+#include "Rendering/SvgMarker.h"
 #include "Rendering/SvgText.h"
 #include "Rendering/Tessellate.h"
 #include "Rendering/Text.h"
@@ -1566,6 +1567,11 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
         SvgView view;
         int depth = 0;
         std::vector<const Element*> chain;
+        // A marker's vertex-anchored placement: marker user point m paints at
+        // view.x/y plus the frame rotated by (scale * m + offset). Unset for
+        // ordinary shapes, where place() is a plain viewport map.
+        bool marker = false;
+        SvgMarkerFrame markerFrame{};
     };
     // Explicit stack instead of recursion: deep `g` nesting cannot overflow.
     std::vector<Frame> stack;
@@ -1587,8 +1593,12 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                              svgLengthBase(name, frame.view.vbw, frame.view.vbh));
         };
         // Every frame maps through its own view: a `<use>` shifts its clone by
-        // scaling the x/y offset into the view it was expanded in.
+        // scaling the x/y offset into the view it was expanded in. A marker
+        // frame rotates the mapped point about the vertex instead.
         const auto place = [&](float ux, float uy) {
+            if (frame.marker) {
+                return svgMarkerPlace(frame.markerFrame, ux, uy);
+            }
             return SDL_FPoint{frame.view.x + ux * frame.view.sx,
                               frame.view.y + uy * frame.view.sy};
         };
@@ -1647,6 +1657,65 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
         const float diag = svgLengthBase("stroke-width", frame.view.vbw, frame.view.vbh);
         const SvgPaint paint = svgInheritedPaint(el, diag);
         const float alpha = frame.opacity;
+        // Pushes one marker's children with a vertex-anchored, oriented
+        // frame: the marker's refX/refY lands on the vertex and `orient`
+        // rotates the content, auto following the path tangent.
+        const auto pushMarker = [&](const Element& marker, float vx, float vy, float angle,
+                                    bool reverse) {
+            const SvgMarkerFrame markerFrame =
+                svgMarkerFrame(marker, vx, vy, angle, paint.strokeWidth, reverse);
+            for (auto it = marker.children().rbegin(); it != marker.children().rend();
+                 ++it) {
+                if (*it && !(*it)->isTextNode()) {
+                    stack.push_back(
+                        {it->get(), alpha * frame.opacity,
+                         {markerFrame.scale, markerFrame.scale, vx, vy, frame.view.vbw,
+                          frame.view.vbh},
+                         frame.depth + 1, frame.chain, true, markerFrame});
+                }
+            }
+        };
+        // Markers at a shape's vertices: start takes the outgoing direction
+        // (reversed for auto-start-reverse), interior vertices too, and the
+        // end takes the incoming one. A closed shape's seam vertex answers
+        // both start and end. A marker paints even with no stroke.
+        const auto paintMarkers = [&](const std::vector<SDL_FPoint>& vertices,
+                                      bool closedShape) {
+            if (vertices.size() < 2 || frame.depth >= kSvgUseDepth) {
+                return;
+            }
+            Document* document = svg.document();
+            if (!document) {
+                return;
+            }
+            const std::string_view refs[3] = {el.attribute("marker-start"),
+                                              el.attribute("marker-mid"),
+                                              el.attribute("marker-end")};
+            const std::size_t last = vertices.size() - 1;
+            for (int slot = 0; slot < 3; ++slot) {
+                const Element* marker = resolveMarkerRef(*document, refs[slot]);
+                if (!marker) {
+                    continue;
+                }
+                if (slot == 0) {
+                    pushMarker(*marker, vertices[0].x, vertices[0].y,
+                               svgVertexAngle(vertices, 0, false, closedShape), true);
+                } else if (slot == 2) {
+                    const std::size_t at = closedShape ? 0 : last;
+                    pushMarker(*marker, vertices[at].x, vertices[at].y,
+                               svgVertexAngle(vertices, at, true, closedShape), false);
+                } else {
+                    // Interior vertices: every point but the start, and but
+                    // the end unless the loop closes through it.
+                    const std::size_t end = closedShape ? last : last - 1;
+                    for (std::size_t k = 1; k <= end; ++k) {
+                        pushMarker(*marker, vertices[k].x, vertices[k].y,
+                                   svgVertexAngle(vertices, k, false, closedShape),
+                                   false);
+                    }
+                }
+            }
+        };
         const auto tint = [&](Color color) {
             return multiplyAlpha(color, alpha);
         };
@@ -1735,6 +1804,7 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                     renderer.strokePath(path, tint(paint.stroke), paint.strokeWidth,
                                         sub.closed);
                 }
+                paintMarkers(path, sub.closed);
             }
             if (!loops.empty()) {
                 const bool evenOdd = svgFillEvenOdd(el);
@@ -1753,6 +1823,7 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                 renderer.line(a.x, a.y, b.x, b.y, tint(paint.stroke),
                               paint.strokeWidth);
             }
+            paintMarkers({a, b}, false);
         } else if (tag == "polyline" || tag == "polygon") {
             std::vector<SDL_FPoint> user =
                 svgPoints(el.attribute("points"), frame.view.vbw, frame.view.vbh);
@@ -1777,6 +1848,7 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
             if (paint.hasStroke && paint.strokeWidth > 0.0f) {
                 renderer.strokePath(path, tint(paint.stroke), paint.strokeWidth, closed);
             }
+            paintMarkers(path, closed);
         } else if (tag == "text") {
             // One chunk per tspan boundary, each with its own fill, size, and
             // pen: absolute x/y restarts the pen, dx/dy nudge it. Multi-value
