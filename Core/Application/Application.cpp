@@ -12,6 +12,7 @@
 #include "Rendering/ImageBlur.h"
 #include "Rendering/ImageCache.h"
 #include "Rendering/Renderer.h"
+#include "Rendering/SvgText.h"
 #include "Rendering/Tessellate.h"
 #include "Rendering/Text.h"
 #include "SUI/DOM/Document.h"
@@ -1553,30 +1554,6 @@ std::vector<SDL_FPoint> svgPoints(std::string_view text, float baseW, float base
     return points;
 }
 
-// SVG text collapses whitespace the way XML does: newlines and tabs become
-// spaces, runs of spaces become one, and the ends are stripped. An element
-// with nothing left paints nothing.
-std::string collapseSvgText(std::string_view text) {
-    std::string out;
-    out.reserve(text.size());
-    bool pendingSpace = false;
-    bool started = false;
-    for (char c : text) {
-        const bool space = c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
-        if (space) {
-            pendingSpace = started;
-            continue;
-        }
-        if (pendingSpace) {
-            out += ' ';
-            pendingSpace = false;
-        }
-        out += c;
-        started = true;
-    }
-    return out;
-}
-
 void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                     const ComputedStyle& style, const TextFont& font,
                     SDL_Renderer* sdlRenderer, ImageCache& images, float opacity) {
@@ -1801,39 +1778,72 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                 renderer.strokePath(path, tint(paint.stroke), paint.strokeWidth, closed);
             }
         } else if (tag == "text") {
-            // One text run at x/y, which names the baseline's start, painted in
-            // the fill. A stroke never outlines glyphs here; tspans, text on a
-            // path, and per-glyph shifts stay out of scope.
-            const std::string content = collapseSvgText(el.textContent());
-            if (content.empty() || !paint.hasFill || !font.hasFont()) {
-                continue;
-            }
-            const float pxSize = svgTextPxSize(el.attribute("font-size"), style.fontSize,
-                                              frame.view.sx);
-            if (!(pxSize > 0.0f)) {
+            // One chunk per tspan boundary, each with its own fill, size, and
+            // pen: absolute x/y restarts the pen, dx/dy nudge it. Multi-value
+            // lists use their first value; rotate, textLength, and text on a
+            // path (painted straight) stay out of scope, as does stroking
+            // glyph outlines.
+            const std::vector<SvgTextChunk> chunks = collectSvgTextChunks(
+                el, style.fontSize, frame.view.sx, frame.view.sy, frame.view.vbw,
+                frame.view.vbh);
+            if (chunks.empty() || !font.hasFont()) {
                 continue;
             }
             const bool small = style.fontVariant == ComputedStyle::FontVariant::SmallCaps;
-            const float width = font.measureText(content, pxSize, style.fontKerning,
-                                                style.fontStretch, small);
-            const float ascent = font.verticalMetrics(pxSize).ascent;
+            const float ascent = font.verticalMetrics(chunks[0].style.pxSize).ascent;
+            float total = 0.0f;
+            for (const SvgTextChunk& chunk : chunks) {
+                if (chunk.style.pxSize > 0.0f) {
+                    total += font.measureText(chunk.text, chunk.style.pxSize,
+                                              style.fontKerning, style.fontStretch, small);
+                }
+            }
             const SDL_FPoint origin =
                 svgTextOrigin(frame.view, len("x"), len("y"),
-                              svgToken(el.attribute("text-anchor")), width, ascent);
-            const Color tinted = tint(paint.fill);
-            SDL_Texture* text = font.renderText(
-                sdlRenderer, content, pxSize,
-                SDL_Color{tinted.r, tinted.g, tinted.b, tinted.a}, style.fontBold,
-                style.fontStyle != ComputedStyle::FontNormal, style.fontKerning,
-                style.fontStretch, small);
-            if (!text) {
-                continue;
+                              svgToken(el.attribute("text-anchor")), total, ascent);
+            const SDL_FPoint base = place(0.0f, 0.0f);
+            float penX = origin.x;
+            float penY = origin.y;
+            for (const SvgTextChunk& chunk : chunks) {
+                // An absolute start ignores the anchored origin; a relative
+                // shift applies on top of wherever the pen sits.
+                if (chunk.positioned) {
+                    penX = base.x + chunk.x;
+                    penY = base.y + chunk.y;
+                }
+                penX += chunk.dx;
+                penY += chunk.dy;
+                float advance = 0.0f;
+                if (chunk.style.pxSize > 0.0f) {
+                    advance = font.measureText(chunk.text, chunk.style.pxSize,
+                                               style.fontKerning, style.fontStretch, small);
+                }
+                // An empty size or `fill="none"` still moves the pen past the
+                // chunk's advance, so later chunks keep their places.
+                if (advance > 0.0f && chunk.style.hasFill) {
+                    const Color tinted = multiplyAlpha(
+                        Color{chunk.style.fill.r, chunk.style.fill.g,
+                              chunk.style.fill.b, chunk.style.fill.a},
+                        alpha);
+                    SDL_Texture* text = font.renderText(
+                        sdlRenderer, chunk.text, chunk.style.pxSize,
+                        SDL_Color{tinted.r, tinted.g, tinted.b, tinted.a}, style.fontBold,
+                        style.fontStyle != ComputedStyle::FontNormal, style.fontKerning,
+                        style.fontStretch, small);
+                    if (text) {
+                        float texW = 0.0f, texH = 0.0f;
+                        SDL_GetTextureSize(text, &texW, &texH);
+                        const float chunkAscent =
+                            font.verticalMetrics(chunk.style.pxSize).ascent;
+                        const SDL_FRect dst{std::floor(penX),
+                                            std::floor(penY - ascent + chunkAscent), texW,
+                                            texH};
+                        SDL_RenderTexture(sdlRenderer, text, nullptr, &dst);
+                        SDL_DestroyTexture(text);
+                    }
+                }
+                penX += advance;
             }
-            float texW = 0.0f, texH = 0.0f;
-            SDL_GetTextureSize(text, &texW, &texH);
-            const SDL_FRect dst{std::floor(origin.x), std::floor(origin.y), texW, texH};
-            SDL_RenderTexture(sdlRenderer, text, nullptr, &dst);
-            SDL_DestroyTexture(text);
         } else if (tag == "image") {
             // A raster in a box: meet-fit by default, stretched for `none`. A
             // URL that does not load paints nothing.

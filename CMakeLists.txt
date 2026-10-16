@@ -41,6 +41,7 @@ add_library(sui STATIC
     Rendering/ImageBlur.cpp
     Rendering/ClipMask.cpp
     Rendering/ColorMatrix.cpp
+    Rendering/SvgText.cpp
     Rendering/Tessellate.cpp
     Rendering/Renderer.cpp
     Rendering/Text.cpp

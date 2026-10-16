@@ -6,6 +6,7 @@
 #include "Rendering/ClipMask.h"
 #include "Rendering/ColorMatrix.h"
 #include "Rendering/Tessellate.h"
+#include "Rendering/SvgText.h"
 #include "SUI/DOM/Document.h"
 #include "SUI/DOM/Element.h"
 #include "SUI/Markup/Parser.h"
@@ -1344,6 +1345,112 @@ void testObjectFitDst() {
     check(px.x == 10.0f && px.y == 20.0f, "lengths offset directly");
 }
 
+// SVG text chunks split at tspan boundaries with their own fill, size, and
+// pen, collapsing whitespace jointly across the splits.
+void testSvgTextChunks() {
+    const auto parse = [](const char* markup) {
+        sui::ParseError err;
+        return sui::MarkupParser::parse(markup, err);
+    };
+    // Plain text stays one chunk with the CSS size and default fill.
+    {
+        auto doc = parse("<sui><body><svg><text id=\"t\">hi yo</text></svg></body></sui>");
+        check(doc != nullptr, "plain text parsed");
+        if (!doc) {
+            return;
+        }
+        const auto chunks =
+            sui::collectSvgTextChunks(*doc->getElementById("t"), 16.0f, 1.0f, 1.0f, 100.0f, 100.0f);
+        check(chunks.size() == 1, "plain text stays one chunk");
+        if (chunks.size() == 1) {
+            check(chunks[0].text == "hi yo", "the text survives collapsing");
+            check(!chunks[0].positioned, "no authored position means no reset");
+            check(chunks[0].style.pxSize == 16.0f, "the CSS size shows through");
+            check(chunks[0].style.hasFill, "the default fill paints");
+        }
+    }
+    // One chunk per tspan, each with its own fill and size, inheriting through
+    // the text element.
+    {
+        auto doc = parse(
+            "<sui><body><svg><text id=\"t\" fill=\"green\">"
+            "<tspan id=\"a\">x</tspan><tspan id=\"b\" fill=\"red\" font-size=\"20\">y</tspan>"
+            "<tspan id=\"c\" fill=\"none\">z</tspan></text></svg></body></sui>");
+        check(doc != nullptr, "styled tspans parsed");
+        if (!doc) {
+            return;
+        }
+        const auto chunks =
+            sui::collectSvgTextChunks(*doc->getElementById("t"), 16.0f, 1.0f, 1.0f, 100.0f, 100.0f);
+        check(chunks.size() == 3, "each tspan chunks alone");
+        if (chunks.size() == 3) {
+            check(chunks[0].styleNode == doc->getElementById("a"), "first chunk styled by a");
+            check(chunks[0].text == "x", "first text kept");
+            check(chunks[0].style.fill.g == 128 && chunks[0].style.fill.r == 0,
+                  "green inherits from the text element");
+            check(chunks[1].style.pxSize == 20.0f, "the authored size wins");
+            check(chunks[1].style.fill.r == 255, "red overrides green");
+            check(!chunks[2].style.hasFill, "none paints nothing");
+        }
+    }
+    // Positioning: absolute x/y reset the pen, dx/dy nudge it, first values
+    // only.
+    {
+        auto doc = parse(
+            "<sui><body><svg><text id=\"t\" x=\"5\" y=\"6\">a"
+            "<tspan id=\"p\" x=\"10\" y=\"20 30\">b</tspan>"
+            "<tspan id=\"s\" dx=\"5\" dy=\"-2\">c</tspan></text></svg></body></sui>");
+        check(doc != nullptr, "positioned tspans parsed");
+        if (!doc) {
+            return;
+        }
+        const auto chunks =
+            sui::collectSvgTextChunks(*doc->getElementById("t"), 16.0f, 2.0f, 3.0f, 100.0f, 100.0f);
+        check(chunks.size() == 3, "positioning chunks alone");
+        if (chunks.size() == 3) {
+            check(chunks[0].positioned && chunks[0].x == 10.0f && chunks[0].y == 18.0f,
+                  "the text position scales by axis");
+            check(chunks[1].positioned && chunks[1].x == 20.0f && chunks[1].y == 60.0f,
+                  "absolute tspan position scales by axis");
+            check(!chunks[2].positioned && chunks[2].dx == 10.0f && chunks[2].dy == -6.0f,
+                  "relative shifts scale by axis");
+        }
+    }
+    // Whitespace collapses jointly: boundary spaces survive once, markup edges
+    // vanish, and indentation between tspans reads as nothing.
+    {
+        auto doc = parse(
+            "<sui><body><svg><text id=\"t\">a <tspan>b</tspan> c</text>"
+            "<text id=\"u\">\n  <tspan>x</tspan>\n  <tspan>y</tspan>\n</text>"
+            "<text id=\"v\">p <tspan> q</tspan></text></svg></body></sui>");
+        check(doc != nullptr, "spaced text parsed");
+        if (!doc) {
+            return;
+        }
+        const auto spaced = sui::collectSvgTextChunks(*doc->getElementById("t"), 16.0f, 1.0f,
+                                                      1.0f, 100.0f, 100.0f);
+        std::string joined;
+        for (const auto& chunk : spaced) {
+            joined += chunk.text;
+        }
+        check(joined == "a b c", "boundary spaces survive once");
+        const auto indented = sui::collectSvgTextChunks(*doc->getElementById("u"), 16.0f, 1.0f,
+                                                        1.0f, 100.0f, 100.0f);
+        std::string flat;
+        for (const auto& chunk : indented) {
+            flat += chunk.text;
+        }
+        check(flat == "x y", "indentation between tspans reads as one space");
+        const auto doubled = sui::collectSvgTextChunks(*doc->getElementById("v"), 16.0f, 1.0f,
+                                                       1.0f, 100.0f, 100.0f);
+        std::string dbl;
+        for (const auto& chunk : doubled) {
+            dbl += chunk.text;
+        }
+        check(dbl == "p q", "adjacent spaces merge to one");
+    }
+}
+
 // Scanline tessellation fills loops jointly under a fill rule: even-odd
 // pairs crossings, nonzero counts winding, and convex loops stay fans.
 void testTessellate() {
@@ -1807,6 +1914,7 @@ int main() {
     testBackdropFilters();
     testBlendImage();
     testTessellate();
+    testSvgTextChunks();
     testObjectFitDst();
     testColorMatrix();
     testClipCoverage();
