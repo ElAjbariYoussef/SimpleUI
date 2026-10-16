@@ -193,8 +193,17 @@ void addBox(Element& element, const StyleResolver& resolver, const char* tag, bo
         } else if (raw[i] == '\x03') {
             const std::size_t end = raw.find('\x04', i + 1);
             if (end != std::string::npos) {
-                const std::string name = raw.substr(i + 1, end - (i + 1));
-                text += std::to_string(counterValue(counters, name));
+                const std::string body = raw.substr(i + 1, end - (i + 1));
+                // An optional style rides behind a unit separator byte; without
+                // one (or with garbage) the value reads as decimal.
+                const std::size_t split = body.find('\x1f');
+                const std::string name =
+                    split == std::string::npos ? body : body.substr(0, split);
+                ComputedStyle::ListStyleType style = ComputedStyle::LSTDecimal;
+                if (split != std::string::npos) {
+                    parseCounterStyleName(body.substr(split + 1), style);
+                }
+                text += listMarkerText(style, counterValue(counters, name));
                 i = end + 1;
                 continue;
             }

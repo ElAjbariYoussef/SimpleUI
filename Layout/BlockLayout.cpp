@@ -2566,7 +2566,7 @@ private:
                 if (own.listStylePosition == ComputedStyle::LSPInside &&
                     own.listStyleType != ComputedStyle::LSTNone) {
                     std::string marker;
-                    if (own.listStyleType == ComputedStyle::LSTDecimal) {
+                    if (isOrderedMarker(own.listStyleType)) {
                         int ordinal = 1;
                         if (const Element* parent = el.parent()) {
                             for (const auto& sib : parent->children()) {
@@ -2578,13 +2578,9 @@ private:
                                 }
                             }
                         }
-                        marker = std::to_string(ordinal) + ".";
-                    } else if (own.listStyleType == ComputedStyle::LSTCircle) {
-                        marker = "\xE2\x97\x8B";  // U+25CB ○
-                    } else if (own.listStyleType == ComputedStyle::LSTSquare) {
-                        marker = "\xE2\x96\xAA";  // U+25AA ▪
+                        marker = listMarkerText(own.listStyleType, ordinal) + ".";
                     } else {
-                        marker = "\xE2\x80\xA2";  // U+2022 •
+                        marker = listMarkerText(own.listStyleType, 0);
                     }
                     // A non-breaking gap survives collapsing where a plain
                     // space would not.

@@ -4000,6 +4000,101 @@ void testCssCounters() {
     }
 }
 
+// Counter styles number markers and `counter()` values: roman subtracts,
+// alpha rolls over, and anything unrepresentable reads as decimal.
+void testCounterStyles() {
+    using LST = ComputedStyle::ListStyleType;
+    check(sui::toRoman(1, false) == "I", "one is I");
+    check(sui::toRoman(4, false) == "IV", "four subtracts");
+    check(sui::toRoman(9, false) == "IX", "nine subtracts");
+    check(sui::toRoman(14, true) == "xiv", "fourteen lowers");
+    check(sui::toRoman(40, false) == "XL", "forty subtracts tens");
+    check(sui::toRoman(90, false) == "XC", "ninety subtracts tens");
+    check(sui::toRoman(400, false) == "CD", "four hundred subtracts");
+    check(sui::toRoman(900, false) == "CM", "nine hundred subtracts");
+    check(sui::toRoman(1999, false) == "MCMXCIX", "years compose");
+    check(sui::toRoman(3999, false) == "MMMCMXCIX", "the largest roman composes");
+    check(sui::toRoman(4000, false) == "4000", "past the top reads decimal");
+    check(sui::toRoman(0, false) == "0", "zero reads decimal");
+    check(sui::toRoman(-3, true) == "-3", "negatives read decimal");
+    check(sui::toAlpha(1, true) == "a", "one is a");
+    check(sui::toAlpha(26, true) == "z", "twenty-six is z");
+    check(sui::toAlpha(27, true) == "aa", "twenty-seven rolls over");
+    check(sui::toAlpha(28, false) == "AB", "twenty-eight uppers");
+    check(sui::toAlpha(52, true) == "az", "fifty-two pairs down");
+    check(sui::toAlpha(53, true) == "ba", "fifty-three carries");
+    check(sui::toAlpha(702, true) == "zz", "seven hundred two maxes two");
+    check(sui::toAlpha(703, true) == "aaa", "seven hundred three triples");
+    check(sui::toAlpha(0, true) == "0", "zero alpha reads decimal");
+    check(sui::listMarkerText(LST::LSTUpperRoman, 4) == "IV", "markers share roman");
+    check(sui::listMarkerText(LST::LSTLowerAlpha, 3) == "c", "markers share alpha");
+    check(sui::isOrderedMarker(LST::LSTDecimal) && !sui::isOrderedMarker(LST::LSTDisc),
+          "ordered means numbered");
+
+    // Parsing, shorthand, aliases, and serialization.
+    {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "#a { list-style-type: upper-roman } #b { list-style-type: lower-latin } "
+            "#c { list-style: lower-alpha inside } #g { list-style-type: banana }"));
+        auto document = parseOrNull(
+            "<sui><body><div id=\"a\"></div><div id=\"b\"></div>"
+            "<div id=\"c\"></div><div id=\"g\"></div><div id=\"h\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        const auto el = [&](const char* id) { return document->getElementById(id); };
+        check(resolver.resolve(*el("a")).listStyleType == LST::LSTUpperRoman,
+              "upper-roman parses");
+        check(resolver.resolve(*el("b")).listStyleType == LST::LSTLowerAlpha,
+              "lower-latin aliases alpha");
+        check(resolver.resolve(*el("c")).listStyleType == LST::LSTLowerAlpha,
+              "the shorthand carries alpha");
+        check(resolver.resolve(*el("g")).listStyleType == LST::LSTDisc,
+              "garbage falls back to disc");
+        check(sui::StyleResolver::propertyValue(resolver.resolve(*el("a")),
+                                                 "list-style-type") == "upper-roman",
+              "roman serializes");
+    }
+
+    // Inside markers number in style, and `counter()` takes one too.
+    {
+        auto document = parseOrNull(
+            "<sui><body><ol id=\"r\" style=\"list-style:upper-roman inside\">"
+            "<li>a</li><li>b</li></ol>"
+            "<ol id=\"l\" style=\"list-style:lower-alpha inside\">"
+            "<li>a</li><li>b</li></ol>"
+            "<div id=\"c\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body { margin: 0 } #c::after { content: counter(k, lower-roman) } "
+            "body { counter-reset: k 3 }"));
+        sui::generatePseudoElements(*document, resolver);
+        layoutRoot(*document, resolver, 400.0f);
+        Element* r = document->getElementById("r");
+        Element* l = document->getElementById("l");
+        Element* c = document->getElementById("c");
+        check(r && l && c, "styled list elements found");
+        if (!r || !l || !c) {
+            return;
+        }
+        const auto firstRun = [](Element& e) {
+            return e.textRuns().empty() ? std::string() : e.textRuns()[0].text;
+        };
+        Element* r1 = r->children()[0].get();
+        Element* r2 = r->children()[1].get();
+        check(firstRun(*r1).substr(0, 2) == "I.", "roman markers start at I");
+        check(firstRun(*r2).substr(0, 3) == "II.", "roman markers count on");
+        Element* l1 = l->children()[0].get();
+        check(firstRun(*l1).substr(0, 2) == "a.", "alpha markers start at a");
+        check(c->children().size() == 1 && c->children()[0]->textContent() == "iii",
+              "counter() styles its value");
+    }
+}
+
 // `quotes` lists open/close pairs outward in (or `none`), and `content` names
 // them with open/close/no-open/no-close-quote. Depth nests through the tree;
 // a `<q>` quotes itself unless the author already boxed it.
@@ -8866,6 +8961,7 @@ int main() {
     testPhrasingStyles();
     testWordBreakOpportunity();
     testDetails();
+    testCounterStyles();
     testQuotes();
     testColorScheme();
     testPrefersColorScheme();

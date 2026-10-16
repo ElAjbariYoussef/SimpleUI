@@ -861,7 +861,17 @@ struct ComputedStyle {
     Length objectPositionY{Length::Percent, 50.0f};
 
     // List bullet / counter style. `Disc` (•) for unordered, `Decimal` for ordered.
-    enum ListStyleType : std::uint8_t { LSTDisc, LSTCircle, LSTSquare, LSTDecimal, LSTNone };
+    enum ListStyleType : std::uint8_t {
+        LSTDisc,
+        LSTCircle,
+        LSTSquare,
+        LSTDecimal,
+        LSTUpperRoman,
+        LSTLowerRoman,
+        LSTUpperAlpha,
+        LSTLowerAlpha,
+        LSTNone
+    };
     ListStyleType listStyleType = LSTDisc;
     // An image marker (`url()`), painted at intrinsic size instead of the
     // procedural glyph; empty means none. A URL that fails to load falls back
@@ -1188,6 +1198,108 @@ inline UsedBox resolveBox(const ComputedStyle& style, float containingWidth,
         }
     }
     return box;
+}
+
+// Whether a list style numbers its items (and takes an ordinal) rather than
+// stamping one glyph.
+inline bool isOrderedMarker(ComputedStyle::ListStyleType type) noexcept {
+    using LST = ComputedStyle::ListStyleType;
+    return type == LST::LSTDecimal || type == LST::LSTUpperRoman ||
+           type == LST::LSTLowerRoman || type == LST::LSTUpperAlpha ||
+           type == LST::LSTLowerAlpha;
+}
+
+// A counter style name as written in `list-style-type` and `counter(name,
+// style)`. The latin aliases land on their alpha twins.
+inline bool parseCounterStyleName(std::string_view name,
+                                  ComputedStyle::ListStyleType& out) noexcept {
+    using LST = ComputedStyle::ListStyleType;
+    if (name == "decimal") {
+        out = LST::LSTDecimal;
+    } else if (name == "upper-roman") {
+        out = LST::LSTUpperRoman;
+    } else if (name == "lower-roman") {
+        out = LST::LSTLowerRoman;
+    } else if (name == "upper-alpha" || name == "upper-latin") {
+        out = LST::LSTUpperAlpha;
+    } else if (name == "lower-alpha" || name == "lower-latin") {
+        out = LST::LSTLowerAlpha;
+    } else if (name == "disc") {
+        out = LST::LSTDisc;
+    } else if (name == "circle") {
+        out = LST::LSTCircle;
+    } else if (name == "square") {
+        out = LST::LSTSquare;
+    } else if (name == "none") {
+        out = LST::LSTNone;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// Subtractive roman numerals: 4 is IV, 9 is IX, 1999 is MCMXCIX. Anything past
+// 3999 falls back to decimal, which is also what zero and negatives read as.
+inline std::string toRoman(int value, bool lower) {
+    if (value < 1 || value > 3999) {
+        return std::to_string(value);
+    }
+    static const char* const hundreds[] = {"",  "C",  "CC",  "CCC",  "CD",
+                                           "D", "DC", "DCC", "DCCC", "CM"};
+    static const char* const tens[] = {"",  "X",  "XX",  "XXX",  "XL",
+                                       "L", "LX", "LXX", "LXXX", "XC"};
+    static const char* const ones[] = {"",  "I",  "II",  "III",  "IV",
+                                       "V", "VI", "VII", "VIII", "IX"};
+    std::string out;
+    out.append(static_cast<std::size_t>(value / 1000), 'M');
+    out += hundreds[(value % 1000) / 100];
+    out += tens[(value % 100) / 10];
+    out += ones[value % 10];
+    if (lower) {
+        for (char& c : out) {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    return out;
+}
+
+// Alphabetic counting: 1 is a, 26 is z, 27 is aa. Zero and negatives fall back
+// to decimal, like roman.
+inline std::string toAlpha(int value, bool lower) {
+    if (value < 1) {
+        return std::to_string(value);
+    }
+    std::string out;
+    int rest = value;
+    while (rest > 0) {
+        --rest;
+        out.push_back(static_cast<char>('A' + (rest % 26)));
+        rest /= 26;
+    }
+    std::reverse(out.begin(), out.end());
+    if (lower) {
+        for (char& c : out) {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    return out;
+}
+
+// The text of an ordered marker without its trailing dot: "3", "IV", "c".
+// Unordered styles return their glyph; decimally-unrepresentable values read
+// as decimal.
+inline std::string listMarkerText(ComputedStyle::ListStyleType type, int ordinal) {
+    using LST = ComputedStyle::ListStyleType;
+    switch (type) {
+        case LST::LSTDecimal: return std::to_string(ordinal);
+        case LST::LSTUpperRoman: return toRoman(ordinal, false);
+        case LST::LSTLowerRoman: return toRoman(ordinal, true);
+        case LST::LSTUpperAlpha: return toAlpha(ordinal, false);
+        case LST::LSTLowerAlpha: return toAlpha(ordinal, true);
+        case LST::LSTCircle: return "\xE2\x97\x8B";  // U+25CB
+        case LST::LSTSquare: return "\xE2\x96\xAA";  // U+25AA
+        default: return "\xE2\x80\xA2";              // U+2022
+    }
 }
 
 // Fills in the inheritable properties the user-agent style left unspecified.

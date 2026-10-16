@@ -1144,8 +1144,22 @@ ContentResult parseContent(std::string_view v) {
             while (i < v.size() && v[i] != ')' && v[i] != ',') {
                 ++i;
             }
-            std::string_view name = v.substr(start, i - start);
-            // Skip optional style
+            std::string name(v.substr(start, i - start));
+            // An optional style rides behind a unit separator byte, which a CSS
+            // identifier can never contain.
+            while (i < v.size() && std::isspace(static_cast<unsigned char>(v[i]))) ++i;
+            if (i < v.size() && v[i] == ',') {
+                ++i;
+                while (i < v.size() && std::isspace(static_cast<unsigned char>(v[i]))) ++i;
+                const std::size_t styleStart = i;
+                while (i < v.size() && v[i] != ')') ++i;
+                std::string_view styleName =
+                    trim(v.substr(styleStart, i - styleStart));
+                if (!styleName.empty()) {
+                    name += '\x1f';
+                    name += styleName;
+                }
+            }
             while (i < v.size() && v[i] != ')') ++i;
             if (i < v.size() && v[i] == ')') ++i;
             res.text.push_back('');
@@ -5118,15 +5132,7 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         }
     } else if (property == "list-style-type") {
         s.specified |= ComputedStyle::SpecifiedListStyleType;
-        if (value == "none") {
-            s.listStyleType = ComputedStyle::LSTNone;
-        } else if (value == "circle") {
-            s.listStyleType = ComputedStyle::LSTCircle;
-        } else if (value == "square") {
-            s.listStyleType = ComputedStyle::LSTSquare;
-        } else if (value == "decimal") {
-            s.listStyleType = ComputedStyle::LSTDecimal;
-        } else {
+        if (!parseCounterStyleName(value, s.listStyleType)) {
             s.listStyleType = ComputedStyle::LSTDisc;
         }
     } else if (property == "list-style") {
@@ -5141,6 +5147,16 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         }
         if (hasNone) {
             s.listStyleType = ComputedStyle::LSTNone;
+        } else if (value.find("upper-roman") != std::string_view::npos) {
+            s.listStyleType = ComputedStyle::LSTUpperRoman;
+        } else if (value.find("lower-roman") != std::string_view::npos) {
+            s.listStyleType = ComputedStyle::LSTLowerRoman;
+        } else if (value.find("upper-alpha") != std::string_view::npos ||
+                   value.find("upper-latin") != std::string_view::npos) {
+            s.listStyleType = ComputedStyle::LSTUpperAlpha;
+        } else if (value.find("lower-alpha") != std::string_view::npos ||
+                   value.find("lower-latin") != std::string_view::npos) {
+            s.listStyleType = ComputedStyle::LSTLowerAlpha;
         } else if (value.find("circle") != std::string_view::npos) {
             s.listStyleType = ComputedStyle::LSTCircle;
         } else if (value.find("square") != std::string_view::npos) {
@@ -6427,6 +6443,10 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             case ComputedStyle::LSTCircle: return "circle";
             case ComputedStyle::LSTSquare: return "square";
             case ComputedStyle::LSTDecimal: return "decimal";
+            case ComputedStyle::LSTUpperRoman: return "upper-roman";
+            case ComputedStyle::LSTLowerRoman: return "lower-roman";
+            case ComputedStyle::LSTUpperAlpha: return "upper-alpha";
+            case ComputedStyle::LSTLowerAlpha: return "lower-alpha";
             case ComputedStyle::LSTNone: return "none";
             case ComputedStyle::LSTDisc: return "disc";
         }

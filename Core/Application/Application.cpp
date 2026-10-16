@@ -2342,7 +2342,7 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
     if (el.tag() == "li" && s.listStyleType != ComputedStyle::LSTNone &&
         s.listStylePosition == ComputedStyle::LSPOutside) {
         int ordinal = 1;
-        if (s.listStyleType == ComputedStyle::LSTDecimal) {
+        if (isOrderedMarker(s.listStyleType)) {
             if (const Element* par = el.parent()) {
                 for (const auto& sib : par->children()) {
                     if (!sib || sib.get() == &el) break;
@@ -2351,14 +2351,10 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
             }
         }
         std::string marker;
-        if (s.listStyleType == ComputedStyle::LSTDecimal) {
-            marker = std::to_string(ordinal) + ".";
-        } else if (s.listStyleType == ComputedStyle::LSTCircle) {
-            marker = "\xE2\x97\x8B";  // U+25CB ○
-        } else if (s.listStyleType == ComputedStyle::LSTSquare) {
-            marker = "\xE2\x96\xAA";  // U+25AA ▪
+        if (isOrderedMarker(s.listStyleType)) {
+            marker = listMarkerText(s.listStyleType, ordinal) + ".";
         } else {
-            marker = "\xE2\x80\xA2";  // U+2022 •
+            marker = listMarkerText(s.listStyleType, 0);
         }
 
         // An image marker replaces the procedural glyph: it paints at its
