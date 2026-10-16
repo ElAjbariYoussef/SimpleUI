@@ -5318,8 +5318,23 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         s.counterIncrement = parseCounterList(value, 1);
     } else if (property == "counter-set") {
         s.counterSet = parseCounterList(value, 0);
-    } else if (property == "resize" || property == "appearance" ||
-               property == "-webkit-appearance") {
+    } else if (property == "resize") {
+        // `block` and `inline` name the vertical and horizontal axes in this
+        // engine's horizontal writing mode. Anything else keeps the cascade.
+        if (value == "none") {
+            s.resize = ComputedStyle::ResizeNone;
+            s.specified |= ComputedStyle::SpecifiedResize;
+        } else if (value == "both") {
+            s.resize = ComputedStyle::ResizeBoth;
+            s.specified |= ComputedStyle::SpecifiedResize;
+        } else if (value == "horizontal" || value == "inline") {
+            s.resize = ComputedStyle::ResizeHorizontal;
+            s.specified |= ComputedStyle::SpecifiedResize;
+        } else if (value == "vertical" || value == "block") {
+            s.resize = ComputedStyle::ResizeVertical;
+            s.specified |= ComputedStyle::SpecifiedResize;
+        }
+    } else if (property == "appearance" || property == "-webkit-appearance") {
         // Accepted; these control browser chrome that this engine does not draw.
     } else if (property == "will-change" || property == "contain" ||
                property == "isolation" || property == "filter") {
@@ -6571,6 +6586,15 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "line-clamp") {
         return style.lineClamp > 0 ? std::to_string(style.lineClamp) : "none";
+    }
+    if (property == "resize") {
+        switch (style.resize) {
+            case ComputedStyle::ResizeBoth: return "both";
+            case ComputedStyle::ResizeHorizontal: return "horizontal";
+            case ComputedStyle::ResizeVertical: return "vertical";
+            case ComputedStyle::ResizeNone: return "none";
+        }
+        return "none";
     }
     if (property == "empty-cells") {
         return style.emptyCells == ComputedStyle::EmptyCellsHide ? "hide" : "show";

@@ -63,6 +63,13 @@ struct Page {
     float scrollTrack_ = 0.0f;
     float scrollTravel_ = 0.0f;
     float scrollMax_ = 0.0f;
+    // A resize grip drag: the box, the grab point, and the content size the
+    // grab remembers. Moves write inline width/height, so the next layout grows.
+    Element* resizeDrag_ = nullptr;
+    float resizeGrabX_ = 0.0f;
+    float resizeGrabY_ = 0.0f;
+    float resizeGrabW_ = 0.0f;
+    float resizeGrabH_ = 0.0f;
     std::size_t selectAnchor_ = 0;
     std::size_t selectEdge_ = 0;
     struct SmoothScroll {
@@ -262,7 +269,13 @@ private:
 
     // Resolves `target`'s `cursor` and, when it changed, hands the keyword to the
     // platform. Called on every pointer move, so an unchanged hover is a no-op.
-    void updateCursor(Element* target);
+    void updateCursor(Element* target, float x, float y);
+    // The resize grip: a 12px square in the border box's bottom-right corner.
+    static constexpr float kResizeGrip = 12.0f;
+    // Whether the point lands on the element's own grip.
+    bool resizeGripAt(const Element& el, float x, float y) const;
+    // The element-or-ancestor whose grip holds the point, if any.
+    Element* resizeGripTarget(Element* target, float x, float y) const;
 
     // Runs every <script> in `phase`, reporting hrefs that were never compiled in.
     void runScripts(bool afterBody);
@@ -392,6 +405,13 @@ private:
     float scrollTrack_ = 0.0f;
     float scrollTravel_ = 0.0f;
     float scrollMax_ = 0.0f;
+    // A resize grip drag: the box, the grab point, and the content size the
+    // grab remembers. Moves retarget the inline size; release drops the drag.
+    Element* resizeDrag_ = nullptr;
+    float resizeGrabX_ = 0.0f;
+    float resizeGrabY_ = 0.0f;
+    float resizeGrabW_ = 0.0f;
+    float resizeGrabH_ = 0.0f;
     // A file dialog resolves off-thread, so its callback only queues picks;
     // the run loop applies them where the element still lives. Guarded because
     // the callback may run on another thread.

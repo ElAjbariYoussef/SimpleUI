@@ -924,6 +924,11 @@ struct ComputedStyle {
     // visible content, in the separated model only. Inherited.
     enum EmptyCells : std::uint8_t { EmptyCellsShow, EmptyCellsHide };
     EmptyCells emptyCells = EmptyCellsShow;
+    // `resize` offers a drag grip: none, both axes, or one. Not inherited.
+    // Only boxes with non-visible overflow (a textarea has auto overflow from
+    // the user-agent style) are resizable.
+    enum Resize : std::uint8_t { ResizeNone, ResizeBoth, ResizeHorizontal, ResizeVertical };
+    Resize resize = ResizeNone;
     // `line-clamp` caps the block at N lines with an ellipsis; 0 is `none`.
     // Not inherited: each container declares its own cap.
     int lineClamp = 0;
@@ -947,6 +952,18 @@ struct ComputedStyle {
 
     // Whether the block caps its lines: a positive `line-clamp` count.
     bool clampsLines() const noexcept { return lineClamp > 0; }
+
+    // Whether the box shows a resize grip at all: a direction plus
+    // non-visible overflow to resize into.
+    bool resizable() const noexcept {
+        return resize != ResizeNone && (overflowX != Visible || overflowY != Visible);
+    }
+    bool resizesHorizontally() const noexcept {
+        return resizable() && (resize == ResizeBoth || resize == ResizeHorizontal);
+    }
+    bool resizesVertically() const noexcept {
+        return resizable() && (resize == ResizeBoth || resize == ResizeVertical);
+    }
 
     // CSS counters, keyed by name. `counterReset` sets the counter to `value` on
     // the element that declares it; `counterIncrement` adds `value` to it;
@@ -1069,6 +1086,7 @@ struct ComputedStyle {
         SpecifiedQuotes = 1ULL << 36,
         SpecifiedEmptyCells = 1ULL << 37,
         SpecifiedLineClamp = 1ULL << 38,
+        SpecifiedResize = 1ULL << 39,
         SpecifiedScrollBehavior = 1u << 25,
         SpecifiedColorScheme = 1u << 26,
         // A marker, not a property: the element still carries the user-agent

@@ -4121,6 +4121,65 @@ void testEmptyCells() {
     }
 }
 
+// `resize` names a drag direction (`block`/`inline` are the vertical and
+// horizontal axes here); only boxes with non-visible overflow grow a grip.
+// A textarea resizes both ways out of the box.
+void testResize() {
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#b { resize: both } #h { resize: horizontal; overflow: auto } #v { resize: vertical } "
+        "#bl { resize: block } #in { resize: inline } #n { resize: none } "
+        "#g { resize: banana } #vis { resize: both; overflow: visible } "
+        "#ov { overflow: auto }"));
+    auto document = parseOrNull(
+        "<sui><body><textarea id=\"t\"></textarea><div id=\"d\"></div>"
+        "<div id=\"b\"></div><div id=\"h\"></div><div id=\"v\"></div><div id=\"bl\"></div>"
+        "<div id=\"in\"></div><div id=\"n\"></div><div id=\"g\"></div>"
+        "<div id=\"vis\"></div><div id=\"ov\"></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* t = el("t");
+    check(t && el("d") && el("b") && el("h") && el("v"), "resize elements found");
+    if (!t) {
+        return;
+    }
+    using Resize = ComputedStyle::Resize;
+    check(resolver.resolve(*t).resize == Resize::ResizeBoth, "textareas resize both");
+    check(resolver.resolve(*el("d")).resize == Resize::ResizeNone, "divs resize none");
+    check(resolver.resolve(*el("b")).resize == Resize::ResizeBoth, "both parses");
+    check(resolver.resolve(*el("h")).resize == Resize::ResizeHorizontal,
+          "horizontal parses");
+    check(resolver.resolve(*el("v")).resize == Resize::ResizeVertical, "vertical parses");
+    check(resolver.resolve(*el("bl")).resize == Resize::ResizeVertical,
+          "block means vertical");
+    check(resolver.resolve(*el("in")).resize == Resize::ResizeHorizontal,
+          "inline means horizontal");
+    check(resolver.resolve(*el("n")).resize == Resize::ResizeNone, "none parses");
+    check(resolver.resolve(*el("g")).resize == Resize::ResizeNone, "garbage keeps none");
+    // Grips need non-visible overflow: visible overflow plus both grows none.
+    check(!resolver.resolve(*el("vis")).resizable(), "visible overflow grows no grip");
+    check(resolver.resolve(*el("ov")).resize == Resize::ResizeNone,
+          "overflow alone resizes nothing");
+    check(!resolver.resolve(*el("n")).resizable(), "none never resizes");
+    check(resolver.resolve(*t).resizable(), "a textarea grip shows");
+    check(resolver.resolve(*t).resizesHorizontally() &&
+              resolver.resolve(*t).resizesVertically(),
+          "both resizes both ways");
+    check(resolver.resolve(*el("h")).resizesHorizontally() &&
+              !resolver.resolve(*el("h")).resizesVertically(),
+          "horizontal resizes one way");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*t), "resize") == "both",
+          "both serializes");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*el("d")), "resize") ==
+              "none",
+          "none serializes");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*el("in")), "resize") ==
+              "horizontal",
+          "inline serializes as horizontal");
+}
+
 // `line-clamp` caps a block at N lines with an ellipsis: `none` lifts the cap,
 // anything but a positive integer drops the declaration, and the property does
 // not inherit. Content past the cap lays out nothing; an ellipsis that nothing
@@ -9281,6 +9340,7 @@ int main() {
     testBreakSpaces();
     testEmptyCells();
     testLineClamp();
+    testResize();
     testColorScheme();
     testPrefersColorScheme();
     testCurrentColor();

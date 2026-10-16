@@ -2206,6 +2206,87 @@ int main() {
         }
     }
 
+    // A drag from a textarea's grip corner writes inline dimensions off the
+    // grab: both axes grow, and the tree re-lays itself out around them.
+    // A horizontal-only box answers in width alone.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<textarea id=\"t\"></textarea>"
+            "<div id=\"h\" style=\"resize:horizontal;overflow:auto;width:100px;height:40px\"></div>"
+            "</body></sui>",
+            err);
+        check(doc != nullptr, "resize document parsed");
+        if (doc) {
+            app.setDocument(std::move(doc));
+
+            const auto layout = [&]() {
+                sui::StyleResolver layoutResolver;
+                sui::LayoutInput input;
+                input.resolver = &layoutResolver;
+                input.viewportWidth = 400.0f;
+                input.viewportHeight = 300.0f;
+                sui::BlockLayout().layout(app.document().root(), input);
+            };
+            const auto gripOf = [&](sui::Element* el) {
+                return std::make_pair(el->layoutX() + el->layoutWidth() - 6.0f,
+                                      el->layoutY() + el->layoutHeight() - 6.0f);
+            };
+            const auto drag = [&](sui::Element* el, float dx, float dy) {
+                const auto [gx, gy] = gripOf(el);
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerDown, gx, gy, 1));
+                app.dispatch(
+                    sui::InputEvent(sui::InputKind::PointerMove, gx + dx, gy + dy, 1));
+                app.dispatch(
+                    sui::InputEvent(sui::InputKind::PointerUp, gx + dx, gy + dy, 0));
+            };
+            layout();
+            sui::Element* t = app.document().getElementById("t");
+            sui::Element* h = app.document().getElementById("h");
+            check(t && h, "resize elements found");
+            if (t && h) {
+                const float wasW = t->layoutWidth();
+                const float wasH = t->layoutHeight();
+                const float wasCW = t->contentWidth();
+                const float wasCH = t->contentHeight();
+                const float wasHW = h->layoutWidth();
+                const float wasHH = h->layoutHeight();
+                drag(t, 30.0f, 20.0f);
+                check(t->style().getPropertyValue("width") ==
+                          std::to_string(wasCW + 30.0f) + "px",
+                      "a grip drag writes the grabbed width");
+                check(t->style().getPropertyValue("height") ==
+                          std::to_string(wasCH + 20.0f) + "px",
+                      "and the grabbed height");
+                layout();
+                check(t->layoutWidth() - wasW > 29.0f &&
+                          t->layoutWidth() - wasW < 31.0f,
+                      "the box grows wider by the drag");
+                check(t->layoutHeight() - wasH > 19.0f &&
+                          t->layoutHeight() - wasH < 21.0f,
+                      "and taller by the drag");
+                drag(h, 30.0f, 20.0f);
+                layout();
+                check(h->layoutWidth() - wasHW > 29.0f &&
+                          h->layoutWidth() - wasHW < 31.0f,
+                      "a horizontal box grows wider");
+                check(std::fabs(h->layoutHeight() - wasHH) < 0.01f,
+                      "but never taller");
+                // Hovering the grip reports se-resize.
+                {
+                    const auto [gx, gy] = gripOf(t);
+                    app.dispatch(
+                        sui::InputEvent(sui::InputKind::PointerMove, gx, gy, 0));
+                    check(app.activeCursor() ==
+                              sui::ComputedStyle::CursorSeResize,
+                          "a grip hover reports se-resize");
+                }
+            }
+        }
+    }
+
     platform->shutdown();
 
     std::printf("input_tests: %d checks, %d failures\n", checks, failures);

@@ -2165,6 +2165,21 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         }
     }
 
+    // A resize grip sits in the border box's bottom-right corner: three
+    // diagonal strokes in the border colour, the way a browser hints the
+    // drag. It paints over content, inside the box it resizes. The 12px
+    // square matches Application::kResizeGrip, which hit-tests the drag.
+    if (s.resizable() && box.w > 12.0f && box.h > 12.0f) {
+        const sui::Color gripCol = multiplyAlpha(toColor(s.borderColor), opacity);
+        const float right = box.x + box.w;
+        const float bottom = box.y + box.h;
+        for (int k = 0; k < 3; ++k) {
+            const float off = 3.0f + 4.0f * static_cast<float>(k);
+            renderer.line(right - off - 5.0f, bottom - off, right - off,
+                          bottom - off - 5.0f, gripCol, 1.0f);
+        }
+    }
+
     // A checked checkbox/radio draws its own control: a tick for the box, a dot
     // for the circle. The background and border were painted above, and neither
     // mark needs a font.
@@ -3165,6 +3180,11 @@ void Application::bindPage(std::size_t index) {
     datalistHighlight_ = page.datalistHighlight_;
     scrollDrag_ = page.scrollDrag_;
     scrollDragX_ = page.scrollDragX_;
+    resizeDrag_ = page.resizeDrag_;
+    resizeGrabX_ = page.resizeGrabX_;
+    resizeGrabY_ = page.resizeGrabY_;
+    resizeGrabW_ = page.resizeGrabW_;
+    resizeGrabH_ = page.resizeGrabH_;
     scrollGrab_ = page.scrollGrab_;
     scrollTrack_ = page.scrollTrack_;
     scrollTravel_ = page.scrollTravel_;
@@ -3203,6 +3223,11 @@ void Application::flushBound() {
     page.datalistHighlight_ = datalistHighlight_;
     page.scrollDrag_ = scrollDrag_;
     page.scrollDragX_ = scrollDragX_;
+    page.resizeDrag_ = resizeDrag_;
+    page.resizeGrabX_ = resizeGrabX_;
+    page.resizeGrabY_ = resizeGrabY_;
+    page.resizeGrabW_ = resizeGrabW_;
+    page.resizeGrabH_ = resizeGrabH_;
     page.scrollGrab_ = scrollGrab_;
     page.scrollTrack_ = scrollTrack_;
     page.scrollTravel_ = scrollTravel_;
@@ -3234,6 +3259,7 @@ void Application::setDocument(std::unique_ptr<Document> document) {
     page.openDatalist_ = nullptr;
     page.datalistHighlight_ = 0;
     page.scrollDrag_ = nullptr;
+    page.resizeDrag_ = nullptr;
     page.smoothScrolls_.clear();
     // A picked file for the old tree must never land in the new one.
     std::lock_guard<std::mutex> lock(fileMutex_);
@@ -3331,6 +3357,7 @@ void Application::installPageAt(std::size_t index, std::unique_ptr<Document> doc
     page.openDatalist_ = nullptr;
     page.datalistHighlight_ = 0;
     page.scrollDrag_ = nullptr;
+    page.resizeDrag_ = nullptr;
     page.selectAnchor_ = 0;
     page.selectEdge_ = 0;
     page.smoothScrolls_.clear();
@@ -3580,10 +3607,36 @@ void Application::runScripts(bool afterBody) {
     }
 }
 
-void Application::updateCursor(Element* target) {
+bool Application::resizeGripAt(const Element& el, float x, float y) const {
+    if (el.layoutWidth() <= 0.0f || el.layoutHeight() <= 0.0f) {
+        return false;
+    }
+    if (!resolver_.resolve(const_cast<Element&>(el)).resizable()) {
+        return false;
+    }
+    const float right = el.layoutX() + el.layoutWidth();
+    const float bottom = el.layoutY() + el.layoutHeight();
+    return x >= right - kResizeGrip && x < right && y >= bottom - kResizeGrip &&
+           y < bottom;
+}
+
+Element* Application::resizeGripTarget(Element* target, float x, float y) const {
+    for (Element* anchor = target; anchor; anchor = anchor->parent()) {
+        if (resizeGripAt(*anchor, x, y)) {
+            return anchor;
+        }
+    }
+    return nullptr;
+}
+
+void Application::updateCursor(Element* target, float x, float y) {
     ComputedStyle::Cursor cursor = ComputedStyle::CursorAuto;
     if (target) {
         cursor = resolver_.resolve(*target).cursor;
+        // A resize grip reports se-resize whatever the box cursor says.
+        if (resizeGripTarget(target, x, y)) {
+            cursor = ComputedStyle::CursorSeResize;
+        }
     }
     if (cursor == activeCursor_) {
         return;
@@ -3774,7 +3827,7 @@ void Application::dispatch(const InputEvent& event) {
             // The pointer shape follows whatever is under it. Resolved here, after
             // the hover state is set, so a `:hover` rule that changes `cursor` is
             // honoured on the same move that entered it.
-            updateCursor(target);
+            updateCursor(target, event.x, event.y);
             // A drag keeps the active element under the cursor, so `:active` follows
             // the pointer instead of sticking to wherever the press landed. The button
             // field is zero for a plain hover, which is what separates the two.
@@ -3791,6 +3844,23 @@ void Application::dispatch(const InputEvent& event) {
                         scrollDrag_->setScrollLeft(f * scrollMax_);
                     } else {
                         scrollDrag_->setScrollTop(f * scrollMax_);
+                    }
+                }
+                // A resize grip drag writes inline dimensions off the grab.
+                if (resizeDrag_ && document_->root() &&
+                    isReachable(*document_->root(), resizeDrag_)) {
+                    const ComputedStyle gripStyle = resolver_.resolve(*resizeDrag_);
+                    if (gripStyle.resizesHorizontally()) {
+                        const float w = std::max(
+                            0.0f, resizeGrabW_ + (event.x - resizeGrabX_));
+                        resizeDrag_->style().setProperty(
+                            "width", std::to_string(w) + "px");
+                    }
+                    if (gripStyle.resizesVertically()) {
+                        const float h = std::max(
+                            0.0f, resizeGrabH_ + (event.y - resizeGrabY_));
+                        resizeDrag_->style().setProperty(
+                            "height", std::to_string(h) + "px");
                     }
                 }
                 // Mouse drag updates selection on a focused text field
@@ -3919,6 +3989,18 @@ void Application::dispatch(const InputEvent& event) {
             if (target) {
                 dragRange(*target, event.x);
             }
+            // A press on a resize grip starts a grip drag: the box keeps the
+            // grab point and its own border size, and moves resize off those.
+            if (Element* grip = resizeGripTarget(target, event.x, event.y)) {
+                resizeDrag_ = grip;
+                resizeGrabX_ = event.x;
+                resizeGrabY_ = event.y;
+                // Content size, not border size: the inline write below sets
+                // the content box, so grabbing it keeps the border box glued
+                // to the pointer instead of leaking the chrome in.
+                resizeGrabW_ = grip->contentWidth();
+                resizeGrabH_ = grip->contentHeight();
+            }
             // A select opens its popup on click, or closes an open one, before
             // any `onclick` handler so the handler observes the new state. A
             // pick or a toggle-off on the same press suppresses reopening. An
@@ -4016,6 +4098,7 @@ void Application::dispatch(const InputEvent& event) {
         case InputKind::PointerUp:
             resolver_.setActive(nullptr);
             scrollDrag_ = nullptr;
+            resizeDrag_ = nullptr;
             // Releasing over an open popup's row picks it, so press-drag-release
             // works alongside click-click. Anything else leaves the popup open.
             if (openSelect_ && document_->root() &&

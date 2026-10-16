@@ -208,6 +208,8 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
         s.whiteSpace = Style::WrapPreWrap;
         s.overflowX = Style::Auto;
         s.overflowY = Style::Auto;
+        // Textareas resize both ways out of the box, like a browser's.
+        s.resize = Style::ResizeBoth;
         return s;
     }
 
