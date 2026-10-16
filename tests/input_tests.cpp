@@ -2287,6 +2287,30 @@ int main() {
         }
     }
 
+    // A non-modal dialog opens in place, stays open under Escape (which only
+    // dismisses modal dialogs), and closes on request.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body><dialog id=\"d\">hi</dialog></body></sui>", err);
+        check(doc != nullptr, "dialog document parsed");
+        if (doc) {
+            app.setDocument(std::move(doc));
+            sui::Element* d = app.document().getElementById("d");
+            check(d && !d->dialogOpen(), "a dialog starts shut");
+            if (d) {
+                d->show();
+                check(d->dialogOpen(), "show opens it");
+                app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0,
+                                             0, 0x1B));
+                check(d->dialogOpen(), "escape leaves a modeless dialog open");
+                d->close();
+                check(!d->dialogOpen(), "close shuts it");
+            }
+        }
+    }
+
     platform->shutdown();
 
     std::printf("input_tests: %d checks, %d failures\n", checks, failures);

@@ -7267,6 +7267,13 @@ const Element* disclosureSummary(const Element& details) {
     return nullptr;
 }
 
+// Whether a <dialog> without `open` takes no box, the user-agent rule
+// `dialog:not([open])`. Positioned before inheritance so author declarations
+// still win below, the way closed details stay hidden.
+bool hiddenByClosedDialog(const Element& element) {
+    return element.tag() == "dialog" && !element.hasAttribute("open");
+}
+
 // Whether the element is hidden by a closed <details>: anything but its first
 // <summary> (and with no summary, everything) takes no box.
 bool hiddenByClosedDetails(const Element& element) {
@@ -7284,6 +7291,9 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
     // `details:not([open]) > :not(summary)`. Positioned before inheritance so
     // author declarations still win below.
     if (hiddenByClosedDetails(element)) {
+        style.display = ComputedStyle::None;
+    }
+    if (hiddenByClosedDialog(element)) {
         style.display = ComputedStyle::None;
     }
     if (element.tag() == "input") {

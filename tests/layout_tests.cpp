@@ -10,6 +10,7 @@
 #include "SUI/DOM/Document.h"
 #include "SUI/DOM/Element.h"
 #include "SUI/Markup/Parser.h"
+#include "SUI/Script/Script.h"
 
 #include <cmath>
 #include <cstdio>
@@ -22,6 +23,8 @@
 namespace {
 
 int failures = 0;
+bool g_dialogClosed = false;
+void flagDialogClose() { g_dialogClosed = true; }
 
 void check(bool condition, const char* what) {
     if (!condition) {
@@ -4119,6 +4122,52 @@ void testEmptyCells() {
         pt->children().back()->appendChild(Element::createText("q", content.get()));
         check(pt->hasVisibleContent(), "a generated box with text counts");
     }
+}
+
+// A <dialog> without `open` takes no box; show() opens it in place and
+// close() shuts it firing `onclose`. Non-modal only: showModal is queued
+// behind the top-layer paint milestone.
+void testDialog() {
+    auto document = parseOrNull(
+        "<sui><body><dialog id=\"d\">hi</dialog>"
+        "<dialog id=\"o\" open=\"\">yo</dialog>"
+        "<div id=\"w\" style=\"width:200px\"></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* d = el("d");
+    Element* o = el("o");
+    check(d && o, "dialog elements found");
+    if (!d || !o) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+    check(resolver.resolve(*d).display == ComputedStyle::None,
+          "a closed dialog takes no box");
+    check(resolver.resolve(*o).display == ComputedStyle::Block,
+          "an open dialog lays out block");
+    check(!d->dialogOpen() && o->dialogOpen(), "open reflects the attribute");
+    layoutRoot(*document, resolver, 400.0f);
+    check(d->textRuns().empty(), "closed content flows nothing");
+    check(!o->textRuns().empty(), "open content flows");
+    // show() opens in place; show() again is a no-op; close() shuts.
+    d->show();
+    check(d->dialogOpen(), "show opens the dialog");
+    d->show();
+    check(d->dialogOpen(), "show again stays open");
+    layoutRoot(*document, resolver, 400.0f);
+    check(!d->textRuns().empty(), "shown content flows");
+    d->close();
+    check(!d->dialogOpen(), "close shuts the dialog");
+    d->close();
+    check(!d->dialogOpen(), "close again stays shut");
+    // close() fires the `onclose` handler when there is one.
+    o->setAttribute("onclose", "flagDialogClose()");
+    sui::script::registerHandler("flagDialogClose", flagDialogClose);
+    o->close();
+    check(g_dialogClosed, "close fires onclose");
 }
 
 // `resize` names a drag direction (`block`/`inline` are the vertical and
@@ -9341,6 +9390,7 @@ int main() {
     testEmptyCells();
     testLineClamp();
     testResize();
+    testDialog();
     testColorScheme();
     testPrefersColorScheme();
     testCurrentColor();

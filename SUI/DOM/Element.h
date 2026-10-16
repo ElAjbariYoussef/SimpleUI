@@ -123,6 +123,13 @@ public:
     // 0..1. An indeterminate progress (no `value`) reports 0; test
     // `gaugeIndeterminate()` for the animated case.
     float gaugeFraction() const;
+    // A <dialog> opens non-modally with show() (no-op when already open) and
+    // closes with close(), which fires the `onclose` handler when there is
+    // one. Modal presentation (`showModal`) is a later milestone; these two
+    // are the DOM half every dialog needs.
+    void show();
+    void close();
+    bool dialogOpen() const;
     // A valueless <progress> shows indeterminate instead of a fraction.
     bool gaugeIndeterminate() const;
     // A <meter> colour zone from low/high/optimum: 0 beside the optimum, 1

@@ -2,6 +2,7 @@
 
 #include "CSS/Parser.h"
 #include "SUI/DOM/Document.h"
+#include "SUI/Script/Script.h"
 
 #include <algorithm>
 #include <cctype>
@@ -371,6 +372,33 @@ Element* Element::selectedOption() const {
         }
     }
     return options.empty() ? nullptr : options[0];
+}
+
+void Element::show() {
+    if (tag_ != "dialog" || hasAttribute("open")) {
+        return;
+    }
+    // Non-modal only: the dialog joins the flow in place, like a disclosure.
+    // Focusing stays where it was, the way a browser leaves it.
+    setAttribute("open", "");
+}
+
+void Element::close() {
+    if (tag_ != "dialog" || !hasAttribute("open")) {
+        return;
+    }
+    removeAttribute("open");
+    // The close event fires on the dialog that just shut. An empty handler
+    // is no call at all, which also skips the focus-taking an invocation
+    // performs on the engine's behalf.
+    const std::string_view handler = attribute("onclose");
+    if (!handler.empty()) {
+        script::invokeInlineHandler(handler, this);
+    }
+}
+
+bool Element::dialogOpen() const {
+    return tag_ == "dialog" && hasAttribute("open");
 }
 
 std::string Element::fileName() const {
