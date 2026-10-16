@@ -8,9 +8,19 @@
 #include "Rendering/Tessellate.h"
 #include "Rendering/SvgText.h"
 #include "Rendering/SvgMarker.h"
+#include "CSS/Parser.h"
+#include "CSS/Style.h"
+#include "CSS/StyleResolver.h"
+#include "Core/Resources/Resources.h"
 #include "SUI/DOM/Document.h"
 #include "SUI/DOM/Element.h"
 #include "SUI/Markup/Parser.h"
+#include "Rendering/ImageCache.h"
+
+#include <SDL3/SDL_render.h>
+#include <SDL3/SDL_surface.h>
+
+using sui::ComputedStyle;
 #include "Rendering/ImageBlur.h"
 #include "Rendering/Renderer.h"
 #include "Rendering/Text.h"
@@ -1707,6 +1717,84 @@ void testTessellate() {
     }
 }
 
+// Background layers blend in isolation: the stack composites against itself,
+// never against the page behind it. A software renderer paints headlessly, so
+// these read real pixels instead of trusting the plumbing.
+void testBackgroundBlendPixels() {
+    SDL_Surface* surf = SDL_CreateSurface(100, 100, SDL_PIXELFORMAT_ABGR8888);
+    check(surf != nullptr, "a software surface exists");
+    if (!surf) {
+        return;
+    }
+    SDL_Renderer* sr = SDL_CreateSoftwareRenderer(surf);
+    check(sr != nullptr, "a software renderer exists");
+    if (!sr) {
+        SDL_DestroySurface(surf);
+        return;
+    }
+    sui::Renderer renderer(sr);
+    sui::FileResources resources("/nonexistent");
+    sui::ImageCache images(resources);
+    const auto paint = [&](const std::string& css, std::uint8_t& r, std::uint8_t& g,
+                           std::uint8_t& b, std::uint8_t& a) {
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body><div id=\"b\">x</div></body></sui>", err);
+        if (!doc) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(css));
+        sui::Element* el = doc->getElementById("b");
+        const ComputedStyle style = resolver.resolve(*el);
+        const sui::BackgroundBoxes boxes{{0.0f, 0.0f, 100.0f, 100.0f},
+                                         {0.0f, 0.0f, 100.0f, 100.0f},
+                                         {0.0f, 0.0f, 100.0f, 100.0f}};
+        sui::paintBackground(style, boxes, 16.0f, 16.0f, 1.0f, renderer, images,
+                             sui::Radii{});
+        SDL_FlushRenderer(sr);
+        const std::uint8_t* pixels = static_cast<const std::uint8_t*>(surf->pixels);
+        const std::size_t at = (50 * 100 + 50) * 4;
+        r = pixels[at];
+        g = pixels[at + 1];
+        b = pixels[at + 2];
+        a = pixels[at + 3];
+    };
+    const auto clear = [&](std::uint8_t cr, std::uint8_t cg, std::uint8_t cb) {
+        SDL_SetRenderTarget(sr, nullptr);
+        SDL_SetRenderDrawColor(sr, cr, cg, cb, 255);
+        SDL_RenderClear(sr);
+        SDL_FlushRenderer(sr);
+    };
+    const char* layers =
+        "#b { background-image: linear-gradient(red, red), linear-gradient(blue, blue); ";
+    std::uint8_t r = 0, g = 0, b = 0, a = 0;
+    // Without a blend mode the top layer simply wins.
+    clear(0, 0, 0);
+    paint(layers + std::string("}"), r, g, b, a);
+    check(r == 255 && g == 0 && b == 0 && a == 255, "normal paints the top layer");
+    // Multiply composites red over blue to black, inside the stack.
+    clear(0, 0, 0);
+    paint(layers + std::string("background-blend-mode: multiply; }"), r, g, b, a);
+    check(r == 0 && g == 0 && b == 0 && a == 255, "multiply blends the stack to black");
+    // The page behind never leaks in: screening black over black stays black
+    // on a white page (leaked white would screen to white).
+    clear(255, 255, 255);
+    paint("#b { background-image: linear-gradient(black, black); "
+          "background-blend-mode: screen; }",
+          r, g, b, a);
+    check(r == 0 && g == 0 && b == 0, "the stack isolates from the page");
+    // Non-separable modes pair by position too: color paints red at green
+    // luminosity, the same triple the surface compositor proved.
+    clear(0, 0, 0);
+    paint("#b { background-image: linear-gradient(red, red), "
+          "linear-gradient(lime, lime); background-blend-mode: color; }",
+          r, g, b, a);
+    check(r == 255 && g == 106 && b == 106, "color resolves per layer");
+    SDL_DestroyRenderer(sr);
+    SDL_DestroySurface(surf);
+}
+
 // A blended surface over its backdrop, per channel with source-over alpha.
 // One opaque pixel over one opaque pixel tells each mode apart.
 void testBlendImage() {
@@ -2087,6 +2175,7 @@ int main() {
     testSvgTextChunks();
     testSvgMarkers();
     testTextOnPath();
+    testBackgroundBlendPixels();
     testObjectFitDst();
     testColorMatrix();
     testClipCoverage();

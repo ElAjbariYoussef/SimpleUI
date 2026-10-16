@@ -568,6 +568,71 @@ bool endsWith(std::string_view value, std::string_view suffix) {
 
 // The arguments of `name(...)`, or false when the token is not that function. The
 // closing paren is the token's last character, so a `url()` holding one still works.
+// Names one of the sixteen compositing modes both blend properties share.
+// False for anything else, which keeps the previous cascade winner.
+bool blendModeByName(std::string_view name, ComputedStyle::MixBlendMode& out) {
+    using Blend = ComputedStyle::MixBlendMode;
+    if (name == "normal") {
+        out = Blend::Normal;
+    } else if (name == "multiply") {
+        out = Blend::Multiply;
+    } else if (name == "screen") {
+        out = Blend::Screen;
+    } else if (name == "overlay") {
+        out = Blend::Overlay;
+    } else if (name == "darken") {
+        out = Blend::Darken;
+    } else if (name == "lighten") {
+        out = Blend::Lighten;
+    } else if (name == "color-dodge") {
+        out = Blend::ColorDodge;
+    } else if (name == "color-burn") {
+        out = Blend::ColorBurn;
+    } else if (name == "hard-light") {
+        out = Blend::HardLight;
+    } else if (name == "soft-light") {
+        out = Blend::SoftLight;
+    } else if (name == "difference") {
+        out = Blend::Difference;
+    } else if (name == "exclusion") {
+        out = Blend::Exclusion;
+    } else if (name == "hue") {
+        out = Blend::Hue;
+    } else if (name == "saturation") {
+        out = Blend::Saturation;
+    } else if (name == "color") {
+        out = Blend::Color;
+    } else if (name == "luminosity") {
+        out = Blend::Luminosity;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+const char* blendModeName(ComputedStyle::MixBlendMode mode) {
+    using Blend = ComputedStyle::MixBlendMode;
+    switch (mode) {
+        case Blend::Normal: return "normal";
+        case Blend::Multiply: return "multiply";
+        case Blend::Screen: return "screen";
+        case Blend::Overlay: return "overlay";
+        case Blend::Darken: return "darken";
+        case Blend::Lighten: return "lighten";
+        case Blend::ColorDodge: return "color-dodge";
+        case Blend::ColorBurn: return "color-burn";
+        case Blend::HardLight: return "hard-light";
+        case Blend::SoftLight: return "soft-light";
+        case Blend::Difference: return "difference";
+        case Blend::Exclusion: return "exclusion";
+        case Blend::Hue: return "hue";
+        case Blend::Saturation: return "saturation";
+        case Blend::Color: return "color";
+        case Blend::Luminosity: return "luminosity";
+    }
+    return "normal";
+}
+
 bool functionArgs(std::string_view token, std::string_view name, std::string_view& out) {
     if (token.empty() || token.back() != ')') {
         return false;
@@ -4230,6 +4295,16 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.fontKerning = true;
             s.specified |= ComputedStyle::SpecifiedFontKerning;
         }
+    } else if (property == "background-blend-mode") {
+        // One entry per background layer, pairing with the image list and
+        // cycling short lists. Garbage keeps the previous cascade winner,
+        // like its mix-blend sibling.
+        for (const std::string& part : splitCommaList(value)) {
+            ComputedStyle::MixBlendMode mode;
+            if (blendModeByName(part, mode)) {
+                s.backgroundBlendModes.push_back(mode);
+            }
+        }
     } else if (property == "mix-blend-mode") {
         // Every mode composites; only garbage keeps the previous cascade
         // winner. `normal` isolates nothing.
@@ -6169,6 +6244,19 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         }
     }
     if (property == "background-color") return color(style.backgroundColor);
+    if (property == "background-blend-mode") {
+        if (style.backgroundBlendModes.empty()) {
+            return "normal";
+        }
+        std::string out;
+        for (std::size_t i = 0; i < style.backgroundBlendModes.size(); ++i) {
+            if (i > 0) {
+                out += ", ";
+            }
+            out += blendModeName(style.backgroundBlendModes[i]);
+        }
+        return out;
+    }
     if (property == "border-color") return color(style.borderColor);
     if (property == "font-size") return number(style.fontSize);
     // line-height is kept as a multiplier, so it serialises without a unit.

@@ -2477,7 +2477,7 @@ void testUnknownPropertyIsReported() {
     auto document = parseOrNull("<sui><body><div id=\"x\">x</div></body></sui>");
     if (document) {
         sui::StyleResolver resolver;
-        resolver.setRules(sui::CSSParser::parse("div { background-blend-mode: multiply; width: 10px }"));
+        resolver.setRules(sui::CSSParser::parse("div { scroll-timeline: --x; width: 10px }"));
         resolver.resolve(*document->getElementById("x"));
         resolvedLog = capturedLog;
         const std::size_t afterFirst = capturedLog.size();
@@ -2498,7 +2498,7 @@ void testUnknownPropertyIsReported() {
         }
         return false;
     };
-    check(mentions("background-blend-mode"), "an unsupported property is logged by name");
+    check(mentions("scroll-timeline"), "an unsupported property is logged by name");
     check(!mentions("width"), "a supported property is not reported");
 
     // A different unsupported property is its own report; dedupe is per name.
@@ -4238,6 +4238,40 @@ void testDialog() {
     sui::script::registerHandler("flagDialogClose", flagDialogClose);
     o->close();
     check(g_dialogClosed, "close fires onclose");
+}
+
+// `background-blend-mode` pairs one entry per image layer, cycling short
+// lists; garbage never lands, and nothing authored reads back as `normal`.
+void testBackgroundBlendMode() {
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#a { background-blend-mode: multiply, screen } "
+        "#b { background-blend-mode: banana, overlay } "
+        "#g { background-blend-mode: banana }"));
+    auto document = parseOrNull(
+        "<sui><body><div id=\"a\"></div><div id=\"b\"></div>"
+        "<div id=\"g\"></div><div id=\"c\"></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    using Blend = ComputedStyle::MixBlendMode;
+    check(resolver.resolve(*el("a")).backgroundBlendModes.size() == 2 &&
+              resolver.resolve(*el("a")).backgroundBlendModes[0] == Blend::Multiply &&
+              resolver.resolve(*el("a")).backgroundBlendModes[1] == Blend::Screen,
+          "entries pair in order");
+    check(resolver.resolve(*el("b")).backgroundBlendModes.size() == 1 &&
+              resolver.resolve(*el("b")).backgroundBlendModes[0] == Blend::Overlay,
+          "garbage entries never land");
+    check(resolver.resolve(*el("g")).backgroundBlendModes.empty(),
+          "all garbage keeps the previous list");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*el("a")),
+                                             "background-blend-mode") ==
+              "multiply, screen",
+          "entries serialize in order");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*el("c")),
+                                             "background-blend-mode") == "normal",
+          "nothing authored reads as normal");
 }
 
 // `resize` names a drag direction (`block`/`inline` are the vertical and
@@ -9593,6 +9627,7 @@ int main() {
     testEmptyCells();
     testLineClamp();
     testResize();
+    testBackgroundBlendMode();
     testDialog();
     testModalDialog();
     testColorScheme();

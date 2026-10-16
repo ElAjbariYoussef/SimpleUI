@@ -1,7 +1,10 @@
 #include "Core/Application/Background.h"
+#include "Rendering/ColorMatrix.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <vector>
 
 namespace sui {
 namespace {
@@ -435,12 +438,12 @@ bool insideBox(float px, float py, const SDL_FRect& box) {
 
 }  // namespace
 
-void paintBackground(const ComputedStyle& style, const BackgroundBoxes& boxes, float fontSize,
-                     float rootFontSize, float opacity, Renderer& renderer, ImageCache& images,
-                     const Radii& borderRadii) {
-    // The colour is the bottom layer, so it goes down first across whichever box the
-    // colour is clipped to. CSS puts `background-clip` on a layer; the colour has no
-    // layer of its own, so it takes the first layer's clip, defaulting to the border box.
+// The colour is the bottom layer, painted across whichever box the first
+// `background-clip` names (defaulting to the border box). The colour has no
+// layer of its own, so it takes the first layer's clip.
+void paintBackgroundColor(const ComputedStyle& style, const BackgroundBoxes& boxes,
+                          float /*fontSize*/, float /*rootFontSize*/, float opacity,
+                          Renderer& renderer, const Radii& borderRadii) {
     const ComputedStyle::BackgroundBox colourClip =
         style.backgroundClips.empty() ? ComputedStyle::BackgroundBorderBox
                                      : style.backgroundClips.front();
@@ -450,16 +453,27 @@ void paintBackground(const ComputedStyle& style, const BackgroundBoxes& boxes, f
         renderer.fillRect(colourBox, Shader::solid(colour),
                           radiiForBox(borderRadii, boxes.border, colourBox));
     }
+}
 
-    // CSS paints the first image layer on top, so the list is walked backwards.
-    for (std::size_t index = style.backgroundImages.size(); index-- > 0;) {
+void paintIsolatedBackground(const ComputedStyle& style, const BackgroundBoxes& boxes,
+                             float fontSize, float rootFontSize, float opacity,
+                             Renderer& renderer, ImageCache& images,
+                             const Radii& borderRadii);
+
+// One image layer by index, or nothing for `none` and empty clips. Paints to
+// the current render target, so the isolated path can redirect it per layer.
+void paintBackgroundLayer(const ComputedStyle& style, const BackgroundBoxes& boxes,
+                          std::size_t index, float fontSize, float rootFontSize,
+                          float opacity, Renderer& renderer, ImageCache& images,
+                          const Radii& borderRadii) {
+    if (index < style.backgroundImages.size()) {
         const ComputedStyle::BackgroundImage& layer = style.backgroundImages[index];
         if (layer.kind == ComputedStyle::BackgroundImage::None) {
-            continue;
+            return;
         }
         const SDL_FRect clipBox = boxOf(boxes, listAt(style.backgroundClips, index));
         if (clipBox.w <= 0.0f || clipBox.h <= 0.0f) {
-            continue;
+            return;
         }
         const Radii radii = radiiForBox(borderRadii, boxes.border, clipBox);
         const ComputedStyle::BackgroundPosition position = listAt(style.backgroundPositions, index);
@@ -480,7 +494,7 @@ void paintBackground(const ComputedStyle& style, const BackgroundBoxes& boxes, f
                 SDL_Texture* texture =
                     images.texture(renderer.sdl(), layer.href);
                 if (!texture) {
-                    continue;
+                    return;
                 }
                 float intrinsicWidth = 0.0f;
                 float intrinsicHeight = 0.0f;
@@ -495,7 +509,7 @@ void paintBackground(const ComputedStyle& style, const BackgroundBoxes& boxes, f
                                              static_cast<Uint8>(std::lround(opacity * 255.0f))});
                 SDL_FRect visible;
                 if (!coveredArea(clipBox, destination, repeatPair.x, repeatPair.y, visible)) {
-                    continue;
+                    return;
                 }
                 paintBox = visible;
                 break;
@@ -508,12 +522,12 @@ void paintBackground(const ComputedStyle& style, const BackgroundBoxes& boxes, f
                 gradient.stops = toGradientStops(layer.linear.stops, lineLength, fontSize,
                                                  rootFontSize, opacity);
                 if (gradient.stops.empty()) {
-                    continue;
+                    return;
                 }
                 shader = Shader::linear(gradient);
                 SDL_FRect visible;
                 if (!coveredArea(clipBox, destination, repeatPair.x, repeatPair.y, visible)) {
-                    continue;
+                    return;
                 }
                 paintBox = visible;
                 break;
@@ -527,12 +541,12 @@ void paintBackground(const ComputedStyle& style, const BackgroundBoxes& boxes, f
                     layer.radial.stops, std::max(gradient.radiusX, gradient.radiusY), fontSize,
                     rootFontSize, opacity);
                 if (gradient.stops.empty()) {
-                    continue;
+                    return;
                 }
                 shader = Shader::radial(gradient);
                 SDL_FRect visible;
                 if (!coveredArea(clipBox, destination, repeatPair.x, repeatPair.y, visible)) {
-                    continue;
+                    return;
                 }
                 paintBox = visible;
                 break;
@@ -554,18 +568,18 @@ void paintBackground(const ComputedStyle& style, const BackgroundBoxes& boxes, f
                 gradient.stops = toGradientStops(layer.conical.stops, 1.0f, fontSize,
                                                  rootFontSize, opacity);
                 if (gradient.stops.empty()) {
-                    continue;
+                    return;
                 }
                 shader = Shader::conical(gradient);
                 SDL_FRect visible;
                 if (!coveredArea(clipBox, destination, repeatPair.x, repeatPair.y, visible)) {
-                    continue;
+                    return;
                 }
                 paintBox = visible;
                 break;
             }
             case ComputedStyle::BackgroundImage::None:
-                continue;
+                return;
         }
 
         const Radii paintRadii = paintBox.w == clipBox.w && paintBox.h == clipBox.h
@@ -573,6 +587,134 @@ void paintBackground(const ComputedStyle& style, const BackgroundBoxes& boxes, f
                                      : radiiClippedTo(radii, clipBox, paintBox);
         renderer.fillRect(paintBox, shader, paintRadii);
     }
+}
+
+// Whether any background layer blends: an empty list (or all normal) paints
+// straight onto the page, anything else isolates the stack from the backdrop.
+bool usesBackgroundBlending(const ComputedStyle& style) {
+    for (ComputedStyle::MixBlendMode mode : style.backgroundBlendModes) {
+        if (mode != ComputedStyle::MixBlendMode::Normal) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void paintBackground(const ComputedStyle& style, const BackgroundBoxes& boxes, float fontSize,
+                     float rootFontSize, float opacity, Renderer& renderer, ImageCache& images,
+                     const Radii& borderRadii) {
+    // CSS paints the first image layer on top, so the list is walked backwards.
+    if (usesBackgroundBlending(style)) {
+        paintIsolatedBackground(style, boxes, fontSize, rootFontSize, opacity, renderer,
+                                images, borderRadii);
+        return;
+    }
+    paintBackgroundColor(style, boxes, fontSize, rootFontSize, opacity, renderer,
+                         borderRadii);
+    for (std::size_t index = style.backgroundImages.size(); index-- > 0;) {
+        paintBackgroundLayer(style, boxes, index, fontSize, rootFontSize, opacity, renderer,
+                             images, borderRadii);
+    }
+}
+
+// Blends the background stack in isolation: the colour goes down over
+// transparency, then each image layer blends with what the lower layers left,
+// and the finished stack composites over the page. The `background-blend-mode`
+// list pairs with the image list and cycles short lists, the way the other
+// background lists do. Each layer renders into a scratch target the size of
+// the border box (shifted to the origin, so window-coordinate layers land in
+// place), reads back, and blends on the CPU with the same compositor the
+// mix-blend-mode groups use.
+void paintIsolatedBackground(const ComputedStyle& style, const BackgroundBoxes& boxes,
+                             float fontSize, float rootFontSize, float opacity,
+                             Renderer& renderer, ImageCache& images,
+                             const Radii& borderRadii) {
+    const int width = static_cast<int>(std::ceil(boxes.border.w));
+    const int height = static_cast<int>(std::ceil(boxes.border.h));
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+    SDL_Renderer* sdl = renderer.sdl();
+    SDL_Texture* previous = SDL_GetRenderTarget(sdl);
+    SDL_PropertiesID props = SDL_CreateProperties();
+    SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER,
+                          SDL_TEXTUREACCESS_TARGET);
+    SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, width);
+    SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, height);
+    SDL_Texture* scratch = SDL_CreateTextureWithProperties(sdl, props);
+    SDL_DestroyProperties(props);
+    if (!scratch) {
+        SDL_SetRenderTarget(sdl, previous);
+        paintBackgroundColor(style, boxes, fontSize, rootFontSize, opacity, renderer,
+                             borderRadii);
+        for (std::size_t index = style.backgroundImages.size(); index-- > 0;) {
+            paintBackgroundLayer(style, boxes, index, fontSize, rootFontSize, opacity,
+                                 renderer, images, borderRadii);
+        }
+        return;
+    }
+    // Layers paint in border-box coordinates, so every box shifts up-left by
+    // the border origin; sizes stay identical, which is what the radii math
+    // and the placement code resolve against.
+    const BackgroundBoxes shifted{
+        SDL_FRect{0.0f, 0.0f, boxes.border.w, boxes.border.h},
+        SDL_FRect{boxes.padding.x - boxes.border.x, boxes.padding.y - boxes.border.y,
+                  boxes.padding.w, boxes.padding.h},
+        SDL_FRect{boxes.content.x - boxes.border.x, boxes.content.y - boxes.border.y,
+                  boxes.content.w, boxes.content.h}};
+    std::vector<std::uint8_t> accum(static_cast<std::size_t>(width) *
+                                    static_cast<std::size_t>(height) * 4u,
+                                    0);
+    const auto blendOne = [&](int index, ComputedStyle::MixBlendMode mode) {
+        SDL_SetRenderTarget(sdl, scratch);
+        SDL_SetRenderDrawColor(sdl, 0, 0, 0, 0);
+        SDL_RenderClear(sdl);
+        if (index < 0) {
+            paintBackgroundColor(style, shifted, fontSize, rootFontSize, opacity, renderer,
+                                 borderRadii);
+        } else {
+            paintBackgroundLayer(style, shifted, static_cast<std::size_t>(index), fontSize,
+                                 rootFontSize, opacity, renderer, images, borderRadii);
+        }
+        SDL_Surface* read = SDL_RenderReadPixels(sdl, nullptr);
+        if (!read) {
+            return;
+        }
+        SDL_Surface* conv = SDL_ConvertSurface(read, SDL_PIXELFORMAT_ABGR8888);
+        SDL_DestroySurface(read);
+        if (!conv || conv->w != width || conv->h != height) {
+            SDL_DestroySurface(conv);
+            return;
+        }
+        blendImage(static_cast<std::uint8_t*>(conv->pixels), width, height, accum.data(),
+                   mode);
+        std::memcpy(accum.data(), conv->pixels, accum.size());
+        SDL_DestroySurface(conv);
+    };
+    using Blend = ComputedStyle::MixBlendMode;
+    blendOne(-1, Blend::Normal);
+    for (std::size_t index = style.backgroundImages.size(); index-- > 0;) {
+        if (index < style.backgroundImages.size() &&
+            style.backgroundImages[index].kind !=
+                ComputedStyle::BackgroundImage::None) {
+            blendOne(static_cast<int>(index),
+                     listAt(style.backgroundBlendModes, index));
+        }
+    }
+    SDL_SetRenderTarget(sdl, previous);
+    SDL_DestroyTexture(scratch);
+    SDL_Texture* finished =
+        SDL_CreateTexture(sdl, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, width,
+                          height);
+    if (!finished) {
+        return;
+    }
+    SDL_UpdateTexture(finished, nullptr, accum.data(), width * 4);
+    SDL_SetTextureBlendMode(finished, SDL_BLENDMODE_BLEND);
+    const SDL_FRect dst{boxes.border.x, boxes.border.y, static_cast<float>(width),
+                        static_cast<float>(height)};
+    SDL_RenderTexture(sdl, finished, nullptr, &dst);
+    SDL_DestroyTexture(finished);
 }
 
 void applyMaskImage(std::uint8_t* pixels, int width, int height,

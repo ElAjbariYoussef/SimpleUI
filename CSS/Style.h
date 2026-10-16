@@ -907,6 +907,10 @@ struct ComputedStyle {
         Luminosity
     };
     MixBlendMode mixBlendMode = MixBlendMode::Normal;
+    // Per-layer background compositing, pairing with the image list and
+    // cycling short lists. Empty (or all normal) paints layers straight onto
+    // the page; anything else isolates the stack from the backdrop.
+    std::vector<MixBlendMode> backgroundBlendModes;
     // Float and clear (block layout)
     enum FloatType : std::uint8_t { FloatNone, FloatLeft, FloatRight };
     FloatType floatType = FloatNone;
