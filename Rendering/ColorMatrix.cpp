@@ -262,6 +262,105 @@ void applyBackdropDropShadow(std::uint8_t* rgba, int width, int height, float dx
     }
 }
 
+// The whole-colour helpers behind hue, saturation, color, and luminosity,
+// straight from CSS Compositing and Blending Level 1.
+float blendLum(const float c[3]) { return 0.30f * c[0] + 0.59f * c[1] + 0.11f * c[2]; }
+
+float blendSat(const float c[3]) {
+    return std::max({c[0], c[1], c[2]}) - std::min({c[0], c[1], c[2]});
+}
+
+void blendClipColor(float c[3]) {
+    const float l = blendLum(c);
+    const float n = std::min({c[0], c[1], c[2]});
+    const float x = std::max({c[0], c[1], c[2]});
+    if (n < 0.0f) {
+        for (int k = 0; k < 3; ++k) {
+            c[k] = l + ((c[k] - l) * l) / (l - n);
+        }
+    }
+    if (x > 1.0f) {
+        for (int k = 0; k < 3; ++k) {
+            c[k] = l + ((c[k] - l) * (1.0f - l)) / (x - l);
+        }
+    }
+}
+
+void blendSetLum(float c[3], float l) {
+    const float d = l - blendLum(c);
+    for (int k = 0; k < 3; ++k) {
+        c[k] += d;
+    }
+    blendClipColor(c);
+}
+
+void blendSetSat(float c[3], float s) {
+    const float x = std::max({c[0], c[1], c[2]});
+    const float n = std::min({c[0], c[1], c[2]});
+    if (x > n) {
+        for (int k = 0; k < 3; ++k) {
+            c[k] = c[k] == x ? s : ((c[k] - n) * s) / (x - n);
+        }
+    } else {
+        c[0] = c[1] = c[2] = 0.0f;
+    }
+}
+
+// One separable channel of hard-light: multiply below half, screen above.
+float blendHardLight(float cs, float cb) {
+    return cs <= 0.5f ? 2.0f * cs * cb : 1.0f - 2.0f * (1.0f - cs) * (1.0f - cb);
+}
+
+// One separable channel of soft-light: a dark source darkens towards the
+// square, a light one lifts towards the root (or the pegtop curve below a
+// quarter).
+float blendSoftLight(float cs, float cb) {
+    if (cs <= 0.5f) {
+        return cb - (1.0f - 2.0f * cs) * cb * (1.0f - cb);
+    }
+    const float d = cb <= 0.25f ? ((16.0f * cb - 12.0f) * cb + 4.0f) * cb
+                                : std::sqrt(std::max(cb, 0.0f));
+    return cb + (2.0f * cs - 1.0f) * (d - cb);
+}
+
+// Whether the mode blends whole colours rather than channel by channel.
+bool blendNonSeparable(ComputedStyle::MixBlendMode mode) {
+    using Blend = ComputedStyle::MixBlendMode;
+    return mode == Blend::Hue || mode == Blend::Saturation || mode == Blend::Color ||
+           mode == Blend::Luminosity;
+}
+
+// The blended triple for a non-separable mode: hue takes the source hue,
+// saturation the source saturation, color the source hue and saturation, and
+// luminosity the source luminosity, each over the backdrop's remainder.
+void blendWholeColor(const float cs[3], const float cb[3],
+                     ComputedStyle::MixBlendMode mode, float out[3]) {
+    using Blend = ComputedStyle::MixBlendMode;
+    float s[3] = {cs[0], cs[1], cs[2]};
+    float b[3] = {cb[0], cb[1], cb[2]};
+    switch (mode) {
+        case Blend::Hue:
+            blendSetSat(s, blendSat(b));
+            blendSetLum(s, blendLum(b));
+            break;
+        case Blend::Saturation:
+            blendSetSat(b, blendSat(s));
+            blendSetLum(b, blendLum(cb));
+            break;
+        case Blend::Color:
+            blendSetLum(s, blendLum(b));
+            break;
+        case Blend::Luminosity:
+            blendSetLum(b, blendLum(s));
+            break;
+        default: break;
+    }
+    const float* picked = mode == Blend::Saturation || mode == Blend::Luminosity ? b : s;
+    out[0] = picked[0];
+    out[1] = picked[1];
+    out[2] = picked[2];
+}
+
 void blendImage(std::uint8_t* source, int width, int height, const std::uint8_t* backdrop,
                 ComputedStyle::MixBlendMode mode) {
     using Blend = ComputedStyle::MixBlendMode;
@@ -281,6 +380,14 @@ void blendImage(std::uint8_t* source, int width, int height, const std::uint8_t*
             source[i + 3] = 0;
             continue;
         }
+        float whole[3] = {0.0f, 0.0f, 0.0f};
+        if (blendNonSeparable(mode)) {
+            const float cs3[3] = {source[i] / 255.0f, source[i + 1] / 255.0f,
+                                  source[i + 2] / 255.0f};
+            const float cb3[3] = {backdrop[i] / 255.0f, backdrop[i + 1] / 255.0f,
+                                  backdrop[i + 2] / 255.0f};
+            blendWholeColor(cs3, cb3, mode, whole);
+        }
         for (int c = 0; c < 3; ++c) {
             const float cs = source[i + c] / 255.0f;
             const float cb = backdrop[i + c] / 255.0f;
@@ -288,10 +395,27 @@ void blendImage(std::uint8_t* source, int width, int height, const std::uint8_t*
             switch (mode) {
                 case Blend::Multiply: blended = cs * cb; break;
                 case Blend::Screen: blended = cs + cb - cs * cb; break;
+                case Blend::Overlay: blended = blendHardLight(cb, cs); break;
                 case Blend::Darken: blended = std::min(cs, cb); break;
                 case Blend::Lighten: blended = std::max(cs, cb); break;
+                case Blend::ColorDodge:
+                    blended = cb <= 0.0f ? 0.0f
+                              : cs >= 1.0f ? 1.0f
+                                           : std::min(1.0f, cb / (1.0f - cs));
+                    break;
+                case Blend::ColorBurn:
+                    blended = cb >= 1.0f ? 1.0f
+                              : cs <= 0.0f ? 0.0f
+                                           : 1.0f - std::min(1.0f, (1.0f - cb) / cs);
+                    break;
+                case Blend::HardLight: blended = blendHardLight(cs, cb); break;
+                case Blend::SoftLight: blended = blendSoftLight(cs, cb); break;
                 case Blend::Difference: blended = std::fabs(cs - cb); break;
                 case Blend::Exclusion: blended = cs + cb - 2.0f * cs * cb; break;
+                case Blend::Hue:
+                case Blend::Saturation:
+                case Blend::Color:
+                case Blend::Luminosity: blended = whole[c]; break;
                 case Blend::Normal: blended = cs; break;
             }
             // The blended colour shows through both alphas; where either side

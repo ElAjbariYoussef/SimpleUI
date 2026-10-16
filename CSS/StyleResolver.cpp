@@ -4231,15 +4231,29 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.specified |= ComputedStyle::SpecifiedFontKerning;
         }
     } else if (property == "mix-blend-mode") {
-        // Separable modes composite; overlay, soft-light, and the rest parse
-        // as normal, which isolates nothing (the spec's invalid-value fallback).
-        // Anything else keeps the previous cascade winner.
+        // Every mode composites; only garbage keeps the previous cascade
+        // winner. `normal` isolates nothing.
         using Blend = ComputedStyle::MixBlendMode;
-        if (value == "normal" || value == "overlay" || value == "soft-light" ||
-            value == "hard-light" || value == "color-dodge" || value == "color-burn" ||
-            value == "hue" || value == "saturation" || value == "color" ||
-            value == "luminosity") {
+        if (value == "normal") {
             s.mixBlendMode = Blend::Normal;
+        } else if (value == "overlay") {
+            s.mixBlendMode = Blend::Overlay;
+        } else if (value == "soft-light") {
+            s.mixBlendMode = Blend::SoftLight;
+        } else if (value == "hard-light") {
+            s.mixBlendMode = Blend::HardLight;
+        } else if (value == "color-dodge") {
+            s.mixBlendMode = Blend::ColorDodge;
+        } else if (value == "color-burn") {
+            s.mixBlendMode = Blend::ColorBurn;
+        } else if (value == "hue") {
+            s.mixBlendMode = Blend::Hue;
+        } else if (value == "saturation") {
+            s.mixBlendMode = Blend::Saturation;
+        } else if (value == "color") {
+            s.mixBlendMode = Blend::Color;
+        } else if (value == "luminosity") {
+            s.mixBlendMode = Blend::Luminosity;
         } else if (value == "multiply") {
             s.mixBlendMode = Blend::Multiply;
         } else if (value == "screen") {
@@ -6116,10 +6130,19 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         switch (style.mixBlendMode) {
             case ComputedStyle::MixBlendMode::Multiply: return "multiply";
             case ComputedStyle::MixBlendMode::Screen: return "screen";
+            case ComputedStyle::MixBlendMode::Overlay: return "overlay";
             case ComputedStyle::MixBlendMode::Darken: return "darken";
             case ComputedStyle::MixBlendMode::Lighten: return "lighten";
+            case ComputedStyle::MixBlendMode::ColorDodge: return "color-dodge";
+            case ComputedStyle::MixBlendMode::ColorBurn: return "color-burn";
+            case ComputedStyle::MixBlendMode::HardLight: return "hard-light";
+            case ComputedStyle::MixBlendMode::SoftLight: return "soft-light";
             case ComputedStyle::MixBlendMode::Difference: return "difference";
             case ComputedStyle::MixBlendMode::Exclusion: return "exclusion";
+            case ComputedStyle::MixBlendMode::Hue: return "hue";
+            case ComputedStyle::MixBlendMode::Saturation: return "saturation";
+            case ComputedStyle::MixBlendMode::Color: return "color";
+            case ComputedStyle::MixBlendMode::Luminosity: return "luminosity";
             default: return "normal";
         }
     }

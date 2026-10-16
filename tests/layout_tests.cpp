@@ -6752,6 +6752,14 @@ void testMixBlendMode() {
         "<div id=\"o\" style=\"mix-blend-mode:overlay\">x</div>"
         "<div id=\"g\" style=\"mix-blend-mode:banana\">x</div>"
         "<div id=\"h\">x</div>"
+        "<div id=\"sl\" style=\"mix-blend-mode:soft-light\">x</div>"
+        "<div id=\"hl\" style=\"mix-blend-mode:hard-light\">x</div>"
+        "<div id=\"cd\" style=\"mix-blend-mode:color-dodge\">x</div>"
+        "<div id=\"cb\" style=\"mix-blend-mode:color-burn\">x</div>"
+        "<div id=\"hu\" style=\"mix-blend-mode:hue\">x</div>"
+        "<div id=\"sa\" style=\"mix-blend-mode:saturation\">x</div>"
+        "<div id=\"co\" style=\"mix-blend-mode:color\">x</div>"
+        "<div id=\"lu\" style=\"mix-blend-mode:luminosity\">x</div>"
         "</body></sui>");
     if (!document) {
         return;
@@ -6771,7 +6779,21 @@ void testMixBlendMode() {
     resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
     check(resolver.resolve(*p).mixBlendMode == Blend::Multiply, "multiply parses");
     check(resolver.resolve(*c).mixBlendMode == Blend::Normal, "blending never inherits");
-    check(resolver.resolve(*o).mixBlendMode == Blend::Normal, "overlay folds to normal");
+    check(resolver.resolve(*o).mixBlendMode == Blend::Overlay, "overlay parses");
+    check(resolver.resolve(*el("sl")).mixBlendMode == Blend::SoftLight,
+          "soft-light parses");
+    check(resolver.resolve(*el("hl")).mixBlendMode == Blend::HardLight,
+          "hard-light parses");
+    check(resolver.resolve(*el("cd")).mixBlendMode == Blend::ColorDodge,
+          "color-dodge parses");
+    check(resolver.resolve(*el("cb")).mixBlendMode == Blend::ColorBurn,
+          "color-burn parses");
+    check(resolver.resolve(*el("hu")).mixBlendMode == Blend::Hue, "hue parses");
+    check(resolver.resolve(*el("sa")).mixBlendMode == Blend::Saturation,
+          "saturation parses");
+    check(resolver.resolve(*el("co")).mixBlendMode == Blend::Color, "color parses");
+    check(resolver.resolve(*el("lu")).mixBlendMode == Blend::Luminosity,
+          "luminosity parses");
     check(resolver.resolve(*g).mixBlendMode == Blend::Normal, "garbage keeps normal");
     check(resolver.resolve(*h).mixBlendMode == Blend::Normal, "the default is normal");
     const auto serial = [&](const char* id) {
@@ -6779,6 +6801,15 @@ void testMixBlendMode() {
                                                  "mix-blend-mode");
     };
     check(std::string(serial("p")) == "multiply", "multiply serializes");
+    check(std::string(serial("o")) == "overlay", "overlay serializes");
+    check(std::string(serial("sl")) == "soft-light", "soft-light serializes");
+    check(std::string(serial("hl")) == "hard-light", "hard-light serializes");
+    check(std::string(serial("cd")) == "color-dodge", "color-dodge serializes");
+    check(std::string(serial("cb")) == "color-burn", "color-burn serializes");
+    check(std::string(serial("hu")) == "hue", "hue serializes");
+    check(std::string(serial("sa")) == "saturation", "saturation serializes");
+    check(std::string(serial("co")) == "color", "color serializes");
+    check(std::string(serial("lu")) == "luminosity", "luminosity serializes");
     check(std::string(serial("h")) == "normal", "the default serializes as normal");
 }
 

@@ -1386,6 +1386,66 @@ void testBlendImage() {
         blend(0, 0, 0, 128, 255, 255, 255, 255, Blend::Multiply);
     check(grey[0] > 120 && grey[0] < 136 && grey[3] == 255,
           "a half black multiply greys the backdrop");
+    // Overlay is hard-light with its sides swapped: a white source screens
+    // the backdrop's dark half and keeps its light half.
+    const std::vector<std::uint8_t> over =
+        blend(255, 255, 255, 255, 200, 100, 50, 255, Blend::Overlay);
+    check(over[0] == 255 && over[1] == 200 && over[2] == 100,
+          "overlay white screens dark channels, keeps light ones");
+    const std::vector<std::uint8_t> under =
+        blend(0, 0, 0, 255, 200, 100, 50, 255, Blend::Overlay);
+    check(under[0] == 145 && under[1] == 0 && under[2] == 0,
+          "overlay black multiplies light channels, drops dark ones");
+    // Hard-light the other way round: the source decides the branch.
+    check(blend(255, 255, 255, 255, 200, 100, 50, 255, Blend::HardLight)[0] == 255,
+          "hard-light white stays white");
+    check(blend(0, 0, 0, 255, 200, 100, 50, 255, Blend::HardLight)[1] == 0,
+          "hard-light black drops the channel");
+    // Dodge and burn: white dodges to white, black dodges away; black burns
+    // to black, white burns halfway down from white.
+    check(blend(255, 255, 255, 255, 128, 128, 128, 255, Blend::ColorDodge)[0] == 255,
+          "dodging white washes out");
+    check(blend(0, 0, 0, 255, 128, 128, 128, 255, Blend::ColorDodge)[0] == 128,
+          "dodging black keeps the backdrop");
+    check(blend(0, 0, 0, 255, 128, 128, 128, 255, Blend::ColorBurn)[0] == 0,
+          "burning black chars");
+    check(blend(255, 255, 255, 255, 128, 128, 128, 255, Blend::ColorBurn)[0] == 128,
+          "burning white halves white");
+    // Soft-light: black squares mid-grey, white roots it, and dark backdrops
+    // take the pegtop curve.
+    check(blend(0, 0, 0, 255, 128, 128, 128, 255, Blend::SoftLight)[0] == 64,
+          "soft black squares the channel");
+    check(blend(255, 255, 255, 255, 128, 128, 128, 255, Blend::SoftLight)[0] == 181,
+          "soft white roots the channel");
+    check(blend(255, 255, 255, 255, 32, 32, 32, 255, Blend::SoftLight)[0] == 88,
+          "dark backdrops take the pegtop curve");
+    // Whole-colour modes: grey over grey stays grey, whatever the mode.
+    for (Blend mode :
+         {Blend::Hue, Blend::Saturation, Blend::Color, Blend::Luminosity}) {
+        const std::vector<std::uint8_t> g =
+            blend(128, 128, 128, 255, 128, 128, 128, 255, mode);
+        check(g[0] == 128 && g[1] == 128 && g[2] == 128,
+              "grey over grey stays grey");
+    }
+    // Hue takes the source hue at the backdrop luminosity: red over blue is a
+    // dark red. Color takes hue and saturation both: red over green clips to
+    // full red with half green and blue. Luminosity mirrors color with the
+    // sides swapped. Saturation drains to grey at the backdrop luminosity.
+    const std::vector<std::uint8_t> hue =
+        blend(255, 0, 0, 255, 0, 0, 255, 255, Blend::Hue);
+    check(hue[0] == 94 && hue[1] == 0 && hue[2] == 0, "hue reddens blue darkly");
+    const std::vector<std::uint8_t> color =
+        blend(255, 0, 0, 255, 0, 255, 0, 255, Blend::Color);
+    check(color[0] == 255 && color[1] == 106 && color[2] == 106,
+          "color paints red at green luminosity");
+    const std::vector<std::uint8_t> lum =
+        blend(0, 255, 0, 255, 255, 0, 0, 255, Blend::Luminosity);
+    check(lum[0] == 255 && lum[1] == 106 && lum[2] == 106,
+          "luminosity mirrors color with swapped sides");
+    const std::vector<std::uint8_t> sat =
+        blend(255, 255, 255, 255, 255, 0, 0, 255, Blend::Saturation);
+    check(sat[0] == 77 && sat[1] == 77 && sat[2] == 77,
+          "saturation drains red to its grey");
 }
 
 // Backdrop opacity fades every alpha and leaves colours alone; drop shadows
