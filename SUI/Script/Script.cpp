@@ -109,8 +109,18 @@ std::vector<std::string> registeredHrefs() {
 }
 
 void invokeInlineHandler(std::string_view attributeValue, Element* target) {
-    if (g_context && g_context->document) {
-        g_context->document->setFocused(target);
+    if (g_context && g_context->document && target) {
+        // A handler can still run for an element in the tree a navigation just
+        // left behind (the click navigates before its own handler runs, and the
+        // live page is the new one by now). Focus only sticks when the element
+        // belongs to the tree that is on screen.
+        Element* root = g_context->document->root();
+        for (Element* walk = target; walk; walk = walk->parent()) {
+            if (walk == root) {
+                g_context->document->setFocused(target);
+                break;
+            }
+        }
     }
 
     std::string_view rest = trim(attributeValue);

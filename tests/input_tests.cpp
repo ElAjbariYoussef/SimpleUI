@@ -2047,6 +2047,9 @@ int main() {
         press("self", 1, primary);
         check(app.currentPage() == "pages/settings.sui", "a press follows the link");
         check(g_navSeen == "pages/settings.sui", "the handler observes the new page");
+        // The clicked element belongs to the tree that was just left: focus
+        // must not stick to it once the new page is live.
+        check(app.document().focused() == nullptr, "focus does not follow the old tree");
         home();
 
         // `_blank` opens instead of replacing.

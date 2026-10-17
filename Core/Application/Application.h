@@ -315,6 +315,11 @@ private:
     std::unique_ptr<Resources> resources_;
     std::unique_ptr<Platform> platform_;
     std::unique_ptr<Document> document_;
+    // Trees a navigation (or `setDocument`) moved out while an event may still
+    // be walking them: a link press navigates before its own handler runs, and
+    // that handler chain lives in the tree being left. Kept until the next
+    // event is handled, or shutdown.
+    std::vector<std::unique_ptr<Document>> retiredDocuments_;
     std::unique_ptr<TextFont> font_;
     // Decoded background and content images, shared across every element and every
     // frame. Constructed once the resources exist, so it borrows rather than owns them.

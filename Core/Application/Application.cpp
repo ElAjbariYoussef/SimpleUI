@@ -3559,6 +3559,11 @@ void Application::flushBound() {
 void Application::setDocument(std::unique_ptr<Document> document) {
     flushBound();
     Page& page = ensurePrimary();
+    // Same reason as a navigation: an event handling the old tree may still be
+    // on the stack.
+    if (page.document) {
+        retiredDocuments_.push_back(std::move(page.document));
+    }
     page.document = std::move(document);
     // The open popup points into the old tree.
     page.openSelect_ = nullptr;
@@ -3658,6 +3663,11 @@ void Application::installPageAt(std::size_t index, std::unique_ptr<Document> doc
     // Navigation retires the old page's timers: a callback that captured the
     // previous tree must not fire into the new one.
     sui::script::cancelForPage(&page);
+    // The click that navigated here is still on the stack, and so is the
+    // handler chain it walks: the tree being replaced outlives the assignment.
+    if (page.document) {
+        retiredDocuments_.push_back(std::move(page.document));
+    }
     page.document = std::move(document);
     // A new tree starts with no focus, no caret, and no open popups: nothing
     // from the page this one replaces carries over.
@@ -4073,6 +4083,9 @@ void Application::updateCursor(Element* target, float x, float y) {
 }
 
 void Application::dispatch(const InputEvent& event) {
+    // A tree retired by an earlier navigation is no longer being walked once a
+    // new event starts: this is where it lets go.
+    retiredDocuments_.clear();
     // The event belongs to its window's page; a synthetic event with no window
     // belongs to the primary page. The working copy stays bound afterwards, so
     // reads between events see the page they just touched.
