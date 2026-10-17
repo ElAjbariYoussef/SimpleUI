@@ -346,7 +346,7 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
     }
 
     // Media and replaced elements keep their author-specified size, or HTML standard defaults.
-    if (tag == "video" || tag == "canvas") {
+    if (tag == "video" || tag == "canvas" || tag == "iframe") {
         Style s;
         s.display = Style::InlineBlock;
         s.width = {Length::Px, 300.0f};
@@ -361,7 +361,7 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
         return s;
     }
     if (tag == "img" || tag == "svg" ||
-        tag == "iframe" || tag == "picture" ||
+        tag == "picture" ||
         tag == "source" || tag == "track") {
         Style s;
         s.display = Style::InlineBlock;

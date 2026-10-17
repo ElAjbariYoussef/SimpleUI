@@ -3498,6 +3498,7 @@ void Application::bindPage(std::size_t index) {
     selectAnchor_ = page.selectAnchor_;
     selectEdge_ = page.selectEdge_;
     smoothScrolls_ = std::move(page.smoothScrolls_);
+    iframeFrames_ = std::move(page.iframeFrames);
     scriptsAfterBodyRun_ = page.scriptsAfterBodyRun;
     std::swap(scriptContext_.generation, page.scriptGeneration);
     boundPage_ = static_cast<int>(index);
@@ -3516,6 +3517,7 @@ void Application::flushBound() {
     Page& page = *pages_[static_cast<std::size_t>(boundPage_)];
     page.document = std::move(document_);
     page.resolver = std::move(resolver_);
+    page.iframeFrames = std::move(iframeFrames_);
     page.lastFocused_ = lastFocused_;
     page.caretBytePos_ = caretBytePos_;
     page.selectionAnchor_ = selectionAnchor_;
@@ -3554,6 +3556,124 @@ void Application::flushBound() {
     scriptContext_.application = this;
     scriptContext_.page = &page;
     script::setContext(&scriptContext_);
+}
+
+Document* Application::frameDocument(const Element& frame) const {
+    const auto it = iframeFrames_.find(const_cast<Element*>(&frame));
+    if (it == iframeFrames_.end() || !it->second || it->second->failed) {
+        return nullptr;
+    }
+    return it->second->document.get();
+}
+
+// A frame loads once per src: the element keeps its state while the attribute
+// is unchanged, and a rewritten src replaces the document wholesale. A failed
+// load stays marked so a missing file is reported once, not every frame.
+void Application::syncFrames() {
+    if (!document_ || !document_->root() || !resources_) {
+        iframeFrames_.clear();
+        return;
+    }
+    std::vector<Element*> live;
+    std::vector<Element*> stack{document_->root()};
+    while (!stack.empty()) {
+        Element* el = stack.back();
+        stack.pop_back();
+        if (el->tag() == "iframe") {
+            live.push_back(el);
+        }
+        for (const auto& child : el->children()) {
+            if (child && !child->isTextNode()) {
+                stack.push_back(child.get());
+            }
+        }
+    }
+    for (auto it = iframeFrames_.begin(); it != iframeFrames_.end();) {
+        if (std::find(live.begin(), live.end(), it->first) == live.end()) {
+            it = iframeFrames_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (Element* el : live) {
+        const std::string_view src = el->attribute("src");
+        auto it = iframeFrames_.find(el);
+        if (it != iframeFrames_.end() && it->second && it->second->src == src) {
+            continue;
+        }
+        auto frame = std::make_unique<FrameState>();
+        frame->src = std::string(src);
+        FrameState* state = frame.get();
+        iframeFrames_[el] = std::move(frame);
+        if (src.empty()) {
+            continue;
+        }
+        auto source = resources_->readText(src);
+        if (!source) {
+            state->failed = true;
+            script::warn("cannot read frame " + std::string(src));
+            continue;
+        }
+        ParseError parseError;
+        std::unique_ptr<Document> document = MarkupParser::parse(*source, parseError);
+        if (!document) {
+            state->failed = true;
+            script::warn(std::string(src) + ":" + std::to_string(parseError.line) + ": " +
+                         parseError.message);
+            continue;
+        }
+        // The frame's styles are its own: a fresh resolver (UA defaults come
+        // with it) fed from its own stylesheets, exactly like a page's.
+        auto resolver = std::make_unique<StyleResolver>();
+        for (const auto& link : document->stylesheets()) {
+            auto css = resources_->readText(link.href);
+            if (!css) {
+                script::warn("cannot read stylesheet " + link.href);
+                continue;
+            }
+            std::vector<Rule> rules;
+            std::vector<KeyframeBlock> keyframes;
+            CSSParser::parseWithKeyframes(
+                *css, rules, keyframes,
+                [this](std::string_view import) -> std::optional<std::string> {
+                    return resources_->readText(import);
+                },
+                link.href);
+            for (auto& rule : rules) {
+                resolver->addRule(std::move(rule));
+            }
+            resolver->addKeyframes(std::move(keyframes));
+        }
+        if (Element* body = document->querySelector("body")) {
+            resolver->setRootFontSize(resolver->resolve(*body).fontSize);
+        }
+        state->document = std::move(document);
+        state->resolver = std::move(resolver);
+    }
+}
+
+// The page's own layout gives every frame its content box; the frame then lays
+// out from its own origin at that box's size and is translated onto it. A
+// frame that failed to load leaves its element painting alone.
+void Application::layoutFrames() {
+    if (!document_ || !document_->root() || !font_) {
+        return;
+    }
+    for (auto& [el, frame] : iframeFrames_) {
+        if (!frame || !frame->document || !frame->resolver || !frame->document->root()) {
+            continue;
+        }
+        generatePseudoElements(*frame->document, *frame->resolver);
+        LayoutInput input;
+        input.resolver = frame->resolver.get();
+        input.font = font_.get();
+        input.viewportWidth = el->contentWidth();
+        input.viewportHeight = el->contentHeight();
+        BlockLayout layout;
+        layout.layout(frame->document->root(), input);
+        BlockLayout::translateSubtree(*frame->document->root(), el->contentX(),
+                                      el->contentY());
+    }
 }
 
 void Application::setDocument(std::unique_ptr<Document> document) {
@@ -3633,6 +3753,7 @@ void Application::installPageAt(std::size_t index, std::unique_ptr<Document> doc
     // A page brings its own stylesheets and nothing else does: the previous
     // page's rules go first, or a style it declared would outlive it.
     page.resolver.clearStyles();
+    page.iframeFrames.clear();
     for (const auto& link : document->stylesheets()) {
         auto css = resources_->readText(link.href);
         if (!css) {
@@ -5298,7 +5419,9 @@ bool Application::renderFrame(WindowId id) {
                 // reason to draw another frame.
                 generatePseudoElements(*document_, resolver_);
 
+                syncFrames();
                 layout.layout(document_->root(), input);
+                layoutFrames();
                 syncModalDialog();
                 if (modalDialog_ &&
                     isReachable(*document_->root(), modalDialog_)) {
@@ -5338,7 +5461,9 @@ bool Application::renderFrame(WindowId id) {
                     // out again so the frame about to be painted reflects the
                     // change.
                     generatePseudoElements(*document_, resolver_);
+                    syncFrames();
                     layout.layout(document_->root(), input);
+                    layoutFrames();
                     syncModalDialog();
                     if (modalDialog_ &&
                         isReachable(*document_->root(), modalDialog_)) {

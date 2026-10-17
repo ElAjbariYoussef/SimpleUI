@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <unordered_map>
 #include <vector>
 
 namespace sui {
@@ -24,6 +25,18 @@ class Document;
 class Element;
 class TextFont;
 class Renderer;
+
+// One `<iframe>`'s loaded document and the styles that belong to it. A frame
+// is a page of its own: a fresh resolver (UA defaults included) and stylesheets
+// loaded through the same resources. `src` names the load, so a rewritten
+// attribute reloads it; a frame that failed stays marked so it is not retried
+// every frame. Frames nested inside a frame are not loaded.
+struct FrameState {
+    std::unique_ptr<Document> document;
+    std::unique_ptr<StyleResolver> resolver;
+    std::string src;
+    bool failed = false;
+};
 
 // One page: a document plus everything that belongs to showing it. A page that
 // is bound to a window paints there; a page with no window is headless (a test
@@ -83,6 +96,8 @@ struct Page {
         float top = 0.0f;
     };
     std::vector<SmoothScroll> smoothScrolls_;
+    // The `<iframe>` documents this page loaded, keyed by the frame element.
+    std::unordered_map<Element*, std::unique_ptr<FrameState>> iframeFrames;
 };
 
 // Where a list item's outside marker lands. An image that loaded takes its own
@@ -137,6 +152,12 @@ public:
 
     Document& document() const;
     void setDocument(std::unique_ptr<Document> document);
+
+    // The document the `<iframe>` element loaded, or null when it has none:
+    // no src, a load that failed, or a page that is not the bound one. The
+    // frame lays out inside the element's content box; `src` is resolved
+    // against the project root, like every other href in a page.
+    Document* frameDocument(const Element& frame) const;
 
     // Routes one input event through the DOM, updating input fields or firing handlers.
     void dispatch(const InputEvent& event);
@@ -325,6 +346,8 @@ private:
     // frame. Constructed once the resources exist, so it borrows rather than owns them.
     std::unique_ptr<ImageCache> images_;
     StyleResolver resolver_;
+    // The bound page's frames; mirrors Page::iframeFrames like the other state.
+    std::unordered_map<Element*, std::unique_ptr<FrameState>> iframeFrames_;
     script::Context scriptContext_;
     std::string screenshotPath_;
 
@@ -469,6 +492,13 @@ private:
     // working copy so handlers always see the page they belong to.
     void bindPage(std::size_t index);
     void flushBound();
+    // Loads every `<iframe>` in the bound page whose src is new (or changed)
+    // and drops the frames whose element left the tree. Runs before layout,
+    // so the frame boxes a layout pass sees are the ones on screen.
+    void syncFrames();
+    // Lays each loaded frame out inside its element's content box and lands it
+    // there. Runs after the page's own layout, which is what gives the boxes.
+    void layoutFrames();
     // Drops the pages whose windows the platform just closed. The working copy
     // is flushed first, so a page being painted is never erased from under it.
     void dropClosedPages();

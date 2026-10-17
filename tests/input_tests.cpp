@@ -2389,6 +2389,86 @@ int main() {
         }
     }
 
+    // An `<iframe>` brings a document of its own: loaded through the same
+    // resources, styled by its own stylesheets, laid out inside the frame
+    // element's content box, and untouched by the host page's rules.
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "sui-iframe-check";
+        fs::remove_all(root);
+        fs::create_directories(root);
+        {
+            std::ofstream out(root / "index.sui", std::ios::binary);
+            out << "<sui><head><link rel=\"stylesheet\" href=\"/page.css\"/></head><body>"
+                   "<iframe id=\"f\" src=\"/frame.sui\"></iframe>"
+                   "<iframe id=\"auto\" src=\"/frame.sui\"></iframe>"
+                   "<iframe id=\"gone\" src=\"/missing.sui\"></iframe>"
+                   "<div id=\"box\">host</div>"
+                   "</body></sui>";
+        }
+        {
+            std::ofstream out(root / "page.css", std::ios::binary);
+            out << "#f { display: block; margin: 0; border: 0; padding: 0; width: 200px; "
+                   "height: 100px; } #auto { margin: 0; } #box { width: 999px; }";
+        }
+        {
+            std::ofstream out(root / "frame.sui", std::ios::binary);
+            out << "<sui><head><link rel=\"stylesheet\" href=\"/frame.css\"/></head>"
+                   "<body><div id=\"box\">frame</div></body></sui>";
+        }
+        {
+            std::ofstream out(root / "frame.css", std::ios::binary);
+            out << "body { margin: 0; } #box { width: 50px; height: 20px; margin-left: 7px; }";
+        }
+        const fs::path previous = fs::current_path();
+        struct RestoreIframe {
+            fs::path previous;
+            ~RestoreIframe() {
+                std::error_code ec;
+                fs::current_path(previous, ec);
+            }
+        } restoreIframe{previous};
+        fs::current_path(root);
+
+        sui::Application app;
+        std::string error;
+        check(app.start("index.sui", error), "an iframe project starts");
+        if (app.platform()) {
+            const sui::WindowId primary = app.platform()->primaryWindow();
+            check(app.renderFrame(primary), "the iframe page lays out");
+            sui::Element* frameEl = app.document().getElementById("f");
+            sui::Element* autoEl = app.document().getElementById("auto");
+            sui::Element* goneEl = app.document().getElementById("gone");
+            check(frameEl != nullptr && autoEl != nullptr && goneEl != nullptr,
+                  "the frame elements exist");
+            if (frameEl && autoEl && goneEl) {
+                sui::Document* frame = app.frameDocument(*frameEl);
+                check(frame != nullptr, "the frame document loads");
+                check(app.frameDocument(*goneEl) == nullptr,
+                      "a frame whose source is missing stays unloaded");
+                check(autoEl->layoutWidth() == 300.0f && autoEl->layoutHeight() == 150.0f,
+                      "an unsized frame keeps the replaced default size");
+                if (frame) {
+                    sui::Element* frameBox = frame->getElementById("box");
+                    sui::Element* pageBox = app.document().getElementById("box");
+                    check(frameBox != nullptr && pageBox != nullptr,
+                          "both #box elements exist");
+                    if (frameBox && pageBox) {
+                        check(pageBox->layoutWidth() == 999.0f,
+                              "the host page keeps its own #box rule");
+                        check(frameBox->layoutWidth() == 50.0f &&
+                                  frameBox->layoutHeight() == 20.0f,
+                              "the frame lays out under its own stylesheet");
+                        check(std::fabs(frameBox->layoutX() - frameEl->contentX() - 7.0f) <
+                                  0.01f &&
+                                  std::fabs(frameBox->layoutY() - frameEl->contentY()) < 0.01f,
+                              "the frame lands inside the element's content box");
+                    }
+                }
+            }
+        }
+    }
+
     platform->shutdown();
 
     std::printf("input_tests: %d checks, %d failures\n", checks, failures);

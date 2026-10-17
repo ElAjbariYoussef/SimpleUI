@@ -3566,6 +3566,12 @@ void BlockLayout::centerInViewport(Element& el, float viewportWidth,
               (viewportHeight - el.layoutHeight()) * 0.5f - el.layoutY());
 }
 
+void BlockLayout::translateSubtree(Element& el, float dx, float dy) {
+    // A nested document lays out at its own origin; this lands it on the box
+    // that hosts it. Callers re-layout first, so the shift never accumulates.
+    shiftTree(el, dx, dy);
+}
+
 void BlockLayout::layout(Element* root, const LayoutInput& input) {
     if (!root || !input.resolver) {
         return;

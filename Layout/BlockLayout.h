@@ -25,6 +25,11 @@ public:
     // moves, so hit-testing and painting follow without further offsets. The
     // frame recomputes it from a fresh layout, so nothing accumulates.
     static void centerInViewport(Element& el, float viewportWidth, float viewportHeight);
+
+    // Moves a laid-out subtree by (dx, dy): boxes, padding/content boxes, and
+    // text runs together. A nested document lays out at its own origin and is
+    // translated onto the box that hosts it.
+    static void translateSubtree(Element& el, float dx, float dy);
 };
 
 }  // namespace sui
