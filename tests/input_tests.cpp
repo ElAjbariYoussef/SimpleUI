@@ -2408,17 +2408,21 @@ int main() {
         }
         {
             std::ofstream out(root / "page.css", std::ios::binary);
-            out << "#f { display: block; margin: 0; border: 0; padding: 0; width: 200px; "
-                   "height: 100px; } #auto { margin: 0; } #box { width: 999px; }";
+            out << "body { background: #00ff00; } #f { display: block; margin: 0; border: 0; "
+                   "padding: 0; width: 200px; "
+                   "height: 100px; } #auto { margin: 0; } #box { width: 999px; "
+                   "background: #0000ff; }";
         }
         {
             std::ofstream out(root / "frame.sui", std::ios::binary);
             out << "<sui><head><link rel=\"stylesheet\" href=\"/frame.css\"/></head>"
-                   "<body><div id=\"box\">frame</div></body></sui>";
+                   "<body><div id=\"box\">frame</div><div id=\"wide\"></div></body></sui>";
         }
         {
             std::ofstream out(root / "frame.css", std::ios::binary);
-            out << "body { margin: 0; } #box { width: 50px; height: 20px; margin-left: 7px; }";
+            out << "body { margin: 0; } #box { width: 50px; height: 20px; margin-left: 7px; "
+                   "background: #ff0000; } #wide { width: 400px; height: 10px; "
+                   "background: #0000ff; }";
         }
         const fs::path previous = fs::current_path();
         struct RestoreIframe {
@@ -2463,6 +2467,57 @@ int main() {
                                   0.01f &&
                                   std::fabs(frameBox->layoutY() - frameEl->contentY()) < 0.01f,
                               "the frame lands inside the element's content box");
+                    }
+                    // Pixel proof: the dummy driver keeps the renderer's buffer
+                    // readable, so what the frame painted can be inspected.
+                    const auto readPixel = [&](float x, float y, int& r, int& g,
+                                               int& b) -> bool {
+                        SDL_Renderer* renderer = app.platform()->renderer(primary);
+                        if (!renderer) {
+                            return false;
+                        }
+                        const SDL_Rect rect{static_cast<int>(x), static_cast<int>(y), 1, 1};
+                        SDL_Surface* read = SDL_RenderReadPixels(renderer, &rect);
+                        if (!read) {
+                            return false;
+                        }
+                        SDL_Surface* conv =
+                            SDL_ConvertSurface(read, SDL_PIXELFORMAT_ABGR8888);
+                        SDL_DestroySurface(read);
+                        if (!conv) {
+                            return false;
+                        }
+                        const Uint8* px = static_cast<const Uint8*>(conv->pixels);
+                        r = px[0];
+                        g = px[1];
+                        b = px[2];
+                        SDL_DestroySurface(conv);
+                        return true;
+                    };
+                    const float fx = frameEl->contentX();
+                    const float fy = frameEl->contentY();
+                    int r = 0, g = 0, b = 0;
+                    const bool readable = readPixel(fx + 17.0f, fy + 10.0f, r, g, b);
+                    check(readable, "the frame buffer reads back");
+                    if (readable) {
+                        // `#box` is the frame's own red rule; the host's blue
+                        // `#box` rule must never leak into the frame's paint.
+                        check(r > 200 && g < 60 && b < 60,
+                              "the frame paints its own element styles");
+                    }
+                    if (readPixel(fx + 100.0f, fy + 60.0f, r, g, b)) {
+                        check(g > 200 && r < 60 && b < 60,
+                              "the frame shows the host through its transparent body");
+                    } else {
+                        check(false, "the frame buffer reads back");
+                    }
+                    // `#wide` reaches past the viewport on purpose: it must be
+                    // cut at the content box, not spill across the host page.
+                    if (readPixel(fx + 210.0f, fy + 25.0f, r, g, b)) {
+                        check(g > 200 && r < 60 && b < 60,
+                              "the frame's content is clipped to the content box");
+                    } else {
+                        check(false, "the frame buffer reads back");
                     }
                 }
             }

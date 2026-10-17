@@ -5481,8 +5481,15 @@ bool Application::renderFrame(WindowId id) {
                 // its ancestors' `overflow` allows. A stacking context that carries
                 // an alpha under 1 is rendered into an offscreen surface and blended
                 // back as one unit, so its overlapping members mix first.
-                const std::vector<PaintOp> paintOps =
-                    computePaintOps(*document_->root(), resolver_);
+                std::vector<FrameSplice> frameSplices;
+                for (const auto& [frameEl, frame] : iframeFrames_) {
+                    if (frame && frame->document && frame->resolver && !frame->failed) {
+                        frameSplices.push_back(FrameSplice{frameEl, frame->document.get(),
+                                                           frame->resolver.get()});
+                    }
+                }
+                const std::vector<PaintOp> paintOps = spliceFrameOps(
+                    computePaintOps(*document_->root(), resolver_), frameSplices);
                 SDL_Renderer* sdlRenderer = platform_->renderer(id);
                 std::vector<GroupFrame> groups;
                 // Where the open select painted this frame, if it did: an open
@@ -5491,6 +5498,8 @@ bool Application::renderFrame(WindowId id) {
                 float popupOffX = 0.0f, popupOffY = 0.0f, popupOpacity = 1.0f;
                 bool popupFound = false;
                 for (const PaintOp& op : paintOps) {
+                    const StyleResolver& opResolver =
+                        op.item.resolver ? *op.item.resolver : resolver_;
                     if (op.kind == PaintOp::Kind::BeginGroup) {
                         const int width = static_cast<int>(std::ceil(op.bounds.w));
                         const int height = static_cast<int>(std::ceil(op.bounds.h));
@@ -5523,7 +5532,7 @@ bool Application::renderFrame(WindowId id) {
                             frame.maskOrigins = op.item.maskOrigins;
                             frame.maskClips = op.item.maskClips;
                             frame.maskBorder = op.item.maskBorder;
-                            frame.maskFontSize = resolver_.resolve(*op.item.el).fontSize;
+                            frame.maskFontSize = opResolver.resolve(*op.item.el).fontSize;
                             // Boxes in surface coords: layout minus the
                             // offsets paint uses, rebased to the surface origin.
                             float ox = 0.0f, oy = 0.0f;
@@ -5638,7 +5647,7 @@ bool Application::renderFrame(WindowId id) {
                                                 frame.maskRepeats, frame.maskOrigins,
                                                 frame.maskClips, frame.maskBoxes,
                                                 frame.maskFontSize,
-                                                resolver_.rootFontSize(),
+                                                opResolver.rootFontSize(),
                                                 [&](std::string_view href)
                                                     -> const DecodedImage* {
                                                     return images_ ? images_->decoded(href)
@@ -5649,7 +5658,7 @@ bool Application::renderFrame(WindowId id) {
                                                     pixels, conv->w, conv->h,
                                                     frame.maskBorder, frame.maskBoxes,
                                                     frame.maskFontSize,
-                                                    resolver_.rootFontSize(),
+                                                    opResolver.rootFontSize(),
                                                     [&](std::string_view href)
                                                         -> const DecodedImage* {
                                                         return images_ ? images_->decoded(href)
@@ -5903,7 +5912,7 @@ bool Application::renderFrame(WindowId id) {
                             compCursor = compositionCursor_;
                         }
                     }
-                    paintBox(*item.el, renderer, sdlRenderer, resolver_, *font_, groupOpacity,
+                    paintBox(*item.el, renderer, sdlRenderer, opResolver, *font_, groupOpacity,
                              *images_, item.dx + ox, item.dy + oy, caretPos, showCaret, selStart, selEnd,
                              compText, compCursor);
                 }

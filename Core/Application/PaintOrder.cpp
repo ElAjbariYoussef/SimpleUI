@@ -2,6 +2,7 @@
 
 #include "CSS/StyleResolver.h"
 #include "Rendering/ColorMatrix.h"
+#include "SUI/DOM/Document.h"
 #include "SUI/DOM/Element.h"
 
 #include <algorithm>
@@ -1232,6 +1233,7 @@ struct Collector {
         }
         PaintItem& item = box.item;
         item.el = &el;
+        item.resolver = &resolver;
         item.zIndex = s.positioned ? s.zIndex : 0;
         item.layer = !s.positioned ? 0 : (s.zIndex < 0 ? -1 : (s.zIndex > 0 ? 2 : 1));
         item.order = nextOrder++;
@@ -1668,6 +1670,70 @@ std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolve
     }
     computeGroupBounds(out, resolver);
     return out;
+}
+
+std::vector<PaintOp> spliceFrameOps(const std::vector<PaintOp>& host,
+                                    const std::vector<FrameSplice>& frames) {
+    std::vector<PaintOp> ops;
+    if (frames.empty()) {
+        return host;
+    }
+    ops.reserve(host.size());
+    for (const PaintOp& op : host) {
+        ops.push_back(op);
+        if (op.kind != PaintOp::Kind::Box || !op.item.el) {
+            continue;
+        }
+        const FrameSplice* splice = nullptr;
+        for (const FrameSplice& candidate : frames) {
+            if (candidate.frame == op.item.el) {
+                splice = &candidate;
+                break;
+            }
+        }
+        if (!splice || !splice->document || !splice->document->root() ||
+            !splice->resolver) {
+            continue;
+        }
+        // The frame viewport is the element's content box: a frame crops to it
+        // the way an `overflow: hidden` box crops its children.
+        const SDL_FRect viewport{op.item.el->contentX(), op.item.el->contentY(),
+                                 op.item.el->contentWidth(), op.item.el->contentHeight()};
+        if (viewport.w <= 0.0f || viewport.h <= 0.0f) {
+            continue;
+        }
+        // A host scroll moves the whole frame with the box; the frame's own
+        // scrolls already ride its items.
+        const float dx = op.item.dx;
+        const float dy = op.item.dy;
+        std::vector<PaintOp> inner =
+            computePaintOps(*splice->document->root(), *splice->resolver);
+        for (PaintOp& inner_op : inner) {
+            inner_op.item.dx += dx;
+            inner_op.item.dy += dy;
+            SDL_FRect clip = inner_op.item.clip;
+            if (op.item.clip.w > 0.0f && op.item.clip.h > 0.0f) {
+                clip = intersectClip(clip, op.item.clip);
+            }
+            inner_op.item.clip = intersectClip(clip, viewport);
+            // A `clip-path` on the frame element clips the box; the frame's own
+            // shapes win over it, and two of them on one frame stay a
+            // simplification.
+            if (inner_op.item.clipShape.kind == ResolvedClip::Kind::None) {
+                inner_op.item.clipShape = op.item.clipShape;
+            }
+            if (inner_op.kind == PaintOp::Kind::BeginGroup) {
+                // Group bounds and the transform origin are in window
+                // coordinates with the host's scroll already folded in.
+                inner_op.bounds.x -= dx;
+                inner_op.bounds.y -= dy;
+                inner_op.origin.x -= dx;
+                inner_op.origin.y -= dy;
+            }
+            ops.push_back(std::move(inner_op));
+        }
+    }
+    return ops;
 }
 
 Element* hitTestPaintOrder(const std::vector<PaintOp>& ops, float x, float y) {

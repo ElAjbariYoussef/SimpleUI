@@ -36,6 +36,7 @@ namespace sui {
 
 class Element;
 class StyleResolver;
+class Document;
 
 struct PaintItem {
     Element* el = nullptr;
@@ -86,6 +87,11 @@ struct PaintItem {
     // allocate a surface).
     float opacity = 1.0f;
     bool pointerEventsNone = false;
+    // The resolver that owns `el`. A frame's ops are spliced into the host's
+    // list and must keep resolving against the frame's own document, so every
+    // item carries the resolver its walk used. Null means the bound page's --
+    // what hit-testing and older reads assume.
+    const StyleResolver* resolver = nullptr;
 };
 
 // A parsed `filter: drop-shadow(x y blur color)`. The shadow follows the
@@ -204,6 +210,26 @@ bool unprojectPoint(const ProjectedQuad& quad, float rectX, float rectY, float r
 // renderer, so tests can assert on the sequence, the group bounds, and the
 // alphas directly.
 std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolver);
+
+// One loaded `<iframe>`: the element in the host tree and the document it
+// brought, with the resolver that document resolves against.
+struct FrameSplice {
+    const Element* frame = nullptr;
+    const Document* document = nullptr;
+    const StyleResolver* resolver = nullptr;
+};
+
+// The host's op list with every loaded frame's ops spliced in right after its
+// `<iframe>` box. A frame lays out in host coordinates already (so later
+// siblings still paint over it), but the host's scroll offsets and clip stack
+// apply on top of its own: each spliced item adds the host box's dx/dy, its
+// clip is intersected with the host box's and with the frame's content box
+// (the frame viewport), and group bounds/origins (window coordinates) shift by
+// the host scroll the same way. The frame's own groups keep the bounds their
+// walk computed -- frames are cut to the content box, so nothing spills out of
+// the host box those bounds were derived from.
+std::vector<PaintOp> spliceFrameOps(const std::vector<PaintOp>& host,
+                                    const std::vector<FrameSplice>& frames);
 
 // Hit-test the paint ops in paint order (topmost first): walk from end to start
 // and return the first Box element whose painted region contains the point

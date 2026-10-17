@@ -1441,6 +1441,151 @@ void testTransform3D() {
         }
     }
 }
+
+// An `<iframe>` splices its document's ops in right after its own box. The
+// frame lays out in host coordinates, so sibling order holds, but the host's
+// scroll offsets and clip stack land on top of the frame's own, and every
+// spliced box keeps the resolver its document resolved against.
+void testFrameSplicing() {
+    auto host = parseOrNull(
+        "<sui><body>"
+        "<div id=\"scroller\" style=\"width:300px;height:80px;overflow:auto\">"
+        "<iframe id=\"f\" style=\"display:block;width:200px;height:50px\"></iframe>"
+        "<div id=\"after\" style=\"width:350px;height:200px\"></div>"
+        "</div>"
+        "</body></sui>");
+    if (!host) {
+        return;
+    }
+    sui::StyleResolver hostResolver;
+    hostResolver.setRules(sui::CSSParser::parse("body{margin:0}#scroller{margin:0}"));
+    layoutRoot(*host, hostResolver);
+    Element* scroller = host->getElementById("scroller");
+    Element* frameEl = host->getElementById("f");
+    Element* after = host->getElementById("after");
+    check(scroller && frameEl && after, "the host page lays out around its frame");
+    if (!scroller || !frameEl || !after) {
+        return;
+    }
+    // The scroller really scrolls, so there is a host offset to apply.
+    scroller->setScrollTop(15.0f);
+    scroller->setScrollLeft(5.0f);
+
+    auto frame = parseOrNull(
+        "<sui><body>"
+        "<div id=\"inner\" style=\"width:150px;height:30px;margin-left:5px;"
+        "opacity:0.5\"></div>"
+        "<div id=\"below\" style=\"height:400px;background:#0000ff\"></div>"
+        "</body></sui>");
+    if (!frame) {
+        return;
+    }
+    sui::StyleResolver frameResolver;
+    frameResolver.setRules(
+        sui::CSSParser::parse("body{margin:0}#inner{background:#ff0000}"));
+    sui::LayoutInput frameInput;
+    frameInput.resolver = &frameResolver;
+    frameInput.font = nullptr;
+    frameInput.viewportWidth = frameEl->contentWidth();
+    frameInput.viewportHeight = frameEl->contentHeight();
+    sui::BlockLayout().layout(frame->root(), frameInput);
+    sui::BlockLayout::translateSubtree(*frame->root(), frameEl->contentX(),
+                                       frameEl->contentY());
+    Element* innerEl = frame->getElementById("inner");
+    Element* belowEl = frame->getElementById("below");
+    if (!innerEl || !belowEl) {
+        check(false, "the frame document lays out");
+        return;
+    }
+
+    const std::vector<sui::PaintOp> hostOps = sui::computePaintOps(*host->root(), hostResolver);
+    const std::vector<sui::PaintOp> ops = sui::spliceFrameOps(
+        hostOps, {sui::FrameSplice{frameEl, frame.get(), &frameResolver}});
+
+    auto boxAt = [&](Element* el) -> const sui::PaintOp* {
+        for (const sui::PaintOp& op : ops) {
+            if (op.kind == sui::PaintOp::Kind::Box && op.item.el == el) {
+                return &op;
+            }
+        }
+        return nullptr;
+    };
+    auto indexOf = [&](Element* el) -> int {
+        for (std::size_t i = 0; i < ops.size(); ++i) {
+            if (ops[i].kind == sui::PaintOp::Kind::Box && ops[i].item.el == el) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    };
+    const sui::PaintOp* frameOp = boxAt(frameEl);
+    const sui::PaintOp* innerOp = boxAt(innerEl);
+    const sui::PaintOp* belowOp = boxAt(belowEl);
+    check(frameOp && innerOp && belowOp, "the frame's boxes splice into the host list");
+    if (!frameOp || !innerOp || !belowOp) {
+        return;
+    }
+    check(indexOf(frameEl) < indexOf(innerEl) && indexOf(innerEl) < indexOf(after),
+          "the frame paints after its element and before the next sibling");
+    check(innerOp->item.resolver == &frameResolver, "a spliced box keeps the frame's resolver");
+    check(frameOp->item.resolver == &hostResolver, "a host box keeps the host resolver");
+
+    // The host's scroll rides the frame's boxes on top of their own.
+    checkNear(innerOp->item.dx, 5.0f, 0.01f, "the host scroll shifts the frame's boxes");
+    checkNear(innerOp->item.dy, 15.0f, 0.01f, "the host scroll shifts the frame's boxes");
+    checkNear(frameOp->item.dx, 5.0f, 0.01f, "the host box keeps its own offset");
+    checkNear(frameOp->item.dy, 15.0f, 0.01f, "the host box keeps its own offset");
+
+    // The frame viewport is the element's content box; the frame crops to it
+    // the way an `overflow: hidden` box crops its children.
+    const float vx = frameEl->contentX();
+    const float vy = frameEl->contentY();
+    checkNear(innerOp->item.clip.x, vx, 0.01f, "the frame clip starts at the content box");
+    checkNear(innerOp->item.clip.y, vy, 0.01f, "the frame clip starts at the content box");
+    checkNear(innerOp->item.clip.w, frameEl->contentWidth(), 0.01f,
+              "the frame clip spans the content box width");
+    checkNear(belowOp->item.clip.h, frameEl->contentHeight(), 0.01f,
+              "content past the viewport clips to the content box");
+
+    // `#inner` carries `opacity`, so its group's bounds exist in window
+    // coordinates: the host scroll shifts them like the boxes.
+    const std::size_t innerIndex = static_cast<std::size_t>(indexOf(innerEl));
+    if (innerIndex > 0 && ops[innerIndex - 1].kind == sui::PaintOp::Kind::BeginGroup) {
+        checkNear(ops[innerIndex - 1].bounds.x, innerEl->layoutX() - 5.0f, 0.01f,
+                  "a frame group's bounds follow the host scroll");
+        checkNear(ops[innerIndex - 1].bounds.y, innerEl->layoutY() - 15.0f, 0.01f,
+                  "a frame group's bounds follow the host scroll");
+    } else {
+        check(false, "the frame's opacity opens a group");
+    }
+
+    // Nothing to splice, and an unloaded frame, both leave the list alone.
+    check(sui::spliceFrameOps(hostOps, {}).size() == hostOps.size(),
+          "no frames leaves the host list untouched");
+    check(sui::spliceFrameOps(hostOps, {sui::FrameSplice{frameEl, nullptr, nullptr}}).size() ==
+              hostOps.size(),
+          "an unloaded frame splices nothing");
+
+    // A frame element that paints no box (display:none) splices nothing.
+    auto hiddenHost = parseOrNull(
+        "<sui><body><iframe id=\"f\" style=\"display:none\"></iframe></body></sui>");
+    if (hiddenHost) {
+        sui::StyleResolver hiddenResolver;
+        layoutRoot(*hiddenHost, hiddenResolver);
+        Element* hiddenFrame = hiddenHost->getElementById("f");
+        const std::vector<sui::PaintOp> hiddenOps =
+            sui::computePaintOps(*hiddenHost->root(), hiddenResolver);
+        const std::vector<sui::PaintOp> spliced = sui::spliceFrameOps(
+            hiddenOps, {sui::FrameSplice{hiddenFrame, frame.get(), &frameResolver}});
+        bool leaked = false;
+        for (const sui::PaintOp& op : spliced) {
+            if (op.item.el == innerEl || op.item.el == belowEl) {
+                leaked = true;
+            }
+        }
+        check(hiddenFrame && !leaked, "a hidden frame element splices nothing");
+    }
+}
 int main() {
     testPlainOrder();
     testPositionedGroupsInFlow();
@@ -1468,6 +1613,7 @@ int main() {
     testHitTestPaintOrder();
     testExtendedTransformFunctions();
     testPointerEventsNone();
+    testFrameSplicing();
     if (failures > 0) {
         std::printf("%d check(s) failed\n", failures);
         return 1;
