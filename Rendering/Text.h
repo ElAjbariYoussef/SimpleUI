@@ -52,6 +52,17 @@ struct GlyphMetrics {
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
 };
 
+// Which face a measurement or raster uses. The family matches the first
+// loaded face with that family (case-insensitively); weight and italic then
+// pick among that family's faces following the CSS fallback order. When no
+// face carries the family the default face answers. Empty family always
+// means the default face.
+struct FontQuery {
+    std::string_view family;
+    int weight = 400;
+    bool italic = false;
+};
+
 class TextFont {
 public:
     TextFont();
@@ -60,33 +71,59 @@ public:
     TextFont(const TextFont&) = delete;
     TextFont& operator=(const TextFont&) = delete;
 
-    // Loads a TTF from memory or file. For now, we try to load from a bundled
-    // default; returns false if no font is available (rendering will fallback).
+    // Loads a TTF from memory or file as the default face. For now, we try to
+    // load from a bundled default; returns false if no font is available
+    // (rendering will fallback).
     bool loadFromFile(const std::string& path);
     bool loadFromMemory(const unsigned char* data, int size);
 
-    // Returns glyph metrics for codepoint at size (px). Values are in pixels.
-    GlyphMetrics metrics(unsigned int codepoint, float size) const;
+    // Adds a named face from a file (one @font-face source that resolved and
+    // decoded). Faces never move once added, so references into them stay
+    // valid across further loads.
+    bool addFace(std::string family, const std::string& path, int weight, bool italic);
+    // Adds a named face from bytes: @font-face sources arrive through the
+    // resource layer, which hands over memory rather than paths.
+    bool addFaceFromMemory(std::string family, const unsigned char* data, int size, int weight,
+                           bool italic);
+    bool hasFamily(std::string_view name) const noexcept;
+    // Whether a face with exactly this family, weight, and style is loaded;
+    // @font-face loading uses it to skip sources it already added.
+    bool hasFace(std::string_view family, int weight, bool italic) const noexcept;
+    // The family a query resolves to, or empty for the default face.
+    std::string matchedFamily(const FontQuery& query) const;
 
-    // Vertical metrics of the font at the given size.
+    // The face a query resolves to after fallback. `family` is the matched
+    // @font-face family, empty when the default face answered; weight and
+    // italic describe whichever face that is.
+    struct FaceMatch {
+        std::string family;
+        int weight = 400;
+        bool italic = false;
+    };
+    FaceMatch matchFace(const FontQuery& query) const;
+
+    // Returns glyph metrics for codepoint at size (px). Values are in pixels.
+    GlyphMetrics metrics(FontQuery query, unsigned int codepoint, float size) const;
+
+    // Vertical metrics of the face at the given size.
     struct VerticalMetrics {
         float ascent = 0.0f;
         float descent = 0.0f;
         float lineGap = 0.0f;
         float height = 0.0f;  // ascent + descent + lineGap
     };
-    VerticalMetrics verticalMetrics(float size) const;
+    VerticalMetrics verticalMetrics(FontQuery query, float size) const;
 
     // Advance width of a UTF-8 string at the given size. Runs needing shaping
     // (anything past ASCII) go through HarfBuzz so ligatures, kerning, and
     // mark positioning measure what renders. `kern` follows `font-kerning`.
-    float measureText(std::string_view text, float size, bool kern = true,
+    float measureText(FontQuery query, std::string_view text, float size, bool kern = true,
                    float stretch = 1.0f, bool smallCaps = false) const;
 
     // Shapes a run with HarfBuzz: glyph ids with clusters, advances, and mark
     // offsets. Empty when there is no font. Direction stays left-to-right;
     // bidirectional reordering is not shaped yet.
-    std::vector<ShapedGlyph> shapeText(std::string_view text, float size, bool kern = true,
+    std::vector<ShapedGlyph> shapeText(FontQuery query, std::string_view text, float size, bool kern = true,
                                        float stretch = 1.0f,
                                        bool smallCaps = false) const;
 
@@ -97,25 +134,25 @@ public:
 
     // Glyphs in a run: the shaped count when shaping, else codepoints. Feeds
     // letter-spacing, which applies per rendered glyph.
-    std::size_t glyphCount(std::string_view text, bool kern = true,
+    std::size_t glyphCount(FontQuery query, std::string_view text, bool kern = true,
                            float stretch = 1.0f) const;
 
     // The pixel box one shaped glyph rasterizes to at a stretch: origin inside the
     // em, plus size. stb takes the axes apart, so an expanded run widens its
     // glyphs to match its stretched advances rather than just spreading them.
     // False for a glyph that draws nothing (a space, or no font).
-    bool glyphBitmapBox(unsigned int glyphId, float size, float stretch, int& x0, int& y0,
+    bool glyphBitmapBox(FontQuery query, unsigned int glyphId, float size, float stretch, int& x0, int& y0,
                         int& width, int& height, bool smallCaps = false) const;
 
     // Renders a string to a texture for a given color and size. Caller owns the
     // returned texture (SDL_DestroyTexture). The texture is exactly
     // (measureText(text, size), verticalMetrics(size).height) pixels.
-    SDL_Texture* renderText(SDL_Renderer* renderer, std::string_view text, float size,
+    SDL_Texture* renderText(SDL_Renderer* renderer, FontQuery query, std::string_view text, float size,
                             SDL_Color color, bool bold = false, bool italic = false,
                             bool kern = true, float stretch = 1.0f,
                             bool smallCaps = false) const;
 
-    bool hasFont() const noexcept { return font_ != nullptr; }
+    bool hasFont() const noexcept { return !faces_.empty() && faces_[0]->info != nullptr; }
 
 private:
     struct FontSizeKey {
@@ -133,17 +170,25 @@ private:
         }
     };
 
-    void* font_ = nullptr;  // stbtt_fontinfo*
-    unsigned char* fontData_ = nullptr;
-    std::size_t fontDataSize_ = 0;
-    // HarfBuzz shaping state over the same bytes: blob, face, and font with
-    // the OpenType metric funcs, so no FreeType is needed. Null until shaped.
-    void* hbBlob_ = nullptr;  // hb_blob_t*
-    void* hbFace_ = nullptr;  // hb_face_t*
-    void* hbFont_ = nullptr;  // hb_font_t*
-    void initHarfBuzz();
-    void clearHarfBuzz();
-    mutable std::unordered_map<FontSizeKey, GlyphMetrics, FontSizeKeyHash> cache_;
+    struct Face {
+        std::string family;
+        int weight = 400;
+        bool italic = false;
+        void* info = nullptr;  // stbtt_fontinfo*
+        unsigned char* data = nullptr;
+        std::size_t dataSize = 0;
+        void* hbBlob = nullptr;  // hb_blob_t*
+        void* hbFace = nullptr;  // hb_face_t*
+        void* hbFont = nullptr;  // hb_font_t*
+        mutable std::unordered_map<FontSizeKey, GlyphMetrics, FontSizeKeyHash> cache;
+        ~Face();
+    };
+
+    static bool sameFamily(std::string_view a, std::string_view b) noexcept;
+    const Face& faceFor(const FontQuery& query) const noexcept;
+    static void initFaceHarfBuzz(Face& face);
+    static void clearFaceHarfBuzz(Face& face);
+    std::vector<std::unique_ptr<Face>> faces_;
 };
 
 }  // namespace sui

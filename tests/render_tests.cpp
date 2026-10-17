@@ -11,6 +11,7 @@
 #include "CSS/Parser.h"
 #include "CSS/Style.h"
 #include "CSS/StyleResolver.h"
+#include "Core/Application/FontFaces.h"
 #include "Core/Resources/Resources.h"
 #include "SUI/DOM/Document.h"
 #include "SUI/DOM/Element.h"
@@ -28,6 +29,8 @@ using sui::ComputedStyle;
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <string>
 #include <string_view>
@@ -262,24 +265,214 @@ void testFontSizeIsTheEmSquare() {
     constexpr float kEm = 2048.0f;
     constexpr float kSize = 100.0f;
 
-    const sui::TextFont::VerticalMetrics vm = font.verticalMetrics(kSize);
+    const sui::TextFont::VerticalMetrics vm = font.verticalMetrics(sui::FontQuery{}, kSize);
     checkNear(vm.ascent, 1901.0f / kEm * kSize, 0.05f, "ascent is a fraction of the em");
     checkNear(vm.descent, 483.0f / kEm * kSize, 0.05f, "descent is a fraction of the em");
     checkNear(vm.height, 2384.0f / kEm * kSize, 0.05f,
               "the line box is the font's own height, which is over one em");
 
-    const sui::GlyphMetrics cap = font.metrics('H', kSize);
+    const sui::GlyphMetrics cap = font.metrics(sui::FontQuery{}, 'H', kSize);
     checkNear(cap.advance, 1540.0f / kEm * kSize, 0.05f, "an advance is a fraction of the em");
     checkNear(cap.height, 1493.0f / kEm * kSize, 1.0f, "cap height matches the font table");
-    checkNear(font.metrics('x', kSize).height, 1120.0f / kEm * kSize, 1.0f,
+    checkNear(font.metrics(sui::FontQuery{}, 'x', kSize).height, 1120.0f / kEm * kSize, 1.0f,
               "x-height matches the font table");
 
     // Every metric has to scale with the size, which is only true if the rasteriser
     // scale is derived from the requested em rather than from a fixed pixel height.
-    checkNear(font.metrics('H', 50.0f).advance, cap.advance * 0.5f, 0.05f,
+    checkNear(font.metrics(sui::FontQuery{}, 'H', 50.0f).advance, cap.advance * 0.5f, 0.05f,
               "halving font-size halves the advance");
-    checkNear(font.verticalMetrics(200.0f).height, vm.height * 2.0f, 0.1f,
+    checkNear(font.verticalMetrics(sui::FontQuery{}, 200.0f).height, vm.height * 2.0f, 0.1f,
               "doubling font-size doubles the line box");
+}
+
+// `@font-face` end to end: the parser's descriptors, the match order the face
+// query follows, and the loader that turns a sheet's blocks into faces through
+// the resource layer.
+void testFontFaces() {
+    // One block with every descriptor spelling.
+    {
+        const auto faces = sui::CSSParser::parseFontFaces(R"(
+            body { font-family: nope; }
+            @font-face {
+                font-family: "Fancy";
+                src: local("Fancy System"), url('fancy.otf') format("opentype"), url(fallback.ttf);
+                font-weight: 700;
+                font-style: italic;
+            }
+            .after { color: red; }
+        )");
+        check(faces.size() == 1, "one font-face block parses");
+        check(faces.size() == 1 && faces[0].family == "Fancy", "a quoted family dequotes");
+        check(faces.size() == 1 && faces[0].weight == 700, "a numeric weight parses");
+        check(faces.size() == 1 && faces[0].italic, "italic parses");
+        check(faces.size() == 1 && faces[0].src.size() == 2,
+              "local() is skipped, both url() sources stay");
+        check(faces.size() == 1 && faces[0].src[0] == "fancy.otf" &&
+                  faces[0].src[1] == "fallback.ttf",
+              "url targets dequote and keep author order");
+    }
+    // Keywords, oblique, an out-of-range weight, and href resolution.
+    {
+        const auto faces = sui::CSSParser::parseFontFaces(
+            "@font-face { font-family: Weird; src: url(fonts/w.ttf), url(https://x/y.woff2); "
+            "font-weight: bold; font-style: normal; } "
+            "@font-face { font-family: Weird; src: url(/abs/w.ttf), url( ); "
+            "font-weight: 1500; font-style: oblique; }",
+            "/styles/theme.css");
+        check(faces.size() == 2, "two blocks parse");
+        check(faces.size() == 2 && faces[0].src.size() == 2, "two resolvable sources");
+        check(faces.size() == 2 && faces[0].src[0] == "/styles/fonts/w.ttf",
+              "a relative target joins the sheet's directory");
+        check(faces.size() == 2 && faces[0].src[1] == "https://x/y.woff2",
+              "a scheme-qualified target passes through");
+        check(faces.size() == 2 && faces[0].weight == 700, "bold means 700");
+        check(faces.size() == 2 && !faces[0].italic, "normal is upright");
+        check(faces.size() == 2 && faces[1].src.size() == 1 && faces[1].src[0] == "/abs/w.ttf",
+              "an absolute target passes through and an empty url() drops");
+        check(faces.size() == 2 && faces[1].weight == 400,
+              "an out-of-range weight falls back to 400");
+        check(faces.size() == 2 && faces[1].italic, "oblique is italic");
+    }
+    // Descriptor order does not matter; blocks missing a family or a source,
+    // and blocks nested in a conditional at-rule, add nothing.
+    {
+        const auto faces = sui::CSSParser::parseFontFaces(
+            "@font-face { src: url(a.ttf); } "
+            "@font-face { font-family: NoSrc; } "
+            "@font-face { src: url(late.ttf); font-family: Late; } "
+            "@media screen { @font-face { font-family: Nested; src: url(n.ttf); } } "
+            "@font-face { font-family: Ok; src: url(ok.ttf); }");
+        check(faces.size() == 2 && faces[0].family == "Late" && faces[1].family == "Ok",
+              "family-less, source-less, and nested blocks load nothing");
+    }
+
+    // Face matching among the faces of one family follows the CSS order.
+    const std::string regularPath = std::string(SUI_SOURCE_DIR) + "/assets/fonts/DejaVuSans.ttf";
+    const std::string boldPath = std::string(SUI_SOURCE_DIR) + "/assets/fonts/DejaVuSans-Bold.ttf";
+    sui::TextFont font;
+    if (!font.loadFromFile(regularPath)) {
+        check(false, "the bundled font loads");
+        return;
+    }
+    check(font.addFace("Display", regularPath, 400, false), "a named regular face loads");
+    check(font.addFace("Display", boldPath, 700, false), "a named bold face loads");
+    {
+        std::ifstream in(boldPath, std::ios::binary | std::ios::ate);
+        if (!in) {
+            check(false, "the bundled bold font reads");
+            return;
+        }
+        const std::size_t size = static_cast<std::size_t>(in.tellg());
+        in.seekg(0);
+        std::vector<unsigned char> bytes(size);
+        in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(size));
+        check(font.addFaceFromMemory("Display", bytes.data(), static_cast<int>(bytes.size()), 400,
+                                     true),
+              "a face loads from memory");
+    }
+    const auto normal = font.matchFace({"Display", 400, false});
+    check(normal.family == "Display" && normal.weight == 400 && !normal.italic,
+          "an exact weight and style match");
+    const auto bold = font.matchFace({"Display", 700, false});
+    check(bold.family == "Display" && bold.weight == 700 && !bold.italic,
+          "the bold face answers a bold query");
+    const auto oblique = font.matchFace({"Display", 400, true});
+    check(oblique.family == "Display" && oblique.weight == 400 && oblique.italic,
+          "the italic face answers an italic query");
+    check(font.matchFace({"display", 700, false}).family == "Display",
+          "family matching ignores case");
+    check(font.matchFace({"Display", 900, false}).weight == 700,
+          "above 500 the search reaches the nearest heavier face");
+    check(font.matchFace({"Display", 350, false}).weight == 400,
+          "with nothing lighter, 400 answers a 350 query");
+    check(font.matchFace({"Display", 450, false}).weight == 400,
+          "the 400..500 window takes the lighter side before 700");
+    check(font.matchFace({"Missing", 400, false}).family.empty(),
+          "an unknown family falls back to the default face");
+    // The selected face is the one that draws: bold advances are wider, and
+    // the italic entry carries the bytes it was loaded from.
+    const float wide = font.measureText({"Display", 700, false}, "W", 64.0f);
+    const float narrow = font.measureText({"Display", 400, false}, "W", 64.0f);
+    check(wide > narrow + 0.5f, "a bold query measures with the bold face");
+    checkNear(font.measureText({"Display", 400, true}, "W", 64.0f), wide, 0.01f,
+              "the italic face renders its own source");
+    checkNear(font.measureText({"Missing", 400, false}, "W", 64.0f),
+              font.measureText({}, "W", 64.0f), 0.01f,
+              "an unknown family measures with the default face");
+    // Synthetic styling steps aside for a face that carries it, and stands in
+    // for one that does not: a smear and a shear each widen the texture by
+    // their padding, so exact widths tell the passes apart.
+    {
+        SDL_Surface* probe = SDL_CreateSurface(16, 16, SDL_PIXELFORMAT_ABGR8888);
+        SDL_Renderer* probeRenderer = probe ? SDL_CreateSoftwareRenderer(probe) : nullptr;
+        check(probeRenderer != nullptr, "the synthetic-styling probe renders");
+        if (probeRenderer) {
+            const auto renderedWidth = [&](sui::FontQuery query, bool bold, bool italic) {
+                SDL_Texture* texture = font.renderText(
+                    probeRenderer, query, "H", 32.0f, SDL_Color{255, 255, 255, 255}, bold, italic);
+                float width = 0.0f;
+                float height = 0.0f;
+                if (texture) {
+                    SDL_GetTextureSize(texture, &width, &height);
+                    SDL_DestroyTexture(texture);
+                }
+                return static_cast<int>(width);
+            };
+            const int plain = renderedWidth({"Display", 400, false}, false, false);
+            const int heavy = renderedWidth({"Display", 700, false}, true, false);
+            check(heavy ==
+                      static_cast<int>(std::ceil(font.measureText({"Display", 700, false}, "H", 32.0f))),
+                  "a real bold face takes no synthetic smear");
+            check(heavy > plain, "the bold face still draws heavier");
+            check(renderedWidth({"Display", 400, true}, false, true) ==
+                      static_cast<int>(std::ceil(font.measureText({"Display", 400, true}, "H", 32.0f))),
+                  "a real italic face takes no synthetic shear");
+            check(renderedWidth({"Missing", 400, false}, true, false) ==
+                      static_cast<int>(std::ceil(font.measureText({}, "H", 32.0f))) + 1,
+                  "the default face still synthesizes bold");
+            SDL_DestroyRenderer(probeRenderer);
+        }
+        if (probe) {
+            SDL_DestroySurface(probe);
+        }
+    }
+    check(font.hasFace("Display", 700, false) && font.hasFace("display", 400, true),
+          "hasFace identifies loaded identities, ignoring case");
+    check(!font.hasFace("Display", 700, true), "an unloaded style is not a face");
+    check(font.hasFamily("DISPLAY") && !font.hasFamily("Missing"),
+          "hasFamily tests families alone");
+
+    // The loader reads a sheet's blocks through the resource layer, resolving
+    // relative sources against the sheet, and only adds faces whose source
+    // resolves and decodes.
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / "sui-fontface-check";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root / "assets" / "fonts", ec);
+    check(!ec, "the font-face fixture directory is writable");
+    fs::copy_file(boldPath, root / "assets" / "fonts" / "Widget.ttf",
+                  fs::copy_options::overwrite_existing, ec);
+    check(!ec, "the widget font copies into the fixture root");
+    const sui::FileResources resources(root.string());
+    const std::string css =
+        "@font-face { font-family: Widget; src: local(\"Widget\"), "
+        "url(fonts/Widget.ttf) format(\"truetype\"); font-weight: bold; } "
+        "@font-face { font-family: Ghost; src: url(missing.ttf); }";
+    sui::TextFont appFont;
+    check(appFont.loadFromFile(regularPath), "the app font loads a default");
+    check(sui::loadFontFaces(appFont, resources, css, "/assets/style.css") == 1,
+          "only a face whose source resolves is added");
+    const auto widget = appFont.matchFace({"Widget", 700, false});
+    check(widget.family == "Widget" && widget.weight == 700,
+          "the loaded face carries its family and weight");
+    check(appFont.hasFamily("Widget") && !appFont.hasFamily("Ghost"),
+          "a source that is missing adds no face");
+    check(appFont.measureText({"Widget", 700, false}, "W", 64.0f) >
+              appFont.measureText({}, "W", 64.0f) + 0.5f,
+          "the resolved source is the face that draws");
+    check(sui::loadFontFaces(appFont, resources, css, "/assets/style.css") == 0,
+          "a reload of the same sheet adds no duplicate face");
 }
 
 // The CPU conic sweep the executor hands a `conic-gradient()` background.
@@ -1179,7 +1372,7 @@ void testShaping() {
         std::printf("(skipping shaping: no DejaVu Sans)\n");
         return;
     }
-    const std::vector<sui::ShapedGlyph> fi = font.shapeText("fi", 16.0f);
+    const std::vector<sui::ShapedGlyph> fi = font.shapeText(sui::FontQuery{}, "fi", 16.0f);
     check(fi.size() == 1, "fi fuses into one ligature");
     if (!fi.empty()) {
         check(fi[0].cluster == 0, "a ligature clusters at its first byte");
@@ -1187,11 +1380,11 @@ void testShaping() {
     }
     // Lam plus alef fuses the same way (U+0644 U+0627).
     const std::vector<sui::ShapedGlyph> lamAlef =
-        font.shapeText("\xD9\x84\xD8\xA7", 16.0f);
+        font.shapeText(sui::FontQuery{}, "\xD9\x84\xD8\xA7", 16.0f);
     check(lamAlef.size() == 1, "lam-alef fuses into one glyph");
     // A base plus a combining mark that never precomposes stays two glyphs,
     // the mark spaceless (U+0332 combining low line).
-    const std::vector<sui::ShapedGlyph> marked = font.shapeText("e\xCC\xB2", 16.0f);
+    const std::vector<sui::ShapedGlyph> marked = font.shapeText(sui::FontQuery{}, "e\xCC\xB2", 16.0f);
     check(marked.size() == 2, "a mark does not fuse with its base");
     if (marked.size() == 2) {
         check(marked[1].advance == 0.0f, "a mark takes no advance");
@@ -1202,31 +1395,31 @@ void testShaping() {
     for (const auto& glyph : lamAlef) {
         shaped += glyph.advance;
     }
-    check(font.measureText("\xD9\x84\xD8\xA7", 16.0f) == shaped,
+    check(font.measureText(sui::FontQuery{}, "\xD9\x84\xD8\xA7", 16.0f) == shaped,
           "measurement matches the shaped advances");
     // Kerning pairs kern by default and stand apart with `none`.
-    const float kerned = font.measureText("AV", 16.0f, true);
-    const float unkearned = font.measureText("AV", 16.0f, false);
+    const float kerned = font.measureText(sui::FontQuery{}, "AV", 16.0f, true);
+    const float unkearned = font.measureText(sui::FontQuery{}, "AV", 16.0f, false);
     check(kerned < unkearned, "a kern pair tucks with kerning on");
-    check(font.measureText("AV", 16.0f) == kerned, "kerning defaults on");
+    check(font.measureText(sui::FontQuery{}, "AV", 16.0f) == kerned, "kerning defaults on");
     // `font-stretch` scales the font's horizontal axis, so advances widen and
     // narrow with the glyphs rather than just spreading them.
-    const float wide = font.measureText("AV", 16.0f, true, 1.5f);
-    const float narrow = font.measureText("AV", 16.0f, true, 0.5f);
+    const float wide = font.measureText(sui::FontQuery{}, "AV", 16.0f, true, 1.5f);
+    const float narrow = font.measureText(sui::FontQuery{}, "AV", 16.0f, true, 0.5f);
     check(wide > kerned, "an expanded run measures wider");
     check(narrow < kerned, "a condensed run measures narrower");
     check(wide / kerned > 1.4f && wide / kerned < 1.6f, "expansion scales by the factor");
     check(narrow / kerned > 0.4f && narrow / kerned < 0.6f, "condensation scales by the factor");
-    check(font.measureText("AV", 16.0f, true, 1.0f) == kerned, "a normal stretch is identity");
+    check(font.measureText(sui::FontQuery{}, "AV", 16.0f, true, 1.0f) == kerned, "a normal stretch is identity");
     // Small caps substitute uppercase and shrink to four fifths: already-upper
     // text measures identical, lowered text measures 0.8x its capitals.
-    const float caps = font.measureText("ABC", 16.0f, false);
-    const float small = font.measureText("abc", 16.0f, false, 1.0f, true);
-    check(font.measureText("ABC", 16.0f, false, 1.0f, true) == caps,
+    const float caps = font.measureText(sui::FontQuery{}, "ABC", 16.0f, false);
+    const float small = font.measureText(sui::FontQuery{}, "abc", 16.0f, false, 1.0f, true);
+    check(font.measureText(sui::FontQuery{}, "ABC", 16.0f, false, 1.0f, true) == caps,
           "capitals ignore small caps");
     check(std::fabs(small / caps - 0.8f) < 0.05f, "lowercase shrinks to its capitals");
-    const auto smallGlyphs = font.shapeText("abc", 16.0f, false, 1.0f, true);
-    const auto capGlyphs = font.shapeText("ABC", 16.0f, false);
+    const auto smallGlyphs = font.shapeText(sui::FontQuery{}, "abc", 16.0f, false, 1.0f, true);
+    const auto capGlyphs = font.shapeText(sui::FontQuery{}, "ABC", 16.0f, false);
     check(smallGlyphs.size() == capGlyphs.size(), "substitution keeps glyph count");
     bool sameIds = !smallGlyphs.empty();
     bool allSmall = !smallGlyphs.empty();
@@ -1236,29 +1429,29 @@ void testShaping() {
     }
     check(sameIds, "lowercase shapes to capital glyph ids");
     check(allSmall, "substituted glyphs carry the small flag");
-    check(!font.shapeText("ABC", 16.0f).front().small, "capitals carry no flag");
+    check(!font.shapeText(sui::FontQuery{}, "ABC", 16.0f).front().small, "capitals carry no flag");
     // Latin-1 lowers too; anything unmapped measures untouched.
-    const float grave = font.measureText("\xC3\x80", 16.0f, false);
-    check(std::fabs(font.measureText("\xC3\xA0", 16.0f, false, 1.0f, true) / grave - 0.8f) <
+    const float grave = font.measureText(sui::FontQuery{}, "\xC3\x80", 16.0f, false);
+    check(std::fabs(font.measureText(sui::FontQuery{}, "\xC3\xA0", 16.0f, false, 1.0f, true) / grave - 0.8f) <
               0.05f,
           "latin-1 lowercase shrinks as well");
-    check(font.measureText("\xCE\xB1", 16.0f, false, 1.0f, true) ==
-              font.measureText("\xCE\xB1", 16.0f, false),
+    check(font.measureText(sui::FontQuery{}, "\xCE\xB1", 16.0f, false, 1.0f, true) ==
+              font.measureText(sui::FontQuery{}, "\xCE\xB1", 16.0f, false),
           "greek renders unchanged");
     // The raster follows the advances: the glyphs themselves widen and narrow.
-    const unsigned int lamGlyph = font.shapeText("\xD9\x84", 16.0f).front().glyph;
+    const unsigned int lamGlyph = font.shapeText(sui::FontQuery{}, "\xD9\x84", 16.0f).front().glyph;
     int lx = 0, ly = 0, lw = 0, lh = 0;
     int wx = 0, wy = 0, ww = 0, wh = 0;
     int nx = 0, ny = 0, nw = 0, nh = 0;
-    check(font.glyphBitmapBox(lamGlyph, 16.0f, 1.0f, lx, ly, lw, lh) && lw > 0 && lh > 0,
+    check(font.glyphBitmapBox(sui::FontQuery{}, lamGlyph, 16.0f, 1.0f, lx, ly, lw, lh) && lw > 0 && lh > 0,
           "a shaped glyph reports its box");
-    check(font.glyphBitmapBox(lamGlyph, 16.0f, 2.0f, wx, wy, ww, wh) && ww > lw * 2 - 2,
+    check(font.glyphBitmapBox(sui::FontQuery{}, lamGlyph, 16.0f, 2.0f, wx, wy, ww, wh) && ww > lw * 2 - 2,
           "a doubled stretch doubles the glyph width");
     check(wh == lh, "stretching leaves the height alone");
-    check(font.glyphBitmapBox(lamGlyph, 16.0f, 0.5f, nx, ny, nw, nh) && nw <= lw,
+    check(font.glyphBitmapBox(sui::FontQuery{}, lamGlyph, 16.0f, 0.5f, nx, ny, nw, nh) && nw <= lw,
           "a condensed glyph is no wider");
-    check(font.glyphCount("fi") == 1, "ascii ligatures count fused");
-    check(font.glyphCount("\xD9\x84\xD8\xA7") == lamAlef.size(),
+    check(font.glyphCount(sui::FontQuery{}, "fi") == 1, "ascii ligatures count fused");
+    check(font.glyphCount(sui::FontQuery{}, "\xD9\x84\xD8\xA7") == lamAlef.size(),
           "shaped text counts glyphs");
 }
 
@@ -1371,7 +1564,7 @@ void testSvgTextChunks() {
             return;
         }
         const auto chunks =
-            sui::collectSvgTextChunks(*doc->getElementById("t"), 16.0f, 1.0f, 1.0f, 100.0f, 100.0f);
+            sui::collectSvgTextChunks(*doc->getElementById("t"), 16.0f, "", 1.0f, 1.0f, 100.0f, 100.0f);
         check(chunks.size() == 1, "plain text stays one chunk");
         if (chunks.size() == 1) {
             check(chunks[0].text == "hi yo", "the text survives collapsing");
@@ -1392,7 +1585,7 @@ void testSvgTextChunks() {
             return;
         }
         const auto chunks =
-            sui::collectSvgTextChunks(*doc->getElementById("t"), 16.0f, 1.0f, 1.0f, 100.0f, 100.0f);
+            sui::collectSvgTextChunks(*doc->getElementById("t"), 16.0f, "", 1.0f, 1.0f, 100.0f, 100.0f);
         check(chunks.size() == 3, "each tspan chunks alone");
         if (chunks.size() == 3) {
             check(chunks[0].styleNode == doc->getElementById("a"), "first chunk styled by a");
@@ -1416,7 +1609,7 @@ void testSvgTextChunks() {
             return;
         }
         const auto chunks =
-            sui::collectSvgTextChunks(*doc->getElementById("t"), 16.0f, 2.0f, 3.0f, 100.0f, 100.0f);
+            sui::collectSvgTextChunks(*doc->getElementById("t"), 16.0f, "", 2.0f, 3.0f, 100.0f, 100.0f);
         check(chunks.size() == 3, "positioning chunks alone");
         if (chunks.size() == 3) {
             check(chunks[0].positioned && chunks[0].x == 10.0f && chunks[0].y == 18.0f,
@@ -1438,21 +1631,21 @@ void testSvgTextChunks() {
         if (!doc) {
             return;
         }
-        const auto spaced = sui::collectSvgTextChunks(*doc->getElementById("t"), 16.0f, 1.0f,
+        const auto spaced = sui::collectSvgTextChunks(*doc->getElementById("t"), 16.0f, "", 1.0f,
                                                       1.0f, 100.0f, 100.0f);
         std::string joined;
         for (const auto& chunk : spaced) {
             joined += chunk.text;
         }
         check(joined == "a b c", "boundary spaces survive once");
-        const auto indented = sui::collectSvgTextChunks(*doc->getElementById("u"), 16.0f, 1.0f,
+        const auto indented = sui::collectSvgTextChunks(*doc->getElementById("u"), 16.0f, "", 1.0f,
                                                         1.0f, 100.0f, 100.0f);
         std::string flat;
         for (const auto& chunk : indented) {
             flat += chunk.text;
         }
         check(flat == "x y", "indentation between tspans reads as one space");
-        const auto doubled = sui::collectSvgTextChunks(*doc->getElementById("v"), 16.0f, 1.0f,
+        const auto doubled = sui::collectSvgTextChunks(*doc->getElementById("v"), 16.0f, "", 1.0f,
                                                        1.0f, 100.0f, 100.0f);
         std::string dbl;
         for (const auto& chunk : doubled) {
@@ -1617,7 +1810,7 @@ void testTextOnPath() {
         return;
     }
     const auto chunks =
-        sui::collectSvgTextChunks(*doc->getElementById("t"), 16.0f, 1.0f, 1.0f, 100.0f, 100.0f);
+        sui::collectSvgTextChunks(*doc->getElementById("t"), 16.0f, "", 1.0f, 1.0f, 100.0f, 100.0f);
     check(chunks.size() == 4, "path text chunks in order");
     if (chunks.size() == 4) {
         check(chunks[0].pathNode == nullptr && chunks[0].text == "a", "leading text rides straight");
@@ -2168,6 +2361,7 @@ int main() {
     testMeshNeed();
     testRadialPosition();
     testFontSizeIsTheEmSquare();
+    testFontFaces();
     testBoxBlur();
     testBackdropFilters();
     testBlendImage();

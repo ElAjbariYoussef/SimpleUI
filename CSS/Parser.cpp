@@ -1478,4 +1478,166 @@ std::vector<Rule> CSSParser::parse(std::string_view source) {
     return rules;
 }
 
+// One @font-face descriptor value: dequoted and trimmed, or empty.
+std::string fontFaceString(const Declaration& decl) {
+    std::string_view value = trim(decl.value);
+    if (value.size() >= 2 &&
+        ((value.front() == '"' && value.back() == '"') ||
+         (value.front() == '\'' && value.back() == '\''))) {
+        value = trim(value.substr(1, value.size() - 2));
+    }
+    return std::string(value);
+}
+
+// Splits a `src` value on top-level commas, so commas that belong to a
+// url() or format() argument do not cut a candidate in two.
+std::vector<std::string_view> splitFontSources(std::string_view value) {
+    std::vector<std::string_view> out;
+    std::size_t start = 0;
+    int depth = 0;
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        const char c = value[i];
+        if (c == '(') {
+            ++depth;
+        } else if (c == ')') {
+            --depth;
+        } else if (c == ',' && depth == 0) {
+            out.push_back(value.substr(start, i - start));
+            start = i + 1;
+        }
+    }
+    out.push_back(value.substr(start));
+    return out;
+}
+
+// Reads the target of a leading `url(...)` in one `src` candidate. Anything
+// trailing (a `format(...)` hint) is ignored; `url ()` with a space is
+// accepted the way the url tokenizer does. False when there is no usable
+// target, which also drops `local(...)` candidates.
+bool readFontUrl(std::string_view candidate, std::string_view& out) {
+    candidate = trim(candidate);
+    if (candidate.size() <= 5 || lower(candidate.substr(0, 4)) != "url(") {
+        return false;
+    }
+    const std::size_t close = candidate.find(')', 4);
+    if (close == std::string_view::npos || close <= 4) {
+        return false;
+    }
+    out = trim(candidate.substr(4, close - 4));
+    if (out.size() >= 2 && (out.front() == '"' || out.front() == '\'') &&
+        out.back() == out.front()) {
+        out = trim(out.substr(1, out.size() - 2));
+    }
+    return !out.empty();
+}
+
+std::vector<FontFaceRule> CSSParser::parseFontFaces(std::string_view source,
+                                                    std::string_view baseHref) {
+    std::vector<FontFaceRule> faces;
+    std::size_t i = 0;
+    while (i < source.size()) {
+        if (isSpace(source[i])) {
+            ++i;
+            continue;
+        }
+        if (source[i] == '/' && i + 1 < source.size() && source[i + 1] == '*') {
+            i = skipComment(source, i);
+            continue;
+        }
+        if (source[i] != '@') {
+            // Skip anything that is not an at-rule: a rule body or stray text.
+            if (source[i] == '{') {
+                int depth = 1;
+                ++i;
+                while (i < source.size() && depth > 0) {
+                    if (source[i] == '{') {
+                        ++depth;
+                    } else if (source[i] == '}') {
+                        --depth;
+                    }
+                    ++i;
+                }
+            } else {
+                ++i;
+            }
+            continue;
+        }
+        ++i;
+        const std::size_t nameStart = i;
+        while (i < source.size() && isIdentChar(source[i])) {
+            ++i;
+        }
+        const std::string_view name = source.substr(nameStart, i - nameStart);
+        while (i < source.size() && source[i] != '{' && source[i] != ';') {
+            ++i;
+        }
+        if (name != "font-face" || i >= source.size() || source[i] != '{') {
+            if (i < source.size() && source[i] == ';') {
+                ++i;
+            } else if (i < source.size() && source[i] == '{') {
+                int depth = 1;
+                ++i;
+                while (i < source.size() && depth > 0) {
+                    if (source[i] == '{') {
+                        ++depth;
+                    } else if (source[i] == '}') {
+                        --depth;
+                    }
+                    ++i;
+                }
+            }
+            continue;
+        }
+        ++i;  // '{'
+        const std::size_t bodyStart = i;
+        int depth = 1;
+        while (i < source.size() && depth > 0) {
+            if (source[i] == '{') {
+                ++depth;
+            } else if (source[i] == '}') {
+                --depth;
+            }
+            ++i;
+        }
+        const std::size_t bodyEnd = i > bodyStart && source[i - 1] == '}' ? i - 1 : i;
+        FontFaceRule face;
+        for (const Declaration& decl :
+             parseDeclarations(source.substr(bodyStart, bodyEnd - bodyStart))) {
+            if (decl.property == "font-family") {
+                face.family = fontFaceString(decl);
+            } else if (decl.property == "src") {
+                // Candidate sources in order: url() targets load, local()
+                // names need system matching and are skipped. A trailing
+                // format(...) hint is ignored, the target decides.
+                for (std::string_view part : splitFontSources(decl.value)) {
+                    std::string_view target;
+                    if (readFontUrl(part, target)) {
+                        face.src.push_back(joinHref(baseHref, target));
+                    }
+                }
+            } else if (decl.property == "font-weight") {
+                const std::string text = fontFaceString(decl);
+                if (text == "bold") {
+                    face.weight = 700;
+                } else if (text == "normal") {
+                    face.weight = 400;
+                } else {
+                    char* stop = nullptr;
+                    const long weight = std::strtol(text.c_str(), &stop, 10);
+                    face.weight = (stop && *stop == '\0' && weight >= 1 && weight <= 1000)
+                                      ? static_cast<int>(weight)
+                                      : 400;
+                }
+            } else if (decl.property == "font-style") {
+                const std::string text = fontFaceString(decl);
+                face.italic = text == "italic" || text == "oblique";
+            }
+        }
+        if (!face.family.empty() && !face.src.empty()) {
+            faces.push_back(std::move(face));
+        }
+    }
+    return faces;
+}
+
 }  // namespace sui

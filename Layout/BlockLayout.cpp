@@ -45,11 +45,13 @@ struct Metrics {
 
 Metrics metricsFor(const TextFont* font, const ComputedStyle& s) {
     Metrics m;
+    const sui::FontQuery query{s.fontFamily, s.fontWeight,
+                               s.fontStyle != ComputedStyle::FontNormal};
     if (font && font->hasFont() && s.fontSize > 0.0f) {
-        const TextFont::VerticalMetrics vm = font->verticalMetrics(s.fontSize);
+        const TextFont::VerticalMetrics vm = font->verticalMetrics(query, s.fontSize);
         m.ascent = vm.ascent;
         m.lineHeight = std::max(s.fontSize * s.lineHeight, vm.height);
-        m.spaceWidth = font->measureText(" ", s.fontSize, s.fontKerning, s.fontStretch,
+        m.spaceWidth = font->measureText(query, " ", s.fontSize, s.fontKerning, s.fontStretch,
                                 s.fontVariant == ComputedStyle::FontVariant::SmallCaps);
     } else {
         m.ascent = s.fontSize * 0.8f;
@@ -145,6 +147,8 @@ float textWidth(const TextFont* font, const ComputedStyle& s, std::string_view t
     if (t.empty()) {
         return 0.0f;
     }
+    const sui::FontQuery query{s.fontFamily, s.fontWeight,
+                               s.fontStyle != ComputedStyle::FontNormal};
     std::string tt = transformText(s, t);
     float w = 0.0f;
     std::size_t glyphCount = 0;
@@ -154,10 +158,10 @@ float textWidth(const TextFont* font, const ComputedStyle& s, std::string_view t
         }
     }
     if (font && font->hasFont() && s.fontSize > 0.0f) {
-        w = font->measureText(tt, s.fontSize, s.fontKerning, s.fontStretch,
+        w = font->measureText(query, tt, s.fontSize, s.fontKerning, s.fontStretch,
                      s.fontVariant == ComputedStyle::FontVariant::SmallCaps);
         // Letter-spacing applies per rendered glyph: ligatures render fewer.
-        glyphCount = font->glyphCount(tt, s.fontKerning, s.fontStretch);
+        glyphCount = font->glyphCount(query, tt, s.fontKerning, s.fontStretch);
     } else {
         w = static_cast<float>(glyphCount) * s.fontSize * 0.5f;
     }
@@ -353,7 +357,9 @@ public:
         // characters wide by `rows` lines tall, measured in its own font.
         const int cols = intAttribute(el, "cols", 20);
         const int rows = intAttribute(el, "rows", 2);
-        const float advance = (font_ && font_->hasFont()) ? font_->measureText("0", s.fontSize, s.fontKerning, s.fontStretch,
+        const sui::FontQuery query{s.fontFamily, s.fontWeight,
+                                   s.fontStyle != ComputedStyle::FontNormal};
+        const float advance = (font_ && font_->hasFont()) ? font_->measureText(query, "0", s.fontSize, s.fontKerning, s.fontStretch,
                          s.fontVariant == ComputedStyle::FontVariant::SmallCaps)
                                                           : s.fontSize * 0.5f;
         const Metrics m = metricsFor(font_, s);
@@ -369,13 +375,15 @@ public:
         if (el.tag() != "select") {
             return;
         }
+        const sui::FontQuery query{s.fontFamily, s.fontWeight,
+                                   s.fontStyle != ComputedStyle::FontNormal};
         // A closed combo sizes like a replaced element: wide enough for the
         // longest option plus the drop arrow, one line tall.
         if (s.width.isAuto()) {
             float text = 0.0f;
             if (font_ && font_->hasFont()) {
                 for (Element* option : el.selectOptions()) {
-                    text = std::max(text, font_->measureText(option->optionLabel(), s.fontSize, s.fontKerning, s.fontStretch,
+                    text = std::max(text, font_->measureText(query, option->optionLabel(), s.fontSize, s.fontKerning, s.fontStretch,
                          s.fontVariant == ComputedStyle::FontVariant::SmallCaps));
                 }
             } else {
@@ -3043,7 +3051,7 @@ private:
                  originY_ + cursorY_ + verticalAlignShift(style_, &metrics_, &metrics_), ellWidth,
                  metrics_.lineHeight, metrics_.ascent, style_.fontSize, style_.color.r,
                  style_.color.g, style_.color.b, style_.color.a, style_.fontBold,
-                 style_.fontStyle != ComputedStyle::FontNormal});
+                 style_.fontStyle != ComputedStyle::FontNormal, style_.fontFamily});
             penX_ = endX - originX_ - lineIndent_ + ellWidth;
         }
 
@@ -3164,7 +3172,7 @@ private:
                                  metrics_.spaceWidth, metrics_.lineHeight,
                                  metrics_.ascent + ascentDelta, s.fontSize, s.color.r, s.color.g,
                                  s.color.b, s.color.a, s.fontBold,
-                                 s.fontStyle != ComputedStyle::FontNormal});
+                                 s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
             penX_ += metrics_.spaceWidth;
             lineHasContent_ = true;
             widest_ = std::max(widest_, penX_);
@@ -3242,7 +3250,7 @@ private:
                      originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), pieceWidth,
                      metrics_.lineHeight, metrics_.ascent + ascentDelta, s.fontSize, s.color.r,
                      s.color.g, s.color.b, s.color.a, s.fontBold,
-                     s.fontStyle != ComputedStyle::FontNormal});
+                     s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
                 penX_ += space + pieceWidth;
                 lineHasContent_ = true;
                 widest_ = std::max(widest_, penX_);
@@ -3337,7 +3345,7 @@ private:
                                              originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), rWidth,
                                              metrics_.lineHeight, metrics_.ascent + ascentDelta,
                                              s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
-                                             s.fontBold, s.fontStyle != ComputedStyle::FontNormal});
+                                             s.fontBold, s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
                         penX_ += space + rWidth;
                         lineHasContent_ = true;
                         widest_ = std::max(widest_, penX_);
@@ -3351,7 +3359,7 @@ private:
                                          originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), ellWidth,
                                          metrics_.lineHeight, metrics_.ascent + ascentDelta,
                                          s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
-                                         s.fontBold, s.fontStyle != ComputedStyle::FontNormal});
+                                         s.fontBold, s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
                     penX_ += space + ellWidth;
                     lineHasContent_ = true;
                     widest_ = std::max(widest_, penX_);
@@ -3386,7 +3394,7 @@ private:
                                      originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), ellWidth,
                                      metrics_.lineHeight, metrics_.ascent + ascentDelta,
                                      s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
-                                     s.fontBold, s.fontStyle != ComputedStyle::FontNormal});
+                                     s.fontBold, s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
                 penX_ = ellWidth;
                 lineHasContent_ = true;
                 widest_ = std::max(widest_, penX_);
@@ -3399,7 +3407,7 @@ private:
                                  originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), wWidth,
                                  metrics_.lineHeight, metrics_.ascent + ascentDelta,
                                  s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
-                                 s.fontBold, s.fontStyle != ComputedStyle::FontNormal});
+                                 s.fontBold, s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
             penX_ += space + wWidth;
             lineHasContent_ = true;
             widest_ = std::max(widest_, penX_);

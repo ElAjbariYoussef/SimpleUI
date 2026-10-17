@@ -37,6 +37,7 @@ add_library(sui STATIC
     CSS/PseudoElements.cpp
     Layout/BlockLayout.cpp
     Core/Application/Background.cpp
+    Core/Application/FontFaces.cpp
     Rendering/ImageCache.cpp
     Rendering/ImageBlur.cpp
     Rendering/ClipMask.cpp

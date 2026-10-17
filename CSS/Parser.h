@@ -129,6 +129,17 @@ struct KeyframeBlock {
     std::vector<Keyframe> frames;
 };
 
+// One `@font-face` block: the family it defines, candidate sources in order,
+// and the weight/style it claims. `src` holds raw url() targets; the
+// application resolves and loads the first one that decodes. `local()`
+// candidates need system font matching and are skipped.
+struct FontFaceRule {
+    std::string family;
+    std::vector<std::string> src;
+    int weight = 400;
+    bool italic = false;
+};
+
 class CSSParser {
 public:
     // Parses CSS source into rules, skipping comments and at-rules.
@@ -156,6 +167,13 @@ public:
 
     // Parses a single selector (no comma list, no declarations).
     static SimpleSelector parseSelector(std::string_view source);
+
+    // Parses every top-level `@font-face` block in a stylesheet. Blocks
+    // missing a family or a usable url() source are dropped, as a browser
+    // would. url() targets resolve against `baseHref` the way @import hrefs
+    // do; absolute and scheme-qualified targets pass through.
+    static std::vector<FontFaceRule> parseFontFaces(std::string_view source,
+                                                    std::string_view baseHref = {});
 };
 
 // Parses an `@media` query list: alternatives separated by commas, each an

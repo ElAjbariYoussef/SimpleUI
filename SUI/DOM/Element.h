@@ -246,10 +246,14 @@ public:
         float baseline = 0.0f;
         float fontSize = 0.0f;
         std::uint8_t r = 255, g = 255, b = 255, a = 255;
-        // Synthetic emphasis: there is only one font face loaded, so bold is a
-        // one-pixel smear and italic is a shear applied while the glyph rasterises.
+        // Synthetic emphasis: bold is a one-pixel smear and italic is a shear
+        // applied while the glyph rasterises, on top of whatever face the
+        // family resolved to.
         bool bold = false;
         bool italic = false;
+        // The first `font-family` in effect where the run was laid out, so the
+        // painter rasters with the face it measured with.
+        std::string fontFamily;
     };
     const std::vector<TextRun>& textRuns() const noexcept { return textRuns_; }
     std::vector<TextRun>& textRuns() noexcept { return textRuns_; }

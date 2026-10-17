@@ -42,11 +42,14 @@ bool styleTag(std::string_view tag) {
 
 }  // namespace
 
-SvgTextStyle svgTextStyle(const Element& node, float cssFontSize, float scaleX) {
+SvgTextStyle svgTextStyle(const Element& node, float cssFontSize, std::string_view cssFamily,
+                          float scaleX) {
     SvgTextStyle style;
     style.pxSize = cssFontSize;
+    style.family = std::string(cssFamily);
     bool fillSeen = false;
     bool sizeSeen = false;
+    bool familySeen = false;
     for (const Element* at = &node; at; at = at->parent()) {
         const std::string_view tag = at->tag();
         if (!styleTag(tag)) {
@@ -79,7 +82,16 @@ SvgTextStyle svgTextStyle(const Element& node, float cssFontSize, float scaleX) 
                 sizeSeen = true;
             }
         }
-        if (fillSeen && sizeSeen) {
+        if (!familySeen) {
+            const std::string_view raw = at->attribute("font-family");
+            const std::size_t first = raw.find_first_not_of(" \t\n\r\f\"'");
+            if (first != std::string_view::npos) {
+                const std::size_t last = raw.find_last_not_of(" \t\n\r\f\"'");
+                style.family = std::string(raw.substr(first, last - first + 1));
+                familySeen = true;
+            }
+        }
+        if (fillSeen && sizeSeen && familySeen) {
             break;
         }
     }
@@ -91,8 +103,8 @@ SvgTextStyle svgTextStyle(const Element& node, float cssFontSize, float scaleX) 
 }
 
 std::vector<SvgTextChunk> collectSvgTextChunks(const Element& text, float cssFontSize,
-                                               float scaleX, float scaleY, float baseW,
-                                               float baseH) {
+                                               std::string_view cssFamily, float scaleX,
+                                               float scaleY, float baseW, float baseH) {
     std::vector<SvgTextChunk> chunks;
     // Joint whitespace collapsing: trailing and leading spaces meeting at a
     // chunk boundary become exactly one (or none at the string ends), the way
@@ -127,7 +139,7 @@ std::vector<SvgTextChunk> collectSvgTextChunks(const Element& text, float cssFon
             chunk.y = currentY;
             chunk.dx = currentDx;
             chunk.dy = currentDy;
-            chunk.style = svgTextStyle(*currentNode, cssFontSize, scaleX);
+            chunk.style = svgTextStyle(*currentNode, cssFontSize, cssFamily, scaleX);
             chunks.push_back(std::move(chunk));
             current.clear();
         }

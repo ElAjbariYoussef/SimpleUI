@@ -15,17 +15,20 @@
 
 namespace sui {
 
-// Fill and size a text chunk paints with: the nearest authored `fill` (with
-// `none` stopping the search and garbage continuing it, defaulting to black)
-// and `font-size` (nearest authored wins, falling back to the CSS size) on
-// the way up through tspan, text, g, and svg.
+// Fill, size, and family a text chunk paints with: the nearest authored
+// `fill` (with `none` stopping the search and garbage continuing it,
+// defaulting to black), `font-size` (nearest authored wins), and `font-family`
+// (nearest authored wins), each falling back to the CSS value, on the way up
+// through tspan, text, g, and svg.
 struct SvgTextStyle {
     bool hasFill = false;
     Color fill{0, 0, 0, 255};
     float pxSize = 0.0f;
+    std::string family;
 };
 
-SvgTextStyle svgTextStyle(const Element& node, float cssFontSize, float scaleX);
+SvgTextStyle svgTextStyle(const Element& node, float cssFontSize,
+                          std::string_view cssFamily, float scaleX);
 
 // One paintable run: collapsed text, the node styling it, and an optional
 // absolute start plus relative shift, all in pixels. A chunk inside a
@@ -49,8 +52,8 @@ struct SvgTextChunk {
 // collapses exactly as if the whole content were one string, so markup
 // indentation between tspans behaves like it does without them.
 std::vector<SvgTextChunk> collectSvgTextChunks(const Element& text, float cssFontSize,
-                                               float scaleX, float scaleY, float baseW,
-                                               float baseH);
+                                               std::string_view cssFamily, float scaleX,
+                                               float scaleY, float baseW, float baseH);
 
 // Arc-length parameterization of flattened loops for text on a path: total
 // length plus the point and tangent at a distance, looping closed shapes

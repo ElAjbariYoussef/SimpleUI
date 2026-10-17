@@ -119,29 +119,134 @@ float emScale(const stbtt_fontinfo* info, float size) {
 
 TextFont::TextFont() = default;
 
-TextFont::~TextFont() {
-    clearHarfBuzz();
-    if (font_) {
-        delete static_cast<stbtt_fontinfo*>(font_);
-        font_ = nullptr;
-    }
-    delete[] fontData_;
-    fontData_ = nullptr;
-    fontDataSize_ = 0;
+TextFont::~TextFont() = default;
+
+TextFont::Face::~Face() {
+    clearFaceHarfBuzz(*this);
+    delete static_cast<stbtt_fontinfo*>(info);
+    delete[] data;
 }
 
-void TextFont::clearHarfBuzz() {
-    if (hbFont_) {
-        hb_font_destroy(static_cast<hb_font_t*>(hbFont_));
-        hbFont_ = nullptr;
+bool TextFont::sameFamily(std::string_view a, std::string_view b) noexcept {
+    if (a.size() != b.size()) {
+        return false;
     }
-    if (hbFace_) {
-        hb_face_destroy(static_cast<hb_face_t*>(hbFace_));
-        hbFace_ = nullptr;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        unsigned char x = static_cast<unsigned char>(a[i]);
+        unsigned char y = static_cast<unsigned char>(b[i]);
+        if (x >= 'A' && x <= 'Z') {
+            x = static_cast<unsigned char>(x + ('a' - 'A'));
+        }
+        if (y >= 'A' && y <= 'Z') {
+            y = static_cast<unsigned char>(y + ('a' - 'A'));
+        }
+        if (x != y) {
+            return false;
+        }
     }
-    if (hbBlob_) {
-        hb_blob_destroy(static_cast<hb_blob_t*>(hbBlob_));
-        hbBlob_ = nullptr;
+    return true;
+}
+
+namespace {
+
+// The CSS fallback order for weight, as a distance: exact matches are zero,
+// and the side the spec searches first outranks the other. Below 400 that is
+// lighter faces; above 500, heavier; in the 400..500 window it is faces up to
+// 500 first, then lighter, then heavier than 500.
+int weightDistance(int wanted, int have) {
+    if (have == wanted) {
+        return 0;
+    }
+    if (wanted > 500) {
+        return have > wanted ? have - wanted : 1000 + (wanted - have);
+    }
+    if (wanted < 400) {
+        return have < wanted ? wanted - have : 1000 + (have - wanted);
+    }
+    if (have > wanted && have <= 500) {
+        return have - wanted;
+    }
+    return have < wanted ? 1000 + (wanted - have) : 2000 + (have - wanted);
+}
+
+}  // namespace
+
+const TextFont::Face& TextFont::faceFor(const FontQuery& query) const noexcept {
+    // Style is one flag here (normal or italic), so it is only exact and
+    // fallback; weight follows the CSS order through weightDistance. A tie
+    // keeps the face loaded first.
+    const Face* best = nullptr;
+    int bestStyle = 0;
+    int bestWeight = 0;
+    for (const auto& face : faces_) {
+        if (!face || !sameFamily(face->family, query.family)) {
+            continue;
+        }
+        const int style = face->italic == query.italic ? 0 : 1;
+        const int weight = weightDistance(query.weight, face->weight);
+        if (best == nullptr || style < bestStyle ||
+            (style == bestStyle && weight < bestWeight)) {
+            best = face.get();
+            bestStyle = style;
+            bestWeight = weight;
+        }
+    }
+    if (best != nullptr) {
+        return *best;
+    }
+    static const Face empty;
+    if (faces_.empty() || !faces_[0]) {
+        return empty;
+    }
+    return *faces_[0];
+}
+
+bool TextFont::hasFamily(std::string_view name) const noexcept {
+    for (const auto& face : faces_) {
+        if (face && sameFamily(face->family, name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool TextFont::hasFace(std::string_view family, int weight, bool italic) const noexcept {
+    for (const auto& face : faces_) {
+        if (face && face->weight == weight && face->italic == italic &&
+            sameFamily(face->family, family)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string TextFont::matchedFamily(const FontQuery& query) const {
+    return matchFace(query).family;
+}
+
+TextFont::FaceMatch TextFont::matchFace(const FontQuery& query) const {
+    const Face& face = faceFor(query);
+    FaceMatch out;
+    out.weight = face.weight;
+    out.italic = face.italic;
+    if (!face.family.empty() && sameFamily(face.family, query.family)) {
+        out.family = face.family;
+    }
+    return out;
+}
+
+void TextFont::clearFaceHarfBuzz(Face& face) {
+    if (face.hbFont) {
+        hb_font_destroy(static_cast<hb_font_t*>(face.hbFont));
+        face.hbFont = nullptr;
+    }
+    if (face.hbFace) {
+        hb_face_destroy(static_cast<hb_face_t*>(face.hbFace));
+        face.hbFace = nullptr;
+    }
+    if (face.hbBlob) {
+        hb_blob_destroy(static_cast<hb_blob_t*>(face.hbBlob));
+        face.hbBlob = nullptr;
     }
 }
 
@@ -149,20 +254,20 @@ void TextFont::clearHarfBuzz() {
 // our copy (kept alive as long), the face parses its OpenType tables, and the
 // OpenType metric funcs answer from those tables, so shaping needs no
 // FreeType and can never disagree with stb about a glyph id.
-void TextFont::initHarfBuzz() {
-    clearHarfBuzz();
-    if (!fontData_ || fontDataSize_ == 0) {
+void TextFont::initFaceHarfBuzz(Face& face) {
+    clearFaceHarfBuzz(face);
+    if (!face.data || face.dataSize == 0) {
         return;
     }
     hb_blob_t* blob = hb_blob_create(
-        reinterpret_cast<const char*>(fontData_), static_cast<unsigned int>(fontDataSize_),
+        reinterpret_cast<const char*>(face.data), static_cast<unsigned int>(face.dataSize),
         HB_MEMORY_MODE_READONLY, nullptr, nullptr);
-    hb_face_t* face = hb_face_create(blob, 0);
-    hb_font_t* font = hb_font_create(face);
+    hb_face_t* hbface = hb_face_create(blob, 0);
+    hb_font_t* font = hb_font_create(hbface);
     hb_ot_font_set_funcs(font);
-    hbBlob_ = blob;
-    hbFace_ = face;
-    hbFont_ = font;
+    face.hbBlob = blob;
+    face.hbFace = hbface;
+    face.hbFont = font;
 }
 
 bool TextFont::loadFromFile(const std::string& path) {
@@ -181,6 +286,45 @@ bool TextFont::loadFromFile(const std::string& path) {
     return loadFromMemory(data.data(), static_cast<int>(size));
 }
 
+bool TextFont::addFace(std::string family, const std::string& path, int weight, bool italic) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in) {
+        return false;
+    }
+    const std::size_t size = static_cast<std::size_t>(in.tellg());
+    in.seekg(0);
+    std::vector<unsigned char> data(size);
+    if (!in.read(reinterpret_cast<char*>(data.data()),
+                 static_cast<std::streamsize>(size))) {
+        return false;
+    }
+    return addFaceFromMemory(std::move(family), data.data(), static_cast<int>(size), weight,
+                             italic);
+}
+
+bool TextFont::addFaceFromMemory(std::string family, const unsigned char* data, int size,
+                                 int weight, bool italic) {
+    if (!data || size <= 0) {
+        return false;
+    }
+    auto copy = std::make_unique<unsigned char[]>(static_cast<std::size_t>(size));
+    std::memcpy(copy.get(), data, static_cast<std::size_t>(size));
+    auto info = std::make_unique<stbtt_fontinfo>();
+    if (!stbtt_InitFont(info.get(), copy.get(), 0)) {
+        return false;
+    }
+    auto face = std::make_unique<Face>();
+    face->family = std::move(family);
+    face->weight = weight;
+    face->italic = italic;
+    face->info = info.release();
+    face->data = copy.release();
+    face->dataSize = static_cast<std::size_t>(size);
+    initFaceHarfBuzz(*face);
+    faces_.push_back(std::move(face));
+    return true;
+}
+
 bool TextFont::loadFromMemory(const unsigned char* data, int size) {
     if (!data || size <= 0) {
         return false;
@@ -195,30 +339,36 @@ bool TextFont::loadFromMemory(const unsigned char* data, int size) {
         return false;
     }
 
-    delete static_cast<stbtt_fontinfo*>(font_);
-    delete[] fontData_;
-    font_ = info.release();
-    fontData_ = copy.release();
-    fontDataSize_ = static_cast<std::size_t>(size);
-    cache_.clear();
-    initHarfBuzz();
+    if (faces_.empty() || !faces_[0]) {
+        faces_.push_back(std::make_unique<Face>());
+    }
+    Face& face = *faces_[0];
+    delete static_cast<stbtt_fontinfo*>(face.info);
+    delete[] face.data;
+    face.info = info.release();
+    face.data = copy.release();
+    face.dataSize = static_cast<std::size_t>(size);
+    face.cache.clear();
+    initFaceHarfBuzz(face);
     return true;
 }
 
-GlyphMetrics TextFont::metrics(unsigned int codepoint, float size) const {
+GlyphMetrics TextFont::metrics(FontQuery query, unsigned int codepoint, float size) const {
     GlyphMetrics gm;
-    if (!font_ || size <= 0.0f) {
+    const Face& face = faceFor(query);
+    auto* faceInfo = static_cast<stbtt_fontinfo*>(face.info);
+    if (!faceInfo || size <= 0.0f) {
         return gm;
     }
     const int sizePx = pxFromFloat(size);
     (void)sizePx;
     const FontSizeKey key{codepoint, pxFromFloat(size)};
-    auto it = cache_.find(key);
-    if (it != cache_.end()) {
+    auto it = face.cache.find(key);
+    if (it != face.cache.end()) {
         return it->second;
     }
 
-    auto* info = static_cast<stbtt_fontinfo*>(font_);
+    auto* info = faceInfo;
     int advance = 0;
     int lsb = 0;
     stbtt_GetCodepointHMetrics(info, static_cast<int>(codepoint), &advance, &lsb);
@@ -235,18 +385,20 @@ GlyphMetrics TextFont::metrics(unsigned int codepoint, float size) const {
     gm.y0 = y0;
     gm.x1 = x1;
     gm.y1 = y1;
-    cache_.emplace(key, gm);
+    face.cache.emplace(key, gm);
     return gm;
 }
 
-TextFont::VerticalMetrics TextFont::verticalMetrics(float size) const {
+TextFont::VerticalMetrics TextFont::verticalMetrics(FontQuery query, float size) const {
     VerticalMetrics vm;
-    if (!font_ || size <= 0.0f) {
+    const Face& face = faceFor(query);
+    auto* faceInfo = static_cast<stbtt_fontinfo*>(face.info);
+    if (!faceInfo || size <= 0.0f) {
         return vm;
     }
-    const float scale = emScale(static_cast<stbtt_fontinfo*>(font_), size);
+    const float scale = emScale(faceInfo, size);
     int ascent = 0, descent = 0, lineGap = 0;
-    stbtt_GetFontVMetrics(static_cast<stbtt_fontinfo*>(font_), &ascent, &descent, &lineGap);
+    stbtt_GetFontVMetrics(faceInfo, &ascent, &descent, &lineGap);
     vm.ascent = static_cast<float>(ascent) * scale;
     vm.descent = static_cast<float>(-descent) * scale;
     vm.lineGap = static_cast<float>(lineGap) * scale;
@@ -254,14 +406,16 @@ TextFont::VerticalMetrics TextFont::verticalMetrics(float size) const {
     return vm;
 }
 
-float TextFont::measureText(std::string_view text, float size, bool kern,
+float TextFont::measureText(FontQuery query, std::string_view text, float size, bool kern,
                           float stretch, bool smallCaps) const {
-    if (!font_ || size <= 0.0f) {
+    const Face& face = faceFor(query);
+    auto* faceInfo = static_cast<stbtt_fontinfo*>(face.info);
+    if (!faceInfo || size <= 0.0f) {
         return 0.0f;
     }
-    if (hbFont_) {
+    if (face.hbFont) {
         float total = 0.0f;
-        for (const ShapedGlyph& glyph : shapeText(text, size, kern, stretch, smallCaps)) {
+        for (const ShapedGlyph& glyph : shapeText(query, text, size, kern, stretch, smallCaps)) {
             total += glyph.advance;
         }
         return total;
@@ -280,7 +434,7 @@ float TextFont::measureText(std::string_view text, float size, bool kern,
                 cap = kSmallCapScale;
             }
         }
-        total += metrics(shaped, size).advance * cap;
+        total += metrics(query, shaped, size).advance * cap;
     }
     return total;
 }
@@ -294,17 +448,18 @@ bool TextFont::needsShaping(std::string_view text) {
     return false;
 }
 
-bool TextFont::glyphBitmapBox(unsigned int glyphId, float size, float stretch, int& x0,
+bool TextFont::glyphBitmapBox(FontQuery query, unsigned int glyphId, float size, float stretch, int& x0,
                               int& y0, int& width, int& height,
                               bool smallCaps) const {
     x0 = 0;
     y0 = 0;
     width = 0;
     height = 0;
-    if (!font_ || size <= 0.0f) {
+    const Face& face = faceFor(query);
+    auto* info = static_cast<stbtt_fontinfo*>(face.info);
+    if (!info || size <= 0.0f) {
         return false;
     }
-    auto* info = static_cast<stbtt_fontinfo*>(font_);
     const float cap = smallCaps ? kSmallCapScale : 1.0f;
     const float scale = emScale(info, size) * cap;
     int x1 = 0, y1 = 0;
@@ -315,10 +470,10 @@ bool TextFont::glyphBitmapBox(unsigned int glyphId, float size, float stretch, i
     return width > 0 && height > 0;
 }
 
-std::size_t TextFont::glyphCount(std::string_view text, bool kern,
+std::size_t TextFont::glyphCount(FontQuery query, std::string_view text, bool kern,
                               float stretch) const {
-    if (hbFont_) {
-        return shapeText(text, 16.0f, kern, stretch).size();
+    if (faceFor(query).hbFont) {
+        return shapeText(query, text, 16.0f, kern, stretch).size();
     }
     std::size_t count = 0;
     for (unsigned char c : text) {
@@ -329,11 +484,13 @@ std::size_t TextFont::glyphCount(std::string_view text, bool kern,
     return count;
 }
 
-std::vector<ShapedGlyph> TextFont::shapeText(std::string_view text, float size,
+std::vector<ShapedGlyph> TextFont::shapeText(FontQuery query, std::string_view text, float size,
                                               bool kern, float stretch,
                                               bool smallCaps) const {
     std::vector<ShapedGlyph> out;
-    if (!hbFont_ || text.empty() || size <= 0.0f) {
+    const Face& face = faceFor(query);
+    auto* faceHb = static_cast<hb_font_t*>(face.hbFont);
+    if (!faceHb || text.empty() || size <= 0.0f) {
         return out;
     }
     // Small caps shape the uppercase: every Latin lowercase becomes its capital
@@ -364,7 +521,7 @@ std::vector<ShapedGlyph> TextFont::shapeText(std::string_view text, float size,
         }
         text = shaped;
     }
-    hb_font_t* font = static_cast<hb_font_t*>(hbFont_);
+    hb_font_t* font = faceHb;
     // 26.6 fixed point: advances come back in px after one divide.
     // `font-stretch` is a horizontal scale of the font itself, so advances and
     // offsets widen or narrow with the glyphs rather than just spacing them.
@@ -403,16 +560,22 @@ std::vector<ShapedGlyph> TextFont::shapeText(std::string_view text, float size,
     return out;
 }
 
-SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
+SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, FontQuery query, std::string_view text,
                                   float size, SDL_Color color, bool bold,
                                   bool italic, bool kern, float stretch,
                                   bool smallCaps) const {
-    if (!font_ || !renderer || text.empty() || size <= 0.0f) {
+    const Face& face = faceFor(query);
+    auto* info = static_cast<stbtt_fontinfo*>(face.info);
+    if (!info || !renderer || text.empty() || size <= 0.0f) {
         return nullptr;
     }
-    auto* info = static_cast<stbtt_fontinfo*>(font_);
+    // Synthetic styling stands in for faces a family does not carry, so it
+    // only applies when the matched face lacks the weight (600 and up reads
+    // bold) or the slant the request asked for.
+    bold = bold && face.weight < 600;
+    italic = italic && !face.italic;
     const float scale = emScale(info, size);
-    const VerticalMetrics vm = verticalMetrics(size);
+    const VerticalMetrics vm = verticalMetrics(query, size);
     const int ascentPx = static_cast<int>(std::ceil(vm.ascent));
 
     // A synthetic italic is a shear about the baseline: a glyph pixel `d` above the
@@ -426,7 +589,7 @@ SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
 
     const int h = static_cast<int>(std::ceil(vm.height));
     const int w =
-        static_cast<int>(std::ceil(measureText(text, size, kern, stretch, smallCaps))) +
+        static_cast<int>(std::ceil(measureText(query, text, size, kern, stretch, smallCaps))) +
         italicLeft +
                   italicRight + boldRight;
     if (w <= 0 || h <= 0) {
@@ -458,9 +621,9 @@ SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
     };
 
     float penX = 0.0f;
-    const bool shaped = hbFont_ != nullptr;
+    const bool shaped = face.hbFont != nullptr;
     const std::vector<ShapedGlyph> glyphs =
-        shaped ? shapeText(text, size, kern, stretch, smallCaps) : std::vector<ShapedGlyph>{};
+        shaped ? shapeText(query, text, size, kern, stretch, smallCaps) : std::vector<ShapedGlyph>{};
     if (shaped && !glyphs.empty()) {
         // Shaped blit: glyph ids with advances and mark offsets from the
         // shaper, rasterized by stb from the same font bytes. stb takes the
@@ -469,7 +632,7 @@ SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
         const float scaleX = scale * stretch;
         for (const ShapedGlyph& glyph : glyphs) {
             int x0 = 0, y0 = 0, gw = 0, gh = 0;
-            if (glyphBitmapBox(glyph.glyph, size, stretch, x0, y0, gw, gh, glyph.small)) {
+            if (glyphBitmapBox(query, glyph.glyph, size, stretch, x0, y0, gw, gh, glyph.small)) {
                 std::vector<unsigned char> bmp(static_cast<std::size_t>(gw) *
                                                static_cast<std::size_t>(gh));
                 // A small cap rasterizes at its shrunken scale, matching the box
@@ -514,7 +677,7 @@ SDL_Texture* TextFont::renderText(SDL_Renderer* renderer, std::string_view text,
                 cap = kSmallCapScale;
             }
         }
-        const GlyphMetrics gm = metrics(shaped, size);
+        const GlyphMetrics gm = metrics(query, shaped, size);
         // A substituted cap shrinks its box and raster to match the advance the
         // measurer handed back, the way the shaped path does.
         const int x0 = static_cast<int>(std::lround(gm.x0 * cap));

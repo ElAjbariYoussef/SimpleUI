@@ -1,6 +1,7 @@
 #include "Core/Application/Application.h"
 
 #include "Core/Application/Background.h"
+#include "Core/Application/FontFaces.h"
 #include "Core/Application/PaintOrder.h"
 
 #include "CSS/Parser.h"
@@ -474,7 +475,9 @@ void paintTextShadow(const ComputedStyle::TextShadow& shadow, const Element::Tex
         const float len = std::hypot(dx, dy);
         const float ux = len > 0.0f ? dx / len : 0.707f;
         const float uy = len > 0.0f ? dy / len : 0.707f;
-        SDL_Texture* texture = font.renderText(sdlRenderer, run.text, run.fontSize, tint,
+        SDL_Texture* texture = font.renderText(
+            sdlRenderer, sui::FontQuery{run.fontFamily, run.bold ? 700 : 400, run.italic},
+            run.text, run.fontSize, tint,
                                                run.bold, run.italic, kern, stretch, smallCaps);
         if (!texture) {
             continue;
@@ -989,8 +992,10 @@ void paintSelectPopup(Element& select, Renderer& renderer, SDL_Renderer* sdlRend
         const SDL_Color base =
             hot ? SDL_Color{255, 255, 255, 255}
                 : SDL_Color{style.color.r, style.color.g, style.color.b, style.color.a};
+        const sui::FontQuery rowQuery{style.fontFamily, style.fontWeight,
+                                             style.fontStyle != ComputedStyle::FontNormal};
         SDL_Texture* texture = font.renderText(
-            sdlRenderer, label, style.fontSize,
+            sdlRenderer, rowQuery, label, style.fontSize,
             SDL_Color{base.r, base.g, base.b,
                       static_cast<Uint8>(static_cast<float>(base.a) * opacity)},
             false, false, style.fontKerning);
@@ -1041,8 +1046,10 @@ void paintDatalistPopup(Element& input, const std::vector<Element*>& suggestions
             i == highlight
                 ? SDL_Color{255, 255, 255, 255}
                 : SDL_Color{style.color.r, style.color.g, style.color.b, style.color.a};
+        const sui::FontQuery rowQuery{style.fontFamily, style.fontWeight,
+                                             style.fontStyle != ComputedStyle::FontNormal};
         SDL_Texture* texture = font.renderText(
-            sdlRenderer, label, style.fontSize,
+            sdlRenderer, rowQuery, label, style.fontSize,
             SDL_Color{base.r, base.g, base.b,
                       static_cast<Uint8>(static_cast<float>(base.a) * opacity)},
             false, false, style.fontKerning);
@@ -1080,10 +1087,11 @@ bool caretVisible(std::uint64_t ticks, std::uint64_t blinkStart) {
 
 // Width of `text` at `fontSize`: whatever the loaded font measures, or the
 // layout fallback of half an em per glyph when no font is available.
-float fieldTextWidth(const TextFont* font, std::string_view text, float fontSize,
-                      bool kern = true, float stretch = 1.0f, bool smallCaps = false) {
+float fieldTextWidth(const TextFont* font, sui::FontQuery query, std::string_view text,
+                      float fontSize, bool kern = true, float stretch = 1.0f,
+                      bool smallCaps = false) {
     if (font && font->hasFont() && fontSize > 0.0f) {
-        return font->measureText(text, fontSize, kern, stretch, smallCaps);
+        return font->measureText(query, text, fontSize, kern, stretch, smallCaps);
     }
     std::size_t cps = 0;
     for (unsigned char c : text) {
@@ -1120,14 +1128,14 @@ std::size_t runMaskFactor(std::string_view runText, std::size_t wordGlyphs) {
 // Width of the first `bytes` bytes of a word's text run, with the field's
 // letter-spacing added per glyph. The run holds the glyphs exactly as the line
 // grid drew them, so measuring it matches the rendered caret column.
-float wordPrefixWidth(const TextFont* font, std::string_view runText, std::size_t bytes,
-                      float fontSize, float letterSpacing, bool kern = true,
-                      float stretch = 1.0f, bool smallCaps = false) {
+float wordPrefixWidth(const TextFont* font, sui::FontQuery query, std::string_view runText,
+                      std::size_t bytes, float fontSize, float letterSpacing,
+                      bool kern = true, float stretch = 1.0f, bool smallCaps = false) {
     if (bytes > runText.size()) {
         bytes = runText.size();
     }
     const std::string_view prefix = runText.substr(0, bytes);
-    float w = fieldTextWidth(font, prefix, fontSize, kern, stretch, smallCaps);
+    float w = fieldTextWidth(font, query, prefix, fontSize, kern, stretch, smallCaps);
     const std::size_t cps = glyphCount(prefix);
     if (letterSpacing != 0.0f && cps > 0) {
         w += letterSpacing * static_cast<float>(cps);
@@ -1242,8 +1250,9 @@ void caretGeometry(const Element& el, const std::string& value, std::size_t pos,
         }
     }
     const Element::TextRun& r = runs[run];
+    const sui::FontQuery runQuery{r.fontFamily, r.bold ? 700 : 400, r.italic};
     const float prefix =
-        wordPrefixWidth(font, r.text, runBytes, r.fontSize, ls, s.fontKerning,
+        wordPrefixWidth(font, runQuery, r.text, runBytes, r.fontSize, ls, s.fontKerning,
                         s.fontStretch,
                         s.fontVariant == ComputedStyle::FontVariant::SmallCaps);
     x = std::floor(r.x - tx + prefix);
@@ -1295,6 +1304,7 @@ std::size_t byteAt(const Element& el, const std::string& value, float screenX, f
     }
 
     const Element::TextRun& r = runs[word];
+    const sui::FontQuery wordQuery{r.fontFamily, r.bold ? 700 : 400, r.italic};
     const float localX = screenX - (r.x - tx);
     if (localX <= 0.0f) {
         return spans[word].first;
@@ -1307,7 +1317,7 @@ std::size_t byteAt(const Element& el, const std::string& value, float screenX, f
     float bestDist = std::fabs(localX);
     for (std::size_t b = 0; b <= r.text.size();) {
         const float w =
-            wordPrefixWidth(font, r.text, b, r.fontSize, ls, s.fontKerning,
+            wordPrefixWidth(font, wordQuery, r.text, b, r.fontSize, ls, s.fontKerning,
                             s.fontStretch,
                             s.fontVariant == ComputedStyle::FontVariant::SmallCaps);
         const float d = std::fabs(localX - w);
@@ -1362,7 +1372,9 @@ std::size_t moveCaretLine(const TextFont* font, const std::string& value, std::s
     }
     const float ls = resolvedLetterSpacing(s);
     const float column =
-        fieldTextWidth(font, columnText, s.fontSize, s.fontKerning, s.fontStretch,
+        fieldTextWidth(font, sui::FontQuery{s.fontFamily, s.fontWeight,
+                                                   s.fontStyle != ComputedStyle::FontNormal},
+                             columnText, s.fontSize, s.fontKerning, s.fontStretch,
                        s.fontVariant == ComputedStyle::FontVariant::SmallCaps) +
                          (ls != 0.0f ? ls * static_cast<float>(glyphCount(columnText)) : 0.0f);
     std::size_t best = 0;
@@ -1370,7 +1382,9 @@ std::size_t moveCaretLine(const TextFont* font, const std::string& value, std::s
     for (std::size_t b = 0; b <= target.size();) {
         const std::string_view prefix = target.substr(0, b);
         const float w =
-            fieldTextWidth(font, prefix, s.fontSize, s.fontKerning, s.fontStretch,
+            fieldTextWidth(font, sui::FontQuery{s.fontFamily, s.fontWeight,
+                                                       s.fontStyle != ComputedStyle::FontNormal},
+                                 prefix, s.fontSize, s.fontKerning, s.fontStretch,
                            s.fontVariant == ComputedStyle::FontVariant::SmallCaps) +
                         (ls != 0.0f ? ls * static_cast<float>(glyphCount(prefix)) : 0.0f);
         const float d = std::fabs(column - w);
@@ -1856,17 +1870,22 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
             // path (painted straight) stay out of scope, as does stroking
             // glyph outlines.
             const std::vector<SvgTextChunk> chunks = collectSvgTextChunks(
-                el, style.fontSize, frame.view.sx, frame.view.sy, frame.view.vbw,
-                frame.view.vbh);
+                el, style.fontSize, style.fontFamily, frame.view.sx, frame.view.sy,
+                frame.view.vbw, frame.view.vbh);
             if (chunks.empty() || !font.hasFont()) {
                 continue;
             }
             const bool small = style.fontVariant == ComputedStyle::FontVariant::SmallCaps;
-            const float ascent = font.verticalMetrics(chunks[0].style.pxSize).ascent;
+            const sui::FontQuery firstQuery{chunks[0].style.family, style.fontWeight,
+                                             style.fontStyle != ComputedStyle::FontNormal};
+            const float ascent = font.verticalMetrics(firstQuery, chunks[0].style.pxSize).ascent;
             float total = 0.0f;
             for (const SvgTextChunk& chunk : chunks) {
                 if (chunk.style.pxSize > 0.0f) {
-                    total += font.measureText(chunk.text, chunk.style.pxSize,
+                    const sui::FontQuery chunkQuery{
+                        chunk.style.family, style.fontWeight,
+                        style.fontStyle != ComputedStyle::FontNormal};
+                    total += font.measureText(chunkQuery, chunk.text, chunk.style.pxSize,
                                               style.fontKerning, style.fontStretch, small);
                 }
             }
@@ -1958,8 +1977,11 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                     PathState* pathState = pathFor(chunk.pathNode);
                     if (pathState && chunk.style.pxSize > 0.0f &&
                         chunk.style.hasFill) {
+                        const sui::FontQuery pathQuery{
+                            chunk.style.family, style.fontWeight,
+                            style.fontStyle != ComputedStyle::FontNormal};
                         const float chunkAscent =
-                            font.verticalMetrics(chunk.style.pxSize).ascent;
+                            font.verticalMetrics(pathQuery, chunk.style.pxSize).ascent;
                         const Color tinted = multiplyAlpha(
                             Color{chunk.style.fill.r, chunk.style.fill.g,
                                   chunk.style.fill.b, chunk.style.fill.a},
@@ -1978,12 +2000,12 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                             i = next;
                             if (glyph == " ") {
                                 pathState->at += font.measureText(
-                                    glyph, chunk.style.pxSize, style.fontKerning,
+                                    pathQuery, glyph, chunk.style.pxSize, style.fontKerning,
                                     style.fontStretch, small);
                                 continue;
                             }
                             const float advance = font.measureText(
-                                glyph, chunk.style.pxSize, style.fontKerning,
+                                pathQuery, glyph, chunk.style.pxSize, style.fontKerning,
                                 style.fontStretch, small);
                             SvgPathPoint at;
                             if (!svgPointAtDistance(pathState->loops,
@@ -1992,7 +2014,7 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                             }
                             pathState->at += advance;
                             SDL_Texture* text = font.renderText(
-                                sdlRenderer, glyph, chunk.style.pxSize, color,
+                                sdlRenderer, pathQuery, glyph, chunk.style.pxSize, color,
                                 style.fontBold,
                                 style.fontStyle != ComputedStyle::FontNormal,
                                 style.fontKerning, style.fontStretch, small);
@@ -2024,9 +2046,12 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                 }
                 penX += chunk.dx;
                 penY += chunk.dy;
+                const sui::FontQuery chunkQuery{
+                    chunk.style.family, style.fontWeight,
+                    style.fontStyle != ComputedStyle::FontNormal};
                 float advance = 0.0f;
                 if (chunk.style.pxSize > 0.0f) {
-                    advance = font.measureText(chunk.text, chunk.style.pxSize,
+                    advance = font.measureText(chunkQuery, chunk.text, chunk.style.pxSize,
                                                style.fontKerning, style.fontStretch, small);
                 }
                 // An empty size or `fill="none"` still moves the pen past the
@@ -2037,15 +2062,18 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                               chunk.style.fill.b, chunk.style.fill.a},
                         alpha);
                     SDL_Texture* text = font.renderText(
-                        sdlRenderer, chunk.text, chunk.style.pxSize,
+                        sdlRenderer, chunkQuery, chunk.text, chunk.style.pxSize,
                         SDL_Color{tinted.r, tinted.g, tinted.b, tinted.a}, style.fontBold,
                         style.fontStyle != ComputedStyle::FontNormal, style.fontKerning,
                         style.fontStretch, small);
                     if (text) {
                         float texW = 0.0f, texH = 0.0f;
                         SDL_GetTextureSize(text, &texW, &texH);
+                        const sui::FontQuery straightQuery{
+                            chunk.style.family, style.fontWeight,
+                            style.fontStyle != ComputedStyle::FontNormal};
                         const float chunkAscent =
-                            font.verticalMetrics(chunk.style.pxSize).ascent;
+                            font.verticalMetrics(straightQuery, chunk.style.pxSize).ascent;
                         const SDL_FRect dst{std::floor(penX),
                                             std::floor(penY - ascent + chunkAscent), texW,
                                             texH};
@@ -2558,8 +2586,11 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                                         multiplyAlpha(sui::Color{63, 63, 70, 255}, opacity),
                                         1.0f);
                     if (font.hasFont()) {
+                        const sui::FontQuery browseQuery{
+                            s.fontFamily, s.fontWeight,
+                            s.fontStyle != ComputedStyle::FontNormal};
                         SDL_Texture* texture = font.renderText(
-                            sdlRenderer, "Browse...", s.fontSize,
+                            sdlRenderer, browseQuery, "Browse...", s.fontSize,
                             SDL_Color{s.color.r, s.color.g, s.color.b,
                                       static_cast<Uint8>(static_cast<float>(s.color.a) *
                                                          opacity)},
@@ -2664,10 +2695,13 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                     : SDL_Color{
                           s.color.r, s.color.g, s.color.b,
                           static_cast<Uint8>(static_cast<float>(s.color.a) * opacity)};
+            const sui::FontQuery markerQuery{
+                s.fontFamily, s.fontWeight,
+                s.fontStyle != ComputedStyle::FontNormal};
             SDL_Texture* markerTex =
-                font.renderText(sdlRenderer, marker, s.fontSize, markerColor, s.fontBold,
-                                s.fontStyle != ComputedStyle::FontNormal, s.fontKerning,
-                                s.fontStretch,
+                font.renderText(sdlRenderer, markerQuery, marker, s.fontSize, markerColor,
+                                s.fontBold, s.fontStyle != ComputedStyle::FontNormal,
+                                s.fontKerning, s.fontStretch,
                                 s.fontVariant == ComputedStyle::FontVariant::SmallCaps);
             if (markerTex) {
                 float mTexW = 0.0f, mTexH = 0.0f;
@@ -2751,7 +2785,12 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                         }
                         firstLetterRun = firstLineRuns.front();
                         firstLetterWidth =
-                            wordPrefixWidth(&font, first.text, bytes, first.fontSize, ls0);
+                            wordPrefixWidth(&font,
+                                                    sui::FontQuery{
+                                                        first.fontFamily,
+                                                        first.bold ? 700 : 400,
+                                                        first.italic},
+                                                    first.text, bytes, first.fontSize, ls0);
                         hasFirstLetter = true;
                         if (letterColors.bgSet) {
                             const SDL_Color bg = letterColors.bg;
@@ -2805,7 +2844,12 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                     if (k == lineStartIdx && coverStart <= spans[k].first) {
                         startX = r.x - tx;
                     } else if (coverStart > spans[k].first && coverStart <= spans[k].second) {
-                        startX = r.x - tx + wordPrefixWidth(&font, r.text, coverStart - spans[k].first,
+                        startX = r.x - tx + wordPrefixWidth(&font,
+                                                            sui::FontQuery{
+                                                                r.fontFamily,
+                                                                r.bold ? 700 : 400,
+                                                                r.italic},
+                                                            r.text, coverStart - spans[k].first,
                                                             r.fontSize, ls,
                                                             s.fontKerning, s.fontStretch,
                         s.fontVariant == ComputedStyle::FontVariant::SmallCaps);
@@ -2813,7 +2857,11 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                     if (k == lineEndIdx - 1 && coverEnd >= spans[k].second) {
                         endX = r.x - tx + r.width;
                     } else if (coverEnd >= spans[k].first && coverEnd < spans[k].second) {
-                        endX = r.x - tx + wordPrefixWidth(&font, r.text, coverEnd - spans[k].first,
+                        endX = r.x - tx + wordPrefixWidth(&font,
+                                                          sui::FontQuery{
+                                                              r.fontFamily,
+                                                              r.bold ? 700 : 400, r.italic},
+                                                          r.text, coverEnd - spans[k].first,
                                                           r.fontSize, ls,
                                                           s.fontKerning, s.fontStretch,
                         s.fontVariant == ComputedStyle::FontVariant::SmallCaps);
@@ -2828,14 +2876,22 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                             const float a =
                                 lo == spans[k].first
                                     ? 0.0f
-                                    : wordPrefixWidth(&font, r.text, lo - spans[k].first,
+                                    : wordPrefixWidth(&font,
+                                                      sui::FontQuery{
+                                                          r.fontFamily,
+                                                          r.bold ? 700 : 400, r.italic},
+                                                      r.text, lo - spans[k].first,
                                                       r.fontSize, ls,
                                                       s.fontKerning, s.fontStretch,
                         s.fontVariant == ComputedStyle::FontVariant::SmallCaps);
                             const float b =
                                 hi == spans[k].second
                                     ? r.width
-                                    : wordPrefixWidth(&font, r.text, hi - spans[k].first,
+                                    : wordPrefixWidth(&font,
+                                                      sui::FontQuery{
+                                                          r.fontFamily,
+                                                          r.bold ? 700 : 400, r.italic},
+                                                      r.text, hi - spans[k].first,
                                                       r.fontSize, ls,
                                                       s.fontKerning, s.fontStretch,
                         s.fontVariant == ComputedStyle::FontVariant::SmallCaps);
@@ -2880,7 +2936,8 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                         s.fontVariant == ComputedStyle::FontVariant::SmallCaps);
         }
         SDL_Texture* texture = font.renderText(
-            sdlRenderer, run.text, run.fontSize,
+            sdlRenderer, sui::FontQuery{run.fontFamily, run.bold ? 700 : 400, run.italic},
+            run.text, run.fontSize,
             SDL_Color{run.r, run.g, run.b,
                       static_cast<Uint8>(static_cast<float>(run.a) * opacity)},
             run.bold, run.italic, s.fontKerning, s.fontStretch,
@@ -2909,7 +2966,9 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                 return;
             }
             SDL_Texture* fgTex = font.renderText(
-                sdlRenderer, run.text, run.fontSize,
+                sdlRenderer,
+                sui::FontQuery{run.fontFamily, run.bold ? 700 : 400, run.italic},
+                run.text, run.fontSize,
                 SDL_Color{fg.r, fg.g, fg.b,
                           static_cast<Uint8>(static_cast<float>(fg.a) * opacity)},
                 run.bold, run.italic, s.fontKerning, s.fontStretch,
@@ -2950,7 +3009,9 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                 }
                 const SDL_Color fg = selColors.fg;
                 SDL_Texture* fgTex = font.renderText(
-                    sdlRenderer, run.text, run.fontSize,
+                    sdlRenderer,
+                    sui::FontQuery{run.fontFamily, run.bold ? 700 : 400, run.italic},
+                    run.text, run.fontSize,
                     SDL_Color{fg.r, fg.g, fg.b,
                               static_cast<Uint8>(static_cast<float>(fg.a) * opacity)},
                     run.bold, run.italic, s.fontKerning, s.fontStretch,
@@ -3003,8 +3064,10 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                                 el.contentWidth(), el.contentHeight()};
         const std::string label = el.value();
         if (!label.empty()) {
+            const sui::FontQuery labelQuery{s.fontFamily, s.fontWeight,
+                                             s.fontStyle != ComputedStyle::FontNormal};
             SDL_Texture* texture = font.renderText(
-                sdlRenderer, label, s.fontSize,
+                sdlRenderer, labelQuery, label, s.fontSize,
                 SDL_Color{s.color.r, s.color.g, s.color.b,
                           static_cast<Uint8>(static_cast<float>(s.color.a) * opacity)},
                 false, false, s.fontKerning, s.fontStretch,
@@ -3031,8 +3094,10 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         caretGeometry(el, el.value(), static_cast<std::size_t>(caretBytePos), s, &font,
                       offX, offY, caretX, caretY, caretH);
         if (compositionText && *compositionText && font.hasFont()) {
+            const sui::FontQuery compQuery{s.fontFamily, s.fontWeight,
+                                                  s.fontStyle != ComputedStyle::FontNormal};
             SDL_Texture* compTex = font.renderText(
-                sdlRenderer, compositionText, s.fontSize,
+                sdlRenderer, compQuery, compositionText, s.fontSize,
                 SDL_Color{s.color.r, s.color.g, s.color.b,
                           static_cast<Uint8>(static_cast<float>(s.color.a) * opacity)},
                 false, false, s.fontKerning, s.fontStretch,
@@ -3054,7 +3119,7 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                 if (compCursor >= 0) {
                     std::string_view compView(compositionText);
                     std::size_t cLen = std::min(static_cast<std::size_t>(compCursor), compView.size());
-                    caretX += font.measureText(compView.substr(0, cLen), s.fontSize,
+                    caretX += font.measureText(compQuery, compView.substr(0, cLen), s.fontSize,
                                                s.fontKerning, s.fontStretch,
                                                s.fontVariant ==
                                                    ComputedStyle::FontVariant::SmallCaps);
@@ -3584,6 +3649,11 @@ void Application::installPageAt(std::size_t index, std::unique_ptr<Document> doc
             page.resolver.addRule(std::move(rule));
         }
         page.resolver.addKeyframes(std::move(keyframes));
+        // Faces are process-wide, so they load once and stay: a page that
+        // names an already-loaded face reads the one that loaded first.
+        if (font_) {
+            loadFontFaces(*font_, *resources_, *css, link.href);
+        }
     }
     // Navigation retires the old page's timers: a callback that captured the
     // previous tree must not fire into the new one.
