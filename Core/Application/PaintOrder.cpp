@@ -1711,6 +1711,7 @@ std::vector<PaintOp> spliceFrameOps(const std::vector<PaintOp>& host,
         for (PaintOp& inner_op : inner) {
             inner_op.item.dx += dx;
             inner_op.item.dy += dy;
+            inner_op.item.frame = splice->state;
             SDL_FRect clip = inner_op.item.clip;
             if (op.item.clip.w > 0.0f && op.item.clip.h > 0.0f) {
                 clip = intersectClip(clip, op.item.clip);

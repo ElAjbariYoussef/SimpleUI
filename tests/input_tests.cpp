@@ -2404,25 +2404,43 @@ int main() {
                    "<iframe id=\"auto\" src=\"/frame.sui\"></iframe>"
                    "<iframe id=\"gone\" src=\"/missing.sui\"></iframe>"
                    "<div id=\"box\">host</div>"
+                   "<input id=\"host-input\"/>"
                    "</body></sui>";
         }
         {
             std::ofstream out(root / "page.css", std::ios::binary);
             out << "body { background: #00ff00; } #f { display: block; margin: 0; border: 0; "
                    "padding: 0; width: 200px; "
-                   "height: 100px; } #auto { margin: 0; } #box { width: 999px; "
+                   "height: 200px; } #auto { margin: 0; } #box { width: 999px; "
                    "background: #0000ff; }";
+        }
+        {
+            std::ofstream out(root / "other.sui", std::ios::binary);
+            out << "<sui><body><div id=\"other\">other</div></body></sui>";
         }
         {
             std::ofstream out(root / "frame.sui", std::ios::binary);
             out << "<sui><head><link rel=\"stylesheet\" href=\"/frame.css\"/></head>"
-                   "<body><div id=\"box\">frame</div><div id=\"wide\"></div></body></sui>";
+                   "<body><div id=\"box\">frame</div><div id=\"wide\"></div>"
+                   "<input id=\"name\"/><button id=\"btn\">ok</button>"
+                   "<div id=\"scroll\"><div id=\"tall\"></div></div>"
+                   "<a id=\"flink\" href=\"/other.sui\">go</a>"
+                   "<div id=\"smooth\"><div id=\"stall\"></div></div></body></sui>";
         }
         {
             std::ofstream out(root / "frame.css", std::ios::binary);
-            out << "body { margin: 0; } #box { width: 50px; height: 20px; margin-left: 7px; "
+            out << "body { margin: 0; background: transparent; } "
+                   "#box { width: 50px; height: 20px; margin-left: 7px; "
                    "background: #ff0000; } #wide { width: 400px; height: 10px; "
-                   "background: #0000ff; }";
+                   "background: #0000ff; } "
+                   "#name { display: block; width: 80px; height: 18px; } "
+                   "#btn { display: block; width: 40px; height: 14px; } "
+                   "#scroll { overflow: auto; height: 30px; width: 60px; } "
+                   "#tall { height: 200px; width: 60px; background: #0000ff; } "
+                   "#flink { display: block; width: 60px; height: 12px; background: #00ffff; } "
+                   "#smooth { overflow: auto; height: 30px; width: 60px; "
+                   "scroll-behavior: smooth; } "
+                   "#stall { height: 200px; width: 60px; background: #ff00ff; }";
         }
         const fs::path previous = fs::current_path();
         struct RestoreIframe {
@@ -2505,7 +2523,7 @@ int main() {
                         check(r > 200 && g < 60 && b < 60,
                               "the frame paints its own element styles");
                     }
-                    if (readPixel(fx + 100.0f, fy + 60.0f, r, g, b)) {
+                    if (readPixel(fx + 150.0f, fy + 60.0f, r, g, b)) {
                         check(g > 200 && r < 60 && b < 60,
                               "the frame shows the host through its transparent body");
                     } else {
@@ -2518,6 +2536,114 @@ int main() {
                               "the frame's content is clipped to the content box");
                     } else {
                         check(false, "the frame buffer reads back");
+                    }
+
+                    // Interaction: a click inside the frame routes into the
+                    // frame's document, typing and keys land on its own focused
+                    // field, a host press takes the keyboard back, a wheel
+                    // scrolls the frame's own scroller, and a link inside a frame
+                    // never navigates the host page.
+                    sui::Element* hostInput = app.document().getElementById("host-input");
+                    sui::Element* frameInput = frame->getElementById("name");
+                    sui::Element* frameScroll = frame->getElementById("scroll");
+                    sui::Element* frameLink = frame->getElementById("flink");
+                    check(hostInput != nullptr && frameInput != nullptr &&
+                              frameScroll != nullptr && frameLink != nullptr,
+                          "the interactive elements exist on both sides");
+                    if (hostInput && frameInput && frameScroll && frameLink) {
+                        const auto pressAt = [&](float x, float y) {
+                            app.dispatch(sui::InputEvent(sui::InputKind::PointerDown, x, y, 1));
+                            app.dispatch(sui::InputEvent(sui::InputKind::PointerUp, x, y, 1));
+                        };
+                        // A click inside the frame hands the keyboard to the
+                        // frame's document...
+                        pressAt(frameInput->layoutX() + 4.0f, frameInput->layoutY() + 8.0f);
+                        check(frame->focused() == frameInput,
+                              "a click inside the frame focuses the frame's field");
+                        check(app.document().focused() == frameEl,
+                              "the host focus mirrors onto the frame element");
+                        // ...where the field paints its own caret, from the
+                        // frame's state rather than the page's.
+                        check(app.renderFrame(primary),
+                              "the host repaints when a frame takes focus");
+                        int cr = 0, cg = 0, cb = 0;
+                        if (readPixel(frameInput->contentX() + 0.5f,
+                                      frameInput->contentY() + 8.0f, cr, cg, cb)) {
+                            check(cr > 150 && cg > 150 && cb > 150,
+                                  "the frame's focused field paints its caret");
+                        } else {
+                            check(false, "the frame buffer reads back for its caret");
+                        }
+                        // Typing and keys land in the frame's field, never on
+                        // the page...
+                        app.dispatch(
+                            sui::InputEvent(sui::InputKind::TextInput, 0, 0, 0, 0, 0, 0, "ab"));
+                        check(frameInput->value() == "ab",
+                              "typing lands in the frame's focused field");
+                        check(hostInput->value().empty(),
+                              "typing inside the frame never reaches the page");
+                        app.dispatch(
+                            sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x08));
+                        check(frameInput->value() == "a",
+                              "a key inside the frame edits the frame's field");
+                        // ...a press on the page takes the keyboard back...
+                        pressAt(hostInput->layoutX() + 4.0f, hostInput->layoutY() + 8.0f);
+                        check(frame->focused() == nullptr,
+                              "a host press drops the frame's focus");
+                        check(app.document().focused() == hostInput,
+                              "the host press focuses the page's own field");
+                        app.dispatch(
+                            sui::InputEvent(sui::InputKind::TextInput, 0, 0, 0, 0, 0, 0, "x"));
+                        check(hostInput->value() == "x", "the page takes typing back");
+                        check(frameInput->value() == "a",
+                              "typing on the page never reaches the frame");
+                        // ...and clicking the frame again hands it back.
+                        pressAt(frameInput->layoutX() + 4.0f, frameInput->layoutY() + 8.0f);
+                        check(frame->focused() == frameInput,
+                              "a second click hands the keyboard back to the frame");
+                        // A wheel over the frame scrolls the frame's own scroller,
+                        // and a frame-only change repaints the host: settle the
+                        // stamp first so the wheel is the one thing that moved.
+                        app.renderFrame(primary);
+                        app.dispatch(sui::InputEvent(sui::InputKind::Wheel,
+                                                     frameScroll->layoutX() + 5.0f,
+                                                     frameScroll->layoutY() + 5.0f, 0, 0.0f,
+                                                     -1.0f));
+                        check(frameScroll->scrollTop() > 0.0f,
+                              "a wheel inside the frame scrolls the frame's scroller");
+                        check(app.renderFrame(primary),
+                              "a wheel inside a frame repaints the host");
+                        // A smooth scroller inside the frame eases like the
+                        // page's do: the queue lives with the frame and ticks
+                        // with the host's frames.
+                        sui::Element* frameSmooth = frame->getElementById("smooth");
+                        check(frameSmooth != nullptr, "the frame's smooth scroller exists");
+                        if (frameSmooth) {
+                            app.dispatch(sui::InputEvent(sui::InputKind::Wheel,
+                                                         frameSmooth->layoutX() + 5.0f,
+                                                         frameSmooth->layoutY() + 5.0f, 0, 0.0f,
+                                                         -1.0f));
+                            check(frameSmooth->scrollTop() == 0.0f,
+                                  "a smooth notch inside a frame does not jump");
+                            check(app.renderFrame(primary),
+                                  "the frame's smooth scroll repaints the host");
+                            const float first = frameSmooth->scrollTop();
+                            check(first > 0.0f && first < 40.0f,
+                                  "the frame's smooth scroll closes part of the gap");
+                            int smoothFrames = 0;
+                            while (app.renderFrame(primary) && smoothFrames < 200) {
+                                ++smoothFrames;
+                            }
+                            check(frameSmooth->scrollTop() == 40.0f,
+                                  "the frame's smooth scroll lands on the notch");
+                        }
+                        // A frame's link must not navigate the host page.
+                        const std::string before = app.currentPage();
+                        pressAt(frameLink->layoutX() + 5.0f, frameLink->layoutY() + 4.0f);
+                        check(app.currentPage() == before,
+                              "a link inside a frame does not navigate the page");
+                        check(app.frameDocument(*frameEl) == frame,
+                              "the frame survives the link press");
                     }
                 }
             }

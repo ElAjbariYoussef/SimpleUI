@@ -3344,14 +3344,14 @@ void Application::openFileDialog(Element& input) {
 // Applies queued file picks where their inputs still live. Runs on the main
 // thread before layout so a new value measures and paints the same frame.
 void Application::queueSmoothScroll(Element& box, float left, float top) {
-    for (Page::SmoothScroll& scroll : smoothScrolls_) {
+    for (SmoothScroll& scroll : smoothScrolls_) {
         if (scroll.box == &box) {
             scroll.left = left;
             scroll.top = top;
             return;
         }
     }
-    smoothScrolls_.push_back(Page::SmoothScroll{&box, left, top});
+    smoothScrolls_.push_back(SmoothScroll{&box, left, top});
 }
 
 bool Application::tickScrolling() {
@@ -3360,13 +3360,13 @@ bool Application::tickScrolling() {
     Element* root = document_ ? document_->root() : nullptr;
     smoothScrolls_.erase(
         std::remove_if(smoothScrolls_.begin(), smoothScrolls_.end(),
-                       [root](const Page::SmoothScroll& scroll) {
+                       [root](const SmoothScroll& scroll) {
                            return !scroll.box || !root || !isReachable(*root, scroll.box);
                        }),
         smoothScrolls_.end());
     bool moving = false;
     for (std::size_t i = 0; i < smoothScrolls_.size();) {
-        Page::SmoothScroll& scroll = smoothScrolls_[i];
+        SmoothScroll& scroll = smoothScrolls_[i];
         const float left = smoothScrollStep(scroll.box->scrollLeft(), scroll.left);
         const float top = smoothScrollStep(scroll.box->scrollTop(), scroll.top);
         scroll.box->setScrollLeft(left);
@@ -3379,6 +3379,57 @@ bool Application::tickScrolling() {
         ++i;
     }
     return moving;
+}
+
+// The frames belong to the bound page, so this runs while the page is bound --
+// `tickScrolling`'s counterpart for everything a wheel started inside a frame.
+bool Application::tickFrameScrolling() {
+    bool moving = false;
+    for (auto& [frameEl, frame] : iframeFrames_) {
+        if (!frame || !frame->document || !frame->document->root() ||
+            frame->smoothScrolls.empty()) {
+            continue;
+        }
+        // Same rule as the page's scrolls: a box that left its document stops.
+        Element* root = frame->document->root();
+        frame->smoothScrolls.erase(
+            std::remove_if(frame->smoothScrolls.begin(), frame->smoothScrolls.end(),
+                           [root](const SmoothScroll& scroll) {
+                               return !scroll.box || !isReachable(*root, scroll.box);
+                           }),
+            frame->smoothScrolls.end());
+        for (std::size_t i = 0; i < frame->smoothScrolls.size();) {
+            SmoothScroll& scroll = frame->smoothScrolls[i];
+            const float left = smoothScrollStep(scroll.box->scrollLeft(), scroll.left);
+            const float top = smoothScrollStep(scroll.box->scrollTop(), scroll.top);
+            scroll.box->setScrollLeft(left);
+            scroll.box->setScrollTop(top);
+            if (left == scroll.left && top == scroll.top) {
+                frame->smoothScrolls.erase(frame->smoothScrolls.begin() +
+                                           static_cast<std::ptrdiff_t>(i));
+                continue;
+            }
+            moving = true;
+            ++i;
+        }
+    }
+    return moving;
+}
+
+// Sums the frames' document mutations and resolver generations: any change in
+// any frame has to make the host repaint, exactly like the page's own counters.
+std::uint64_t Application::frameGeneration() const {
+    std::uint64_t stamp = 0;
+    for (const auto& [frameEl, frame] : iframeFrames_) {
+        if (!frame) {
+            continue;
+        }
+        if (frame->document) {
+            stamp += frame->document->mutationCount();
+        }
+        stamp += frame->resolver.generation();
+    }
+    return stamp;
 }
 
 void Application::applyPendingFiles() {
@@ -3463,7 +3514,7 @@ int Application::pageForEvent(const InputEvent& event) const {
 }
 
 void Application::bindPage(std::size_t index) {
-    if (boundPage_ >= 0 && static_cast<std::size_t>(boundPage_) == index) {
+    if (boundPage_ >= 0 && static_cast<std::size_t>(boundPage_) == index && !boundFrame_) {
         return;
     }
     flushBound();
@@ -3499,6 +3550,7 @@ void Application::bindPage(std::size_t index) {
     selectEdge_ = page.selectEdge_;
     smoothScrolls_ = std::move(page.smoothScrolls_);
     iframeFrames_ = std::move(page.iframeFrames);
+    focusedFrame_ = page.focusedFrame_;
     scriptsAfterBodyRun_ = page.scriptsAfterBodyRun;
     std::swap(scriptContext_.generation, page.scriptGeneration);
     boundPage_ = static_cast<int>(index);
@@ -3510,6 +3562,10 @@ void Application::bindPage(std::size_t index) {
 }
 
 void Application::flushBound() {
+    if (boundFrame_) {
+        flushFrame();
+        return;
+    }
     if (boundPage_ < 0 || static_cast<std::size_t>(boundPage_) >= pages_.size()) {
         boundPage_ = -1;
         return;
@@ -3518,6 +3574,7 @@ void Application::flushBound() {
     page.document = std::move(document_);
     page.resolver = std::move(resolver_);
     page.iframeFrames = std::move(iframeFrames_);
+    page.focusedFrame_ = focusedFrame_;
     page.lastFocused_ = lastFocused_;
     page.caretBytePos_ = caretBytePos_;
     page.selectionAnchor_ = selectionAnchor_;
@@ -3558,6 +3615,184 @@ void Application::flushBound() {
     script::setContext(&scriptContext_);
 }
 
+// An event inside a frame runs with the frame's document bound: the working
+// copy swaps to the frame's document, resolver, and interaction state, so
+// every method below resolves, focuses, and edits against the frame's tree
+// exactly as it would against a page. The script context stays on the page:
+// a frame's scripts never run. The caller decides when to bind (a pointer
+// event inside a frame, or a key event while the frame holds focus).
+void Application::bindFrame(Element* frameEl) {
+    if (!frameEl) {
+        return;
+    }
+    // The state has to be found before anything flushes: the map itself moves
+    // with the page, but the FrameState object it points at stays where it is.
+    const auto it = iframeFrames_.find(frameEl);
+    if (it == iframeFrames_.end() || !it->second || !it->second->document ||
+        it->second->failed) {
+        return;
+    }
+    FrameState* state = it->second.get();
+    const int owner = boundPage_;
+    flushBound();
+    FrameState& frame = *state;
+    document_ = std::move(frame.document);
+    resolver_ = std::move(frame.resolver);
+    lastFocused_ = frame.lastFocused;
+    caretBytePos_ = frame.caretBytePos;
+    selectionAnchor_ = frame.selectionAnchor;
+    caretBlinkStart_ = frame.caretBlinkStart;
+    caretBlinkResets_ = frame.caretBlinkResets;
+    compositionText_ = std::move(frame.compositionText);
+    compositionCursor_ = frame.compositionCursor;
+    openSelect_ = frame.openSelect;
+    selectHighlight_ = frame.selectHighlight;
+    openDatalist_ = frame.openDatalist;
+    datalistHighlight_ = frame.datalistHighlight;
+    scrollDrag_ = frame.scrollDrag;
+    scrollDragX_ = frame.scrollDragX;
+    scrollGrab_ = frame.scrollGrab;
+    scrollTrack_ = frame.scrollTrack;
+    scrollTravel_ = frame.scrollTravel;
+    scrollMax_ = frame.scrollMax;
+    resizeDrag_ = frame.resizeDrag;
+    resizeGrabX_ = frame.resizeGrabX;
+    resizeGrabY_ = frame.resizeGrabY;
+    resizeGrabW_ = frame.resizeGrabW;
+    resizeGrabH_ = frame.resizeGrabH;
+    modalDialog_ = frame.modalDialog;
+    modalReturnFocus_ = frame.modalReturnFocus;
+    modalSyncMutations_ = frame.modalSyncMutations;
+    selectAnchor_ = frame.selectAnchor;
+    selectEdge_ = frame.selectEdge;
+    smoothScrolls_ = std::move(frame.smoothScrolls);
+    boundFrame_ = frameEl;
+    // The frame belongs to the page that owned the working copy, which is what
+    // lets `flushFrame` settle the page's keyboard hand-off.
+    boundPage_ = owner;
+}
+
+// Moves the frame's state back where `bindFrame` found it. The page keeps the
+// keyboard hand-off: `focusedFrame_` names the frame whose document holds
+// focus, and the host tree mirrors it (the frame element itself is what
+// `:focus` matches there, the way a browser shows it).
+void Application::flushFrame() {
+    Element* frameEl = boundFrame_;
+    boundFrame_ = nullptr;
+    const int pageIndex = boundPage_;
+    boundPage_ = -1;
+    // The frame's map never left the page: `bindFrame` flushed the page first,
+    // so the entry and its state are the page's to find.
+    Page* ownerPage =
+        (pageIndex >= 0 && static_cast<std::size_t>(pageIndex) < pages_.size())
+            ? pages_[static_cast<std::size_t>(pageIndex)].get()
+            : nullptr;
+    FrameState* state = nullptr;
+    if (ownerPage && frameEl) {
+        const auto it = ownerPage->iframeFrames.find(frameEl);
+        if (it != ownerPage->iframeFrames.end()) {
+            state = it->second.get();
+        }
+    }
+    if (!state) {
+        // The element left the tree mid-event: its state dies with it, and the
+        // next bind reloads a live page into the working copy.
+        document_.reset();
+        if (frameEl && focusedFrame_ == frameEl) {
+            focusedFrame_ = nullptr;
+        }
+        return;
+    }
+    FrameState& frame = *state;
+    frame.document = std::move(document_);
+    frame.resolver = std::move(resolver_);
+    frame.lastFocused = lastFocused_;
+    frame.caretBytePos = caretBytePos_;
+    frame.selectionAnchor = selectionAnchor_;
+    frame.caretBlinkStart = caretBlinkStart_;
+    frame.caretBlinkResets = caretBlinkResets_;
+    frame.compositionText = std::move(compositionText_);
+    frame.compositionCursor = compositionCursor_;
+    frame.openSelect = openSelect_;
+    frame.selectHighlight = selectHighlight_;
+    frame.openDatalist = openDatalist_;
+    frame.datalistHighlight = datalistHighlight_;
+    frame.scrollDrag = scrollDrag_;
+    frame.scrollDragX = scrollDragX_;
+    frame.scrollGrab = scrollGrab_;
+    frame.scrollTrack = scrollTrack_;
+    frame.scrollTravel = scrollTravel_;
+    frame.scrollMax = scrollMax_;
+    frame.resizeDrag = resizeDrag_;
+    frame.resizeGrabX = resizeGrabX_;
+    frame.resizeGrabY = resizeGrabY_;
+    frame.resizeGrabW = resizeGrabW_;
+    frame.resizeGrabH = resizeGrabH_;
+    frame.modalDialog = modalDialog_;
+    frame.modalReturnFocus = modalReturnFocus_;
+    frame.modalSyncMutations = modalSyncMutations_;
+    frame.selectAnchor = selectAnchor_;
+    frame.selectEdge = selectEdge_;
+    frame.smoothScrolls = std::move(smoothScrolls_);
+    if (ownerPage) {
+        Page& page = *ownerPage;
+        const bool ownsKeyboard = frame.document && frame.document->focused() != nullptr;
+        page.focusedFrame_ = ownsKeyboard ? frameEl : nullptr;
+        if (page.document) {
+            if (ownsKeyboard) {
+                if (page.document->focused() != frameEl && page.document->root() &&
+                    isReachable(*page.document->root(), frameEl)) {
+                    page.document->setFocused(frameEl);
+                    page.resolver.setFocused(frameEl);
+                }
+            } else if (page.document->focused() == frameEl) {
+                page.document->setFocused(nullptr);
+                page.resolver.setFocused(nullptr);
+            }
+        }
+    }
+}
+
+// The frame whose loaded document contains `el`, or null. A frame element is
+// not "inside" its own frame document, so callers handle that case themselves.
+Element* Application::frameOwning(const Element& el) const {
+    for (const auto& [frameEl, frame] : iframeFrames_) {
+        if (frame && frame->document && frame->document->root() &&
+            isReachable(*frame->document->root(), &el)) {
+            return frameEl;
+        }
+    }
+    return nullptr;
+}
+
+// A press outside the frame takes the keyboard back: the frame's own focus and
+// hover drop, and the page stops routing key events into it.
+void Application::dropFrameFocus() {
+    if (!focusedFrame_) {
+        return;
+    }
+    const auto it = iframeFrames_.find(focusedFrame_);
+    if (it != iframeFrames_.end() && it->second && it->second->document) {
+        it->second->document->setFocused(nullptr);
+        it->second->resolver.setFocused(nullptr);
+        it->second->resolver.setHovered(nullptr);
+        it->second->lastFocused = nullptr;
+    }
+    focusedFrame_ = nullptr;
+}
+
+// `:hover` / `:active` live in the resolver that was set, and the two sides of
+// a frame boundary have a resolver each: a pointer event on one side clears the
+// other's, so no frame keeps a stale hover while the pointer is outside it.
+void Application::clearFrameHovers() {
+    for (auto& [frameEl, frame] : iframeFrames_) {
+        if (frame) {
+            frame->resolver.setHovered(nullptr);
+            frame->resolver.setActive(nullptr);
+        }
+    }
+}
+
 Document* Application::frameDocument(const Element& frame) const {
     const auto it = iframeFrames_.find(const_cast<Element*>(&frame));
     if (it == iframeFrames_.end() || !it->second || it->second->failed) {
@@ -3590,6 +3825,10 @@ void Application::syncFrames() {
     }
     for (auto it = iframeFrames_.begin(); it != iframeFrames_.end();) {
         if (std::find(live.begin(), live.end(), it->first) == live.end()) {
+            // A frame whose element left takes the keyboard hand-off with it.
+            if (focusedFrame_ == it->first) {
+                focusedFrame_ = nullptr;
+            }
             it = iframeFrames_.erase(it);
         } else {
             ++it;
@@ -3600,6 +3839,11 @@ void Application::syncFrames() {
         auto it = iframeFrames_.find(el);
         if (it != iframeFrames_.end() && it->second && it->second->src == src) {
             continue;
+        }
+        // The frame is replaced wholesale (new src, or a first load): anything
+        // the old frame's document held is about to die with it.
+        if (focusedFrame_ == el) {
+            focusedFrame_ = nullptr;
         }
         auto frame = std::make_unique<FrameState>();
         frame->src = std::string(src);
@@ -3624,7 +3868,7 @@ void Application::syncFrames() {
         }
         // The frame's styles are its own: a fresh resolver (UA defaults come
         // with it) fed from its own stylesheets, exactly like a page's.
-        auto resolver = std::make_unique<StyleResolver>();
+        StyleResolver resolver;
         for (const auto& link : document->stylesheets()) {
             auto css = resources_->readText(link.href);
             if (!css) {
@@ -3640,12 +3884,12 @@ void Application::syncFrames() {
                 },
                 link.href);
             for (auto& rule : rules) {
-                resolver->addRule(std::move(rule));
+                resolver.addRule(std::move(rule));
             }
-            resolver->addKeyframes(std::move(keyframes));
+            resolver.addKeyframes(std::move(keyframes));
         }
         if (Element* body = document->querySelector("body")) {
-            resolver->setRootFontSize(resolver->resolve(*body).fontSize);
+            resolver.setRootFontSize(resolver.resolve(*body).fontSize);
         }
         state->document = std::move(document);
         state->resolver = std::move(resolver);
@@ -3660,12 +3904,12 @@ void Application::layoutFrames() {
         return;
     }
     for (auto& [el, frame] : iframeFrames_) {
-        if (!frame || !frame->document || !frame->resolver || !frame->document->root()) {
+        if (!frame || !frame->document || !frame->document->root()) {
             continue;
         }
-        generatePseudoElements(*frame->document, *frame->resolver);
+        generatePseudoElements(*frame->document, frame->resolver);
         LayoutInput input;
-        input.resolver = frame->resolver.get();
+        input.resolver = &frame->resolver;
         input.font = font_.get();
         input.viewportWidth = el->contentWidth();
         input.viewportHeight = el->contentHeight();
@@ -3697,6 +3941,9 @@ void Application::setDocument(std::unique_ptr<Document> document) {
     page.modalDialog_ = nullptr;
     page.modalReturnFocus_ = nullptr;
     page.smoothScrolls_.clear();
+    // Frames of the old tree: the element they were keyed by is gone, and its
+    // keyboard hand-off dies with it.
+    page.focusedFrame_ = nullptr;
     // A picked file for the old tree must never land in the new one.
     std::lock_guard<std::mutex> lock(fileMutex_);
     pendingFileInput_ = nullptr;
@@ -3810,6 +4057,8 @@ void Application::installPageAt(std::size_t index, std::unique_ptr<Document> doc
     page.selectAnchor_ = 0;
     page.selectEdge_ = 0;
     page.smoothScrolls_.clear();
+    // A frame of the old tree cannot hold the new page's keyboard.
+    page.focusedFrame_ = nullptr;
 
     // `rem` and `font-size: <percentage>` on the root resolve against the new
     // page's own font size, so it has to be known before its first layout.
@@ -4104,6 +4353,28 @@ bool withinSubtree(const Element* el, const Element* root) {
     return false;
 }
 
+// Every loaded frame in the bound page, in map order, as what `spliceFrameOps`
+// takes. Failed frames and frames with no document splice nothing.
+std::vector<FrameSplice> frameSplicesFor(
+    const std::unordered_map<Element*, std::unique_ptr<FrameState>>& frames) {
+    std::vector<FrameSplice> splices;
+    splices.reserve(frames.size());
+    for (const auto& [el, frame] : frames) {
+        if (frame && frame->document && !frame->failed) {
+            splices.push_back(FrameSplice{el, frame->document.get(), &frame->resolver,
+                                          frame.get()});
+        }
+    }
+    return splices;
+}
+
+// Whether the point is inside the element's content box. A frame is only
+// interactive where its document is laid out, not over its border or padding.
+bool inContentBox(const Element& el, float x, float y) {
+    return x >= el.contentX() && x < el.contentX() + el.contentWidth() &&
+           y >= el.contentY() && y < el.contentY() + el.contentHeight();
+}
+
 }  // namespace
 
 void Application::syncModalDialog() {
@@ -4203,7 +4474,22 @@ void Application::updateCursor(Element* target, float x, float y) {
     }
 }
 
+// The event runs with whatever it touched bound -- a frame, for input inside
+// one -- and the wrapper settles the working copy back on the page afterwards,
+// so reads between events (`document`, `frameDocument`, the caret accessors)
+// always see the page rather than a frame mid-hand-off.
 void Application::dispatch(const InputEvent& event) {
+    dispatchEvent(event);
+    if (boundFrame_) {
+        const int page = boundPage_;
+        flushFrame();
+        if (page >= 0 && static_cast<std::size_t>(page) < pages_.size()) {
+            bindPage(static_cast<std::size_t>(page));
+        }
+    }
+}
+
+void Application::dispatchEvent(const InputEvent& event) {
     // A tree retired by an earlier navigation is no longer being walked once a
     // new event starts: this is where it lets go.
     retiredDocuments_.clear();
@@ -4222,6 +4508,13 @@ void Application::dispatch(const InputEvent& event) {
     const bool keyboard = event.kind == InputKind::KeyDown ||
                           event.kind == InputKind::KeyUp || event.kind == InputKind::TextInput ||
                           event.kind == InputKind::TextEdit;
+    // Focus inside a frame routes there: bind the frame so this key or text
+    // input lands on the frame's document, with its own focus, caret, and value
+    // state. A frame that left the tree since focus landed keeps the page
+    // handling the event.
+    if (keyboard && focusedFrame_) {
+        bindFrame(focusedFrame_);
+    }
     // A key event has no coordinates and belongs to whatever holds focus; a pointer
     // event belongs to whatever is under it in paint order (topmost).
     Element* target = nullptr;
@@ -4246,7 +4539,10 @@ void Application::dispatch(const InputEvent& event) {
                 return;
             }
         }
-        const auto ops = computePaintOps(*document_->root(), resolver_);
+        // The hit test sees frames too: a point inside a loaded frame's box
+        // finds the frame's own elements, which is what routes the event there.
+        const auto ops = spliceFrameOps(computePaintOps(*document_->root(), resolver_),
+                                        frameSplicesFor(iframeFrames_));
         target = hitTestPaintOrder(ops, event.x, event.y);
         if (openSelect_ && !isReachable(*document_->root(), openSelect_)) {
             openSelect_ = nullptr;
@@ -4382,6 +4678,48 @@ void Application::dispatch(const InputEvent& event) {
         }
     }
 
+    // A pointer event inside a loaded frame is an event inside that frame's
+    // document: bind the frame so focus, caret, hover, and scroll state belong
+    // to it, and the switch below runs against its tree. A press on the frame
+    // element itself (no frame element under the point) focuses the frame's
+    // root, the way a click on a browser iframe's blank area does. Anything
+    // else is host input, which takes the keyboard back from a frame that had
+    // it.
+    if (!keyboard) {
+        Element* frameEl = nullptr;
+        if (target) {
+            frameEl = frameOwning(*target);
+            if (!frameEl && target->tag() == "iframe" && inContentBox(*target, event.x, event.y)) {
+                frameEl = target;
+            }
+        }
+        if (frameEl) {
+            // Neither side keeps a stale hover across the boundary.
+            resolver_.setHovered(nullptr);
+            resolver_.setActive(nullptr);
+            clearFrameHovers();
+            Element* inner = target;
+            bindFrame(frameEl);
+            if (boundFrame_) {
+                if (inner == frameEl) {
+                    inner = document_->root();
+                }
+                target = inner;
+                if (event.kind == InputKind::PointerDown) {
+                    // The frame owns the keyboard from here until a host press.
+                    focusedFrame_ = frameEl;
+                }
+            }
+            // A frame that went stale between the hit test and here, which a
+            // live event cannot do, leaves the page handling its own target.
+        } else {
+            clearFrameHovers();
+            if (event.kind == InputKind::PointerDown) {
+                dropFrameFocus();
+            }
+        }
+    }
+
     // Interactive state is set first and unconditionally. A move that changes what
     // is under the pointer has to clear `:hover` even when it lands on nothing, and
     // a press that misses the document has to clear `:focus`.
@@ -4493,8 +4831,9 @@ void Application::dispatch(const InputEvent& event) {
                 resolver_.setFocusVisible(focusShowsOnClick(*target));
                 lastFocused_ = target;
                 // Focusing a listed input opens its suggestions; anything else
-                // closes. A press on the open input itself keeps its popup.
-                if (!suppressDatalistOpen && target->datalistFor() &&
+                // closes. A press on the open input itself keeps its popup, and
+                // a frame's popups do not exist (no overlay paints them).
+                if (!boundFrame_ && !suppressDatalistOpen && target->datalistFor() &&
                     !datalistSuggestions(*target).empty()) {
                     if (openDatalist_ != target) {
                         openDatalist_ = target;
@@ -4572,9 +4911,12 @@ void Application::dispatch(const InputEvent& event) {
             // A select opens its popup on click, or closes an open one, before
             // any `onclick` handler so the handler observes the new state. A
             // pick or a toggle-off on the same press suppresses reopening. An
-            // open list never pops up: its rows handle the click below.
-            if (target && target->tag() == "select" && target->listboxRows() == 0 &&
-                !target->hasAttribute("disabled") && !suppressSelectToggle) {
+            // open list never pops up: its rows handle the click below. A
+            // frame's dropdowns do not open yet: their popup overlay is not
+            // painted inside the frame.
+            if (!boundFrame_ && target && target->tag() == "select" &&
+                target->listboxRows() == 0 && !target->hasAttribute("disabled") &&
+                !suppressSelectToggle) {
                 if (openSelect_ == target) {
                     openSelect_ = nullptr;
                 } else {
@@ -4648,8 +4990,10 @@ void Application::dispatch(const InputEvent& event) {
             // control action above uses. `data-navigate="false"` opts out for a
             // handler that drives navigation itself; `target="_blank"` opens a
             // new window instead of replacing this one. Only the left button
-            // navigates; other buttons are for the host to interpret.
-            if (target && event.button == 1) {
+            // navigates; other buttons are for the host to interpret. A link
+            // inside a frame does not navigate the page (a frame's own
+            // navigation is not supported).
+            if (target && event.button == 1 && !boundFrame_) {
                 for (Element* anchor = target; anchor; anchor = anchor->parent()) {
                     if (anchor->tag() != "a") {
                         continue;
@@ -4761,7 +5105,8 @@ void Application::dispatch(const InputEvent& event) {
                     resolver_.setFocused(next);
                     resolver_.setFocusVisible(true);
                     lastFocused_ = next;
-                    if (next->datalistFor() && !datalistSuggestions(*next).empty()) {
+                    if (!boundFrame_ && next->datalistFor() &&
+                        !datalistSuggestions(*next).empty()) {
                         openDatalist_ = next;
                         datalistHighlight_ = 0;
                         openSelect_ = nullptr;
@@ -5091,7 +5436,8 @@ void Application::dispatch(const InputEvent& event) {
                         revealSelectOption(*target, *options[to]);
                     }
                 }
-            } else if ((event.key == kReturn || event.key == kSpace) && !listbox) {
+            } else if ((event.key == kReturn || event.key == kSpace) && !listbox &&
+                       !boundFrame_) {
                 openSelect_ = target;
                 selectHighlight_ = selectSelectedIndex(*target);
             }
@@ -5148,15 +5494,19 @@ void Application::dispatch(const InputEvent& event) {
     }
 
     // Fire on the target, then bubble to its ancestors, stopping at the first
-    // handler that explicitly stops propagation.
-    for (Element* current = target; current; current = current->parent()) {
-        const std::string_view handler = current->attribute(attribute);
-        if (handler.empty()) {
-            continue;
-        }
-        script::invokeInlineHandler(handler, current);
-        if (current->attribute("data-stoppropagation") == "true") {
-            break;
+    // handler that explicitly stops propagation. An event inside a frame fires
+    // none: frame scripts never run, which is what keeps a frame's document
+    // static.
+    if (!boundFrame_) {
+        for (Element* current = target; current; current = current->parent()) {
+            const std::string_view handler = current->attribute(attribute);
+            if (handler.empty()) {
+                continue;
+            }
+            script::invokeInlineHandler(handler, current);
+            if (current->attribute("data-stoppropagation") == "true") {
+                break;
+            }
         }
     }
 }
@@ -5362,13 +5712,28 @@ bool Application::renderFrame(WindowId id) {
         // so an animated page repaints without any script.
         const bool timerFired = sui::script::pumpTimers();
         // A CSS animation or a smooth scroll keeps moving on its own, so either
-        // holds the frame stale until it finishes.
-        const bool moving = resolver_.hasRunningAnimations() || tickScrolling();
-        const bool inputFocused = document_ && isEditableField(document_->focused());
+        // holds the frame stale until it finishes -- in the page or in any of
+        // its frames.
+        const bool moving =
+            resolver_.hasRunningAnimations() || tickScrolling() || tickFrameScrolling();
+        // The caret the user sees belongs to whatever owns the keyboard: the
+        // page's focused field, or the focused frame's when the host focus
+        // mirrors onto the frame element.
+        Element* inputFocused = document_ ? document_->focused() : nullptr;
+        std::uint64_t inputBlinkStart = caretBlinkStart_;
+        if (inputFocused && inputFocused->tag() == "iframe") {
+            const auto focusedIt = iframeFrames_.find(inputFocused);
+            if (focusedIt != iframeFrames_.end() && focusedIt->second &&
+                focusedIt->second->document) {
+                inputFocused = focusedIt->second->document->focused();
+                inputBlinkStart = focusedIt->second->caretBlinkStart;
+            }
+        }
         const Uint64 ticks = SDL_GetTicks();
-        const bool caretBlinkPhase = inputFocused && caretVisible(ticks, caretBlinkStart_);
+        const bool caretShowing = isEditableField(inputFocused);
+        const bool caretBlinkPhase = caretShowing && caretVisible(ticks, inputBlinkStart);
         static bool lastCaretBlinkPhase = false;
-        const bool caretPhaseChanged = inputFocused && (caretBlinkPhase != lastCaretBlinkPhase);
+        const bool caretPhaseChanged = caretShowing && (caretBlinkPhase != lastCaretBlinkPhase);
         if (caretPhaseChanged) {
             lastCaretBlinkPhase = caretBlinkPhase;
         }
@@ -5396,6 +5761,7 @@ bool Application::renderFrame(WindowId id) {
              (!scriptedClicks_.empty() || !scriptedMoves_.empty() || !scriptedWheels_.empty())) ||
             (document_ && document_->mutationCount() != frame->stamp.mutations) ||
             resolver_.generation() != frame->stamp.rules ||
+            frameGeneration() != frame->stamp.frames ||
             scriptContext_.generation != frame->stamp.script;
         if (stale) {
             platform_->clear(id);
@@ -5481,15 +5847,9 @@ bool Application::renderFrame(WindowId id) {
                 // its ancestors' `overflow` allows. A stacking context that carries
                 // an alpha under 1 is rendered into an offscreen surface and blended
                 // back as one unit, so its overlapping members mix first.
-                std::vector<FrameSplice> frameSplices;
-                for (const auto& [frameEl, frame] : iframeFrames_) {
-                    if (frame && frame->document && frame->resolver && !frame->failed) {
-                        frameSplices.push_back(FrameSplice{frameEl, frame->document.get(),
-                                                           frame->resolver.get()});
-                    }
-                }
                 const std::vector<PaintOp> paintOps = spliceFrameOps(
-                    computePaintOps(*document_->root(), resolver_), frameSplices);
+                    computePaintOps(*document_->root(), resolver_),
+                    frameSplicesFor(iframeFrames_));
                 SDL_Renderer* sdlRenderer = platform_->renderer(id);
                 std::vector<GroupFrame> groups;
                 // Where the open select painted this frame, if it did: an open
@@ -5497,6 +5857,15 @@ bool Application::renderFrame(WindowId id) {
                 // the select's own offsets rather than re-derived.
                 float popupOffX = 0.0f, popupOffY = 0.0f, popupOpacity = 1.0f;
                 bool popupFound = false;
+                // The frame holding the keyboard shows its own caret: the host
+                // caret state lives in the working copy, a frame's in its state.
+                const FrameState* focusedFrameState = nullptr;
+                if (focusedFrame_) {
+                    const auto focusedIt = iframeFrames_.find(focusedFrame_);
+                    if (focusedIt != iframeFrames_.end()) {
+                        focusedFrameState = focusedIt->second.get();
+                    }
+                }
                 for (const PaintOp& op : paintOps) {
                     const StyleResolver& opResolver =
                         op.item.resolver ? *op.item.resolver : resolver_;
@@ -5900,7 +6269,26 @@ bool Application::renderFrame(WindowId id) {
                     int selStart = -1, selEnd = -1;
                     const char* compText = nullptr;
                     int compCursor = 0;
-                    if (document_ && document_->focused() == item.el) {
+                    if (item.frame) {
+                        // A frame's focused element draws its caret from the
+                        // frame's own state, and only while the frame holds the
+                        // keyboard; an unfocused frame shows none.
+                        if (item.frame == focusedFrameState && item.frame->document &&
+                            item.frame->document->focused() == item.el) {
+                            caretPos = static_cast<int>(item.frame->caretBytePos);
+                            showCaret = caretVisible(ticks, item.frame->caretBlinkStart);
+                            if (item.frame->selectionAnchor != item.frame->caretBytePos) {
+                                selStart = static_cast<int>(std::min(item.frame->selectionAnchor,
+                                                                    item.frame->caretBytePos));
+                                selEnd = static_cast<int>(std::max(item.frame->selectionAnchor,
+                                                                  item.frame->caretBytePos));
+                            }
+                            if (!item.frame->compositionText.empty()) {
+                                compText = item.frame->compositionText.c_str();
+                                compCursor = item.frame->compositionCursor;
+                            }
+                        }
+                    } else if (document_ && document_->focused() == item.el) {
                         caretPos = static_cast<int>(caretBytePos_);
                         showCaret = caretVisible(ticks, caretBlinkStart_);
                         if (selectionAnchor_ != caretBytePos_) {
@@ -5962,6 +6350,7 @@ bool Application::renderFrame(WindowId id) {
 
             frame->stamp.mutations = document_ ? document_->mutationCount() : 0;
             frame->stamp.rules = resolver_.generation();
+            frame->stamp.frames = frameGeneration();
             frame->stamp.script = scriptContext_.generation;
             frame->stamp.width = width;
             frame->stamp.height = height;

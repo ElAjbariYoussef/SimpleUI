@@ -26,16 +26,59 @@ class Element;
 class TextFont;
 class Renderer;
 
+// One box easing toward a scroll target, for `scroll-behavior: smooth`. A
+// second notch on the same box retargets it rather than queueing. Pages and
+// frames each carry their own working copy; see `bindPage` / `bindFrame`.
+struct SmoothScroll {
+    Element* box = nullptr;
+    float left = 0.0f;
+    float top = 0.0f;
+};
+
 // One `<iframe>`'s loaded document and the styles that belong to it. A frame
 // is a page of its own: a fresh resolver (UA defaults included) and stylesheets
 // loaded through the same resources. `src` names the load, so a rewritten
 // attribute reloads it; a frame that failed stays marked so it is not retried
 // every frame. Frames nested inside a frame are not loaded.
+//
+// The fields after `failed` are the frame's half of the interaction state the
+// working copy carries for a page: `bindFrame` moves them in while an event is
+// inside the frame, so the same event code focuses, edits, and scrolls against
+// the frame's document. Focus itself lives in the document (`focused()`); the
+// page's `focusedFrame_` names the frame whose document owns the keyboard.
 struct FrameState {
     std::unique_ptr<Document> document;
-    std::unique_ptr<StyleResolver> resolver;
+    StyleResolver resolver;
     std::string src;
     bool failed = false;
+    Element* lastFocused = nullptr;
+    std::size_t caretBytePos = 0;
+    std::size_t selectionAnchor = 0;
+    std::uint64_t caretBlinkStart = 0;
+    std::uint64_t caretBlinkResets = 0;
+    std::string compositionText;
+    int compositionCursor = 0;
+    Element* openSelect = nullptr;
+    std::size_t selectHighlight = 0;
+    Element* openDatalist = nullptr;
+    std::size_t datalistHighlight = 0;
+    Element* scrollDrag = nullptr;
+    bool scrollDragX = false;
+    float scrollGrab = 0.0f;
+    float scrollTrack = 0.0f;
+    float scrollTravel = 0.0f;
+    float scrollMax = 0.0f;
+    Element* resizeDrag = nullptr;
+    float resizeGrabX = 0.0f;
+    float resizeGrabY = 0.0f;
+    float resizeGrabW = 0.0f;
+    float resizeGrabH = 0.0f;
+    Element* modalDialog = nullptr;
+    Element* modalReturnFocus = nullptr;
+    std::uint64_t modalSyncMutations = 0;
+    std::size_t selectAnchor = 0;
+    std::size_t selectEdge = 0;
+    std::vector<SmoothScroll> smoothScrolls;
 };
 
 // One page: a document plus everything that belongs to showing it. A page that
@@ -90,14 +133,13 @@ struct Page {
     float resizeGrabH_ = 0.0f;
     std::size_t selectAnchor_ = 0;
     std::size_t selectEdge_ = 0;
-    struct SmoothScroll {
-        Element* box = nullptr;
-        float left = 0.0f;
-        float top = 0.0f;
-    };
     std::vector<SmoothScroll> smoothScrolls_;
     // The `<iframe>` documents this page loaded, keyed by the frame element.
     std::unordered_map<Element*, std::unique_ptr<FrameState>> iframeFrames;
+    // The `<iframe>` whose document owns the keyboard, if any. Key events and
+    // text input for this page route into that frame's document; a press on
+    // the page itself takes the keyboard back.
+    Element* focusedFrame_ = nullptr;
 };
 
 // Where a list item's outside marker lands. An image that loaded takes its own
@@ -348,6 +390,13 @@ private:
     StyleResolver resolver_;
     // The bound page's frames; mirrors Page::iframeFrames like the other state.
     std::unordered_map<Element*, std::unique_ptr<FrameState>> iframeFrames_;
+    // The frame the working copy currently holds, if any. A pointer event
+    // inside a loaded frame binds it: `bindFrame` swaps the working copy to the
+    // frame's document, resolver, and state, and `flushFrame` swaps back, so
+    // the event code runs against the frame's tree unchanged.
+    Element* boundFrame_ = nullptr;
+    // Mirrors Page::focusedFrame_: the frame whose document owns the keyboard.
+    Element* focusedFrame_ = nullptr;
     script::Context scriptContext_;
     std::string screenshotPath_;
 
@@ -358,6 +407,9 @@ private:
         std::uint64_t mutations = 0;
         std::uint64_t rules = 0;
         std::uint64_t script = 0;
+        // The combined stamp of the page's `<iframe>` documents: a change inside
+        // a frame repaints the host page the same way the page's own counters do.
+        std::uint64_t frames = 0;
         int width = -1;
         int height = -1;
     };
@@ -382,6 +434,9 @@ private:
     // before-body scripts, the colour preference, and the scripted test hooks.
     // Idempotent, so `renderFrame` can call it directly and `run` stays a loop.
     void ensureFrameStartup();
+    // The bound page's frames' combined mutation/resolution stamp: document
+    // mutations plus resolver generations, summed. Feeds the frame-skip check.
+    std::uint64_t frameGeneration() const;
     bool frameStartupDone_ = false;
     // Scripted test hooks (SUI_CLICK / SUI_MOVE / SUI_WHEEL / SUI_FRAMES /
     // SUI_RESIZE), parsed once at startup. They address the primary window,
@@ -470,7 +525,7 @@ private:
     // One box easing toward a scroll target, for `scroll-behavior: smooth`. A
     // second notch on the same box retargets it rather than queueing. The
     // working copy of the bound page's scrolls; see `bindPage`.
-    std::vector<Page::SmoothScroll> smoothScrolls_;
+    std::vector<SmoothScroll> smoothScrolls_;
     void queueSmoothScroll(Element& box, float left, float top);
     // Every live page, headless or window-bound. `pages_[0]` is the primary
     // page: the one `setDocument` fills, `document()` returns, and `navigate`
@@ -492,6 +547,26 @@ private:
     // working copy so handlers always see the page they belong to.
     void bindPage(std::size_t index);
     void flushBound();
+    // `dispatch`'s body. A frame-bound event leaves the frame bound, so the
+    // public wrapper settles the working copy back on the page before anyone
+    // reads it.
+    void dispatchEvent(const InputEvent& event);
+    // Frame interaction. `bindFrame` flushes whatever is bound, then moves the
+    // frame's document, resolver, and state into the working copy; `flushFrame`
+    // moves them back. Between events the working copy is always on a page.
+    void bindFrame(Element* frameEl);
+    void flushFrame();
+    // The frame whose loaded document contains `el`, or null. A frame element
+    // itself is not "inside" its frame document; callers handle that.
+    Element* frameOwning(const Element& el) const;
+    // A press on the page drops the frame's own focus and hover state.
+    void dropFrameFocus();
+    // Pointer events on one side of the frame boundary clear the other side's
+    // hover/active state, which lives in the resolver that was set.
+    void clearFrameHovers();
+    // Advances every loaded frame's smooth scrolls one step. Runs beside
+    // `tickScrolling`, whose working copy is the page.
+    bool tickFrameScrolling();
     // Loads every `<iframe>` in the bound page whose src is new (or changed)
     // and drops the frames whose element left the tree. Runs before layout,
     // so the frame boxes a layout pass sees are the ones on screen.

@@ -37,6 +37,7 @@ namespace sui {
 class Element;
 class StyleResolver;
 class Document;
+struct FrameState;
 
 struct PaintItem {
     Element* el = nullptr;
@@ -92,6 +93,10 @@ struct PaintItem {
     // item carries the resolver its walk used. Null means the bound page's --
     // what hit-testing and older reads assume.
     const StyleResolver* resolver = nullptr;
+    // The frame's interaction state when the item belongs to a spliced frame
+    // document (null for the host's own items). The painter reads the frame's
+    // focus and caret from it; this header keeps the type opaque.
+    const FrameState* frame = nullptr;
 };
 
 // A parsed `filter: drop-shadow(x y blur color)`. The shadow follows the
@@ -212,11 +217,13 @@ bool unprojectPoint(const ProjectedQuad& quad, float rectX, float rectY, float r
 std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolver);
 
 // One loaded `<iframe>`: the element in the host tree and the document it
-// brought, with the resolver that document resolves against.
+// brought, with the resolver that document resolves against and the frame's
+// interaction state, which every spliced item carries.
 struct FrameSplice {
     const Element* frame = nullptr;
     const Document* document = nullptr;
     const StyleResolver* resolver = nullptr;
+    const FrameState* state = nullptr;
 };
 
 // The host's op list with every loaded frame's ops spliced in right after its
