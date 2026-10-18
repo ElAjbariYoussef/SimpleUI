@@ -4584,6 +4584,7 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         } else {
             s.whiteSpace = ComputedStyle::WrapText;
         }
+        s.specified |= ComputedStyle::SpecifiedWhiteSpace;
     } else if (property == "box-sizing") {
         s.boxSizing =
             value == "border-box" ? BoxSizing::BorderBox : BoxSizing::ContentBox;
@@ -6330,6 +6331,16 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         }
         return "none";
     }
+    if (property == "white-space") {
+        switch (style.whiteSpace) {
+            case ComputedStyle::WrapNone: return "nowrap";
+            case ComputedStyle::WrapPre: return "pre";
+            case ComputedStyle::WrapPreWrap: return "pre-wrap";
+            case ComputedStyle::WrapBreakSpaces: return "break-spaces";
+            case ComputedStyle::WrapText: return "normal";
+        }
+        return "normal";
+    }
     if (property == "vertical-align") {
         switch (style.verticalAlign) {
             case ComputedStyle::VAlignTop: return "top";
@@ -7307,7 +7318,8 @@ bool isInheritable(std::string_view property) {
            property == "cursor" || property == "list-style-position" ||
            property == "quotes" || property == "caret-color" || property == "direction" ||
            property == "font-variant" || property == "text-align-last" ||
-           property == "empty-cells" || property == "tab-size";
+           property == "empty-cells" || property == "tab-size" ||
+           property == "white-space";
 }
 
 // `inherit` and `unset` are the two CSS-wide keywords the engine can answer

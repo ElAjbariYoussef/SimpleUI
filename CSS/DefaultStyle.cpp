@@ -85,6 +85,18 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
         return s;
     }
 
+    if (tag == "pre") {
+        // A code block: whitespace and newlines survive, tabs stop at
+        // `tab-size`, and the face is the generic monospace family (the app
+        // loads one; the default face answers when the machine has none).
+        Style s = block();
+        s.fontFamily = "monospace";
+        s.whiteSpace = Style::WrapPre;
+        s.margin = {16.0f, 0.0f, 16.0f, 0.0f};
+        s.specified = Style::SpecifiedFontFamily | Style::SpecifiedWhiteSpace;
+        return s;
+    }
+
     if (tag == "h1" || tag == "h2" || tag == "h3" || tag == "h4" ||
         tag == "h5" || tag == "h6") {
         Style s = block(Style::SpecifiedFontSize | Style::SpecifiedFontBold);
@@ -111,15 +123,30 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
         return s;
     }
 
-    if (tag == "span" || tag == "label" || tag == "br" || tag == "code" ||
-        tag == "em" || tag == "i" || tag == "var" || tag == "cite" ||
-        tag == "dfn") {
+    if (tag == "span" || tag == "label" || tag == "br") {
+        // Neutral phrasing: inline, no decoration of its own.
+        Style s;
+        s.display = Style::Inline;
+        return s;
+    }
+
+    if (tag == "em" || tag == "i" || tag == "var" || tag == "cite" || tag == "dfn") {
         // Emphasis is italic. Sizes and shifts need the parent font, so they
         // land in applyPhrasingStyle instead of here.
         Style s;
         s.display = Style::Inline;
         s.fontStyle = Style::FontItalic;
         s.specified = Style::SpecifiedFontStyle;
+        return s;
+    }
+
+    if (tag == "code" || tag == "kbd" || tag == "samp") {
+        // Computer text is monospaced and upright: a browser never italicizes
+        // it, whatever the surrounding emphasis does.
+        Style s;
+        s.display = Style::Inline;
+        s.fontFamily = "monospace";
+        s.specified = Style::SpecifiedFontFamily;
         return s;
     }
 
@@ -210,7 +237,8 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
     if (tag == "textarea") {
         Style s;
         s.display = Style::InlineBlock;
-        s.specified = Style::SpecifiedColor | Style::SpecifiedLineHeight;
+        s.specified = Style::SpecifiedColor | Style::SpecifiedLineHeight |
+                      Style::SpecifiedWhiteSpace;
         s.padding = {2.0f, 2.0f, 2.0f, 2.0f};
         s.borderWidth = {1.0f, 1.0f, 1.0f, 1.0f};
         s.borderColor = {82, 82, 91, 255};

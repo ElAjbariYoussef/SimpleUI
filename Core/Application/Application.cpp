@@ -309,6 +309,43 @@ bool loadFirstAvailable(TextFont& font, const Resources* resources) {
     return false;
 }
 
+// The generic `monospace` family the UA asks for on `<pre>`/`<code>`, from the
+// same two tiers. Without a mono file the family falls back to the default
+// face, so the text still renders, just proportionally.
+constexpr std::array<std::string_view, 4> kBundledMonoFonts = {
+    "/assets/fonts/DejaVuSansMono.ttf", "/assets/fonts/RobotoMono-Regular.ttf",
+    "/assets/fonts/Go-Mono.ttf", "/assets/fonts/FreeMono.ttf"};
+
+constexpr std::array<std::string_view, 4> kSystemMonoFonts = {
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+    "/usr/share/fonts/fonts-go/Go-Mono.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeMono.ttf"};
+
+bool loadMonoFace(TextFont& font, const Resources* resources) {
+    if (resources) {
+        for (const auto& href : kBundledMonoFonts) {
+            if (!resources->exists(href)) {
+                continue;
+            }
+            if (auto data = resources->readText(href)) {
+                if (font.addFaceFromMemory(
+                        "monospace", reinterpret_cast<const unsigned char*>(data->data()),
+                        static_cast<int>(data->size()), 400, false)) {
+                    return true;
+                }
+            }
+        }
+    }
+    for (const auto& path : kSystemMonoFonts) {
+        if (std::filesystem::exists(path) &&
+            font.addFace("monospace", std::string(path), 400, false)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // A percentage radius resolves against the box's own width and height, and an `em`
 // or `rem` against the font sizes, so this cannot be settled until the box is known.
 sui::Radii radiiOf(const ComputedStyle& s, const SDL_FRect& box, float rootFontSize) {
@@ -5521,6 +5558,9 @@ void Application::ensureFrameStartup() {
     if (!loadFirstAvailable(*font_, resources_.get())) {
         SDL_Log("no font available; text will not render");
     }
+    // The UA styles for `<pre>`/`<code>` ask for the generic monospace family;
+    // register the machine's mono face under it when one is installed.
+    loadMonoFace(*font_, resources_.get());
 
     // `@media` is evaluated against the viewport and the resolver starts with
     // none, so an unreported size would read as 0x0 and let every `max-width`

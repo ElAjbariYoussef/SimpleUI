@@ -1101,6 +1101,7 @@ struct ComputedStyle {
         SpecifiedLineClamp = 1ULL << 38,
         SpecifiedResize = 1ULL << 39,
         SpecifiedTabSize = 1ULL << 40,
+        SpecifiedWhiteSpace = 1ULL << 41,
         SpecifiedScrollBehavior = 1u << 25,
         SpecifiedColorScheme = 1u << 26,
         // A marker, not a property: the element still carries the user-agent
@@ -1392,6 +1393,11 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     }
     if (!(style.specified & ComputedStyle::SpecifiedTabSize)) {
         style.tabSize = parent.tabSize;
+    }
+    // `white-space` inherits, which is what keeps the contents of a `<pre>`
+    // preserved inside the elements nested in it.
+    if (!(style.specified & ComputedStyle::SpecifiedWhiteSpace)) {
+        style.whiteSpace = parent.whiteSpace;
     }
     if (!(style.specified & ComputedStyle::SpecifiedFontStretch)) {
         style.fontStretch = parent.fontStretch;

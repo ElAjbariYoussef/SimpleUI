@@ -2650,6 +2650,63 @@ int main() {
         }
     }
 
+    // The UA's `<pre>`/`<code>` ask for the generic monospace family, and the
+    // app registers the machine's mono face under it while loading fonts.
+    // Uniform glyphs then measure the same inside a `<pre>`, while the default
+    // family keeps its proportions. Needs real fonts, so the check skips
+    // quietly without the system DejaVu pair.
+    {
+        namespace fs = std::filesystem;
+        if (!fs::exists("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf") ||
+            !fs::exists("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf")) {
+            std::printf("(skipping monospace face: no system DejaVu Sans / Mono)\n");
+        } else {
+            const fs::path root = fs::temp_directory_path() / "sui-mono-check";
+            fs::remove_all(root);
+            fs::create_directories(root);
+            {
+                std::ofstream out(root / "index.sui", std::ios::binary);
+                out << "<sui><body>"
+                       "<pre id=\"mono-i\">iiii</pre>"
+                       "<pre id=\"mono-m\">mmmm</pre>"
+                       "<p id=\"prop-i\">iiii</p>"
+                       "<p id=\"prop-m\">mmmm</p>"
+                       "</body></sui>";
+            }
+            const fs::path previous = fs::current_path();
+            struct RestoreMono {
+                fs::path previous;
+                ~RestoreMono() {
+                    std::error_code ec;
+                    fs::current_path(previous, ec);
+                }
+            } restoreMono{previous};
+            fs::current_path(root);
+
+            sui::Application app;
+            std::string error;
+            check(app.start("index.sui", error), "a monospace project starts");
+            if (app.platform()) {
+                const sui::WindowId primary = app.platform()->primaryWindow();
+                check(app.renderFrame(primary), "the monospace page lays out");
+                sui::Element* monoI = app.document().getElementById("mono-i");
+                sui::Element* monoM = app.document().getElementById("mono-m");
+                sui::Element* propI = app.document().getElementById("prop-i");
+                sui::Element* propM = app.document().getElementById("prop-m");
+                check(monoI && monoM && propI && propM, "the monospace elements exist");
+                if (monoI && monoM && propI && propM && !monoI->textRuns().empty() &&
+                    !monoM->textRuns().empty() && !propI->textRuns().empty() &&
+                    !propM->textRuns().empty()) {
+                    check(std::fabs(monoI->textRuns()[0].width - monoM->textRuns()[0].width) <
+                              0.01f,
+                          "monospace glyphs advance uniformly in a pre");
+                    check(propI->textRuns()[0].width + 1.0f < propM->textRuns()[0].width,
+                          "the default face keeps its proportions");
+                }
+            }
+        }
+    }
+
     platform->shutdown();
 
     std::printf("input_tests: %d checks, %d failures\n", checks, failures);

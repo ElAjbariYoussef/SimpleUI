@@ -4143,6 +4143,74 @@ void testTabSize() {
           "a px length serializes");
 }
 
+// `<pre>` is a code block out of the box: whitespace and newlines survive,
+// nested blocks inherit the preserved whitespace, tabs stop at `tab-size`, and
+// the UA asks for the generic monospace family.
+void testPreDefaults() {
+    const sui::ComputedStyle pre = sui::defaultStyleFor("pre");
+    check(pre.display == sui::ComputedStyle::Block, "pre is a block");
+    check(pre.whiteSpace == sui::ComputedStyle::WrapPre, "pre preserves whitespace");
+    check(pre.fontFamily == "monospace", "pre asks for monospace");
+    checkNear(pre.margin.top.value, 16.0f, 0.01f, "pre keeps the UA lead");
+    checkNear(pre.margin.bottom.value, 16.0f, 0.01f, "pre keeps the UA trail");
+
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<pre id=\"a\">a  b\nc</pre>"
+        "<pre id=\"t\">x\ty</pre>"
+        "<pre id=\"n\"><div id=\"child\">m  n</div></pre>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* a = el("a");
+    Element* t = el("t");
+    Element* n = el("n");
+    Element* child = el("child");
+    check(a && t && n && child, "pre elements found");
+    if (!a || !t || !n || !child) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+    layoutRoot(*document, resolver, 400.0f);
+
+    check(a->textRuns().size() == 2, "a newline in a pre starts a second run");
+    if (a->textRuns().size() == 2) {
+        check(a->textRuns()[0].text == "a  b", "the double space survives in a pre");
+        check(a->textRuns()[1].y > a->textRuns()[0].y, "the newline takes a new line");
+    }
+    // The default stop is eight spaces of 4px each, so "y" lands at x=32.
+    check(t->textRuns().size() == 3, "a tab in a pre becomes a blank run");
+    if (t->textRuns().size() == 3) {
+        check(t->textRuns()[1].text == " ", "the pre tab run is blank");
+        checkNear(t->textRuns()[2].x - t->textRuns()[0].x, 32.0f, 0.01f,
+                  "the pre tab lands on the default stop");
+    }
+    check(resolver.resolve(*child).whiteSpace == sui::ComputedStyle::WrapPre,
+          "white-space inherits into a nested block");
+    check(child->textRuns().size() == 1 && child->textRuns()[0].text == "m  n",
+          "the nested block keeps its spaces");
+
+    // Author declarations still win over the UA block.
+    sui::StyleResolver author;
+    author.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } pre { white-space: pre-wrap; font-family: serif; margin: 0 }"));
+    auto document2 = parseOrNull("<sui><body><pre id=\"p\">a  b</pre></body></sui>");
+    if (!document2) {
+        return;
+    }
+    Element* p = document2->getElementById("p");
+    check(p != nullptr, "author pre found");
+    if (p) {
+        const sui::ComputedStyle s = author.resolve(*p);
+        check(s.whiteSpace == sui::ComputedStyle::WrapPreWrap, "an author pre-wrap wins");
+        check(s.fontFamily == "serif", "an author family wins");
+        checkNear(s.margin.top.value, 0.0f, 0.01f, "an author margin wins");
+    }
+}
+
 // `empty-cells: hide` blanks the background and borders of a table cell with
 // no visible content, in the separated borders model only.
 void testEmptyCells() {
@@ -7920,6 +7988,8 @@ void testPhrasingStyles() {
         "<sub id=\"sub\">2</sub><sup id=\"sup\">2</sup><big id=\"big\">b</big>"
         "<s id=\"s\">s</s><del id=\"del\">d</del><ins id=\"ins\">i</ins>"
         "<u id=\"u\">u</u><var id=\"v\">v</var></p>"
+        "<p id=\"q\"><span id=\"sp\">s</span><label id=\"lb\">l</label>"
+        "<code id=\"co\">c</code><kbd id=\"kb\">k</kbd><samp id=\"sa\">s</samp></p>"
         "<template id=\"tp\"><div id=\"inner\">x</div></template>"
         "<button id=\"b\" disabled=\"\">x</button>"
         "<button id=\"be\">x</button>"
@@ -7935,6 +8005,14 @@ void testPhrasingStyles() {
     check(styleOf("e").fontStyle == ComputedStyle::FontItalic, "em is italic");
     check(styleOf("i").fontStyle == ComputedStyle::FontItalic, "i is italic");
     check(styleOf("v").fontStyle == ComputedStyle::FontItalic, "var is italic");
+    check(styleOf("sp").fontStyle == ComputedStyle::FontNormal, "span is upright");
+    check(styleOf("lb").fontStyle == ComputedStyle::FontNormal, "label is upright");
+    check(styleOf("co").fontStyle == ComputedStyle::FontNormal, "code is upright");
+    check(styleOf("co").fontFamily == "monospace", "code is monospaced");
+    check(styleOf("kb").fontFamily == "monospace", "kbd is monospaced");
+    check(styleOf("sa").fontFamily == "monospace", "samp is monospaced");
+    check(styleOf("kb").display == ComputedStyle::Inline, "kbd stays inline");
+    check(styleOf("sa").display == ComputedStyle::Inline, "samp stays inline");
     check(styleOf("sm").fontSize == 16.0f, "small scales off the parent");
     check(styleOf("big").fontSize == 24.0f, "big grows off the parent");
     check(styleOf("sub").verticalAlign == ComputedStyle::VAlignSub, "sub sinks");
@@ -9724,6 +9802,7 @@ int main() {
     testQuotes();
     testBreakSpaces();
     testTabSize();
+    testPreDefaults();
     testEmptyCells();
     testLineClamp();
     testResize();
