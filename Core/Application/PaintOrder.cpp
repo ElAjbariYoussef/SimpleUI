@@ -100,6 +100,9 @@ struct PaintEntry {
     DropShadowFilter dropShadow{};
     // A `mix-blend-mode` compositing the group against its backdrop.
     ComputedStyle::MixBlendMode blend = ComputedStyle::MixBlendMode::Normal;
+    // `isolation: isolate`: the group opens even when nothing else about it
+    // composites, so its descendants blend with its content alone.
+    bool isolated = false;
     std::vector<PaintEntry> inner;
 };
 
@@ -825,7 +828,7 @@ bool declares(const std::string& value) {
 // around it -- CSS lets it, the engine keeps it inside.
 GroupKind classifyGroup(const ComputedStyle& s) {
     if (s.opacity < 1.0f || declares(s.transform) || declares(s.filter) ||
-        s.mixBlendMode != ComputedStyle::MixBlendMode::Normal) {
+        s.isolate || s.mixBlendMode != ComputedStyle::MixBlendMode::Normal) {
         return GroupKind::Real;
     }
     // A `clip-path` composites its subtree through a surface to mask it, so it
@@ -1118,6 +1121,7 @@ struct Collector {
         DropShadowFilter dropShadow{};
         // A `mix-blend-mode` that composites the group against its backdrop.
         ComputedStyle::MixBlendMode blend = ComputedStyle::MixBlendMode::Normal;
+        bool isolated = false;
         PaintItem item;
         PaintEnv child;
     };
@@ -1217,6 +1221,7 @@ struct Collector {
         box.blur = composited ? blur : 0.0f;
         box.dropShadow = composited ? dropShadow : DropShadowFilter{};
         box.blend = composited ? s.mixBlendMode : ComputedStyle::MixBlendMode::Normal;
+        box.isolated = s.isolate;
         box.m[0] = matrix.a;
         box.m[1] = matrix.b;
         box.m[2] = matrix.c;
@@ -1356,6 +1361,7 @@ struct Collector {
         entry.shift = box.shift;
         entry.dropShadow = box.dropShadow;
         entry.blend = box.blend;
+        entry.isolated = box.isolated;
         for (int i = 0; i < 12; ++i) {
             entry.filter[i] = box.filter[i];
         }
@@ -1392,7 +1398,7 @@ struct Collector {
             if (entry.group &&
                 (entry.groupAlpha < 1.0f || entry.transformed || entry.projective ||
                  entry.blur > 0.0f || entry.shift || entry.dropShadow.present ||
-                 entry.blend != ComputedStyle::MixBlendMode::Normal ||
+                 entry.blend != ComputedStyle::MixBlendMode::Normal || entry.isolated ||
                  entry.item.clipShape.kind != ResolvedClip::Kind::None ||
                  hasMaskSurface(entry.item.maskImages) ||
                  hasMaskBorderSurface(entry.item.maskBorder))) {

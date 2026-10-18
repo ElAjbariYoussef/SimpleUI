@@ -272,6 +272,8 @@ void testGroupDetection() {
         <div id="maskurl" style="mask-image:url(m.png)"></div>
         <div id="maskborder" style="mask-border-source:url(b.png)"></div>
         <div id="maskbordernone" style="mask-border-source:none"></div>
+        <div id="iso" style="isolation:isolate"></div>
+        <div id="isoauto" style="isolation:auto"></div>
     </body></sui>)HTML");
     if (!document) {
         return;
@@ -301,6 +303,8 @@ void testGroupDetection() {
         {"maskurl", true, "a url mask opens a group for sampling"},
         {"maskborder", true, "a border mask opens a group"},
         {"maskbordernone", false, "mask-border-source:none opens no group"},
+        {"iso", true, "isolation:isolate opens a group"},
+        {"isoauto", false, "isolation:auto opens no group"},
     };
     for (const Case& c : cases) {
         Element* el = document->getElementById(c.id);
@@ -603,6 +607,65 @@ void testBlendGroup() {
         }
     }
     check(!plainGrouped, "a plain box opens no group of its own");
+}
+
+// `isolation: isolate` opens a group even when nothing else about the box
+// composites: its blended descendants land in the box's own surface instead of
+// the page behind it. The group itself carries no effect.
+void testIsolationGroup() {
+    auto document = parseOrNull(R"(<sui><body>
+        <div id="iso" style="isolation:isolate;width:100px;height:60px">
+            <div id="c" style="mix-blend-mode:multiply;width:40px;height:20px"></div>
+        </div>
+        <div id="auto" style="isolation:auto;width:100px;height:60px"></div>
+    </body></sui>)");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body{margin:0}"));
+    layoutRoot(*document, resolver);
+    const auto ops = sui::computePaintOps(*document->root(), resolver);
+    Element* iso = document->getElementById("iso");
+    Element* c = document->getElementById("c");
+    Element* autoEl = document->getElementById("auto");
+    if (!iso || !c || !autoEl) {
+        check(false, "isolation document parsed");
+        return;
+    }
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*iso), "isolation") == "isolate",
+          "isolation serializes as isolate");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*autoEl), "isolation") == "auto",
+          "isolation:auto serializes back");
+    std::vector<std::size_t> begins;
+    std::size_t isoBegin = ops.size();
+    std::size_t cBegin = ops.size();
+    for (std::size_t i = 0; i < ops.size(); ++i) {
+        if (ops[i].kind != sui::PaintOp::Kind::BeginGroup) {
+            continue;
+        }
+        begins.push_back(i);
+        if (ops[i].item.el == iso) {
+            isoBegin = i;
+        }
+        if (ops[i].item.el == c) {
+            cBegin = i;
+        }
+    }
+    check(begins.size() == 2, "the isolated box and its blended child group, nothing else");
+    check(isoBegin != ops.size() && ops[isoBegin].alpha == 1.0f &&
+              ops[isoBegin].blend == sui::ComputedStyle::MixBlendMode::Normal,
+          "an isolated box opens an effect-free group");
+    check(cBegin != ops.size() && isoBegin != ops.size() && cBegin > isoBegin,
+          "the blended child groups inside the isolation");
+    // The sequence is Begin(iso) Box(iso) Begin(c) Box(c) End(c) End(iso): the
+    // isolation wraps the blend, so the executor's surface contains it.
+    const bool wraps = isoBegin + 5 < ops.size() &&
+                       ops[isoBegin + 1].kind == sui::PaintOp::Kind::Box &&
+                       ops[isoBegin + 2].kind == sui::PaintOp::Kind::BeginGroup &&
+                       ops[isoBegin + 4].kind == sui::PaintOp::Kind::EndGroup &&
+                       ops[isoBegin + 5].kind == sui::PaintOp::Kind::EndGroup;
+    check(wraps, "the blend's group closes before the isolation's");
 }
 
 // Nested alphas composite in nested surfaces: each BeginGroup carries only its
@@ -1600,6 +1663,7 @@ int main() {
     testEffectsDontCompound();
     testGroupBecomesOffscreenBlit();
     testBlendGroup();
+    testIsolationGroup();
     testNestedGroupAlphas();
     testGroupBoundsIncludePaint();
     testGroupClampedToClip();

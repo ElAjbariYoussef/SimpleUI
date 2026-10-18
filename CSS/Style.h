@@ -907,6 +907,10 @@ struct ComputedStyle {
         Luminosity
     };
     MixBlendMode mixBlendMode = MixBlendMode::Normal;
+    // `isolation: isolate` forces this box to open its own group, so mixed
+    // descendants composite against its content alone rather than the page
+    // behind it. Not inherited; the group composites as a plain unit.
+    bool isolate = false;
     // Per-layer background compositing, pairing with the image list and
     // cycling short lists. Empty (or all normal) paints layers straight onto
     // the page; anything else isolates the stack from the backdrop.

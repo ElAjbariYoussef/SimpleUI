@@ -2707,6 +2707,91 @@ int main() {
         }
     }
 
+    // `isolation: isolate` opens a group, so a blended descendant composites
+    // against the group's own surface instead of the page behind it. Two
+    // identical red-over-blue pairs prove it in pixels: isolated, the blue
+    // survives; plain, multiply paints black. The third band pins the group
+    // surface's alpha: an opacity group's untouched area must let the page
+    // through, not composite black.
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "sui-isolation-check";
+        fs::remove_all(root);
+        fs::create_directories(root);
+        {
+            std::ofstream out(root / "index.sui", std::ios::binary);
+            out << "<sui><body style=\"margin:0;background:#ffffff\">"
+                   "<div id=\"back\" style=\"position:absolute;left:0;top:0;width:60px;"
+                   "height:40px;background:#ff0000\"></div>"
+                   "<div id=\"iso\" style=\"position:absolute;left:0;top:0;width:60px;"
+                   "height:40px;isolation:isolate\">"
+                   "<div id=\"blend\" style=\"position:absolute;left:0;top:0;width:60px;"
+                   "height:40px;background:#0000ff;mix-blend-mode:multiply\"></div></div>"
+                   "<div id=\"back2\" style=\"position:absolute;left:0;top:60px;width:60px;"
+                   "height:40px;background:#ff0000\"></div>"
+                   "<div id=\"plain\" style=\"position:absolute;left:0;top:60px;width:60px;"
+                   "height:40px\">"
+                   "<div id=\"blend2\" style=\"position:absolute;left:0;top:0;width:60px;"
+                   "height:40px;background:#0000ff;mix-blend-mode:multiply\"></div></div>"
+                   "<div id=\"back3\" style=\"position:absolute;left:0;top:120px;width:60px;"
+                   "height:40px;background:#ff0000\"></div>"
+                   "<div id=\"ghost\" style=\"position:absolute;left:0;top:120px;width:60px;"
+                   "height:40px;opacity:0.5\">"
+                   "<div id=\"oleft\" style=\"position:absolute;left:0;top:0;width:30px;"
+                   "height:40px;background:#0000ff\"></div></div>"
+                   "</body></sui>";
+        }
+        const fs::path previous = fs::current_path();
+        struct RestoreIsolation {
+            fs::path previous;
+            ~RestoreIsolation() {
+                std::error_code ec;
+                fs::current_path(previous, ec);
+            }
+        } restoreIsolation{previous};
+        fs::current_path(root);
+
+        sui::Application app;
+        std::string error;
+        check(app.start("index.sui", error), "an isolation project starts");
+        if (app.platform()) {
+            const sui::WindowId primary = app.platform()->primaryWindow();
+            check(app.renderFrame(primary), "the isolation page lays out");
+            const auto readPixel = [&](float x, float y, int& r, int& g, int& b) -> bool {
+                SDL_Renderer* renderer = app.platform()->renderer(primary);
+                if (!renderer) {
+                    return false;
+                }
+                const SDL_Rect rect{static_cast<int>(x), static_cast<int>(y), 1, 1};
+                SDL_Surface* read = SDL_RenderReadPixels(renderer, &rect);
+                if (!read) {
+                    return false;
+                }
+                SDL_Surface* conv = SDL_ConvertSurface(read, SDL_PIXELFORMAT_ABGR8888);
+                SDL_DestroySurface(read);
+                if (!conv) {
+                    return false;
+                }
+                const Uint8* px = static_cast<const Uint8*>(conv->pixels);
+                r = px[0];
+                g = px[1];
+                b = px[2];
+                SDL_DestroySurface(conv);
+                return true;
+            };
+            int r = 0, g = 0, b = 0;
+            check(readPixel(30.0f, 20.0f, r, g, b) && r == 0 && g == 0 && b == 255,
+                  "an isolated group keeps the blend off the page behind it");
+            check(readPixel(30.0f, 80.0f, r, g, b) && r == 0 && g == 0 && b == 0,
+                  "a plain wrapper blends with the page");
+            check(readPixel(45.0f, 140.0f, r, g, b) && r == 255 && g == 0 && b == 0,
+                  "a group's untouched surface composites away");
+            check(readPixel(15.0f, 140.0f, r, g, b) && std::abs(r - 127) <= 2 &&
+                      std::abs(g - 0) <= 2 && std::abs(b - 127) <= 2,
+                  "a half-opacity group composites its content");
+        }
+    }
+
     platform->shutdown();
 
     std::printf("input_tests: %d checks, %d failures\n", checks, failures);

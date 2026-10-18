@@ -5419,9 +5419,16 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         }
     } else if (property == "appearance" || property == "-webkit-appearance") {
         // Accepted; these control browser chrome that this engine does not draw.
-    } else if (property == "will-change" || property == "contain" ||
-               property == "isolation" || property == "filter") {
-        // Performance / compositing hints and effects: accepted and ignored.
+    } else if (property == "isolation") {
+        // `isolate` opens the element's own group; `auto` is the initial
+        // value, and garbage keeps the previous cascade winner.
+        if (value == "isolate") {
+            s.isolate = true;
+        } else if (value == "auto") {
+            s.isolate = false;
+        }
+    } else if (property == "will-change" || property == "contain") {
+        // Performance / compositing hints: accepted and ignored.
     } else if (property == "mask" || property == "-webkit-mask") {
         // Shorthand: every layer expands into all eight longhands, resetting
         // whatever they set. One bad token drops the whole declaration.
@@ -6341,6 +6348,7 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         }
         return "normal";
     }
+    if (property == "isolation") return style.isolate ? "isolate" : "auto";
     if (property == "vertical-align") {
         switch (style.verticalAlign) {
             case ComputedStyle::VAlignTop: return "top";

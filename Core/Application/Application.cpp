@@ -5985,7 +5985,22 @@ bool Application::renderFrame(WindowId id) {
                                                   width);
                             SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER,
                                                   height);
+                            // A group's surface must carry alpha: its untouched
+                            // areas have to composite away, and a descendant's
+                            // readback sees them as the empty backdrop. The
+                            // renderer's own format is often opaque (XRGB).
+                            SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER,
+                                                  SDL_PIXELFORMAT_ARGB8888);
                             frame.texture = SDL_CreateTextureWithProperties(sdlRenderer, props);
+                            if (!frame.texture) {
+                                // A renderer that cannot make an alpha target
+                                // keeps its own format rather than losing groups.
+                                SDL_SetNumberProperty(
+                                    props, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER,
+                                    SDL_PIXELFORMAT_UNKNOWN);
+                                frame.texture =
+                                    SDL_CreateTextureWithProperties(sdlRenderer, props);
+                            }
                             SDL_DestroyProperties(props);
                         }
                         if (frame.texture) {
@@ -6005,19 +6020,21 @@ bool Application::renderFrame(WindowId id) {
                         const GroupFrame frame = groups.back();
                         groups.pop_back();
                         if (frame.texture) {
-                            // A `filter: blur()`, a colour-shift chain, or a
-                            // drop-shadow reworks the finished surface: read it
-                            // back while it is still the target, shift and blur
-                            // it, and for a drop-shadow build a recoloured,
-                            // blurred silhouette to blit under it. A failed
-                            // readback keeps the sharp surface rather than
-                            // dropping the group.
+                            // A `filter: blur()`, a colour-shift chain, a
+                            // drop-shadow, a clip, or a `mix-blend-mode` reworks
+                            // the finished surface: read it back while it is
+                            // still the target, shift and blur it, and for a
+                            // drop-shadow build a recoloured, blurred silhouette
+                            // to blit under it, or replace its pixels with the
+                            // blend against the backdrop. A failed readback keeps
+                            // the sharp surface rather than dropping the group.
                             SDL_Texture* texture = frame.texture;
                             SDL_Texture* shadow = nullptr;
                             const int blurRadius =
                                 frame.blur > 0.0f ? std::lround(frame.blur) : 0;
                             if (frame.shift || blurRadius > 0 || frame.dropShadow.present ||
-                                frame.clip) {
+                                frame.clip ||
+                                frame.blend != ComputedStyle::MixBlendMode::Normal) {
                                 SDL_Surface* read = SDL_RenderReadPixels(sdlRenderer, nullptr);
                                 if (read) {
                                     SDL_Surface* conv = SDL_ConvertSurface(
