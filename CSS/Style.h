@@ -1006,6 +1006,11 @@ struct ComputedStyle {
     TextSizeAdjust textSizeAdjust = TextSizeAdjust::Auto;
     float textSizeAdjustPercent = 100.0f;
 
+    // `tab-size`: how far a tab advances in preserved whitespace. A number
+    // counts space widths (the default of 8), a length is absolute with
+    // font-relative units resolved at layout. Inherited.
+    Length tabSize{Length::Number, 8.0f};
+
     // Pointer events: when true (from `pointer-events: none`), the element does not
     // intercept pointer events during hit testing.
     bool pointerEventsNone = false;
@@ -1095,6 +1100,7 @@ struct ComputedStyle {
         SpecifiedEmptyCells = 1ULL << 37,
         SpecifiedLineClamp = 1ULL << 38,
         SpecifiedResize = 1ULL << 39,
+        SpecifiedTabSize = 1ULL << 40,
         SpecifiedScrollBehavior = 1u << 25,
         SpecifiedColorScheme = 1u << 26,
         // A marker, not a property: the element still carries the user-agent
@@ -1383,6 +1389,9 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     if (!(style.specified & ComputedStyle::SpecifiedTextSizeAdjust)) {
         style.textSizeAdjust = parent.textSizeAdjust;
         style.textSizeAdjustPercent = parent.textSizeAdjustPercent;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedTabSize)) {
+        style.tabSize = parent.tabSize;
     }
     if (!(style.specified & ComputedStyle::SpecifiedFontStretch)) {
         style.fontStretch = parent.fontStretch;

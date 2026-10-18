@@ -4044,6 +4044,105 @@ void testBreakSpaces() {
     check(p->textRuns().size() == 2, "pre-wrap collapses spaces");
 }
 
+// `tab-size`: a tab in preserved whitespace advances the pen to the next tab
+// stop. A bare number counts space widths (8 by default), a length is
+// absolute, and stops are measured from the line's left edge.
+void testTabSize() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"d\" style=\"white-space:pre\">a\tb</div>"
+        "<div id=\"n\" style=\"white-space:pre;tab-size:4\">a\tb</div>"
+        "<div id=\"e\" style=\"white-space:pre;tab-size:2em\">a\tb</div>"
+        "<div id=\"l\" style=\"white-space:pre;tab-size:3px\">a\tb</div>"
+        "<div id=\"z\" style=\"white-space:pre;tab-size:0\">a\tb</div>"
+        "<div id=\"m\" style=\"white-space:pre;tab-size:-2\">a\tb</div>"
+        "<div id=\"g\" style=\"white-space:pre;tab-size:banana\">a\tb</div>"
+        "<div id=\"k\" style=\"white-space:break-spaces;tab-size:4\">a\tb</div>"
+        "<div id=\"c\" style=\"white-space:pre\">ab\tc</div>"
+        "<div style=\"tab-size:3\"><div id=\"i\" style=\"white-space:pre\">a\tb</div></div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* d = el("d");
+    Element* n = el("n");
+    Element* e = el("e");
+    Element* l = el("l");
+    Element* z = el("z");
+    Element* m = el("m");
+    Element* g = el("g");
+    Element* k = el("k");
+    Element* c = el("c");
+    Element* inh = el("i");
+    check(d && n && e && l && z && m && g && k && c && inh, "tab elements found");
+    if (!d || !n || !e || !l || !z || !m || !g || !k || !c || !inh) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px } div { margin: 0 }"));
+    layoutRoot(*document, resolver, 400.0f);
+
+    // Without a font a space is 4px at 16px, so the default stop is 32. "a"
+    // takes 8px, the tab run the remaining 24, and "b" starts on the stop.
+    const auto gap = [](Element* box) {
+        return box->textRuns().size() == 3 ? box->textRuns()[2].x - box->textRuns()[0].x
+                                           : -1.0f;
+    };
+    check(d->textRuns().size() == 3, "a tab splits a pre line into three runs");
+    if (d->textRuns().size() == 3) {
+        check(d->textRuns()[1].text == " ", "the tab paints as a blank run");
+        checkNear(d->textRuns()[1].width, 24.0f, 0.01f,
+                  "the default tab run fills to the eighth space");
+        checkNear(gap(d), 32.0f, 0.01f, "the tab lands the next word on the second stop");
+    }
+    check(n->textRuns().size() == 3, "tab-size:4 keeps three runs");
+    if (n->textRuns().size() == 3) {
+        checkNear(gap(n), 16.0f, 0.01f, "tab-size:4 halves the stop");
+    }
+    check(e->textRuns().size() == 3, "an absolute tab length keeps three runs");
+    if (e->textRuns().size() == 3) {
+        checkNear(gap(e), 32.0f, 0.01f, "2em resolves against the font size");
+    }
+    check(l->textRuns().size() == 3, "a px tab length keeps three runs");
+    if (l->textRuns().size() == 3) {
+        checkNear(gap(l), 9.0f, 0.01f, "a 3px stop snaps the pen forward to 9");
+    }
+    check(z->textRuns().size() == 3, "a zero tab size keeps three runs");
+    if (z->textRuns().size() == 3) {
+        checkNear(gap(z), 8.0f, 0.01f, "a zero stop never moves the pen");
+    }
+    check(m->textRuns().size() == 3, "a negative tab size keeps three runs");
+    if (m->textRuns().size() == 3) {
+        checkNear(gap(m), 32.0f, 0.01f, "a negative tab size is invalid");
+    }
+    check(g->textRuns().size() == 3, "a garbage tab size keeps three runs");
+    if (g->textRuns().size() == 3) {
+        checkNear(gap(g), 32.0f, 0.01f, "garbage keeps the default stop");
+    }
+    check(k->textRuns().size() == 3, "break-spaces keeps its tab runs");
+    if (k->textRuns().size() == 3) {
+        checkNear(gap(k), 16.0f, 0.01f, "break-spaces expands tabs too");
+    }
+    check(c->textRuns().size() == 3, "a longer prefix keeps its tab runs");
+    if (c->textRuns().size() == 3) {
+        checkNear(gap(c), 32.0f, 0.01f, "the stop counts from the line's left edge");
+    }
+    checkNear(resolver.resolve(*inh).tabSize.value, 3.0f, 0.01f, "tab-size inherits");
+    check(resolver.resolve(*inh).tabSize.unit == sui::Length::Number,
+          "an inherited number stays a number");
+
+    // Serialization round-trips the three shapes.
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*d), "tab-size") == "8",
+          "the default serializes as a number");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*n), "tab-size") == "4",
+          "a number serializes without a unit");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*e), "tab-size") == "2em",
+          "an em length serializes");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*l), "tab-size") == "3px",
+          "a px length serializes");
+}
+
 // `empty-cells: hide` blanks the background and borders of a table cell with
 // no visible content, in the separated borders model only.
 void testEmptyCells() {
@@ -9624,6 +9723,7 @@ int main() {
     testCounterStyles();
     testQuotes();
     testBreakSpaces();
+    testTabSize();
     testEmptyCells();
     testLineClamp();
     testResize();

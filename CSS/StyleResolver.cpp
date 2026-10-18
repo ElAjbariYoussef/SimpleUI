@@ -5651,8 +5651,32 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
                 s.specified |= ComputedStyle::SpecifiedTextSizeAdjust;
             }
         }
-    } else if (property == "tab-size" || property == "hyphens") {
-        // Text shaping hints that the layout engine does not yet implement.
+    } else if (property == "tab-size") {
+        // A number counts space widths, a length is absolute. Percentages and
+        // negative values are invalid, and an invalid value keeps the cascade's
+        // previous winner, like any failed parse.
+        std::string_view val = trim(value);
+        if (!val.empty() && val[0] == '+') {
+            val = val.substr(1);
+        }
+        std::size_t digits = 0;
+        while (digits < val.size() &&
+               (std::isdigit(static_cast<unsigned char>(val[digits])) || val[digits] == '.')) {
+            ++digits;
+        }
+        if (digits > 0 && digits == val.size()) {
+            s.tabSize = Length{Length::Number,
+                               std::strtof(std::string(val).c_str(), nullptr)};
+            s.specified |= ComputedStyle::SpecifiedTabSize;
+        } else {
+            const Length len = parseLength(val);
+            if (!len.isAuto() && len.unit != Length::Percent && len.value >= 0.0f) {
+                s.tabSize = len;
+                s.specified |= ComputedStyle::SpecifiedTabSize;
+            }
+        }
+    } else if (property == "hyphens") {
+        // Text shaping hint that the layout engine does not yet implement.
     } else if (property == "text-overflow") {
         std::string_view val = trim(value);
         if (val == "ellipsis") {
@@ -6295,6 +6319,7 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "letter-spacing") return length(style.letterSpacing, "normal");
     if (property == "word-spacing") return length(style.wordSpacing, "normal");
+    if (property == "tab-size") return length(style.tabSize);
     if (property == "text-indent") return length(style.textIndent, "0px");
     if (property == "text-transform") {
         switch (style.textTransform) {
@@ -7282,7 +7307,7 @@ bool isInheritable(std::string_view property) {
            property == "cursor" || property == "list-style-position" ||
            property == "quotes" || property == "caret-color" || property == "direction" ||
            property == "font-variant" || property == "text-align-last" ||
-           property == "empty-cells";
+           property == "empty-cells" || property == "tab-size";
 }
 
 // `inherit` and `unset` are the two CSS-wide keywords the engine can answer

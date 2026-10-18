@@ -2560,7 +2560,23 @@ private:
                 const std::size_t end = nl == std::string_view::npos ? text.size() : nl;
                 if (end > start) {
                     if (spacing_.keepsWhitespace) {
-                        word(text.substr(start, end - start), s, m, ascentDelta);
+                        // Tabs open a gap to the next tab stop; the pieces
+                        // around them keep their spaces literally, so no
+                        // implicit inter-word space is added between calls.
+                        std::size_t from = start;
+                        while (from < end) {
+                            const std::size_t tab = text.find('\t', from);
+                            const std::size_t stop =
+                                tab == std::string_view::npos || tab > end ? end : tab;
+                            if (stop > from) {
+                                word(text.substr(from, stop - from), s, m, ascentDelta, true);
+                            }
+                            if (tab == std::string_view::npos || tab >= end) {
+                                break;
+                            }
+                            tabGap(s, m, ascentDelta);
+                            from = tab + 1;
+                        }
                     } else {
                         words(text.substr(start, end - start), s, m, ascentDelta);
                     }
@@ -3138,7 +3154,11 @@ private:
                     continue;
                 }
                 if (std::isspace(static_cast<unsigned char>(text[i]))) {
-                    preservedSpace(s, m, ascentDelta);
+                    if (text[i] == '\t') {
+                        tabGap(s, m, ascentDelta);
+                    } else {
+                        preservedSpace(s, m, ascentDelta);
+                    }
                     ++i;
                     continue;
                 }
@@ -3148,6 +3168,62 @@ private:
                 }
                 word(text.substr(start, i - start), s, m, ascentDelta);
             }
+        }
+
+        // One tab stop's width: a `tab-size` number counts space widths, a
+        // length is absolute with font-relative units against the run's own
+        // font (`rem` against the document root's).
+        float tabStop(const ComputedStyle& s, const Metrics& m) const {
+            if (s.tabSize.unit == Length::Number) {
+                return s.tabSize.value > 0.0f ? s.tabSize.value * m.spaceWidth : 0.0f;
+            }
+            const float len =
+                s.tabSize.resolve(0.0f, s.fontSize, owner_.resolver_.rootFontSize());
+            return len > 0.0f ? len : 0.0f;
+        }
+
+        // A tab in preserved whitespace advances the pen to the next tab stop
+        // measured from the line's left edge. The gap is a blank run, so it
+        // takes room without painting a glyph and selection can cover it. A
+        // `tab-size` of 0 makes the tab advance nothing, like a browser's.
+        void tabGap(const ComputedStyle& s, const Metrics& m, float ascentDelta) {
+            if (ellipsisAdded_) {
+                return;
+            }
+            if (clamped_) {
+                breakAllowed_ = false;
+                clampSuppressed_ = true;
+                return;
+            }
+            const float stop = tabStop(s, m);
+            auto advance = [&]() {
+                if (stop <= 0.0f) {
+                    return 0.0f;
+                }
+                const float used = lineIndent_ + penX_;
+                // A pen exactly on a stop advances a whole stop, never zero.
+                return (std::floor(used / stop) + 1.0f) * stop - used;
+            };
+            float gap = advance();
+            // Only break-spaces wraps preserved whitespace; a tab that would
+            // run past the line starts the next one, like a preserved space.
+            if (spacing_.wraps && lineHasContent_ && lineIndent_ + penX_ + gap > lineAvail_) {
+                newLine();
+                if (clamped_) {
+                    clampSuppressed_ = true;
+                    return;
+                }
+                gap = advance();
+            }
+            ownerEl_.addTextRun({" ", originX_ + lineIndent_ + penX_,
+                                 originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m),
+                                 gap, metrics_.lineHeight, metrics_.ascent + ascentDelta,
+                                 s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
+                                 s.fontBold, s.fontStyle != ComputedStyle::FontNormal,
+                                 s.fontFamily});
+            penX_ += gap;
+            lineHasContent_ = true;
+            widest_ = std::max(widest_, penX_);
         }
 
         // One blank run a space wide. Wraps like a word when it overflows, so a
@@ -3262,7 +3338,8 @@ private:
             }
         }
 
-        void word(std::string_view w, const ComputedStyle& s, const Metrics& m, float ascentDelta) {
+        void word(std::string_view w, const ComputedStyle& s, const Metrics& m,
+                  float ascentDelta, bool suppressGap = false) {
             if (ellipsisAdded_) {
                 return;
             }
@@ -3295,7 +3372,7 @@ private:
             }
             // Gaps come from space runs in break-spaces mode, never from word().
             float space = 0.0f;
-            if (lineHasContent_ && !spacing_.breakSpaces) {
+            if (lineHasContent_ && !spacing_.breakSpaces && !suppressGap) {
                 space = metrics_.spaceWidth;
                 if (s.wordSpacing.unit != sui::Length::Auto) {
                     space += s.wordSpacing.resolve(s.fontSize, s.fontSize, 16.0f);
