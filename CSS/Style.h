@@ -834,6 +834,15 @@ struct ComputedStyle {
     enum WhiteSpace : std::uint8_t { WrapText, WrapNone, WrapPre, WrapPreWrap, WrapBreakSpaces };
     WhiteSpace whiteSpace = WrapText;
 
+    // `text-wrap` splits into its longhands: the mode turns wrapping off for
+    // the whole box, and the style asks the breaker to re-break the paragraph
+    // at a narrower width so its lines even out (`balance`) or its last line
+    // stops being a lone word (`pretty`). Both inherit, like `white-space`.
+    enum class TextWrapMode : std::uint8_t { Wrap, Nowrap };
+    TextWrapMode textWrapMode = TextWrapMode::Wrap;
+    enum class TextWrapStyle : std::uint8_t { Auto, Balance, Pretty };
+    TextWrapStyle textWrapStyle = TextWrapStyle::Auto;
+
     // How overflow text is rendered when clipped: `Clip` (default) or `Ellipsis`.
     enum TextOverflow : std::uint8_t { TextOverflowClip, TextOverflowEllipsis };
     TextOverflow textOverflow = TextOverflowClip;
@@ -1106,6 +1115,8 @@ struct ComputedStyle {
         SpecifiedResize = 1ULL << 39,
         SpecifiedTabSize = 1ULL << 40,
         SpecifiedWhiteSpace = 1ULL << 41,
+        SpecifiedTextWrapMode = 1ULL << 42,
+        SpecifiedTextWrapStyle = 1ULL << 43,
         SpecifiedScrollBehavior = 1u << 25,
         SpecifiedColorScheme = 1u << 26,
         // A marker, not a property: the element still carries the user-agent
@@ -1402,6 +1413,12 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     // preserved inside the elements nested in it.
     if (!(style.specified & ComputedStyle::SpecifiedWhiteSpace)) {
         style.whiteSpace = parent.whiteSpace;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedTextWrapMode)) {
+        style.textWrapMode = parent.textWrapMode;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedTextWrapStyle)) {
+        style.textWrapStyle = parent.textWrapStyle;
     }
     if (!(style.specified & ComputedStyle::SpecifiedFontStretch)) {
         style.fontStretch = parent.fontStretch;

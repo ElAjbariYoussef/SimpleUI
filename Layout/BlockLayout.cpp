@@ -2487,7 +2487,22 @@ private:
                              : probe ? kUnbounded
                                      : std::max(0.0f, availableWidth - box.horizontalChrome());
 
-        Flow flow(*this, el, s, metricsFor(font_, s), inner, contentX, contentY);
+        // `text-wrap: balance|pretty` re-breaks the paragraph before the real
+        // pass: probes run the same breaker at candidate widths and roll their
+        // throwaway runs back, then one pass lays out the chosen width. That
+        // needs wrapping to be possible at all, and a clamped paragraph keeps
+        // its committed lines.
+        const bool rebreak = !probe && s.lineClamp <= 0 && inner > 0.0f &&
+                             s.textWrapStyle != ComputedStyle::TextWrapStyle::Auto &&
+                             s.whiteSpace != ComputedStyle::WrapNone &&
+                             s.whiteSpace != ComputedStyle::WrapPre &&
+                             s.textWrapMode != ComputedStyle::TextWrapMode::Nowrap;
+        const std::size_t runStart = el.textRuns().size();
+        const float wrapWidth = rebreak
+                                    ? rebreakWidth(el, s, inner, contentX, contentY, runStart)
+                                    : inner;
+
+        Flow flow(*this, el, s, metricsFor(font_, s), wrapWidth, contentX, contentY);
         flow.inlineBox(el, s);
         flow.finish();
 
@@ -2503,6 +2518,9 @@ private:
 
     static constexpr float kUnbounded = 1.0e6f;
     static constexpr float kUnboundedProbe = kUnbounded;
+    // `text-wrap` re-breaking stops paying off past a handful of lines, and
+    // every candidate width costs a full breaker pass.
+    static constexpr int kMaxRebreakLines = 6;
 
     // Greedy line breaking for one inline formatting context.
     class Flow {
@@ -2538,6 +2556,9 @@ private:
             }
             lineIndent_ = std::max(0.0f, left - originX_);
             lineAvail_ = std::max(0.0f, right - originX_ - lineIndent_);
+            if (lineIndent_ > 0.0f || lineAvail_ < maxWidth_) {
+                sawFloat_ = true;
+            }
         }
 
         void text(std::string_view text, const ComputedStyle& s) {
@@ -2753,7 +2774,8 @@ private:
                     newLine();
                 }
             }
-            if (lineHasContent_ && lineIndent_ + penX_ + outerW > lineAvail_) {
+            if (lineHasContent_ && cs.textWrapMode == ComputedStyle::TextWrapMode::Wrap &&
+                lineIndent_ + penX_ + outerW > lineAvail_) {
                 newLine();
             }
             if (clamped_) {
@@ -3091,6 +3113,21 @@ private:
         }
         float penX() const { return penX_; }
         float widest() const { return widest_; }
+        // What the pass produced, for `text-wrap` re-break probing: the number
+        // of lines (the trailing partial one counted), the words on the last
+        // line, and whether floats shaped any line.
+        int lineCount() const { return linesCommitted_ + (lineHasContent_ ? 1 : 0); }
+        int lastLineWords() const {
+            int words = 0;
+            const std::vector<Element::TextRun>& runs = ownerEl_.textRuns();
+            for (std::size_t k = lineRunStartIndex_; k < runs.size(); ++k) {
+                if (!runs[k].text.empty() && runs[k].text != " ") {
+                    ++words;
+                }
+            }
+            return words;
+        }
+        bool sawFloat() const { return sawFloat_; }
 
     private:
         // What `white-space` changes. `nowrap` collapses runs of spaces but never
@@ -3207,7 +3244,8 @@ private:
             float gap = advance();
             // Only break-spaces wraps preserved whitespace; a tab that would
             // run past the line starts the next one, like a preserved space.
-            if (spacing_.wraps && lineHasContent_ && lineIndent_ + penX_ + gap > lineAvail_) {
+            if (spacing_.wraps && s.textWrapMode == ComputedStyle::TextWrapMode::Wrap &&
+                lineHasContent_ && lineIndent_ + penX_ + gap > lineAvail_) {
                 newLine();
                 if (clamped_) {
                     clampSuppressed_ = true;
@@ -3236,7 +3274,8 @@ private:
                 clampSuppressed_ = true;
                 return;
             }
-            if (lineHasContent_ && lineIndent_ + penX_ + metrics_.spaceWidth > lineAvail_) {
+            if (spacing_.wraps && s.textWrapMode == ComputedStyle::TextWrapMode::Wrap &&
+                lineHasContent_ && lineIndent_ + penX_ + metrics_.spaceWidth > lineAvail_) {
                 newLine();
                 if (clamped_) {
                     clampSuppressed_ = true;
@@ -3350,6 +3389,12 @@ private:
                 return;
             }
             const float wWidth = textWidth(owner_.font_, s, w);
+            // Wrapping has to be on for this run: `white-space` sets the box
+            // wide mode, and `text-wrap: nowrap` (inherited or on an inner
+            // span) turns the run's own breaks off without touching its
+            // preserved whitespace.
+            const bool wraps =
+                spacing_.wraps && s.textWrapMode == ComputedStyle::TextWrapMode::Wrap;
             // `break-all` fills lines character by character; `break-word` only
             // breaks a word that overflows its own line. Either way the pieces
             // become their own runs. An ellipsis truncates instead, and a
@@ -3357,12 +3402,12 @@ private:
             const bool breakAll = s.wordBreak == ComputedStyle::WordBreak::BreakAll;
             const bool breakWord =
                 !breakAll && s.overflowWrap == ComputedStyle::OverflowWrap::BreakWord;
-            if (spacing_.wraps && !isEllipsisActive() && ownerEl_.tag() != "textarea" &&
+            if (wraps && !isEllipsisActive() && ownerEl_.tag() != "textarea" &&
                 (breakAll || (breakWord && wWidth > lineAvail_ - lineIndent_))) {
                 breakAcrossLines(w, s, m, ascentDelta);
                 return;
             }
-            if (spacing_.wraps && lineHasContent_ &&
+            if (wraps && lineHasContent_ &&
                 lineIndent_ + penX_ + metrics_.spaceWidth + wWidth > lineAvail_) {
                 newLine();
                 if (clamped_) {
@@ -3383,7 +3428,7 @@ private:
             // same break on its own. Either way a fitting word stays put.
             if (breakAllowed_) {
                 breakAllowed_ = false;
-                if (lineHasContent_ && !spacing_.wraps &&
+                if (lineHasContent_ && !wraps &&
                     lineIndent_ + penX_ + space + wWidth > lineAvail_) {
                     newLine();
                     if (clamped_) {
@@ -3506,6 +3551,9 @@ private:
         float lineIndent_ = 0.0f;
         float lineAvail_ = 0.0f;
         bool lineHasContent_ = false;
+        // Set when floats narrow a line, which rules `text-wrap` re-breaking out:
+        // the inset changes per line, so one target width is meaningless.
+        bool sawFloat_ = false;
         // Set by a `<wbr/>`: the next word starts a fresh line when anything
         // is already on this one. Cleared by every word, taken or not.
         bool breakAllowed_ = false;
@@ -3521,6 +3569,79 @@ private:
         bool clampSuppressed_ = false;
         std::vector<Element::TextRun> droppedClampRuns_;
     };
+
+    // One throwaway breaker pass for `text-wrap` probing: runs it, reads what
+    // it produced, and rolls the runs back to where the caller started.
+    struct WrapProbe {
+        int lines = 0;
+        int lastWords = 0;
+        bool sawFloat = false;
+    };
+
+    WrapProbe probeWrap(Element& el, const ComputedStyle& s, float width, float contentX,
+                        float contentY, std::size_t runStart) {
+        // The pass places the container's float children again, and the float
+        // context is shared: the probe works on a copy so its entries are
+        // thrown away instead of shoving the next real placement lower.
+        FloatContext* const savedFloats = floats_;
+        FloatContext scratch;
+        if (savedFloats) {
+            scratch = *savedFloats;
+            floats_ = &scratch;
+        }
+        Flow probe(*this, el, s, metricsFor(font_, s), width, contentX, contentY);
+        probe.inlineBox(el, s);
+        probe.finish();
+        const WrapProbe out{probe.lineCount(), probe.lastLineWords(), probe.sawFloat()};
+        floats_ = savedFloats;
+        el.textRuns().resize(runStart);
+        return out;
+    }
+
+    // The width `text-wrap: balance|pretty` lays the paragraph out at, or
+    // `inner` when the greedy break already reads well.
+    float rebreakWidth(Element& el, const ComputedStyle& s, float inner, float contentX,
+                       float contentY, std::size_t runStart) {
+        const WrapProbe greedy = probeWrap(el, s, inner, contentX, contentY, runStart);
+        if (greedy.lines < 2 || greedy.lines > kMaxRebreakLines || greedy.sawFloat) {
+            return inner;
+        }
+        if (s.textWrapStyle == ComputedStyle::TextWrapStyle::Balance) {
+            // Bisect for the smallest width that still fits the same number of
+            // lines: the widest line stops being the greedy one.
+            float lo = 0.0f;
+            float hi = inner;
+            for (int step = 0; step < 6; ++step) {
+                const float mid = (lo + hi) * 0.5f;
+                if (mid <= 1.0f) {
+                    break;
+                }
+                if (probeWrap(el, s, mid, contentX, contentY, runStart).lines ==
+                    greedy.lines) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            return hi;
+        }
+        // `pretty` fights one-word last lines: step the width down until a word
+        // is pulled down, and stop once narrowing starts a line of its own.
+        if (greedy.lastWords >= 2) {
+            return inner;
+        }
+        for (int step = 1; step <= 6; ++step) {
+            const float width = inner * (1.0f - 0.05f * static_cast<float>(step));
+            const WrapProbe probe = probeWrap(el, s, width, contentX, contentY, runStart);
+            if (probe.lines == greedy.lines && probe.lastWords >= 2) {
+                return width;
+            }
+            if (probe.lines > greedy.lines) {
+                break;
+            }
+        }
+        return inner;
+    }
 
     const StyleResolver& resolver_;
     float viewportWidth_ = 0.0f;

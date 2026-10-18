@@ -4585,6 +4585,46 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.whiteSpace = ComputedStyle::WrapText;
         }
         s.specified |= ComputedStyle::SpecifiedWhiteSpace;
+    } else if (property == "text-wrap" || property == "text-wrap-mode" ||
+               property == "text-wrap-style") {
+        // The shorthand resets both longhands, a longhand leaves its sibling
+        // alone, and a token that belongs to neither drops the declaration so
+        // the previous cascade winner stays.
+        const bool shorthand = property == "text-wrap";
+        const bool modes = property != "text-wrap-style";
+        const bool styles = property != "text-wrap-mode";
+        ComputedStyle::TextWrapMode mode =
+            shorthand ? ComputedStyle::TextWrapMode::Wrap : s.textWrapMode;
+        ComputedStyle::TextWrapStyle wrap =
+            shorthand ? ComputedStyle::TextWrapStyle::Auto : s.textWrapStyle;
+        const std::vector<std::string_view> tokens = splitOnSpaces(value);
+        bool ok = !tokens.empty();
+        for (const std::string_view token : tokens) {
+            if (token == "wrap" && modes) {
+                mode = ComputedStyle::TextWrapMode::Wrap;
+            } else if (token == "nowrap" && modes) {
+                mode = ComputedStyle::TextWrapMode::Nowrap;
+            } else if (token == "auto" && styles) {
+                wrap = ComputedStyle::TextWrapStyle::Auto;
+            } else if (token == "balance" && styles) {
+                wrap = ComputedStyle::TextWrapStyle::Balance;
+            } else if (token == "pretty" && styles) {
+                wrap = ComputedStyle::TextWrapStyle::Pretty;
+            } else {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) {
+            s.textWrapMode = mode;
+            s.textWrapStyle = wrap;
+            if (modes) {
+                s.specified |= ComputedStyle::SpecifiedTextWrapMode;
+            }
+            if (styles) {
+                s.specified |= ComputedStyle::SpecifiedTextWrapStyle;
+            }
+        }
     } else if (property == "box-sizing") {
         s.boxSizing =
             value == "border-box" ? BoxSizing::BorderBox : BoxSizing::ContentBox;
@@ -6348,6 +6388,28 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         }
         return "normal";
     }
+    if (property == "text-wrap-mode") {
+        return style.textWrapMode == ComputedStyle::TextWrapMode::Nowrap ? "nowrap" : "wrap";
+    }
+    if (property == "text-wrap-style") {
+        switch (style.textWrapStyle) {
+            case ComputedStyle::TextWrapStyle::Balance: return "balance";
+            case ComputedStyle::TextWrapStyle::Pretty: return "pretty";
+            case ComputedStyle::TextWrapStyle::Auto: break;
+        }
+        return "auto";
+    }
+    if (property == "text-wrap") {
+        const bool nowrap = style.textWrapMode == ComputedStyle::TextWrapMode::Nowrap;
+        switch (style.textWrapStyle) {
+            case ComputedStyle::TextWrapStyle::Balance:
+                return nowrap ? "nowrap balance" : "balance";
+            case ComputedStyle::TextWrapStyle::Pretty:
+                return nowrap ? "nowrap pretty" : "pretty";
+            case ComputedStyle::TextWrapStyle::Auto: break;
+        }
+        return nowrap ? "nowrap" : "wrap";
+    }
     if (property == "isolation") return style.isolate ? "isolate" : "auto";
     if (property == "vertical-align") {
         switch (style.verticalAlign) {
@@ -7327,7 +7389,8 @@ bool isInheritable(std::string_view property) {
            property == "quotes" || property == "caret-color" || property == "direction" ||
            property == "font-variant" || property == "text-align-last" ||
            property == "empty-cells" || property == "tab-size" ||
-           property == "white-space";
+           property == "white-space" || property == "text-wrap" ||
+           property == "text-wrap-mode" || property == "text-wrap-style";
 }
 
 // `inherit` and `unset` are the two CSS-wide keywords the engine can answer

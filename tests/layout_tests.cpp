@@ -4211,7 +4211,229 @@ void testPreDefaults() {
     }
 }
 
-// `empty-cells: hide` blanks the background and borders of a table cell with
+// `text-wrap: balance` re-breaks a short paragraph at the smallest width that
+// keeps its line count, so the lines even out; `pretty` only pulls words down
+// until the last line stops being a lone one; `nowrap` stops wrapping per run.
+// Without a font a glyph advances 8px at 16px and a space is 4px, so every
+// expected edge below is arithmetic.
+void testTextWrap() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        // Balance: greedy packs 216+84 at 240px, balanced settles at 172+128.
+        "<div id=\"a\" style=\"width:240px\">aaaaaaaaaaaaaaaa bbbbb ccccc ddddd eeeee</div>"
+        "<div id=\"b\" style=\"width:240px;text-wrap:balance\">aaaaaaaaaaaaaaaa bbbbb ccccc ddddd eeeee</div>"
+        // Pretty: greedy leaves one word alone at 200px; a step down pairs it up.
+        "<div id=\"c\" style=\"width:200px\">aaaaaaaaaaaaaaa bbbbb ccccc</div>"
+        "<div id=\"d\" style=\"width:200px;text-wrap:pretty\">aaaaaaaaaaaaaaa bbbbb ccccc</div>"
+        // Nowrap: whole box, the mode longhand, and a span inside a wrapping box.
+        "<div id=\"e\" style=\"width:100px\">aaaa bbbb cccc</div>"
+        "<div id=\"f\" style=\"width:100px;text-wrap:nowrap\">aaaa bbbb cccc</div>"
+        "<div id=\"g\" style=\"width:100px;text-wrap-mode:nowrap\">aaaa bbbb cccc</div>"
+        "<div id=\"h\" style=\"width:110px\">aaaa bbbb "
+        "<span style=\"text-wrap:nowrap\">cccc dddd</span></div>"
+        "<div id=\"i\" style=\"width:110px\">aaaa bbbb cccc dddd</div>"
+        // Serialization and inheritance.
+        "<div id=\"j\" style=\"text-wrap:nowrap balance\"></div>"
+        "<div id=\"k\" style=\"text-wrap:balance;text-wrap:banana\"></div>"
+        "<div style=\"text-wrap:pretty\"><div id=\"l\"></div></div>"
+        // A float narrows the first line: balance must leave those breaks alone,
+        // even though the lines after it are uneven enough to tempt it.
+        "<div id=\"m\" style=\"width:300px\">"
+        "<div style=\"float:left;width:200px;height:10px\"></div>"
+        "aaaa aaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbb cccccccc</div>"
+        "<div id=\"n\" style=\"width:300px;text-wrap:balance\">"
+        "<div style=\"float:left;width:200px;height:10px\"></div>"
+        "aaaa aaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbb cccccccc</div>"
+        // Nowrap also holds atomic boxes, preserved spaces, and tabs back.
+        "<div id=\"o\" style=\"width:100px;text-wrap:nowrap\">"
+        "<span style=\"display:inline-block;width:60px;height:10px\"></span>"
+        "<span style=\"display:inline-block;width:60px;height:10px\"></span></div>"
+        "<div id=\"p\" style=\"width:100px\">"
+        "<span style=\"display:inline-block;width:60px;height:10px\"></span>"
+        "<span style=\"display:inline-block;width:60px;height:10px\"></span></div>"
+        "<div id=\"q\" style=\"width:40px;white-space:break-spaces\">xxxx xxxx</div>"
+        "<div id=\"r\" style=\"width:40px;white-space:break-spaces;text-wrap:nowrap\">"
+        "xxxx xxxx</div>"
+        "<div id=\"s\" style=\"width:18px;white-space:break-spaces\">xx xxxx</div>"
+        "<div id=\"w\" style=\"width:18px;white-space:break-spaces;text-wrap:nowrap\">"
+        "xx xxxx</div>"
+        "<div id=\"t\" style=\"width:20px;white-space:break-spaces\">a\tb</div>"
+        "<div id=\"u\" style=\"width:20px;white-space:break-spaces;text-wrap:nowrap\">"
+        "a\tb</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    Element* a = el("a");
+    Element* b = el("b");
+    Element* c = el("c");
+    Element* d = el("d");
+    Element* e = el("e");
+    Element* f = el("f");
+    Element* g = el("g");
+    Element* h = el("h");
+    Element* i = el("i");
+    Element* j = el("j");
+    Element* k = el("k");
+    Element* l = el("l");
+    Element* m = el("m");
+    Element* n = el("n");
+    check(a && b && c && d && e && f && g && h && i && j && k && l && m && n,
+          "text-wrap elements found");
+    if (!a || !b || !c || !d || !e || !f || !g || !h || !i || !j || !k || !l || !m || !n) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(
+        sui::CSSParser::parse("body { margin: 0; font-size: 16px } div { margin: 0 }"));
+    layoutRoot(*document, resolver, 400.0f);
+
+    // The right edge of every line, in order: runs come line by line, and the
+    // runs of one line share their y.
+    const auto edges = [](Element* box) {
+        std::vector<float> out;
+        float lineY = -1.0f;
+        for (const sui::Element::TextRun& run : box->textRuns()) {
+            if (out.empty() || run.y > lineY) {
+                out.push_back(run.x + run.width);
+                lineY = run.y;
+            } else {
+                out.back() = std::max(out.back(), run.x + run.width);
+            }
+        }
+        return out;
+    };
+
+    const std::vector<float> greedyBal = edges(a);
+    check(greedyBal.size() == 2, "the unwrapped control breaks in two lines");
+    if (greedyBal.size() == 2) {
+        checkNear(greedyBal[0], 216.0f, 1.0f, "greedy packs the first line full");
+        checkNear(greedyBal[1], 84.0f, 1.0f, "and leaves the last line short");
+    }
+    const std::vector<float> balanced = edges(b);
+    check(balanced.size() == 2, "balance keeps the line count");
+    if (balanced.size() == 2) {
+        checkNear(balanced[0], 172.0f, 1.0f, "balance evens the widest line down");
+        checkNear(balanced[1], 128.0f, 1.0f, "balance fills the last line out");
+    }
+
+    const std::vector<float> greedyPretty = edges(c);
+    check(greedyPretty.size() == 2, "the orphan control breaks in two lines");
+    if (greedyPretty.size() == 2) {
+        checkNear(greedyPretty[1], 40.0f, 1.0f, "greedy leaves a lone word behind");
+    }
+    const std::vector<float> pretty = edges(d);
+    check(pretty.size() == 2, "pretty keeps the line count");
+    if (pretty.size() == 2) {
+        checkNear(pretty[0], 120.0f, 1.0f, "pretty moves the word down");
+        checkNear(pretty[1], 84.0f, 1.0f, "pretty pairs the last line up");
+    }
+
+    check(edges(e).size() == 2, "the wrapping control breaks at 100px");
+    const std::vector<float> nowrap = edges(f);
+    check(nowrap.size() == 1, "text-wrap:nowrap keeps one line");
+    if (nowrap.size() == 1) {
+        checkNear(nowrap[0], 104.0f, 1.0f, "the overflowing line still measures whole");
+    }
+    const std::vector<float> nowrapMode = edges(g);
+    check(nowrapMode.size() == 1, "the mode longhand nowraps the same way");
+    if (nowrapMode.size() == 1 && !nowrap.empty()) {
+        checkNear(nowrapMode[0], nowrap[0], 0.01f, "the longhand matches the shorthand");
+    }
+    const std::vector<float> spanNowrap = edges(h);
+    check(spanNowrap.size() == 1, "a nowrap span holds its words on one line");
+    if (spanNowrap.size() == 1) {
+        checkNear(spanNowrap[0], 140.0f, 1.0f, "the span keeps its two words together");
+    }
+    const std::vector<float> spanControl = edges(i);
+    check(spanControl.size() == 2, "without the span the same words break");
+
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*i), "text-wrap") == "wrap",
+          "the initial shorthand serializes as wrap");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*j), "text-wrap") == "nowrap balance",
+          "the shorthand serializes both longhands");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*j), "text-wrap-mode") == "nowrap",
+          "the mode serializes on its own");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*j), "text-wrap-style") == "balance",
+          "the style serializes on its own");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*k), "text-wrap") == "balance",
+          "a garbage declaration keeps the previous winner");
+    check(sui::StyleResolver::propertyValue(resolver.resolve(*l), "text-wrap") == "pretty",
+          "text-wrap inherits into a child");
+
+    // The float narrows the first line, so the balanced box must keep the same
+    // greedy breaks instead of chasing one target width for every line.
+    const std::vector<float> floatAuto = edges(m);
+    const std::vector<float> floatBalanced = edges(n);
+    check(floatAuto.size() == 3 && floatBalanced.size() == 3,
+          "a float still leaves three greedy lines under balance");
+    if (floatAuto.size() == 3 && floatBalanced.size() == 3) {
+        checkNear(floatAuto[0], 232.0f, 1.0f, "the float indents the first line");
+        checkNear(floatAuto[1], 292.0f, 1.0f, "greedy packs the second line");
+        checkNear(floatBalanced[1], floatAuto[1], 0.5f,
+                  "balance leaves a float-shaped line alone");
+        checkNear(floatBalanced[2], floatAuto[2], 0.5f, "and leaves the last line alone");
+    }
+
+    // Nowrap holds atomic boxes, preserved spaces, and tabs on the line too.
+    Element* o = el("o");
+    Element* p = el("p");
+    Element* q = el("q");
+    Element* r = el("r");
+    Element* s = el("s");
+    Element* t = el("t");
+    Element* u = el("u");
+    Element* w = el("w");
+    check(o && p && q && r && s && t && u && w, "the remaining text-wrap boxes are found");
+    if (o && p && q && r && s && t && u && w) {
+        const auto boxesOf = [](Element* box) {
+            std::vector<Element*> out;
+            for (const auto& child : box->children()) {
+                if (child) {
+                    out.push_back(child.get());
+                }
+            }
+            return out;
+        };
+        const std::vector<Element*> nowrapBoxes = boxesOf(o);
+        const std::vector<Element*> wrapBoxes = boxesOf(p);
+        check(nowrapBoxes.size() == 2 && wrapBoxes.size() == 2, "the inline-blocks are found");
+        if (nowrapBoxes.size() == 2 && wrapBoxes.size() == 2) {
+            checkNear(nowrapBoxes[1]->layoutX(), 60.0f, 0.5f,
+                      "nowrap keeps the second inline-block beside the first");
+            checkNear(nowrapBoxes[1]->layoutY(), nowrapBoxes[0]->layoutY(), 0.5f,
+                      "and on the first box's line");
+            check(wrapBoxes[1]->layoutY() > wrapBoxes[0]->layoutY() + 1.0f,
+                  "without nowrap the second inline-block wraps");
+        }
+
+        const std::vector<float> spaceWrap = edges(q);
+        const std::vector<float> spaceNowrap = edges(r);
+        check(spaceWrap.size() == 2, "a preserved space still wraps by default");
+        check(spaceNowrap.size() == 1, "nowrap holds a preserved space on one line");
+        if (spaceNowrap.size() == 1) {
+            checkNear(spaceNowrap[0], 68.0f, 1.0f, "the preserved line measures whole");
+        }
+
+        const std::vector<float> tightWrap = edges(s);
+        const std::vector<float> tightNowrap = edges(w);
+        check(tightWrap.size() == 3, "a preserved space that does not fit starts a line");
+        check(tightNowrap.size() == 1, "nowrap keeps a tight preserved space in place");
+        if (tightNowrap.size() == 1) {
+            checkNear(tightNowrap[0], 52.0f, 1.0f, "the tight line runs past the edge");
+        }
+
+        const std::vector<float> tabWrap = edges(t);
+        const std::vector<float> tabNowrap = edges(u);
+        check(tabWrap.size() == 3, "a tab wraps onto its own line by default");
+        check(tabNowrap.size() == 1, "nowrap keeps a tab on the line");
+        if (tabNowrap.size() == 1) {
+            checkNear(tabNowrap[0], 40.0f, 1.0f, "the tab holds its whole stop");
+        }
+    }
+}
+
 // no visible content, in the separated borders model only.
 void testEmptyCells() {
     // The decision table for one cell.
@@ -9803,6 +10025,7 @@ int main() {
     testBreakSpaces();
     testTabSize();
     testPreDefaults();
+    testTextWrap();
     testEmptyCells();
     testLineClamp();
     testResize();
