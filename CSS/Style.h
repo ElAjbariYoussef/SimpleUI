@@ -244,6 +244,10 @@ struct ComputedStyle {
     };
     FlexFactors flex;
 
+    // `order`: flex and grid items are placed in `order`-modified document
+    // order, lowest first.
+    int order = 0;
+
     BoxEdge margin;
     BoxEdge padding;
     BoxEdge borderWidth;

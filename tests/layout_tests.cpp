@@ -3040,6 +3040,117 @@ void testFlexGap() {
     checkNear(a2->layoutX(), 0.0f, 0.5f, "row-gap does not affect the inline axis");
 }
 
+// `order` is an integer that rearranges flex and grid items into
+// `order`-modified document order without touching the DOM; equal orders keep
+// document order, block containers ignore it, and it reads back as written so
+// the CSS-wide keywords can copy it.
+void testOrder() {
+    const auto rules = sui::CSSParser::parse(
+        "#oa { order: 2 } #ob { order: -1 } #oc { order: 0 } #od { order: banana }");
+    sui::StyleResolver resolver;
+    resolver.setRules(rules);
+    auto body = parseOrNull("<sui><body>"
+                            "<div id=\"oa\"></div><div id=\"ob\"></div>"
+                            "<div id=\"oc\"></div><div id=\"od\"></div>"
+                            "</body></sui>");
+    if (!body) {
+        return;
+    }
+    Element* oa = body->getElementById("oa");
+    Element* ob = body->getElementById("ob");
+    Element* oc = body->getElementById("oc");
+    Element* od = body->getElementById("od");
+    if (!oa || !ob || !oc || !od) {
+        check(false, "order elements found");
+        return;
+    }
+    const ComputedStyle styleA = resolver.resolve(*oa);
+    const ComputedStyle styleB = resolver.resolve(*ob);
+    const ComputedStyle styleC = resolver.resolve(*oc);
+    const ComputedStyle styleD = resolver.resolve(*od);
+    check(styleA.order == 2 && styleB.order == -1, "order keeps its sign");
+    check(styleC.order == 0 && styleD.order == 0,
+          "the initial order is zero and garbage reads as the initial");
+    check(sui::StyleResolver::propertyValue(styleA, "order") == "2" &&
+              sui::StyleResolver::propertyValue(styleB, "order") == "-1",
+          "order reads back as an integer");
+
+    auto document = parseOrNull(
+        "<sui><body><div id=\"block\"><div id=\"k1\"></div>"
+        "<div id=\"k2\"></div></div><div id=\"row\"><div id=\"a\"></div><div id=\"b\"></div>"
+        "<div id=\"c\"></div></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver layoutResolver;
+    layoutResolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #row { display: flex; width: 300px }"
+        "#a, #b, #c { width: 100px; height: 10px }"
+        "#a { order: 2 } #b { order: -1 } #c { order: 1 }"
+        "#k1, #k2 { width: 40px; height: 10px } #k2 { order: -1 }"));
+    layoutRoot(*document, layoutResolver, 800.0f);
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    Element* c = document->getElementById("c");
+    Element* k1 = document->getElementById("k1");
+    Element* k2 = document->getElementById("k2");
+    if (!a || !b || !c || !k1 || !k2) {
+        check(false, "order layout elements found");
+        return;
+    }
+    checkNear(b->layoutX(), 0.0f, 0.5f, "the lowest order paints first");
+    checkNear(c->layoutX(), 100.0f, 0.5f, "the middle order follows");
+    checkNear(a->layoutX(), 200.0f, 0.5f, "the highest order lands last");
+    checkNear(k1->layoutY(), 0.0f, 0.5f, "block layout keeps document order");
+    checkNear(k2->layoutY(), 10.0f, 0.5f, "a block child's order changes nothing");
+
+    // Equal orders keep document order, so only the odd one out moves.
+    auto stable = parseOrNull(
+        "<sui><body><div id=\"row\"><div id=\"a\"></div><div id=\"b\"></div>"
+        "<div id=\"c\"></div></div></body></sui>");
+    if (!stable) {
+        return;
+    }
+    sui::StyleResolver stableResolver;
+    stableResolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #row { display: flex; width: 300px }"
+        "#a, #b, #c { width: 100px; height: 10px }"
+        "#a, #b { order: 1 } #c { order: 0 }"));
+    layoutRoot(*stable, stableResolver, 800.0f);
+    Element* sa = stable->getElementById("a");
+    Element* sb = stable->getElementById("b");
+    Element* sc = stable->getElementById("c");
+    if (!sa || !sb || !sc) {
+        return;
+    }
+    checkNear(sc->layoutX(), 0.0f, 0.5f, "a lower order starts the row");
+    checkNear(sa->layoutX(), 100.0f, 0.5f, "equal orders keep document order (first)");
+    checkNear(sb->layoutX(), 200.0f, 0.5f, "equal orders keep document order (second)");
+
+    // Grid auto-placement runs in the same `order`-modified order.
+    auto grid = parseOrNull(
+        "<sui><body><div id=\"grid\"><div id=\"g1\"></div><div id=\"g2\"></div>"
+        "<div id=\"g3\"></div></div></body></sui>");
+    if (!grid) {
+        return;
+    }
+    sui::StyleResolver gridResolver;
+    gridResolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #grid { display: grid; width: 300px;"
+        " grid-template-columns: 100px 100px 100px }"
+        "#g1, #g2, #g3 { height: 10px } #g3 { order: -1 }"));
+    layoutRoot(*grid, gridResolver, 800.0f);
+    Element* g1 = grid->getElementById("g1");
+    Element* g2 = grid->getElementById("g2");
+    Element* g3 = grid->getElementById("g3");
+    if (!g1 || !g2 || !g3) {
+        return;
+    }
+    checkNear(g3->layoutX(), 0.0f, 0.5f, "a grid item's order moves it to the first cell");
+    checkNear(g1->layoutX(), 100.0f, 0.5f, "the next document item takes the second cell");
+    checkNear(g2->layoutX(), 200.0f, 0.5f, "and the last takes the third");
+}
+
 void testJustifyContent() {
     const char* css =
         "body { margin: 0 } #row { display: flex; width: 400px; %s } #a { width: 100px; height: 10px } "
@@ -11262,6 +11373,7 @@ int main() {
     testFlexGrowAndShrink();
     testFlexBasisAndShrinkZero();
     testFlexGap();
+    testOrder();
     testJustifyContent();
     testFlexAlignItems();
     testFlexWrap();

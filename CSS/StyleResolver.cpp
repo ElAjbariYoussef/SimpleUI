@@ -4600,8 +4600,8 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
     } else if (property == "flex-basis") {
         s.flex.basis = parseLength(value);
     } else if (property == "order") {
-        // Only `order` above zero changes anything this engine does, and it is
-        // applied at layout time, so nothing is stored here yet.
+        // An integer; placement sorts on it, so negative values are fine.
+        s.order = static_cast<int>(parseNumber(value));
     } else if (property == "content") {
         const auto parsed = parseContent(value);
         s.hasContent = parsed.hasContent;
@@ -7596,6 +7596,7 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "flex-grow") return unitless(style.flex.grow);
     if (property == "flex-shrink") return unitless(style.flex.shrink);
+    if (property == "order") return std::to_string(style.order);
     if (property == "flex-basis") return length(style.flex.basis, "auto");
     // Gaps resolve to px at parse time; `normal` is the unauthored state, which
     // the two longhands record as a negative number.

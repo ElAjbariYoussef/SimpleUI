@@ -1249,14 +1249,25 @@ private:
         }
     }
 
-    // The items a flex container positions: its visual children, in order. Text
-    // nodes between them are only whitespace and are dropped.
+    // The items a flex or grid container positions: its visual children in
+    // `order`-modified document order (equal orders keep document order), with
+    // the whitespace-only text nodes between them dropped.
     std::vector<Element*> flexChildren(Element& el) const {
-        std::vector<Element*> out;
+        std::vector<std::pair<int, Element*>> ordered;
         for (const auto& child : el.children()) {
             if (child && !child->isTextNode() && laidOut(*child)) {
-                out.push_back(child.get());
+                ordered.emplace_back(resolver_.resolve(*child).order, child.get());
             }
+        }
+        std::stable_sort(ordered.begin(), ordered.end(),
+                         [](const std::pair<int, Element*>& a,
+                            const std::pair<int, Element*>& b) {
+                             return a.first < b.first;
+                         });
+        std::vector<Element*> out;
+        out.reserve(ordered.size());
+        for (const auto& entry : ordered) {
+            out.push_back(entry.second);
         }
         return out;
     }
