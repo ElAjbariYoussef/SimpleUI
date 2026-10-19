@@ -4547,11 +4547,21 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
     } else if (property == "justify-self") {
         s.justifySelf = parseAlign(value);
     } else if (property == "gap" || property == "grid-gap") {
-        const Length g = parseLength(value);
-        const float px = g.resolve(0.0f, s.fontSize, rootFontSize);
-        s.gap = px;
-        s.rowGap = px;
-        s.columnGap = px;
+        // One value covers both axes; two are the row gap and then the column
+        // gap, in `margin`'s order. Like the longhands, the values resolve to px
+        // here, so a percentage reads zero.
+        const std::vector<std::string_view> parts = splitTopLevel(value, ' ');
+        const auto toPx = [&](std::string_view token) {
+            return parseLength(token).resolve(0.0f, s.fontSize, rootFontSize);
+        };
+        if (parts.size() == 1) {
+            const float px = toPx(parts[0]);
+            s.rowGap = px;
+            s.columnGap = px;
+        } else if (parts.size() == 2) {
+            s.rowGap = toPx(parts[0]);
+            s.columnGap = toPx(parts[1]);
+        }
     } else if (property == "row-gap") {
         s.rowGap = parseLength(value).resolve(0.0f, s.fontSize, rootFontSize);
     } else if (property == "column-gap") {

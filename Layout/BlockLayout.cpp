@@ -1282,7 +1282,10 @@ private:
                 : (row ? std::max(0.0f, viewportHeight_ -
                                              verticalEdges(box.padding, box.borderWidth))
                        : std::max(0.0f, availableWidth - box.horizontalChrome()));
-        const float gap = std::max(0.0f, s.gap);
+        // A row's items are spaced by the column gap and its lines by the row
+        // gap; a column container swaps the pair.
+        const float mainGap = std::max(0.0f, row ? s.columnGap : s.rowGap);
+        const float crossGap = std::max(0.0f, row ? s.rowGap : s.columnGap);
 
         std::vector<FlexItem> items;
         items.reserve(8);
@@ -1330,13 +1333,13 @@ private:
             const float outer =
                 items[i].mainSize + mainChrome(items[i].box, row) +
                 mainMargins(items[i].box, row);
-            if (wrap && !line.items.empty() && used + gap + outer > mainAvailable + 0.5f) {
+            if (wrap && !line.items.empty() && used + mainGap + outer > mainAvailable + 0.5f) {
                 lines.push_back(line);
                 line = FlexLine{};
                 used = 0.0f;
             }
             if (!line.items.empty()) {
-                used += gap;
+                used += mainGap;
             }
             used += outer;
             line.items.push_back(i);
@@ -1346,7 +1349,7 @@ private:
         // 3. Resolve each line's flexible lengths: grow or shrink into the free
         //    space, then clamp by min/max.
         for (FlexLine& l : lines) {
-            const float gaps = gap * static_cast<float>(l.items.size() - 1);
+            const float gaps = mainGap * static_cast<float>(l.items.size() - 1);
             float outer = gaps;
             float grow = 0.0f;
             float shrinkBase = 0.0f;
@@ -1380,7 +1383,7 @@ private:
                 items[idx].frozen = std::fabs(clamped - items[idx].mainSize) > 0.5f;
                 items[idx].mainSize = clamped;
             }
-            redistribute(items, l, row, gap, mainAvailable);
+            redistribute(items, l, row, mainGap, mainAvailable);
         }
 
         // 4. Size each line on the cross axis. An item's cross size is its own
@@ -1410,16 +1413,16 @@ private:
         float crossCursor = 0.0f;
         for (FlexLine& l : lines) {
             l.crossPos = crossCursor;
-            crossCursor += l.crossSize + gap;
+            crossCursor += l.crossSize + crossGap;
         }
         if (!lines.empty()) {
-            crossCursor -= gap;
+            crossCursor -= crossGap;
         }
-        applyWrapReverse(s, lines, crossAvailable);
+        applyWrapReverse(s, lines, crossAvailable, crossGap);
 
         // 6. Place each item on the main axis, honouring `justify-content`.
         for (FlexLine& l : lines) {
-            const float gaps = gap * static_cast<float>(l.items.size() - 1);
+            const float gaps = mainGap * static_cast<float>(l.items.size() - 1);
             float outer = gaps;
             for (const std::size_t idx : l.items) {
                 const FlexItem& item = items[idx];
@@ -1429,7 +1432,7 @@ private:
             const float freeSpace = mainAvailable - outer;
             const float n = static_cast<float>(l.items.size());
             float before = 0.0f;
-            float between = gap;
+            float between = mainGap;
             switch (s.justifyContent) {
                 case ComputedStyle::AlignEnd:
                     before = freeSpace;
@@ -1439,17 +1442,17 @@ private:
                     break;
                 case ComputedStyle::AlignSpaceBetween:
                     if (n > 1.0f) {
-                        between = gap + std::max(0.0f, freeSpace) / (n - 1.0f);
+                        between = mainGap + std::max(0.0f, freeSpace) / (n - 1.0f);
                     }
                     break;
                 case ComputedStyle::AlignSpaceAround:
                     // Each item gets an equal slice, half of it on either side.
                     before = std::max(0.0f, freeSpace) / n * 0.5f;
-                    between = gap + std::max(0.0f, freeSpace) / n;
+                    between = mainGap + std::max(0.0f, freeSpace) / n;
                     break;
                 case ComputedStyle::AlignSpaceEvenly:
                     before = std::max(0.0f, freeSpace) / (n + 1.0f);
-                    between = gap + std::max(0.0f, freeSpace) / (n + 1.0f);
+                    between = mainGap + std::max(0.0f, freeSpace) / (n + 1.0f);
                     break;
                 default:
                     break;
@@ -1558,7 +1561,7 @@ private:
     // of the near one. Only the line offsets change; items keep their place inside
     // their line.
     void applyWrapReverse(const ComputedStyle& s, std::vector<FlexLine>& lines,
-                          float crossAvailable) {
+                          float crossAvailable, float crossGap) {
         if (s.flexWrap != ComputedStyle::WrapReverse) {
             return;
         }
@@ -1566,11 +1569,11 @@ private:
         for (const FlexLine& line : lines) {
             total += line.crossSize;
         }
-        const float gaps = std::max(0.0f, s.gap) * static_cast<float>(lines.size() - 1);
+        const float gaps = crossGap * static_cast<float>(lines.size() - 1);
         float cursor = std::max(0.0f, crossAvailable - total - gaps);
         for (FlexLine& line : lines) {
             line.crossPos = cursor;
-            cursor += line.crossSize + std::max(0.0f, s.gap);
+            cursor += line.crossSize + crossGap;
         }
     }
 

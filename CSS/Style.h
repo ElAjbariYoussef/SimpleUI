@@ -229,9 +229,9 @@ struct ComputedStyle {
     FlexAlign justifyItems = AlignStretch;
     FlexAlign justifySelf = AlignStretch;
     FlexWrap flexWrap = NoWrap;
-    // `gap` sets both; `row-gap` and `column-gap` override one each. Auto means
-    // "not authored", which is what makes the override detectable.
-    float gap = 0.0f;
+    // `gap` writes both; `row-gap` and `column-gap` override one each. A
+    // negative value means "not authored", which is what keeps the override
+    // detectable.
     float rowGap = -1.0f;
     float columnGap = -1.0f;
 

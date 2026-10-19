@@ -3373,6 +3373,73 @@ void testFlexPropertyParsing() {
     }
 }
 
+void testGapShorthand() {
+    // `gap` takes one value for both axes or two, row then column. The axis a
+    // value lands on follows the container's direction: a row spaces its items
+    // with the column gap and its wrapped lines with the row gap, a column
+    // container the other way round.
+    auto document = parseOrNull(
+        "<sui><body style=\"margin:0\">"
+        "<div id=\"row\" style=\"display:flex;width:200px;gap:8px 20px\">"
+        "<div id=\"r1\" style=\"width:30px;height:10px\"></div>"
+        "<div id=\"r2\" style=\"width:30px;height:10px\"></div></div>"
+        "<div id=\"col\" style=\"display:flex;flex-direction:column;gap:8px 20px\">"
+        "<div id=\"c1\" style=\"height:10px\"></div>"
+        "<div id=\"c2\" style=\"height:10px\"></div></div>"
+        "<div id=\"single\" style=\"display:flex;width:200px;gap:9px\">"
+        "<div id=\"s1\" style=\"width:30px;height:10px\"></div>"
+        "<div id=\"s2\" style=\"width:30px;height:10px\"></div></div>"
+        "<div id=\"wrap\" style=\"display:flex;flex-wrap:wrap;width:70px;gap:5px 40px\">"
+        "<div id=\"w1\" style=\"width:30px;height:10px\"></div>"
+        "<div id=\"w2\" style=\"width:30px;height:10px\"></div></div>"
+        "<div id=\"reverse\" style=\"display:flex;flex-wrap:wrap-reverse;"
+        "width:70px;height:60px;gap:5px 40px\">"
+        "<div id=\"v1\" style=\"width:30px;height:10px\"></div>"
+        "<div id=\"v2\" style=\"width:30px;height:10px\"></div></div>"
+        "<div id=\"grid\" style=\"display:grid;grid-template-columns:40px 40px;"
+        "gap:4px 12px\">"
+        "<div id=\"g1\" style=\"height:10px\"></div>"
+        "<div id=\"g2\" style=\"height:10px\"></div>"
+        "<div id=\"g3\" style=\"height:10px\"></div></div>"
+        "<div id=\"bad\" style=\"gap:6px;gap:1px 2px 3px\"></div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    layoutRoot(*document, resolver, 400.0f);
+    const auto x = [&](const char* id) {
+        Element* el = document->getElementById(id);
+        return el ? el->layoutX() : -1000.0f;
+    };
+    const auto y = [&](const char* id) {
+        Element* el = document->getElementById(id);
+        return el ? el->layoutY() : -1000.0f;
+    };
+    checkNear(x("r2") - (x("r1") + 30.0f), 20.0f, 0.5f,
+              "a row spaces its items with the column gap");
+    checkNear(y("c2") - (y("c1") + 10.0f), 8.0f, 0.5f,
+              "a column spaces its items with the row gap");
+    checkNear(x("s2") - (x("s1") + 30.0f), 9.0f, 0.5f,
+              "a single gap value covers both axes");
+    checkNear(y("w2") - (y("w1") + 10.0f), 5.0f, 0.5f,
+              "wrapped lines use the row gap");
+    checkNear(std::fabs(y("v1") - y("v2")), 15.0f, 0.5f,
+              "wrap-reverse keeps the line gap");
+    checkNear(x("g2") - (x("g1") + 40.0f), 12.0f, 0.5f,
+              "grid columns are separated by the column gap");
+    checkNear(y("g3") - (y("g1") + 10.0f), 4.0f, 0.5f,
+              "grid rows are separated by the row gap");
+    // Three values are not a gap declaration at all, so the cascade keeps what
+    // it had.
+    Element* bad = document->getElementById("bad");
+    if (bad) {
+        const auto s = resolver.resolve(*bad);
+        checkNear(s.rowGap, 6.0f, 0.01f, "a three-value gap leaves the row gap alone");
+        checkNear(s.columnGap, 6.0f, 0.01f, "and the column gap");
+    }
+}
+
 void testFlexIsBlockLevel() {
     // `display: flex` puts the box in the block formatting context, so a flex
     // container sits on its own line and its sibling lands below it. Only
@@ -10658,6 +10725,7 @@ int main() {
     testFlexMinMaxClamp();
     testFlexInlineFlexShrinks();
     testFlexPropertyParsing();
+    testGapShorthand();
     testFlexIsBlockLevel();
     testFlexNestedContainer();
     testLengthUnits();
