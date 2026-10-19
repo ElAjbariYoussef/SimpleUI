@@ -9689,6 +9689,80 @@ void testBackgroundReadBack() {
           "and the parent's position measures back from the edges");
 }
 
+// The `background` shorthand expands each comma layer into all seven
+// longhands (and resets the colour), then reads back in the same grammar:
+// image, position / size, repeat, attachment, origin, clip, and the colour on
+// the final layer only — so the reading parses back to the same layers.
+void testBackgroundShorthand() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"s1\"></div><div id=\"s2\"></div><div id=\"s3\"></div>"
+        "<div id=\"s4\"></div><div id=\"s5\"></div><div id=\"s6\"></div>"
+        "<div id=\"s7\"></div><div id=\"s8\"></div><div id=\"s9\"></div>"
+        "<div id=\"sp\" style=\"background:url(x.png) no-repeat\">"
+        "<div id=\"sq\" style=\"background:inherit\"></div></div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#s1 { background: url(bg.png) no-repeat right 10px top 5px / 20px 30px fixed"
+        " content-box padding-box #11223344 }"
+        "#s2 { background: linear-gradient(45deg, #ff0000, #0000ff) center / cover"
+        " repeat-y scroll border-box }"
+        "#s3 { background: url(a.png), url(b.png) blue }"
+        "#s4 { background-color: red }"
+        "#s5 { background-color: red; background: url(x.png) }"
+        "#s6 { background: none }"
+        "#s7 { background: url(a.png) banana }"
+        "#s8 { background: url(a.png) red, url(b.png) }"
+        "#s9 { background: url(c.png) no-repeat center / contain #00ff00 }"));
+    const auto value = [&](const char* id, const char* property) {
+        Element* el = document->getElementById(id);
+        return el ? sui::StyleResolver::propertyValue(resolver.resolve(*el), property) : "";
+    };
+    check(value("s1", "background") ==
+              "url(bg.png) right 10px top 5px / 20px 30px no-repeat fixed"
+              " content-box padding-box #11223344",
+          "the shorthand rebuilds image, position, size, repeat, attachment, boxes, colour");
+    check(value("s1", "background-size") == "20px 30px" &&
+              value("s1", "background-origin") == "content-box" &&
+              value("s1", "background-clip") == "padding-box" &&
+              value("s1", "background-attachment") == "fixed" &&
+              value("s1", "background-repeat") == "no-repeat",
+          "and the longhands hold the same layer");
+    check(value("s2", "background") ==
+              "linear-gradient(45deg, #ff0000, #0000ff) center center / cover repeat-y"
+              " scroll border-box border-box #00000000",
+          "one box sets both origin and clip; the colour resets");
+    check(value("s3", "background") ==
+              "url(a.png) left top / auto repeat scroll padding-box border-box,"
+              " url(b.png) left top / auto repeat scroll padding-box border-box #0000ff",
+          "every layer reads, with the colour on the final one");
+    check(value("s4", "background-color") == "#ff0000",
+          "a bare colour still reaches the colour longhand");
+    check(value("s5", "background-color") == "#00000000",
+          "the shorthand resets the colour when it names none");
+    check(value("s6", "background") ==
+              "none left top / auto repeat scroll padding-box border-box #00000000",
+          "an explicit none is one layer of initials");
+    check(value("s7", "background") ==
+              "none left top / auto repeat scroll padding-box border-box #00000000",
+          "one bad token drops the whole declaration");
+    check(value("s8", "background") ==
+              "none left top / auto repeat scroll padding-box border-box #00000000",
+          "a colour in a non-final layer drops the whole declaration");
+    check(value("s9", "background") ==
+              "url(c.png) center center / contain no-repeat scroll padding-box border-box"
+              " #00ff00",
+          "the colour may follow the size");
+    check(value("sq", "background") ==
+              "url(x.png) left top / auto no-repeat scroll"
+              " padding-box border-box #00000000",
+          "background: inherit replays the parent's shorthand");
+}
+
 // A flex item's own cross size is a content-box length, so the border and padding
 // have to come off the line's cross extent when it stretches to fill it, and must not
 // be added a second time when the size is written back onto the item.
@@ -11458,6 +11532,7 @@ int main() {
     testBackgroundListsAreParallel();
     testBackgroundSizeAndPositionKeywords();
     testBackgroundReadBack();
+    testBackgroundShorthand();
     testFlexCrossSizeExcludesChrome();
     testFlexBoxSizingIsNotAppliedTwice();
 

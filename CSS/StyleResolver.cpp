@@ -2903,6 +2903,224 @@ bool parseMask(std::string_view value, ComputedStyle& s) {
     return true;
 }
 
+// `background`: image || position [ / size ]? || repeat || attachment ||
+// origin || clip, comma-separated per layer, with the colour allowed only in
+// the final layer. Every layer pushes one entry to each longhand; omitted
+// components take their initial values, so the shorthand resets whatever the
+// longhands set (including the colour, which goes back to transparent when the
+// shorthand names none). One box keyword sets both origin and clip, two set
+// origin then clip. A size needs its position, and one bad token drops the
+// whole declaration, like any failed parse.
+bool parseBackground(std::string_view value, ComputedStyle& s) {
+    using Image = ComputedStyle::BackgroundImage;
+    using Size = ComputedStyle::BackgroundSize;
+    using Position = ComputedStyle::BackgroundPosition;
+    using Repeat = ComputedStyle::RepeatPair;
+    using Box = ComputedStyle::BackgroundBox;
+    using Attachment = ComputedStyle::BackgroundAttachment;
+    const std::vector<std::string_view> layers = splitTopLevel(value);
+    std::vector<Image> images;
+    std::vector<Size> sizes;
+    std::vector<Position> positions;
+    std::vector<Repeat> repeats;
+    std::vector<Box> origins;
+    std::vector<Box> clips;
+    std::vector<Attachment> attachments;
+    SDL_Color colour{0, 0, 0, 0};
+    // A layer token that names an image, with `parseMaskImage`'s shape: `none`
+    // and the empty string read as no image, anything unrecognised is not one.
+    const auto parseImage = [](std::string_view token, Image& out) {
+        const std::string_view text = trim(token);
+        if (text.empty() || text == "none") {
+            out = Image();
+            return true;
+        }
+        Image parsed;
+        if (std::string_view args; functionArgs(text, "linear-gradient", args)) {
+            if (!parseLinearGradient(args, parsed.linear)) {
+                return false;
+            }
+            parsed.kind = Image::LinearGradientImage;
+        } else if (functionArgs(text, "radial-gradient", args)) {
+            if (!parseRadialGradient(args, parsed.radial)) {
+                return false;
+            }
+            parsed.kind = Image::RadialGradientImage;
+        } else if (functionArgs(text, "conic-gradient", args)) {
+            if (!parseConicalGradient(args, parsed.conical)) {
+                return false;
+            }
+            parsed.kind = Image::ConicalGradientImage;
+        } else if (const std::string_view href = unwrapUrl(text); !href.empty()) {
+            parsed.kind = Image::Url;
+            parsed.href = std::string(href);
+        } else {
+            return false;
+        }
+        out = parsed;
+        return true;
+    };
+    for (std::size_t layer = 0; layer < layers.size(); ++layer) {
+        const bool finalLayer = layer + 1 == layers.size();
+        const std::string_view text = trim(layers[layer]);
+        if (text.empty()) {
+            return false;
+        }
+        // The slash separates position from size, paren-aware so a url's own
+        // slashes never cut.
+        const std::vector<std::string_view> halves = splitTopLevel(text, '/');
+        if (halves.size() > 2) {
+            return false;
+        }
+        Image image;
+        bool hasImage = false;
+        std::string positionText;
+        Size size;
+        bool hasSize = false;
+        std::string sizeText;
+        Repeat repeat;
+        bool hasRepeat = false;
+        Attachment attachment = ComputedStyle::BackgroundScroll;
+        bool hasAttachment = false;
+        std::vector<Box> boxes;
+        bool hasColour = false;
+        // One token stream walk for both halves: before the slash a bare
+        // length is a position offset, after it a size. Anything else
+        // classifies the same either way.
+        for (std::size_t half = 0; half < halves.size(); ++half) {
+            const bool inSize = half == 1;
+            const std::vector<std::string_view> tokens = splitTokens(halves[half]);
+            for (std::size_t i = 0; i < tokens.size(); ++i) {
+                const std::string_view token = tokens[i];
+                if (token.empty()) {
+                    continue;
+                }
+                Image parsedImage;
+                if (parseImage(token, parsedImage) &&
+                    (parsedImage.kind != Image::Kind::None || token == "none")) {
+                    if (hasImage) {
+                        return false;
+                    }
+                    image = parsedImage;
+                    hasImage = true;
+                } else if (isRepeatWord(token)) {
+                    if (hasRepeat) {
+                        return false;
+                    }
+                    bool x = false;
+                    bool y = false;
+                    if (repeatAxisValue(token, x) && i + 1 < tokens.size() &&
+                        repeatAxisValue(tokens[i + 1], y)) {
+                        repeat.x = x;
+                        repeat.y = y;
+                        ++i;
+                    } else if (!parseRepeatValue(token, repeat)) {
+                        return false;
+                    }
+                    hasRepeat = true;
+                } else if (token == "scroll" || token == "fixed" || token == "local") {
+                    if (hasAttachment) {
+                        return false;
+                    }
+                    parseAttachment(token, attachment);
+                    hasAttachment = true;
+                } else if (!inSize) {
+                    Box box = ComputedStyle::BackgroundBorderBox;
+                    if (parseBackgroundBox(token, box)) {
+                        if (boxes.size() == 2) {
+                            return false;
+                        }
+                        boxes.push_back(box);
+                    } else if (token == "left" || token == "right" || token == "top" ||
+                               token == "bottom" || isCentre(token) ||
+                               !parseLength(token).isAuto()) {
+                        if (!positionText.empty()) {
+                            positionText += ' ';
+                        }
+                        positionText += std::string(token);
+                    } else {
+                        SDL_Color candidate{};
+                        if (finalLayer && !hasColour && parseColorValue(token, candidate)) {
+                            colour = candidate;
+                            hasColour = true;
+                        } else {
+                            return false;
+                        }
+                    }
+                } else {
+                    // Past the slash: a box keyword is still a box, a length is
+                    // a size, and the colour may still come after the size.
+                    Box box = ComputedStyle::BackgroundBorderBox;
+                    if (parseBackgroundBox(token, box)) {
+                        if (boxes.size() == 2) {
+                            return false;
+                        }
+                        boxes.push_back(box);
+                    } else if (token == "auto" || token == "cover" || token == "contain" ||
+                               !parseLength(token).isAuto()) {
+                        if (!sizeText.empty()) {
+                            sizeText += ' ';
+                        }
+                        sizeText += std::string(token);
+                    } else {
+                        SDL_Color candidate{};
+                        if (finalLayer && !hasColour && parseColorValue(token, candidate)) {
+                            colour = candidate;
+                            hasColour = true;
+                        } else {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        if (!sizeText.empty()) {
+            if (!parseBackgroundSize(sizeText, size)) {
+                return false;
+            }
+            hasSize = true;
+        } else if (halves.size() == 2) {
+            // A slash with nothing after it sizes nothing.
+            return false;
+        }
+        if (hasSize && positionText.empty()) {
+            // A size needs its position, like the mask.
+            return false;
+        }
+        Position position;
+        if (!positionText.empty() && !parsePositionPair(positionText, position)) {
+            return false;
+        }
+        images.push_back(hasImage ? image : Image());
+        sizes.push_back(size);
+        positions.push_back(position);
+        repeats.push_back(repeat);
+        attachments.push_back(attachment);
+        if (boxes.empty()) {
+            origins.push_back(ComputedStyle::BackgroundPaddingBox);
+            clips.push_back(ComputedStyle::BackgroundBorderBox);
+        } else if (boxes.size() == 1) {
+            origins.push_back(boxes[0]);
+            clips.push_back(boxes[0]);
+        } else {
+            origins.push_back(boxes[0]);
+            clips.push_back(boxes[1]);
+        }
+    }
+    if (images.empty()) {
+        return false;
+    }
+    s.backgroundImages = std::move(images);
+    s.backgroundSizes = std::move(sizes);
+    s.backgroundPositions = std::move(positions);
+    s.backgroundRepeats = std::move(repeats);
+    s.backgroundOrigins = std::move(origins);
+    s.backgroundClips = std::move(clips);
+    s.backgroundAttachments = std::move(attachments);
+    s.backgroundColor = colour;
+    return true;
+}
+
 // A bare number with no unit, for the border-slice/width/outset values that
 // count source px or border multiples instead of lengths. `parseLength` reads
 // the same text as px, so this re-tags it.
@@ -4344,11 +4562,15 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         for (const std::string_view entry : splitTopLevel(value)) {
             applyBackgroundLonghand(s, property, entry);
         }
-    } else if (property == "background-color" || property == "background") {
+    } else if (property == "background-color") {
         SDL_Color color{};
         if (parseColorValue(value, color)) {
             s.backgroundColor = color;
         }
+    } else if (property == "background") {
+        // Shorthand: every layer expands into all seven longhands and resets
+        // the colour; one bad token drops the whole declaration.
+        parseBackground(value, s);
     } else if (property == "color") {
         SDL_Color color{};
         if (parseColor(value, color)) {
@@ -6677,6 +6899,52 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
                        : attachment == ComputedStyle::BackgroundLocal ? "local" : "scroll";
         }
         return out.empty() ? std::string("scroll") : out;
+    }
+    if (property == "background") {
+        const auto at = [](const auto& list, std::size_t index) -> const auto& {
+            return list[std::min(index, list.size() - 1)];
+        };
+        const std::size_t layers =
+            style.backgroundImages.empty() ? 1 : style.backgroundImages.size();
+        std::string out;
+        for (std::size_t i = 0; i < layers; ++i) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            const ComputedStyle::BackgroundImage image =
+                style.backgroundImages.empty() ? ComputedStyle::BackgroundImage{}
+                                               : at(style.backgroundImages, i);
+            const ComputedStyle::BackgroundSize size =
+                style.backgroundSizes.empty() ? ComputedStyle::BackgroundSize{}
+                                              : at(style.backgroundSizes, i);
+            const ComputedStyle::BackgroundPosition position =
+                style.backgroundPositions.empty() ? ComputedStyle::BackgroundPosition{}
+                                                  : at(style.backgroundPositions, i);
+            const ComputedStyle::RepeatPair repeat =
+                style.backgroundRepeats.empty() ? ComputedStyle::RepeatPair{}
+                                                : at(style.backgroundRepeats, i);
+            const ComputedStyle::BackgroundAttachment attachment =
+                style.backgroundAttachments.empty() ? ComputedStyle::BackgroundScroll
+                                                    : at(style.backgroundAttachments, i);
+            const ComputedStyle::BackgroundBox origin =
+                style.backgroundOrigins.empty() ? ComputedStyle::BackgroundPaddingBox
+                                                : at(style.backgroundOrigins, i);
+            const ComputedStyle::BackgroundBox clip =
+                style.backgroundClips.empty() ? ComputedStyle::BackgroundBorderBox
+                                              : at(style.backgroundClips, i);
+            out += gradientImage(image) + " " + positionText(position) + " / " +
+                   sizeText(size) + " " + repeatText(repeat) + " " +
+                   (attachment == ComputedStyle::BackgroundFixed
+                        ? "fixed"
+                        : attachment == ComputedStyle::BackgroundLocal ? "local" : "scroll") +
+                   " " + backgroundBoxName(origin) + " " + backgroundBoxName(clip);
+            if (i + 1 == layers) {
+                // Only the final layer carries the colour, which is also where
+                // the grammar allows it.
+                out += " " + alphaColor(style.backgroundColor);
+            }
+        }
+        return out;
     }
     if (property == "background-blend-mode") {
         if (style.backgroundBlendModes.empty()) {
@@ -9200,13 +9468,19 @@ SelectionColors StyleResolver::pseudoColors(Element& element,
             }
             SDL_Color color{};
             if (isBg && decl.property == "background") {
-                // A bare `background` shorthand carries the color first.
-                std::string_view first = trim(decl.value);
-                const std::size_t space = first.find(' ');
-                if (space != std::string_view::npos) {
-                    first = trim(first.substr(0, space));
+                // The shorthand carries its colour as one of the layer tokens
+                // (only the final layer may hold it); the first token that
+                // reads as a colour is the one the highlight paints with.
+                bool found = false;
+                for (std::string_view token : splitTokens(decl.value)) {
+                    SDL_Color candidate{};
+                    if (parseColor(token, candidate)) {
+                        color = candidate;
+                        found = true;
+                        break;
+                    }
                 }
-                if (!parseColor(first, color)) {
+                if (!found) {
                     continue;
                 }
             } else if (!parseColor(decl.value, color)) {
