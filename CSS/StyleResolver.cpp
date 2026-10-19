@@ -1799,6 +1799,23 @@ bool parseBorderStyle(std::string_view v, ComputedStyle::BorderStyle& out) {
     return false;
 }
 
+// The keyword a border style reads back as. `hidden` shares a value with `none`
+// in this engine, so it reads back as `none`.
+std::string_view borderStyleName(ComputedStyle::BorderStyle style) {
+    switch (style) {
+        case ComputedStyle::BorderStyleNone: return "none";
+        case ComputedStyle::BorderSolid: return "solid";
+        case ComputedStyle::BorderDashed: return "dashed";
+        case ComputedStyle::BorderDotted: return "dotted";
+        case ComputedStyle::BorderDouble: return "double";
+        case ComputedStyle::BorderGroove: return "groove";
+        case ComputedStyle::BorderRidge: return "ridge";
+        case ComputedStyle::BorderInset: return "inset";
+        case ComputedStyle::BorderOutset: return "outset";
+    }
+    return "none";
+}
+
 // Whether a token is a length rather than a keyword or a colour. Used by the
 // shadow parsers, which accept their parts in any order.
 bool isLengthToken(std::string_view token) {
@@ -3936,6 +3953,42 @@ bool parseClipPath(std::string_view value, ComputedStyle::ClipPath& clip) {
     return false;
 }
 
+// A `border`-style value list: one width, style, and colour at most, in any
+// order. The `has*` flags record which slots the value actually named, because
+// the shorthands write only those, exactly like `border` itself does.
+struct BorderSlots {
+    bool hasWidth = false;
+    Length width;
+    bool hasStyle = false;
+    ComputedStyle::BorderStyle style = ComputedStyle::BorderSolid;
+    bool hasColor = false;
+    SDL_Color color{};
+};
+
+// Reads a per-side `border` value. An unknown token makes the whole declaration
+// invalid, so it returns false and the caller drops it rather than half-apply a
+// border nobody asked for; the partially filled `out` is ignored then.
+bool parseBorderSlots(std::string_view value, BorderSlots& out) {
+    bool any = false;
+    for (const std::string_view part : splitTopLevel(value, ' ')) {
+        if (part == "thin" || part == "medium" || part == "thick" || isLengthToken(part)) {
+            out.width = parseBorderWidth(part);
+            out.hasWidth = true;
+        } else if (ComputedStyle::BorderStyle parsed{};
+                   parseBorderStyle(part, parsed)) {
+            out.style = parsed;
+            out.hasStyle = true;
+        } else if (SDL_Color parsed{}; parseColorValue(part, parsed)) {
+            out.color = parsed;
+            out.hasColor = true;
+        } else {
+            return false;
+        }
+        any = true;
+    }
+    return any;
+}
+
 void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontSize) {
     const std::string& property = decl.property;
     const std::string_view value = trim(decl.value);
@@ -4225,6 +4278,43 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             SDL_Color color{};
             if (parseColorValue(part, color)) {
                 s.borderColor = color;
+            }
+        }
+    } else if (property == "border-top" || property == "border-right" ||
+               property == "border-bottom" || property == "border-left" ||
+               property == "border-inline" || property == "border-block" ||
+               property == "border-inline-start" || property == "border-inline-end" ||
+               property == "border-block-start" || property == "border-block-end") {
+        // The per-side and logical spellings of `border`: the same three slots,
+        // written to the sides the name covers. Only horizontal writing mode is
+        // laid out, so inline is the left/right pair and block is the top/bottom
+        // one, with every `*-start` the first of its pair. Like `border`, only
+        // the slots the value names are written.
+        const bool top = property == "border-top" || property == "border-block" ||
+                         property == "border-block-start";
+        const bool right = property == "border-right" || property == "border-inline" ||
+                           property == "border-inline-end";
+        const bool bottom = property == "border-bottom" || property == "border-block" ||
+                            property == "border-block-end";
+        const bool left = property == "border-left" || property == "border-inline" ||
+                          property == "border-inline-start";
+
+        BorderSlots slots;
+        if (parseBorderSlots(value, slots)) {
+            if (slots.hasWidth) {
+                if (top) { s.borderWidth.top = slots.width; }
+                if (right) { s.borderWidth.right = slots.width; }
+                if (bottom) { s.borderWidth.bottom = slots.width; }
+                if (left) { s.borderWidth.left = slots.width; }
+            }
+            if (slots.hasStyle) {
+                if (top) { s.borderStyles.top = slots.style; }
+                if (right) { s.borderStyles.right = slots.style; }
+                if (bottom) { s.borderStyles.bottom = slots.style; }
+                if (left) { s.borderStyles.left = slots.style; }
+            }
+            if (slots.hasColor) {
+                s.borderColor = slots.color;
             }
         }
     } else if (property == "background-image") {
@@ -6651,6 +6741,36 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         return length(style.borderWidth.bottom);
     if (property == "border-width-left" || property == "border-left-width")
         return length(style.borderWidth.left);
+    // A border side reads back as `<width> <style> <colour>`, the form the
+    // shorthands themselves accept, so getComputedStyle answers what an author
+    // could have written. The inline and block pairs cover two sides each and
+    // can only read back as one value while both sides agree; a shorthand that
+    // cannot represent its sides has no serialisation, as in CSSOM.
+    const auto borderLine = [&](const Length& width, ComputedStyle::BorderStyle borderStyle) {
+        return length(width) + " " + std::string(borderStyleName(borderStyle)) + " " +
+               color(style.borderColor);
+    };
+    const auto borderLines = [&](const Length& widthA, ComputedStyle::BorderStyle styleA,
+                                 const Length& widthB, ComputedStyle::BorderStyle styleB) {
+        if (length(widthA) != length(widthB) || styleA != styleB) {
+            return std::string();
+        }
+        return borderLine(widthA, styleA);
+    };
+    if (property == "border-top" || property == "border-block-start")
+        return borderLine(style.borderWidth.top, style.borderStyles.top);
+    if (property == "border-right" || property == "border-inline-end")
+        return borderLine(style.borderWidth.right, style.borderStyles.right);
+    if (property == "border-bottom" || property == "border-block-end")
+        return borderLine(style.borderWidth.bottom, style.borderStyles.bottom);
+    if (property == "border-left" || property == "border-inline-start")
+        return borderLine(style.borderWidth.left, style.borderStyles.left);
+    if (property == "border-inline")
+        return borderLines(style.borderWidth.left, style.borderStyles.left,
+                           style.borderWidth.right, style.borderStyles.right);
+    if (property == "border-block")
+        return borderLines(style.borderWidth.top, style.borderStyles.top,
+                           style.borderWidth.bottom, style.borderStyles.bottom);
     if (property == "flex-direction") {
         switch (style.flexDirection) {
             case ComputedStyle::Row: return "row";

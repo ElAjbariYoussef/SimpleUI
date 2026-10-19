@@ -3526,6 +3526,207 @@ void testBorderWidthLonghands() {
           "the legacy spelling reads back too");
 }
 
+// The per-side and logical spellings of the border shorthands. `border-top` and
+// friends take the same width, style, and colour slots as `border`, and the
+// logical names pick physical sides: inline is left/right and block is
+// top/bottom in the one writing mode the engine lays out, with each `*-start`
+// the first of its pair. Like `border`, only the slots the value names are
+// written, so a later shorthand never resets a slot it left out.
+void testBorderSideShorthands() {
+    auto document = parseOrNull("<sui><body><div id=\"t\">x</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* t = document->getElementById("t");
+    if (!t) {
+        return;
+    }
+
+    const auto styleFrom = [&](const char* css) {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(css));
+        return resolver.resolve(*t);
+    };
+    const auto width = [](const sui::Length& l) { return l.resolve(0.0f, 16.0f, 16.0f); };
+
+    {
+        const auto s = styleFrom("#t{border-top:6px dashed #ff0000}");
+        checkNear(width(s.borderWidth.top), 6.0f, 0.01f, "border-top sets that side's width");
+        check(s.borderStyles.top == sui::ComputedStyle::BorderDashed,
+              "border-top sets that side's style");
+        check(s.borderColor.r == 0xff && s.borderColor.g == 0x00 && s.borderColor.b == 0x00,
+              "border-top sets the colour");
+        check(s.borderWidth.left.isAuto() && s.borderWidth.right.isAuto() &&
+                  s.borderWidth.bottom.isAuto(),
+              "border-top leaves the other sides alone");
+        check(s.borderStyles.left == sui::ComputedStyle::BorderSolid,
+              "border-top leaves the other styles alone");
+        check(sui::StyleResolver::propertyValue(s, "border-top") == "6px dashed #ff0000",
+              "border-top reads back in the shorthand's own form");
+        check(sui::StyleResolver::propertyValue(s, "border-block-start") ==
+                  "6px dashed #ff0000",
+              "the matching logical start name reads the same side back");
+    }
+
+    {
+        const auto s = styleFrom("#t{border-inline:2px dotted #00ff00}");
+        checkNear(width(s.borderWidth.left), 2.0f, 0.01f,
+                  "border-inline sets the start (left) width");
+        checkNear(width(s.borderWidth.right), 2.0f, 0.01f,
+                  "border-inline sets the end (right) width");
+        check(s.borderStyles.left == sui::ComputedStyle::BorderDotted &&
+                  s.borderStyles.right == sui::ComputedStyle::BorderDotted,
+              "border-inline sets both styles");
+        check(s.borderColor.g == 0xff, "border-inline sets the colour");
+        check(s.borderWidth.top.isAuto() && s.borderWidth.bottom.isAuto(),
+              "border-inline leaves the block sides alone");
+        check(sui::StyleResolver::propertyValue(s, "border-inline") ==
+                  "2px dotted #00ff00",
+              "border-inline reads back while both sides agree");
+        check(sui::StyleResolver::propertyValue(s, "border-inline-start") ==
+                  "2px dotted #00ff00",
+              "border-inline-start reads the left side back");
+        check(sui::StyleResolver::propertyValue(s, "border-inline-end") ==
+                  "2px dotted #00ff00",
+              "border-inline-end reads the right side back");
+    }
+
+    {
+        const auto s = styleFrom("#t{border-color:#abcdef;border-block:4px}");
+        checkNear(width(s.borderWidth.top), 4.0f, 0.01f, "border-block sets the top width");
+        checkNear(width(s.borderWidth.bottom), 4.0f, 0.01f, "border-block sets the bottom width");
+        check(s.borderWidth.left.isAuto() && s.borderWidth.right.isAuto(),
+              "border-block leaves the inline sides alone");
+        check(s.borderStyles.top == sui::ComputedStyle::BorderSolid,
+              "a width-only value leaves the style as it was");
+        check(sui::StyleResolver::propertyValue(s, "border-block") == "4px solid #abcdef",
+              "border-block reads back");
+    }
+
+    {
+        const auto s = styleFrom("#t{border-right:2px;border-bottom:3px;border-color:#aabbcc}");
+        checkNear(width(s.borderWidth.right), 2.0f, 0.01f, "border-right sets the right width");
+        checkNear(width(s.borderWidth.bottom), 3.0f, 0.01f,
+                  "border-bottom sets the bottom width");
+        check(s.borderWidth.top.isAuto() && s.borderWidth.left.isAuto(),
+              "the physical per-side names touch one side each");
+        check(sui::StyleResolver::propertyValue(s, "border-right") == "2px solid #aabbcc",
+              "border-right reads back");
+    }
+
+    {
+        const auto s = styleFrom("#t{border-inline-start:5px;"
+                                 "border-inline-end:3px dotted;"
+                                 "border-block-start:1px solid #123456;"
+                                 "border-block-end:2px}");
+        checkNear(width(s.borderWidth.left), 5.0f, 0.01f,
+                  "border-inline-start writes the start side");
+        checkNear(width(s.borderWidth.right), 3.0f, 0.01f,
+                  "border-inline-end writes the end side");
+        check(s.borderStyles.right == sui::ComputedStyle::BorderDotted,
+              "border-inline-end writes the end style");
+        check(s.borderStyles.left == sui::ComputedStyle::BorderSolid,
+              "border-inline-start leaves the start style as it was");
+        checkNear(width(s.borderWidth.top), 1.0f, 0.01f, "border-block-start writes the top");
+        checkNear(width(s.borderWidth.bottom), 2.0f, 0.01f,
+                  "border-block-end writes the bottom");
+        check(s.borderStyles.top == sui::ComputedStyle::BorderSolid,
+              "border-block-start writes the top style");
+        check(s.borderColor.r == 0x12 && s.borderColor.g == 0x34 && s.borderColor.b == 0x56,
+              "the pair shorthands share the one border colour");
+    }
+
+    {
+        // Only the named slots move: `border-inline:2px` is a later, higher-priority
+        // declaration for the width and must not touch `border-left`'s style.
+        const auto s = styleFrom("#t{border-left:4px dashed #112233;border-inline:2px}");
+        checkNear(width(s.borderWidth.left), 2.0f, 0.01f,
+                  "a later logical shorthand overwrites the width it names");
+        checkNear(width(s.borderWidth.right), 2.0f, 0.01f,
+                  "on both of its sides");
+        check(s.borderStyles.left == sui::ComputedStyle::BorderDashed,
+              "and keeps a style it does not name");
+        check(s.borderStyles.right == sui::ComputedStyle::BorderSolid,
+              "the untouched side keeps its own style");
+        check(s.borderColor.r == 0x11 && s.borderColor.b == 0x33,
+              "and keeps the colour it does not name");
+        check(sui::StyleResolver::propertyValue(s, "border-inline") == "",
+              "sides that differ have no shorthand serialisation");
+        check(sui::StyleResolver::propertyValue(s, "border-inline-start") ==
+                  "2px dashed #112233",
+              "but each side still reads back");
+        check(sui::StyleResolver::propertyValue(s, "border-inline-end") ==
+                  "2px solid #112233",
+              "on its own");
+
+        const auto block = styleFrom("#t{border-block:1px solid #445566;border-bottom:2px}");
+        check(sui::StyleResolver::propertyValue(block, "border-block") == "",
+              "the block pair has no serialisation while its sides differ either");
+        check(sui::StyleResolver::propertyValue(block, "border-block-end") ==
+                  "2px solid #445566",
+              "and its end side still reads back");
+    }
+
+    {
+        const auto s = styleFrom("#t{border-top:9px;border-top:dashed}");
+        checkNear(width(s.borderWidth.top), 9.0f, 0.01f,
+                  "a style-only value keeps the width it does not name");
+        check(s.borderStyles.top == sui::ComputedStyle::BorderDashed, "and applies its style");
+    }
+
+    {
+        const auto kept = styleFrom("#t{border-top:9px;border-top:banana}");
+        checkNear(width(kept.borderWidth.top), 9.0f, 0.01f,
+                  "an invalid declaration leaves the side as it was");
+        const auto partial = styleFrom("#t{border-inline:2px solid banana}");
+        check(partial.borderWidth.left.isAuto() && partial.borderWidth.right.isAuto(),
+              "an unknown token drops the whole declaration, not just that token");
+    }
+
+    // The logical names reach layout as their physical sides: an absolute box
+    // anchors to the padding box, which the start borders push inwards.
+    auto stage = parseOrNull(
+        "<sui><body style=\"margin:0\">"
+        "<div id=\"stage\" style=\"position:relative;width:200px;height:100px;"
+        "border-inline:10px solid #ff0000;border-block:7px solid #ff0000\">"
+        "<div id=\"box\" style=\"position:absolute;left:0;top:0;width:20px;height:10px\">"
+        "</div></div></body></sui>");
+    if (stage) {
+        sui::StyleResolver resolver;
+        layoutRoot(*stage, resolver, 400.0f);
+        Element* box = stage->getElementById("box");
+        check(box != nullptr, "border shorthand elements found");
+        if (box) {
+            checkNear(box->layoutX(), 10.0f, 0.01f,
+                      "the inline start border shifts the padding box");
+            checkNear(box->layoutY(), 7.0f, 0.01f,
+                      "the block start border shifts it down");
+        }
+    }
+
+    // `inherit` round-trips through the same serialisation, so both sides of a
+    // logical shorthand come from the parent.
+    auto inheritDoc = parseOrNull(
+        "<sui><body style=\"margin:0\">"
+        "<div id=\"p\" style=\"border-inline:3px dotted #0000ff\">"
+        "<div id=\"c\" style=\"border-inline:inherit\"></div></div></body></sui>");
+    if (inheritDoc) {
+        Element* c = inheritDoc->getElementById("c");
+        check(c != nullptr, "inherit elements found");
+        if (c) {
+            sui::StyleResolver resolver;
+            const auto s = resolver.resolve(*c);
+            checkNear(width(s.borderWidth.left), 3.0f, 0.01f,
+                      "border-inline:inherit takes the parent's start width");
+            checkNear(width(s.borderWidth.right), 3.0f, 0.01f,
+                      "and its end width");
+            check(s.borderStyles.left == sui::ComputedStyle::BorderDotted &&
+                      s.borderColor.b == 0xff,
+                  "with the parent's style and colour");
+        }
+    }
+}
+
 void testPositioning() {
     // An absolute box resolves against the padding box of the nearest positioned
     // ancestor, which is only known once the flow has placed that ancestor.
@@ -9921,6 +10122,7 @@ int main() {
     testTableLayout();
     testImportantAndCssWideKeywords();
     testBorderWidthLonghands();
+    testBorderSideShorthands();
     testMediaQueries();
     testCustomProperties();
     testCascade();
