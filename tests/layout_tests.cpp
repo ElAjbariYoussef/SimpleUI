@@ -3645,6 +3645,41 @@ void testContainerAndScrollReadBack() {
           "an untouched snapper reads none");
 }
 
+// Shadows read back colour first and keep every length, including the default
+// zeros and blur/spread, so the string parses back to the same list; the
+// translucent default colour survives as `#rrggbbaa`.
+void testShadowReadBack() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"a\"></div><div id=\"b\"></div><div id=\"c\"></div>"
+        "<div id=\"d\"></div>"
+        "<div id=\"p\" style=\"box-shadow:3px 3px 4px #112233\">"
+        "<div id=\"q\" style=\"box-shadow:inherit\"></div></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#a { box-shadow: none }"
+        "#b { box-shadow: 2px 4px 6px 8px #ff0000, inset 1px 1px 2px #00000080 }"
+        "#c { text-shadow: 1px 2px 3px #00ff00, 4px 5px }"));
+    const auto value = [&](const char* id, const char* property) {
+        Element* el = document->getElementById(id);
+        return el ? sui::StyleResolver::propertyValue(resolver.resolve(*el), property) : "";
+    };
+    check(value("a", "box-shadow") == "none", "no box shadow reads none");
+    check(value("b", "box-shadow") ==
+              "#ff0000 2px 4px 6px 8px, #00000080 1px 1px 2px 0px inset",
+          "box shadows read colour, offsets, blur, spread, and inset");
+    check(value("c", "text-shadow") == "#00ff00 1px 2px 3px, #00000080 4px 5px 0px",
+          "text shadows read colour, offsets, and blur");
+    check(value("d", "box-shadow") == "none" && value("d", "text-shadow") == "none",
+          "an untouched box reads none");
+    check(value("q", "box-shadow") == "#112233 3px 3px 4px 0px",
+          "box-shadow: inherit replays the parent's list");
+    check(value("p", "box-shadow") == value("q", "box-shadow"),
+          "so parent and child agree");
+}
+
 void testFlexIsBlockLevel() {
     // `display: flex` puts the box in the block formatting context, so a flex
     // container sits on its own line and its sibling lands below it. Only
@@ -10933,6 +10968,7 @@ int main() {
     testLayoutValuesReadBack();
     testBorderRadiusReadBack();
     testContainerAndScrollReadBack();
+    testShadowReadBack();
     testFlexIsBlockLevel();
     testFlexNestedContainer();
     testLengthUnits();

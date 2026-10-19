@@ -6913,6 +6913,44 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
                                          length(radii.bottomLeft.y));
         return xs == ys ? xs : xs + " / " + ys;
     }
+    // Shadows serialise colour first, then the resolved offsets, with `inset`
+    // last, which is how CSSOM prints the computed value. The colour is written
+    // as `#rrggbbaa` when it is translucent so the reading parses back exactly.
+    const auto shadowColor = [](const SDL_Color& c) {
+        char buffer[16];
+        if (c.a == 255) {
+            std::snprintf(buffer, sizeof(buffer), "#%02x%02x%02x", c.r, c.g, c.b);
+        } else {
+            std::snprintf(buffer, sizeof(buffer), "#%02x%02x%02x%02x", c.r, c.g, c.b, c.a);
+        }
+        return std::string(buffer);
+    };
+    if (property == "box-shadow") {
+        std::string out;
+        for (const ComputedStyle::BoxShadow& shadow : style.boxShadows) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            out += shadowColor(shadow.color) + " " + length(shadow.offsetX) + " " +
+                   length(shadow.offsetY) + " " + length(shadow.blurRadius) + " " +
+                   length(shadow.spread);
+            if (shadow.inset) {
+                out += " inset";
+            }
+        }
+        return out.empty() ? std::string("none") : out;
+    }
+    if (property == "text-shadow") {
+        std::string out;
+        for (const ComputedStyle::TextShadow& shadow : style.textShadows) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            out += shadowColor(shadow.color) + " " + length(shadow.offsetX) + " " +
+                   length(shadow.offsetY) + " " + length(shadow.blurRadius);
+        }
+        return out.empty() ? std::string("none") : out;
+    }
     // Placement, stacking, and compositing values: they have always driven
     // layout and paint, but the cascade had no way to read them back, so their
     // CSS-wide keywords were dropped as well.
