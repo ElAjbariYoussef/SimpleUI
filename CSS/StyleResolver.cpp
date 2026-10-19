@@ -6745,6 +6745,49 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "inset-inline-end") return length(style.right, "auto");
     if (property == "inset-block-start") return length(style.top, "auto");
     if (property == "inset-block-end") return length(style.bottom, "auto");
+    // The box shorthands read back in the form the cascade writes them: one
+    // value while both sides agree, `start end` otherwise, and for the
+    // four-sided ones a one-to-four value list collapsed the way `margin`
+    // distributes it. Reading them back is also what lets their CSS-wide
+    // keywords round-trip, since `inherit`, `unset` and `initial` re-apply this
+    // serialisation rather than carrying a style object around.
+    const auto twoSides = [&](const Length& start, const Length& end,
+                              const char* autoKeyword) {
+        const std::string first = length(start, autoKeyword);
+        const std::string second = length(end, autoKeyword);
+        return first == second ? first : first + " " + second;
+    };
+    const auto fourSides = [&](const BoxEdge& edges, const char* autoKeyword) {
+        const std::string top = length(edges.top, autoKeyword);
+        const std::string right = length(edges.right, autoKeyword);
+        const std::string bottom = length(edges.bottom, autoKeyword);
+        const std::string left = length(edges.left, autoKeyword);
+        if (top == right && right == bottom && bottom == left) {
+            return top;
+        }
+        if (top == bottom && left == right) {
+            return top + " " + right;
+        }
+        if (left == right) {
+            return top + " " + right + " " + bottom;
+        }
+        return top + " " + right + " " + bottom + " " + left;
+    };
+    if (property == "margin") return fourSides(style.margin, "0px");
+    if (property == "margin-inline")
+        return twoSides(style.margin.left, style.margin.right, "0px");
+    if (property == "margin-block")
+        return twoSides(style.margin.top, style.margin.bottom, "0px");
+    if (property == "padding") return fourSides(style.padding, "0px");
+    if (property == "padding-inline")
+        return twoSides(style.padding.left, style.padding.right, "0px");
+    if (property == "padding-block")
+        return twoSides(style.padding.top, style.padding.bottom, "0px");
+    if (property == "inset") {
+        return fourSides(BoxEdge{style.top, style.right, style.bottom, style.left}, "auto");
+    }
+    if (property == "inset-inline") return twoSides(style.left, style.right, "auto");
+    if (property == "inset-block") return twoSides(style.top, style.bottom, "auto");
     if (property == "border-width-top" || property == "border-top-width")
         return length(style.borderWidth.top);
     if (property == "border-width-right" || property == "border-right-width")

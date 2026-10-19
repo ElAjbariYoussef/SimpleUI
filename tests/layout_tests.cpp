@@ -9941,6 +9941,144 @@ void testLogicalPropertiesAndInsets() {
     checkNear(sins3.bottom.value, 80.0f, 0.01f, "inset-block-end maps to bottom");
 }
 
+// The box shorthands — `margin`, `padding`, `inset`, and the logical pairs — read
+// back in the form the cascade writes them: one value while both sides agree,
+// `start end` otherwise, and a one-to-four value list for the four-sided ones,
+// collapsed the way `margin` distributes it. Reading them back is also what lets
+// their CSS-wide keywords round-trip, since `inherit`, `unset`, and `initial`
+// re-apply the serialisation rather than carrying a style object around.
+void testBoxShorthands() {
+    auto doc = parseOrNull(
+        "<sui><body style=\"margin:0\">"
+        "<div id=\"m1\" style=\"margin:10px 20px\"></div>"
+        "<div id=\"m2\" style=\"margin-inline:10px 20px;margin-block:30px 40px\"></div>"
+        "<div id=\"m3\" style=\"margin-inline:15px;margin-block:25px\"></div>"
+        "<div id=\"m4\" style=\"margin:1px 2px 3px 4px\"></div>"
+        "<div id=\"m5\" style=\"margin:1px 2px 3px\"></div>"
+        "<div id=\"m6\" style=\"margin:1px 2px\"></div>"
+        "<div id=\"m7\" style=\"margin-inline:5% 10%\"></div>"
+        "<div id=\"p1\" style=\"padding:5px 10px\"></div>"
+        "<div id=\"p2\" style=\"padding:2em\"></div>"
+        "<div id=\"p5\" style=\"padding-inline:12px 14px;padding-block:16px\"></div>"
+        "<div id=\"i1\" style=\"position:absolute;inset:1px 2px 3px 4px\"></div>"
+        "<div id=\"i2\" style=\"position:absolute;inset:1px 2px 3px\"></div>"
+        "<div id=\"i3\" style=\"position:absolute;inset-inline:5px 6px;"
+        "inset-block:7px 8px\"></div>"
+        "<div id=\"i4\" style=\"position:absolute;inset:9px\"></div>"
+        "<div id=\"i5\" style=\"position:absolute;inset-inline:5px\"></div>"
+        "<div id=\"i6\" style=\"position:absolute;inset-inline:auto 10px\"></div>"
+        "</body></sui>");
+    if (!doc) {
+        return;
+    }
+    Element* m1 = doc->getElementById("m1");
+    Element* i1 = doc->getElementById("i1");
+    check(m1 && i1, "box shorthand elements found");
+    if (!m1 || !i1) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    const auto value = [&](const char* id, const char* property) {
+        return sui::StyleResolver::propertyValue(
+            resolver.resolve(*doc->getElementById(id)), property);
+    };
+
+    check(value("m1", "margin") == "10px 20px", "margin reads back as a two-value list");
+    check(value("m1", "margin-inline") == "20px" && value("m1", "margin-block") == "10px",
+          "and its logical pairs collapse to one value each");
+    check(value("m2", "margin-inline") == "10px 20px", "margin-inline reads back both sides");
+    check(value("m2", "margin-inline-start") == "10px", "agreeing with its own longhands");
+    check(value("m2", "margin-block") == "30px 40px", "and margin-block too");
+    check(value("m3", "margin-inline") == "15px" && value("m3", "margin-block") == "25px",
+          "equal sides collapse to a single value");
+    check(value("m4", "margin") == "1px 2px 3px 4px", "four distinct sides stay four values");
+    check(value("m5", "margin") == "1px 2px 3px", "a matching left drops out of the list");
+    check(value("m6", "margin") == "1px 2px", "a matching bottom drops out of it too");
+    check(value("m7", "margin-inline") == "5% 10%", "percentages keep their unit");
+    check(value("p1", "padding") == "5px 10px", "padding reads back like margin");
+    check(value("p2", "padding") == "2em", "font-relative units keep their unit");
+    check(value("p5", "padding-inline") == "12px 14px" &&
+              value("p5", "padding-block") == "16px",
+          "the logical paddings read back on their own axes");
+    check(value("p5", "padding") == "16px 14px 16px 12px",
+          "and the physical shorthand gathers all four back up");
+    check(value("i1", "inset") == "1px 2px 3px 4px", "inset reads back as offsets");
+    check(value("i2", "inset") == "1px 2px 3px", "collapsing like margin");
+    check(value("i3", "inset-inline") == "5px 6px" && value("i3", "inset-block") == "7px 8px",
+          "and its logical pairs read back");
+    check(value("i3", "inset") == "7px 6px 8px 5px", "with the offsets gathered back up");
+    check(value("i4", "inset") == "9px" && value("i5", "inset-inline") == "5px",
+          "one value covers both sides");
+    check(value("i4", "inset") == value("i4", "top"),
+          "and each offset longhand agrees with the shorthand");
+    check(value("i6", "inset-inline") == "auto 10px" && value("i6", "left") == "auto",
+          "an auto offset reads back as auto");
+
+    // The round-trip: `inherit` copies the parent's shorthand, `initial` takes the
+    // default style's value, which for these lengths is the initial one.
+    auto kw = parseOrNull(
+        "<sui><body style=\"margin:0\">"
+        "<div id=\"p1\" style=\"margin-inline:10px 20px;margin-block:3px 4px\">"
+        "<div id=\"c1\" style=\"margin-inline:inherit\"></div>"
+        "<div id=\"c2\" style=\"margin-block:inherit\"></div>"
+        "</div>"
+        "<div id=\"p2\" style=\"margin:1px 2px 3px 4px\">"
+        "<div id=\"c3\" style=\"margin:inherit\"></div>"
+        "</div>"
+        "<div id=\"p3\" style=\"position:absolute;inset:11px 12px 13px 14px\">"
+        "<div id=\"c4\" style=\"inset:inherit\"></div>"
+        "<div id=\"c5\" style=\"inset-inline:inherit\"></div>"
+        "<div id=\"c6\" style=\"inset-block:inherit\"></div>"
+        "</div>"
+        "<div id=\"p4\" style=\"padding:7px 8px;padding-block:9px 10px\">"
+        "<div id=\"c7\" style=\"padding:inherit\"></div>"
+        "<div id=\"c8\" style=\"padding-inline:inherit\"></div>"
+        "<div id=\"c9\" style=\"padding-block:inherit\"></div>"
+        "</div>"
+        "<div id=\"c10\" style=\"margin-inline:5px;margin-inline:initial\"></div>"
+        "</body></sui>");
+    if (kw) {
+        sui::StyleResolver r;
+        const auto of = [&](const char* id) { return r.resolve(*kw->getElementById(id)); };
+        const sui::ComputedStyle c1 = of("c1");
+        checkNear(c1.margin.left.value, 10.0f, 0.01f, "margin-inline:inherit takes the start");
+        checkNear(c1.margin.right.value, 20.0f, 0.01f, "and the end");
+        check(sui::StyleResolver::propertyValue(c1, "margin-inline") == "10px 20px",
+              "reading back the same two values");
+        const sui::ComputedStyle c2 = of("c2");
+        checkNear(c2.margin.top.value, 3.0f, 0.01f, "margin-block:inherit takes the block pair");
+        checkNear(c2.margin.bottom.value, 4.0f, 0.01f, "start and end");
+        const sui::ComputedStyle c3 = of("c3");
+        checkNear(c3.margin.top.value, 1.0f, 0.01f, "margin:inherit takes all four sides");
+        checkNear(c3.margin.left.value, 4.0f, 0.01f, "including the fourth");
+        const sui::ComputedStyle c4 = of("c4");
+        checkNear(c4.top.value, 11.0f, 0.01f, "inset:inherit takes the offsets");
+        checkNear(c4.left.value, 14.0f, 0.01f, "all four of them");
+        const sui::ComputedStyle c5 = of("c5");
+        checkNear(c5.left.value, 14.0f, 0.01f, "inset-inline:inherit takes the start offset");
+        checkNear(c5.right.value, 12.0f, 0.01f, "and the end one");
+        const sui::ComputedStyle c6 = of("c6");
+        checkNear(c6.top.value, 11.0f, 0.01f, "inset-block:inherit takes the block sides");
+        checkNear(c6.bottom.value, 13.0f, 0.01f, "from the parent's own inset");
+        const sui::ComputedStyle c7 = of("c7");
+        checkNear(c7.padding.top.value, 9.0f, 0.01f,
+                  "padding:inherit takes the parent's final padding");
+        checkNear(c7.padding.right.value, 8.0f, 0.01f, "all four sides of it");
+        const sui::ComputedStyle c8 = of("c8");
+        checkNear(c8.padding.left.value, 8.0f, 0.01f, "padding-inline:inherit takes the start");
+        checkNear(c8.padding.right.value, 8.0f, 0.01f, "and the end");
+        const sui::ComputedStyle c9 = of("c9");
+        checkNear(c9.padding.top.value, 9.0f, 0.01f,
+                  "padding-block:inherit takes the parent's block pair");
+        checkNear(c9.padding.bottom.value, 10.0f, 0.01f, "start and end, not one value");
+        const sui::ComputedStyle c10 = of("c10");
+        checkNear(c10.margin.left.value, 0.0f, 0.01f,
+                  "margin-inline:initial drops back to the initial zero");
+        check(!c10.margin.left.isAuto() && !c10.margin.right.isAuto(),
+              "rather than staying at the value the stronger declaration set");
+    }
+}
+
 // grid-auto-rows / grid-auto-columns / grid-auto-flow: implicit track sizing and
 // non-row-major auto placement.
 void testGridAutoTracks() {
@@ -10295,6 +10433,7 @@ void testStickyPositioning() {
 
 int main() {
     testLogicalPropertiesAndInsets();
+    testBoxShorthands();
     testGridAutoTracks();
     testStickyPositioning();
     testAspectRatio();
