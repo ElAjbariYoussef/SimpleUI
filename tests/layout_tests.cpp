@@ -3350,7 +3350,7 @@ void testFlexPropertyParsing() {
     };
     check(value("a", "display") == "flex", "display: flex parses");
     check(value("b", "display") == "inline-flex", "display: inline-flex parses");
-    check(value("a", "gap") == "", "gap has no computed-value form yet");
+    check(value("a", "gap") == "7px", "gap reads back");
     check(value("a", "flex-direction") == "column-reverse",
           "flex-direction reads back");
     check(value("a", "justify-content") == "space-evenly", "justify-content reads back");
@@ -3437,6 +3437,83 @@ void testGapShorthand() {
         const auto s = resolver.resolve(*bad);
         checkNear(s.rowGap, 6.0f, 0.01f, "a three-value gap leaves the row gap alone");
         checkNear(s.columnGap, 6.0f, 0.01f, "and the column gap");
+    }
+}
+
+// The values that drive placement, stacking, compositing, and flex spacing had
+// no reading at all, which also dropped their CSS-wide keywords. `position`,
+// `z-index`, `opacity`, `flex`, and the gaps now answer `getComputedStyle`.
+void testLayoutValuesReadBack() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"a\"></div><div id=\"b\"></div><div id=\"c\"></div>"
+        "<div id=\"d\"></div><div id=\"e\"></div><div id=\"f\"></div>"
+        "<div id=\"g\"></div><div id=\"h\"></div><div id=\"i\"></div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#a { position: absolute; z-index: 7; opacity: 0.5 }"
+        "#b { position: sticky }"
+        "#c { z-index: 0 }"
+        "#d { flex: 2 3 40px }"
+        "#e { flex: 1 }"
+        "#f { gap: 8px 12px }"
+        "#g { gap: 10px }"
+        "#h { row-gap: 5px; column-gap: 6px }"));
+    const auto value = [&](const char* id, const char* property) {
+        Element* el = document->getElementById(id);
+        return el ? sui::StyleResolver::propertyValue(resolver.resolve(*el), property) : "";
+    };
+    check(value("a", "position") == "absolute", "position reads back");
+    check(value("a", "z-index") == "7", "z-index reads back");
+    check(value("a", "opacity") == "0.5", "opacity reads back");
+    check(value("b", "position") == "sticky", "every position keyword reads back");
+    check(value("c", "z-index") == "auto", "zero z-index reads as auto, the shared slot");
+    check(value("d", "flex") == "2 3 40px", "the flex shorthand reads back its three slots");
+    check(value("e", "flex") == "1 1 0%", "the one-number flex form reads back as 0% basis");
+    check(value("f", "gap") == "8px 12px", "a two-value gap reads back");
+    check(value("f", "row-gap") == "8px" && value("f", "column-gap") == "12px",
+          "and its longhands agree");
+    check(value("g", "gap") == "10px", "a single gap reads back once");
+    check(value("h", "gap") == "5px 6px", "longhands collapse into the shorthand");
+    check(value("i", "position") == "static" && value("i", "z-index") == "auto" &&
+              value("i", "opacity") == "1" && value("i", "flex") == "0 1 auto" &&
+              value("i", "gap") == "normal" && value("i", "row-gap") == "normal" &&
+              value("i", "column-gap") == "normal",
+          "an untouched box reads its defaults");
+    check(value("i", "grid-gap") == "normal", "the grid-gap alias reads back too");
+
+    // The CSS-wide keywords replay those readings, so `inherit` now copies the
+    // parent instead of dropping the declaration.
+    auto inheritDoc = parseOrNull(
+        "<sui><body style=\"margin:0\">"
+        "<div id=\"p\" style=\"position:relative;z-index:5;opacity:0.25;"
+        "flex:2 0 30px;gap:4px 9px\">"
+        "<div id=\"k\" style=\"position:inherit;z-index:inherit;opacity:inherit;"
+        "flex:inherit;gap:inherit\"></div>"
+        "</div>"
+        "<div id=\"plain\"><div id=\"kn\" style=\"gap:inherit;row-gap:inherit\"></div></div>"
+        "</body></sui>");
+    if (inheritDoc) {
+        sui::StyleResolver inheritResolver;
+        const auto of = [&](const char* id) {
+            return inheritResolver.resolve(*inheritDoc->getElementById(id));
+        };
+        const sui::ComputedStyle k = of("k");
+        check(k.position == sui::ComputedStyle::Relative,
+              "position:inherit takes the parent's keyword");
+        check(k.zIndex == 5, "z-index:inherit takes the parent's number");
+        checkNear(k.opacity, 0.25f, 0.001f, "opacity:inherit takes the parent's value");
+        checkNear(k.flex.grow, 2.0f, 0.01f, "flex:inherit takes the grow factor");
+        checkNear(k.flex.basis.resolve(0.0f, 16.0f, 16.0f), 30.0f, 0.01f,
+                  "and the basis");
+        checkNear(k.rowGap, 4.0f, 0.01f, "gap:inherit takes the row gap");
+        checkNear(k.columnGap, 9.0f, 0.01f, "and the column gap");
+        checkNear(of("kn").rowGap, -1.0f, 0.01f,
+                  "gap:inherit from an unauthored parent stays unauthored");
+        checkNear(of("kn").columnGap, -1.0f, 0.01f, "on both axes");
     }
 }
 
@@ -10726,6 +10803,7 @@ int main() {
     testFlexInlineFlexShrinks();
     testFlexPropertyParsing();
     testGapShorthand();
+    testLayoutValuesReadBack();
     testFlexIsBlockLevel();
     testFlexNestedContainer();
     testLengthUnits();

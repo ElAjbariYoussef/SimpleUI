@@ -4549,9 +4549,12 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
     } else if (property == "gap" || property == "grid-gap") {
         // One value covers both axes; two are the row gap and then the column
         // gap, in `margin`'s order. Like the longhands, the values resolve to px
-        // here, so a percentage reads zero.
+        // here, so a percentage reads zero; `normal` is the unauthored state.
         const std::vector<std::string_view> parts = splitTopLevel(value, ' ');
         const auto toPx = [&](std::string_view token) {
+            if (token == "normal") {
+                return -1.0f;
+            }
             return parseLength(token).resolve(0.0f, s.fontSize, rootFontSize);
         };
         if (parts.size() == 1) {
@@ -4563,9 +4566,12 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.columnGap = toPx(parts[1]);
         }
     } else if (property == "row-gap") {
-        s.rowGap = parseLength(value).resolve(0.0f, s.fontSize, rootFontSize);
+        s.rowGap = value == "normal" ? -1.0f
+                                     : parseLength(value).resolve(0.0f, s.fontSize, rootFontSize);
     } else if (property == "column-gap") {
-        s.columnGap = parseLength(value).resolve(0.0f, s.fontSize, rootFontSize);
+        s.columnGap = value == "normal"
+                          ? -1.0f
+                          : parseLength(value).resolve(0.0f, s.fontSize, rootFontSize);
     } else if (property == "flex") {
         applyFlexShorthand(s, value, rootFontSize);
     } else if (property == "flex-grow") {
@@ -6866,6 +6872,25 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "outline-style") return std::string(borderStyleName(style.outline.style));
     if (property == "outline-color") return color(style.outline.color);
     if (property == "outline-offset") return length(style.outline.offset);
+    // Placement, stacking, and compositing values: they have always driven
+    // layout and paint, but the cascade had no way to read them back, so their
+    // CSS-wide keywords were dropped as well.
+    if (property == "position") {
+        switch (style.position) {
+            case ComputedStyle::Static: return "static";
+            case ComputedStyle::Relative: return "relative";
+            case ComputedStyle::Absolute: return "absolute";
+            case ComputedStyle::Fixed: return "fixed";
+            case ComputedStyle::Sticky: return "sticky";
+        }
+        return std::string();
+    }
+    if (property == "z-index") {
+        // `auto` and `0` share one slot (both order as zero), so `auto` is the
+        // reading that round-trips.
+        return style.zIndex == 0 ? std::string("auto") : std::to_string(style.zIndex);
+    }
+    if (property == "opacity") return unitless(style.opacity);
     if (property == "flex-direction") {
         switch (style.flexDirection) {
             case ComputedStyle::Row: return "row";
@@ -6889,9 +6914,29 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "align-content") return alignName(style.alignContent);
     if (property == "justify-items") return alignName(style.justifyItems);
     if (property == "justify-self") return alignName(style.justifySelf);
+    if (property == "flex") {
+        return unitless(style.flex.grow) + " " + unitless(style.flex.shrink) + " " +
+               length(style.flex.basis, "auto");
+    }
     if (property == "flex-grow") return unitless(style.flex.grow);
     if (property == "flex-shrink") return unitless(style.flex.shrink);
     if (property == "flex-basis") return length(style.flex.basis, "auto");
+    // Gaps resolve to px at parse time; `normal` is the unauthored state, which
+    // the two longhands record as a negative number.
+    if (property == "gap" || property == "grid-gap") {
+        const auto side = [&](float px) {
+            return px < 0.0f ? std::string("normal") : number(px);
+        };
+        const std::string row = side(style.rowGap);
+        const std::string column = side(style.columnGap);
+        return row == column ? row : row + " " + column;
+    }
+    if (property == "row-gap") {
+        return style.rowGap < 0.0f ? std::string("normal") : number(style.rowGap);
+    }
+    if (property == "column-gap") {
+        return style.columnGap < 0.0f ? std::string("normal") : number(style.columnGap);
+    }
     if (property == "transition" || property == "transition-property" ||
         property == "transition-duration" || property == "transition-delay" ||
         property == "transition-timing-function") {
