@@ -9310,6 +9310,82 @@ void testBackgroundSizeAndPositionKeywords() {
               1.0f, 0.01f, "the British spelling of centre is accepted");
 }
 
+// Every background longhand answers with one entry per stored layer, in the
+// grammar the parser reads; gradients print a canonical form (angle or
+// shape/extent/centre/radii, then the stops with authored offsets only), so
+// the readings parse back to the same layers.
+void testBackgroundReadBack() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"a\"></div><div id=\"b\"></div><div id=\"c\"></div>"
+        "<div id=\"d\"></div><div id=\"e\"></div><div id=\"f\"></div>"
+        "<div id=\"g\"></div><div id=\"h\"></div>"
+        "<div id=\"p\" style=\"background-image:url(p.png);"
+        "background-position:right 4px bottom 8px\">"
+        "<div id=\"q\" style=\"background-image:inherit;"
+        "background-position:inherit\"></div></div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#a { background-image: linear-gradient(90deg, #ff0000 0%, #0000ff80 100%) }"
+        "#b { background-image: radial-gradient(circle farthest-side at 20% 30% 10px,"
+        " red, blue), url(two.png) }"
+        "#c { background-image: conic-gradient(from 45deg at 25% 75%, red 0%, blue 100%) }"
+        "#d { background-size: cover, auto 40px; background-repeat: repeat-x, space;"
+        " background-position: right top, 50% 50%; background-clip: content-box;"
+        " background-origin: border-box; background-attachment: fixed, local }"
+        "#e { background-position: 10px 20% }"
+        "#h { background-size: 10px 20px 30px }"
+        "#f { background-image: none }"));
+    const auto value = [&](const char* id, const char* property) {
+        Element* el = document->getElementById(id);
+        return el ? sui::StyleResolver::propertyValue(resolver.resolve(*el), property) : "";
+    };
+    check(value("a", "background-image") ==
+              "linear-gradient(90deg, #ff0000 0%, #0000ff80 100%)",
+          "a linear gradient reads its angle and stops");
+    check(value("b", "background-image") ==
+              "radial-gradient(circle farthest-side at 20% 30% 10px, #ff0000, #0000ff),"
+              " url(two.png)",
+          "a radial gradient reads shape, extent, centre, and radius before the next layer");
+    check(value("c", "background-image") ==
+              "conic-gradient(from 45deg at 25% 75%, #ff0000 0%, #0000ff 100%)",
+          "a conic gradient reads its from-angle, centre, and stops");
+    check(value("d", "background-size") == "cover, auto 40px", "sizes read per layer");
+    check(value("d", "background-repeat") == "repeat-x, space", "repeats read per layer");
+    check(value("d", "background-position") == "right top, left 50% top 50%",
+          "positions read per layer, offsets as the four-value form");
+    check(value("d", "background-clip") == "content-box", "a lone clip serves every layer");
+    check(value("d", "background-origin") == "border-box", "origin reads its box");
+    check(value("d", "background-attachment") == "fixed, local",
+          "attachments read per layer");
+    check(value("e", "background-position") == "left 10px top 20%",
+          "a bare length pair reads as explicit edges");
+    check(value("p", "background-position") == "right 4px bottom 8px",
+          "an edge offset reads the magnitude the author wrote");
+    check(value("h", "background-size") == "auto",
+          "a list entry that fell back to auto keeps its reading");
+    check(value("f", "background-image") == "none", "an explicit none is a layer");
+    check(value("g", "background-image") == "none" &&
+              value("g", "background-size") == "auto" &&
+              value("g", "background-position") == "left top" &&
+              value("g", "background-repeat") == "repeat",
+          "an untouched layer reads the initial values");
+    check(value("g", "background-clip") == "border-box" &&
+              value("g", "background-origin") == "padding-box" &&
+              value("g", "background-attachment") == "scroll",
+          "and the initial boxes and attachment");
+    check(value("g", "background-color") == "#00000000",
+          "a transparent background keeps its alpha");
+    check(value("q", "background-image") == "url(p.png)",
+          "background-image: inherit replays the parent's layers");
+    check(value("q", "background-position") == "right 4px bottom 8px",
+          "and the parent's position measures back from the edges");
+}
+
 // A flex item's own cross size is a content-box length, so the border and padding
 // have to come off the line's cross extent when it stretches to fill it, and must not
 // be added a second time when the size is written back onto the item.
@@ -11074,6 +11150,7 @@ int main() {
     testBackdropFilter();
     testBackgroundListsAreParallel();
     testBackgroundSizeAndPositionKeywords();
+    testBackgroundReadBack();
     testFlexCrossSizeExcludesChrome();
     testFlexBoxSizingIsNotAppliedTwice();
 

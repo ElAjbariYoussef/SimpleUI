@@ -6212,6 +6212,18 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         std::snprintf(buffer, sizeof(buffer), "#%02x%02x%02x", c.r, c.g, c.b);
         return std::string(buffer);
     };
+    // Like `color`, but keeps any translucent alpha as an 8-digit hex, so colours
+    // that are meant to be see-through (shadows, gradient stops, backgrounds)
+    // read back as themselves instead of turning opaque.
+    auto alphaColor = [](const SDL_Color& c) {
+        char buffer[16];
+        if (c.a == 255) {
+            std::snprintf(buffer, sizeof(buffer), "#%02x%02x%02x", c.r, c.g, c.b);
+        } else {
+            std::snprintf(buffer, sizeof(buffer), "#%02x%02x%02x%02x", c.r, c.g, c.b, c.a);
+        }
+        return std::string(buffer);
+    };
     // A computed length keeps whatever unit the author wrote, because that is the
     // only reading that can be turned back into CSS without losing meaning.
     auto length = [&](const Length& l, const char* autoKeyword = "0px") {
@@ -6433,7 +6445,204 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             default: return "normal";
         }
     }
-    if (property == "background-color") return color(style.backgroundColor);
+    if (property == "background-color") return alphaColor(style.backgroundColor);
+    // Background layers answer one comma-separated entry per stored layer, in the
+    // same order as `background-image`; a property with no layers answers its
+    // initial value. Gradients print a canonical, parseable form: the angle,
+    // shape/extent/centre/radii the parser keeps, then the stops, with an offset
+    // printed only when it was authored (an absent one interpolates).
+    const auto isCentred = [](const Length& l) {
+        return l.unit == Length::Percent && l.value == 50.0f;
+    };
+    const auto gradientStopList =
+        [&](const std::vector<ComputedStyle::GradientStop>& stops) {
+            std::string out;
+            for (const ComputedStyle::GradientStop& stop : stops) {
+                if (!out.empty()) {
+                    out += ", ";
+                }
+                out += alphaColor(stop.color);
+                if (!stop.offset.isAuto()) {
+                    out += " " + length(stop.offset);
+                }
+            }
+            return out;
+        };
+    const auto gradientImage =
+        [&](const ComputedStyle::BackgroundImage& image) -> std::string {
+        switch (image.kind) {
+            case ComputedStyle::BackgroundImage::None: return "none";
+            case ComputedStyle::BackgroundImage::Url: return "url(" + image.href + ")";
+            case ComputedStyle::BackgroundImage::LinearGradientImage:
+                return "linear-gradient(" + unitless(image.linear.angle) + "deg, " +
+                       gradientStopList(image.linear.stops) + ")";
+            case ComputedStyle::BackgroundImage::RadialGradientImage: {
+                const ComputedStyle::RadialGradient& radial = image.radial;
+                std::string out = "radial-gradient(";
+                out += radial.shape == ComputedStyle::RadialGradient::Circle ? "circle"
+                                                                             : "ellipse";
+                switch (radial.extent) {
+                    case ComputedStyle::RadialGradient::ClosestSide:
+                        out += " closest-side";
+                        break;
+                    case ComputedStyle::RadialGradient::FarthestSide:
+                        out += " farthest-side";
+                        break;
+                    case ComputedStyle::RadialGradient::ClosestCorner:
+                        out += " closest-corner";
+                        break;
+                    case ComputedStyle::RadialGradient::FarthestCorner:
+                        out += " farthest-corner";
+                        break;
+                }
+                // The radius pair is only reachable behind a centre, which is the
+                // grammar the parser reads: `at <x> <y> <radius>`.
+                if (radial.hasRadii) {
+                    out += " at " + length(radial.centreX) + " " +
+                           length(radial.centreY) + " " + length(radial.radiusX);
+                    if (!radial.radiusY.isAuto()) {
+                        out += " " + length(radial.radiusY);
+                    }
+                } else if (!isCentred(radial.centreX) || !isCentred(radial.centreY)) {
+                    out += " at " + length(radial.centreX) + " " +
+                           length(radial.centreY);
+                }
+                return out + ", " + gradientStopList(radial.stops) + ")";
+            }
+            case ComputedStyle::BackgroundImage::ConicalGradientImage: {
+                const ComputedStyle::ConicalGradient& conical = image.conical;
+                return "conic-gradient(from " + unitless(conical.angle) + "deg at " +
+                       length(conical.centreX) + " " + length(conical.centreY) + ", " +
+                       gradientStopList(conical.stops) + ")";
+            }
+        }
+        return "none";
+    };
+    if (property == "background-image") {
+        std::string out;
+        for (const ComputedStyle::BackgroundImage& image : style.backgroundImages) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            out += gradientImage(image);
+        }
+        return out.empty() ? std::string("none") : out;
+    }
+    if (property == "background-size") {
+        std::string out;
+        for (const ComputedStyle::BackgroundSize& size : style.backgroundSizes) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            if (size.mode == ComputedStyle::BackgroundSize::Cover) {
+                out += "cover";
+            } else if (size.mode == ComputedStyle::BackgroundSize::Contain) {
+                out += "contain";
+            } else if (size.mode == ComputedStyle::BackgroundSize::AutoSize) {
+                out += "auto";
+            } else {
+                out += length(size.width, "auto");
+                if (!size.height.isAuto()) {
+                    out += " " + length(size.height, "auto");
+                }
+            }
+        }
+        return out.empty() ? std::string("auto") : out;
+    }
+    if (property == "background-position") {
+        std::string out;
+        for (const ComputedStyle::BackgroundPosition& p : style.backgroundPositions) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            const char* h = p.horizontal == ComputedStyle::BackgroundPosition::Start
+                                ? "left"
+                                : p.horizontal == ComputedStyle::BackgroundPosition::Center
+                                      ? "center"
+                                      : "right";
+            const char* v = p.vertical == ComputedStyle::BackgroundPosition::Start
+                                ? "top"
+                                : p.vertical == ComputedStyle::BackgroundPosition::Center
+                                      ? "center"
+                                      : "bottom";
+            if (p.offsetX.isAuto() && p.offsetY.isAuto()) {
+                out += std::string(h) + " " + v;
+            } else {
+                // The four-value form measures back from a right/bottom edge,
+                // which the parse stores as a negative offset, so print its
+                // magnitude; a leading-edge offset keeps its sign.
+                const auto measured = [](const Length& l, bool fromEnd) {
+                    return fromEnd ? Length{l.unit, -l.value} : l;
+                };
+                out += std::string(h) + " " +
+                       length(measured(p.offsetX,
+                                       p.horizontal == ComputedStyle::BackgroundPosition::End)) +
+                       " " + v + " " +
+                       length(measured(p.offsetY,
+                                       p.vertical == ComputedStyle::BackgroundPosition::End));
+            }
+        }
+        return out.empty() ? std::string("left top") : out;
+    }
+    if (property == "background-repeat") {
+        std::string out;
+        for (const ComputedStyle::RepeatPair& repeat : style.backgroundRepeats) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            if (repeat.kind == ComputedStyle::RepeatPair::Space) {
+                out += "space";
+            } else if (repeat.kind == ComputedStyle::RepeatPair::Round) {
+                out += "round";
+            } else if (repeat.x && repeat.y) {
+                out += "repeat";
+            } else if (repeat.x) {
+                out += "repeat-x";
+            } else if (repeat.y) {
+                out += "repeat-y";
+            } else {
+                out += "no-repeat";
+            }
+        }
+        return out.empty() ? std::string("repeat") : out;
+    }
+    const auto backgroundBoxName = [](ComputedStyle::BackgroundBox box) -> std::string {
+        switch (box) {
+            case ComputedStyle::BackgroundBorderBox: return "border-box";
+            case ComputedStyle::BackgroundPaddingBox: return "padding-box";
+            case ComputedStyle::BackgroundContentBox: return "content-box";
+        }
+        return "border-box";
+    };
+    const auto backgroundBoxList = [&](const std::vector<ComputedStyle::BackgroundBox>& boxes,
+                                       const char* initial) {
+        std::string out;
+        for (ComputedStyle::BackgroundBox box : boxes) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            out += backgroundBoxName(box);
+        }
+        return out.empty() ? std::string(initial) : out;
+    };
+    if (property == "background-clip") {
+        return backgroundBoxList(style.backgroundClips, "border-box");
+    }
+    if (property == "background-origin") {
+        return backgroundBoxList(style.backgroundOrigins, "padding-box");
+    }
+    if (property == "background-attachment") {
+        std::string out;
+        for (ComputedStyle::BackgroundAttachment attachment : style.backgroundAttachments) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            out += attachment == ComputedStyle::BackgroundFixed
+                       ? "fixed"
+                       : attachment == ComputedStyle::BackgroundLocal ? "local" : "scroll";
+        }
+        return out.empty() ? std::string("scroll") : out;
+    }
     if (property == "background-blend-mode") {
         if (style.backgroundBlendModes.empty()) {
             return "normal";
@@ -6914,24 +7123,14 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         return xs == ys ? xs : xs + " / " + ys;
     }
     // Shadows serialise colour first, then the resolved offsets, with `inset`
-    // last, which is how CSSOM prints the computed value. The colour is written
-    // as `#rrggbbaa` when it is translucent so the reading parses back exactly.
-    const auto shadowColor = [](const SDL_Color& c) {
-        char buffer[16];
-        if (c.a == 255) {
-            std::snprintf(buffer, sizeof(buffer), "#%02x%02x%02x", c.r, c.g, c.b);
-        } else {
-            std::snprintf(buffer, sizeof(buffer), "#%02x%02x%02x%02x", c.r, c.g, c.b, c.a);
-        }
-        return std::string(buffer);
-    };
+    // last, which is how CSSOM prints the computed value.
     if (property == "box-shadow") {
         std::string out;
         for (const ComputedStyle::BoxShadow& shadow : style.boxShadows) {
             if (!out.empty()) {
                 out += ", ";
             }
-            out += shadowColor(shadow.color) + " " + length(shadow.offsetX) + " " +
+            out += alphaColor(shadow.color) + " " + length(shadow.offsetX) + " " +
                    length(shadow.offsetY) + " " + length(shadow.blurRadius) + " " +
                    length(shadow.spread);
             if (shadow.inset) {
@@ -6946,7 +7145,7 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             if (!out.empty()) {
                 out += ", ";
             }
-            out += shadowColor(shadow.color) + " " + length(shadow.offsetX) + " " +
+            out += alphaColor(shadow.color) + " " + length(shadow.offsetX) + " " +
                    length(shadow.offsetY) + " " + length(shadow.blurRadius);
         }
         return out.empty() ? std::string("none") : out;
