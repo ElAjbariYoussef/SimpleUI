@@ -4487,10 +4487,10 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         if (parts.empty()) {
             return;
         }
-        // A longhand takes the same `x / y` form as the shorthand.
-        const std::size_t slash = value.find('/');
+        // A longhand takes one or two lengths: the second is the vertical
+        // radius, with no slash (the slash form belongs to the shorthand).
         const Length x = parts[0];
-        const Length y = slash == std::string_view::npos ? parts[0] : parts[1];
+        const Length y = parts.size() > 1 ? parts[1] : parts[0];
         ComputedStyle::RadiusPair& corner =
             property == "border-top-left-radius"     ? s.borderRadii.topLeft
             : property == "border-top-right-radius"   ? s.borderRadii.topRight
@@ -6716,17 +6716,9 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         }
         return out + ")" + boxName();
     }
-    if (property == "container-type") {
-        switch (style.containerType) {
-            case ComputedStyle::ContainerInlineSize: return "inline-size";
-            case ComputedStyle::ContainerSize: return "size";
-            case ComputedStyle::ContainerNormal: return "normal";
-        }
-        return "normal";
-    }
-    if (property == "container-name") {
+    const auto containerNameList = [&]() {
         if (style.containerNames.empty()) {
-            return "none";
+            return std::string("none");
         }
         std::string names;
         for (const std::string& name : style.containerNames) {
@@ -6736,7 +6728,22 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             names += name;
         }
         return names;
+    };
+    const auto containerTypeName = [&]() -> std::string {
+        switch (style.containerType) {
+            case ComputedStyle::ContainerInlineSize: return "inline-size";
+            case ComputedStyle::ContainerSize: return "size";
+            case ComputedStyle::ContainerNormal: return "normal";
+        }
+        return "normal";
+    };
+    if (property == "container") {
+        // Both slots always appear, so `container: none` and `container: normal`
+        // read back the same way and the string parses back to this pair.
+        return containerNameList() + " / " + containerTypeName();
     }
+    if (property == "container-type") return containerTypeName();
+    if (property == "container-name") return containerNameList();
     if (property == "margin-top") return length(style.margin.top);
     if (property == "margin-right") return length(style.margin.right);
     if (property == "margin-bottom") return length(style.margin.bottom);
@@ -6853,6 +6860,14 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
                          std::string(borderStyleName(style.borderStyles.bottom)),
                          std::string(borderStyleName(style.borderStyles.left)));
     }
+    if (property == "border-top-style")
+        return std::string(borderStyleName(style.borderStyles.top));
+    if (property == "border-right-style")
+        return std::string(borderStyleName(style.borderStyles.right));
+    if (property == "border-bottom-style")
+        return std::string(borderStyleName(style.borderStyles.bottom));
+    if (property == "border-left-style")
+        return std::string(borderStyleName(style.borderStyles.left));
     if (property == "border") {
         const std::string top = borderLine(style.borderWidth.top, style.borderStyles.top);
         const std::string right = borderLine(style.borderWidth.right, style.borderStyles.right);
@@ -6872,6 +6887,32 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "outline-style") return std::string(borderStyleName(style.outline.style));
     if (property == "outline-color") return color(style.outline.color);
     if (property == "outline-offset") return length(style.outline.offset);
+    // A corner keeps both of its radii; the shorthand collapses the horizontal
+    // and vertical radii independently, the way `margin` distributes its four
+    // sides, and adds the `/` list only while the two differ.
+    const auto radiusCorner = [&](const ComputedStyle::RadiusPair& radius) {
+        const std::string x = length(radius.x);
+        const std::string y = length(radius.y);
+        return x == y ? x : x + " " + y;
+    };
+    if (property == "border-top-left-radius")
+        return radiusCorner(style.borderRadii.topLeft);
+    if (property == "border-top-right-radius")
+        return radiusCorner(style.borderRadii.topRight);
+    if (property == "border-bottom-right-radius")
+        return radiusCorner(style.borderRadii.bottomRight);
+    if (property == "border-bottom-left-radius")
+        return radiusCorner(style.borderRadii.bottomLeft);
+    if (property == "border-radius") {
+        const ComputedStyle::Radii& radii = style.borderRadii;
+        const std::string xs = collapsed(length(radii.topLeft.x), length(radii.topRight.x),
+                                         length(radii.bottomRight.x),
+                                         length(radii.bottomLeft.x));
+        const std::string ys = collapsed(length(radii.topLeft.y), length(radii.topRight.y),
+                                         length(radii.bottomRight.y),
+                                         length(radii.bottomLeft.y));
+        return xs == ys ? xs : xs + " / " + ys;
+    }
     // Placement, stacking, and compositing values: they have always driven
     // layout and paint, but the cascade had no way to read them back, so their
     // CSS-wide keywords were dropped as well.
@@ -7046,8 +7087,56 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "table-layout") {
         return style.tableLayout == ComputedStyle::TableLayoutFixed ? "fixed" : "auto";
     }
-    if (property == "line-clamp") {
+    if (property == "line-clamp" || property == "-webkit-line-clamp") {
         return style.lineClamp > 0 ? std::to_string(style.lineClamp) : "none";
+    }
+    // Snapport insets: the shorthands collapse like `margin`, the longhands keep
+    // one value. `scroll-padding` keeps its `auto` reading (that is its initial
+    // value, and auto insets nothing); `scroll-margin` starts at zero, so the
+    // unauthored slot reads `0px`.
+    const auto scrollInsets = [&](const ComputedStyle::ScrollPadding& edges,
+                                  const char* autoKeyword) {
+        return collapsed(length(edges.top, autoKeyword), length(edges.right, autoKeyword),
+                         length(edges.bottom, autoKeyword), length(edges.left, autoKeyword));
+    };
+    if (property == "scroll-padding") return scrollInsets(style.scrollPadding, "auto");
+    if (property == "scroll-padding-top") return length(style.scrollPadding.top, "auto");
+    if (property == "scroll-padding-right") return length(style.scrollPadding.right, "auto");
+    if (property == "scroll-padding-bottom") return length(style.scrollPadding.bottom, "auto");
+    if (property == "scroll-padding-left") return length(style.scrollPadding.left, "auto");
+    if (property == "scroll-margin") return scrollInsets(style.scrollMargin, "0px");
+    if (property == "scroll-margin-top") return length(style.scrollMargin.top);
+    if (property == "scroll-margin-right") return length(style.scrollMargin.right);
+    if (property == "scroll-margin-bottom") return length(style.scrollMargin.bottom);
+    if (property == "scroll-margin-left") return length(style.scrollMargin.left);
+    // `scroll-snap-align` reads block then inline, printing one word while the
+    // axes agree; `scroll-snap-type` always names the axis and the strictness.
+    const auto snapAlignName = [](ComputedStyle::ScrollSnapAlign align) {
+        switch (align) {
+            case ComputedStyle::ScrollSnapAlign::None: return "none";
+            case ComputedStyle::ScrollSnapAlign::Start: return "start";
+            case ComputedStyle::ScrollSnapAlign::End: return "end";
+            case ComputedStyle::ScrollSnapAlign::Center: return "center";
+        }
+        return "none";
+    };
+    if (property == "scroll-snap-align") {
+        const std::string block = snapAlignName(style.snapAlignY);
+        const std::string inlineAxis = snapAlignName(style.snapAlignX);
+        return block == inlineAxis ? block : block + " " + inlineAxis;
+    }
+    if (property == "scroll-snap-type") {
+        const char* axis = "both";
+        switch (style.snapAxis) {
+            case ComputedStyle::ScrollSnapAxis::None: return "none";
+            case ComputedStyle::ScrollSnapAxis::X: axis = "x"; break;
+            case ComputedStyle::ScrollSnapAxis::Y: axis = "y"; break;
+            case ComputedStyle::ScrollSnapAxis::Both: break;
+        }
+        return std::string(axis) +
+               (style.snapStrictness == ComputedStyle::ScrollSnapStrictness::Mandatory
+                    ? " mandatory"
+                    : " proximity");
     }
     if (property == "resize") {
         switch (style.resize) {

@@ -3522,6 +3522,129 @@ void testLayoutValuesReadBack() {
     }
 }
 
+// Radii keep both slots per corner and collapse only while the horizontal and
+// vertical lists agree; the per-side border styles read the same names
+// `border-style` distributes.
+void testBorderRadiusReadBack() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"a\"></div><div id=\"b\"></div><div id=\"c\"></div>"
+        "<div id=\"d\"></div><div id=\"e\"></div><div id=\"f\"></div>"
+        "<div id=\"p\"><div id=\"r\"></div></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#a { border-radius: 4px }"
+        "#b { border-radius: 4px 8px 12px 16px }"
+        "#c { border-radius: 4px 8px / 12px 16px }"
+        "#d { border-top-left-radius: 3px 9px; border-bottom-right-radius: 5px }"
+        "#e { border-top-style: dashed; border-left-style: double;"
+        "border-bottom-style: none }"
+        "#f { border-style: solid dotted }"
+        "#p { border-radius: 6px } #r { border-radius: inherit }"));
+    const auto value = [&](const char* id, const char* property) {
+        Element* el = document->getElementById(id);
+        return el ? sui::StyleResolver::propertyValue(resolver.resolve(*el), property) : "";
+    };
+    check(value("a", "border-radius") == "4px", "one radius covers every corner");
+    check(value("a", "border-top-left-radius") == "4px" &&
+              value("a", "border-bottom-right-radius") == "4px",
+          "and every corner reads back");
+    check(value("b", "border-radius") == "4px 8px 12px 16px",
+          "four distinct radii keep all four values");
+    check(value("b", "border-top-right-radius") == "8px" &&
+              value("b", "border-bottom-left-radius") == "16px",
+          "each corner keeps its own value");
+    check(value("c", "border-radius") == "4px 8px / 12px 16px",
+          "an elliptical shorthand keeps both lists");
+    check(value("c", "border-top-left-radius") == "4px 12px",
+          "and a corner reads horizontal then vertical");
+    check(value("c", "border-bottom-left-radius") == "8px 16px",
+          "matching the shorthand's expansion");
+    check(value("d", "border-top-left-radius") == "3px 9px",
+          "a longhand's second length is the vertical radius");
+    check(value("d", "border-bottom-right-radius") == "5px",
+          "a single-length corner keeps one value");
+    check(value("d", "border-top-right-radius") == "0px",
+          "untouched corners read the initial zero");
+    check(value("e", "border-top-style") == "dashed" &&
+              value("e", "border-left-style") == "double" &&
+              value("e", "border-bottom-style") == "none",
+          "per-side border styles read back");
+    check(value("e", "border-right-style") == "solid",
+          "an untouched side keeps the default style");
+    check(value("e", "border-style") == "dashed solid none double",
+          "and the shorthand distributes them");
+    check(value("f", "border-style") == "solid dotted",
+          "two style values distribute top/bottom then left/right");
+    check(value("f", "border-top-style") == "solid" &&
+              value("f", "border-left-style") == "dotted",
+          "the side longhands agree");
+    check(value("r", "border-radius") == "6px", "border-radius: inherit replays the parent");
+}
+
+// The container shorthand, the -webkit-line-clamp alias, and the scroll-snap
+// and snapport values all drove layout without a reading; they now answer
+// `getComputedStyle` in forms that parse back to the same pair.
+void testContainerAndScrollReadBack() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"a\"></div><div id=\"b\"></div><div id=\"c\"></div>"
+        "<div id=\"d\"></div><div id=\"e\"></div><div id=\"f\"></div>"
+        "<div id=\"g\"></div><div id=\"h\"></div><div id=\"i\"></div>"
+        "<div id=\"j\"></div><div id=\"k\"></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#a { container: card / inline-size }"
+        "#b { container: widget }"
+        "#c { container-type: size }"
+        "#d { -webkit-line-clamp: 3 }"
+        "#e { line-clamp: 2 }"
+        "#f { scroll-padding: 4px 8px }"
+        "#g { scroll-margin-top: 6px; scroll-margin: 3px 5px 7px 9px }"
+        "#h { scroll-margin-left: 2px }"
+        "#i { scroll-snap-type: x mandatory }"
+        "#j { scroll-snap-align: start end }"));
+    const auto value = [&](const char* id, const char* property) {
+        Element* el = document->getElementById(id);
+        return el ? sui::StyleResolver::propertyValue(resolver.resolve(*el), property) : "";
+    };
+    check(value("a", "container") == "card / inline-size",
+          "the container shorthand reads both slots");
+    check(value("a", "container-name") == "card" &&
+              value("a", "container-type") == "inline-size",
+          "and its longhands agree");
+    check(value("b", "container") == "widget / normal", "a name alone keeps the normal type");
+    check(value("c", "container") == "none / size", "a type alone keeps the none name");
+    check(value("k", "container") == "none / normal",
+          "an untouched box reads the pair's initials");
+    check(value("d", "line-clamp") == "3" && value("d", "-webkit-line-clamp") == "3",
+          "the -webkit-line-clamp alias reads back with line-clamp");
+    check(value("e", "line-clamp") == "2", "line-clamp reads back");
+    check(value("f", "scroll-padding") == "4px 8px", "scroll-padding collapses like margin");
+    check(value("f", "scroll-padding-top") == "4px" &&
+              value("f", "scroll-padding-left") == "8px",
+          "and its longhands agree");
+    check(value("g", "scroll-margin") == "3px 5px 7px 9px",
+          "scroll-margin reads the shorthand's expansion");
+    check(value("g", "scroll-margin-top") == "3px", "the longhand reads the same slot");
+    check(value("h", "scroll-margin") == "0px 0px 0px 2px",
+          "one inset keeps the other three at zero");
+    check(value("k", "scroll-padding") == "auto" && value("k", "scroll-margin") == "0px",
+          "the untouched insets read their initials");
+    check(value("k", "scroll-margin-top") == "0px", "down to the longhand");
+    check(value("k", "scroll-padding-top") == "auto", "the padding longhand keeps auto");
+    check(value("i", "scroll-snap-type") == "x mandatory",
+          "scroll-snap-type reads the axis and strictness");
+    check(value("j", "scroll-snap-align") == "start end",
+          "scroll-snap-align reads block then inline");
+    check(value("k", "scroll-snap-type") == "none" && value("k", "scroll-snap-align") == "none",
+          "an untouched snapper reads none");
+}
+
 void testFlexIsBlockLevel() {
     // `display: flex` puts the box in the block formatting context, so a flex
     // container sits on its own line and its sibling lands below it. Only
@@ -10808,6 +10931,8 @@ int main() {
     testFlexPropertyParsing();
     testGapShorthand();
     testLayoutValuesReadBack();
+    testBorderRadiusReadBack();
+    testContainerAndScrollReadBack();
     testFlexIsBlockLevel();
     testFlexNestedContainer();
     testLengthUnits();
