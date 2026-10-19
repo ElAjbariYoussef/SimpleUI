@@ -2822,10 +2822,17 @@ bool parseMask(std::string_view value, ComputedStyle& s) {
                         return false;
                     }
                 } else {
-                    // Past the slash a bare length is a size; anything else is
-                    // invalid there.
-                    if (token == "auto" || token == "cover" || token == "contain" ||
-                        !parseLength(token).isAuto()) {
+                    // Past the slash a bare length is a size. A box keyword is
+                    // still a box (the layer grammar lets the boxes sit after the
+                    // size); anything else is invalid there.
+                    Box box = ComputedStyle::BackgroundBorderBox;
+                    if (isBox(token, box)) {
+                        if (boxes.size() == 2) {
+                            return false;
+                        }
+                        boxes.push_back(box);
+                    } else if (token == "auto" || token == "cover" || token == "contain" ||
+                               !parseLength(token).isAuto()) {
                         if (!sizeText.empty()) {
                             sizeText += ' ';
                         }
@@ -6468,55 +6475,119 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             }
             return out;
         };
+    // The three gradient functions print the same way wherever they appear
+    // (backgrounds, masks), so their text sits in its own lambdas.
+    const auto linearGradientText = [&](const ComputedStyle::LinearGradient& linear) {
+        return "linear-gradient(" + unitless(linear.angle) + "deg, " +
+               gradientStopList(linear.stops) + ")";
+    };
+    const auto radialGradientText = [&](const ComputedStyle::RadialGradient& radial) {
+        std::string out = "radial-gradient(";
+        out += radial.shape == ComputedStyle::RadialGradient::Circle ? "circle" : "ellipse";
+        switch (radial.extent) {
+            case ComputedStyle::RadialGradient::ClosestSide:
+                out += " closest-side";
+                break;
+            case ComputedStyle::RadialGradient::FarthestSide:
+                out += " farthest-side";
+                break;
+            case ComputedStyle::RadialGradient::ClosestCorner:
+                out += " closest-corner";
+                break;
+            case ComputedStyle::RadialGradient::FarthestCorner:
+                out += " farthest-corner";
+                break;
+        }
+        // The radius pair is only reachable behind a centre, which is the grammar
+        // the parser reads: `at <x> <y> <radius>`.
+        if (radial.hasRadii) {
+            out += " at " + length(radial.centreX) + " " + length(radial.centreY) + " " +
+                   length(radial.radiusX);
+            if (!radial.radiusY.isAuto()) {
+                out += " " + length(radial.radiusY);
+            }
+        } else if (!isCentred(radial.centreX) || !isCentred(radial.centreY)) {
+            out += " at " + length(radial.centreX) + " " + length(radial.centreY);
+        }
+        return out + ", " + gradientStopList(radial.stops) + ")";
+    };
+    const auto conicalGradientText = [&](const ComputedStyle::ConicalGradient& conical) {
+        return "conic-gradient(from " + unitless(conical.angle) + "deg at " +
+               length(conical.centreX) + " " + length(conical.centreY) + ", " +
+               gradientStopList(conical.stops) + ")";
+    };
     const auto gradientImage =
         [&](const ComputedStyle::BackgroundImage& image) -> std::string {
         switch (image.kind) {
             case ComputedStyle::BackgroundImage::None: return "none";
             case ComputedStyle::BackgroundImage::Url: return "url(" + image.href + ")";
             case ComputedStyle::BackgroundImage::LinearGradientImage:
-                return "linear-gradient(" + unitless(image.linear.angle) + "deg, " +
-                       gradientStopList(image.linear.stops) + ")";
-            case ComputedStyle::BackgroundImage::RadialGradientImage: {
-                const ComputedStyle::RadialGradient& radial = image.radial;
-                std::string out = "radial-gradient(";
-                out += radial.shape == ComputedStyle::RadialGradient::Circle ? "circle"
-                                                                             : "ellipse";
-                switch (radial.extent) {
-                    case ComputedStyle::RadialGradient::ClosestSide:
-                        out += " closest-side";
-                        break;
-                    case ComputedStyle::RadialGradient::FarthestSide:
-                        out += " farthest-side";
-                        break;
-                    case ComputedStyle::RadialGradient::ClosestCorner:
-                        out += " closest-corner";
-                        break;
-                    case ComputedStyle::RadialGradient::FarthestCorner:
-                        out += " farthest-corner";
-                        break;
-                }
-                // The radius pair is only reachable behind a centre, which is the
-                // grammar the parser reads: `at <x> <y> <radius>`.
-                if (radial.hasRadii) {
-                    out += " at " + length(radial.centreX) + " " +
-                           length(radial.centreY) + " " + length(radial.radiusX);
-                    if (!radial.radiusY.isAuto()) {
-                        out += " " + length(radial.radiusY);
-                    }
-                } else if (!isCentred(radial.centreX) || !isCentred(radial.centreY)) {
-                    out += " at " + length(radial.centreX) + " " +
-                           length(radial.centreY);
-                }
-                return out + ", " + gradientStopList(radial.stops) + ")";
-            }
-            case ComputedStyle::BackgroundImage::ConicalGradientImage: {
-                const ComputedStyle::ConicalGradient& conical = image.conical;
-                return "conic-gradient(from " + unitless(conical.angle) + "deg at " +
-                       length(conical.centreX) + " " + length(conical.centreY) + ", " +
-                       gradientStopList(conical.stops) + ")";
-            }
+                return linearGradientText(image.linear);
+            case ComputedStyle::BackgroundImage::RadialGradientImage:
+                return radialGradientText(image.radial);
+            case ComputedStyle::BackgroundImage::ConicalGradientImage:
+                return conicalGradientText(image.conical);
         }
         return "none";
+    };
+    const auto sizeText = [&](const ComputedStyle::BackgroundSize& size) {
+        if (size.mode == ComputedStyle::BackgroundSize::Cover) {
+            return std::string("cover");
+        }
+        if (size.mode == ComputedStyle::BackgroundSize::Contain) {
+            return std::string("contain");
+        }
+        if (size.mode == ComputedStyle::BackgroundSize::AutoSize) {
+            return std::string("auto");
+        }
+        std::string out = length(size.width, "auto");
+        if (!size.height.isAuto()) {
+            out += " " + length(size.height, "auto");
+        }
+        return out;
+    };
+    const auto positionText = [&](const ComputedStyle::BackgroundPosition& p) {
+        const char* h = p.horizontal == ComputedStyle::BackgroundPosition::Start
+                            ? "left"
+                            : p.horizontal == ComputedStyle::BackgroundPosition::Center ? "center"
+                                                                                       : "right";
+        const char* v = p.vertical == ComputedStyle::BackgroundPosition::Start
+                            ? "top"
+                            : p.vertical == ComputedStyle::BackgroundPosition::Center ? "center"
+                                                                                     : "bottom";
+        if (p.offsetX.isAuto() && p.offsetY.isAuto()) {
+            return std::string(h) + " " + v;
+        }
+        // The four-value form measures back from a right/bottom edge, which the
+        // parse stores as a negative offset, so print its magnitude; a
+        // leading-edge offset keeps its sign.
+        const auto measured = [](const Length& l, bool fromEnd) {
+            return fromEnd ? Length{l.unit, -l.value} : l;
+        };
+        return std::string(h) + " " +
+               length(measured(p.offsetX,
+                               p.horizontal == ComputedStyle::BackgroundPosition::End)) +
+               " " + v + " " +
+               length(measured(p.offsetY,
+                               p.vertical == ComputedStyle::BackgroundPosition::End));
+    };
+    const auto repeatText = [](const ComputedStyle::RepeatPair& repeat) {
+        if (repeat.kind == ComputedStyle::RepeatPair::Space) {
+            return std::string("space");
+        }
+        if (repeat.kind == ComputedStyle::RepeatPair::Round) {
+            return std::string("round");
+        }
+        if (repeat.x && repeat.y) {
+            return std::string("repeat");
+        }
+        if (repeat.x) {
+            return std::string("repeat-x");
+        }
+        if (repeat.y) {
+            return std::string("repeat-y");
+        }
+        return std::string("no-repeat");
     };
     if (property == "background-image") {
         std::string out;
@@ -6534,18 +6605,7 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             if (!out.empty()) {
                 out += ", ";
             }
-            if (size.mode == ComputedStyle::BackgroundSize::Cover) {
-                out += "cover";
-            } else if (size.mode == ComputedStyle::BackgroundSize::Contain) {
-                out += "contain";
-            } else if (size.mode == ComputedStyle::BackgroundSize::AutoSize) {
-                out += "auto";
-            } else {
-                out += length(size.width, "auto");
-                if (!size.height.isAuto()) {
-                    out += " " + length(size.height, "auto");
-                }
-            }
+            out += sizeText(size);
         }
         return out.empty() ? std::string("auto") : out;
     }
@@ -6555,32 +6615,7 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             if (!out.empty()) {
                 out += ", ";
             }
-            const char* h = p.horizontal == ComputedStyle::BackgroundPosition::Start
-                                ? "left"
-                                : p.horizontal == ComputedStyle::BackgroundPosition::Center
-                                      ? "center"
-                                      : "right";
-            const char* v = p.vertical == ComputedStyle::BackgroundPosition::Start
-                                ? "top"
-                                : p.vertical == ComputedStyle::BackgroundPosition::Center
-                                      ? "center"
-                                      : "bottom";
-            if (p.offsetX.isAuto() && p.offsetY.isAuto()) {
-                out += std::string(h) + " " + v;
-            } else {
-                // The four-value form measures back from a right/bottom edge,
-                // which the parse stores as a negative offset, so print its
-                // magnitude; a leading-edge offset keeps its sign.
-                const auto measured = [](const Length& l, bool fromEnd) {
-                    return fromEnd ? Length{l.unit, -l.value} : l;
-                };
-                out += std::string(h) + " " +
-                       length(measured(p.offsetX,
-                                       p.horizontal == ComputedStyle::BackgroundPosition::End)) +
-                       " " + v + " " +
-                       length(measured(p.offsetY,
-                                       p.vertical == ComputedStyle::BackgroundPosition::End));
-            }
+            out += positionText(p);
         }
         return out.empty() ? std::string("left top") : out;
     }
@@ -6590,19 +6625,7 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             if (!out.empty()) {
                 out += ", ";
             }
-            if (repeat.kind == ComputedStyle::RepeatPair::Space) {
-                out += "space";
-            } else if (repeat.kind == ComputedStyle::RepeatPair::Round) {
-                out += "round";
-            } else if (repeat.x && repeat.y) {
-                out += "repeat";
-            } else if (repeat.x) {
-                out += "repeat-x";
-            } else if (repeat.y) {
-                out += "repeat-y";
-            } else {
-                out += "no-repeat";
-            }
+            out += repeatText(repeat);
         }
         return out.empty() ? std::string("repeat") : out;
     }
@@ -6756,6 +6779,161 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "backdrop-filter") return style.backdropFilter;
     if (property == "mask-type") {
         return style.maskType == ComputedStyle::MaskType::Alpha ? "alpha" : "luminance";
+    }
+    // Mask layers answer like the background ones: one entry per stored list,
+    // with an empty list answering the property's initial value. The shorthand
+    // rebuilds each layer in the grammar its parser reads, repeating a shorter
+    // list's last entry the way paint matches them.
+    const auto maskImageText = [&](const ComputedStyle::MaskImage& image) -> std::string {
+        switch (image.kind) {
+            case ComputedStyle::MaskImage::Kind::None: return "none";
+            case ComputedStyle::MaskImage::Kind::Url: return "url(" + image.href + ")";
+            case ComputedStyle::MaskImage::Kind::LinearGradient:
+                return linearGradientText(image.linear);
+            case ComputedStyle::MaskImage::Kind::RadialGradient:
+                return radialGradientText(image.radial);
+            case ComputedStyle::MaskImage::Kind::ConicalGradient:
+                return conicalGradientText(image.conical);
+        }
+        return "none";
+    };
+    const auto maskModeName = [](ComputedStyle::MaskMode mode) {
+        switch (mode) {
+            case ComputedStyle::MaskMode::MatchSource: return "match-source";
+            case ComputedStyle::MaskMode::Alpha: return "alpha";
+            case ComputedStyle::MaskMode::Luminance: return "luminance";
+        }
+        return "match-source";
+    };
+    const auto maskCompositeName = [](ComputedStyle::MaskComposite composite) {
+        switch (composite) {
+            case ComputedStyle::MaskComposite::Add: return "add";
+            case ComputedStyle::MaskComposite::Subtract: return "subtract";
+            case ComputedStyle::MaskComposite::Intersect: return "intersect";
+            case ComputedStyle::MaskComposite::Exclude: return "exclude";
+        }
+        return "add";
+    };
+    if (property == "mask-image" || property == "-webkit-mask-image") {
+        std::string out;
+        for (const ComputedStyle::MaskImage& image : style.maskImages) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            out += maskImageText(image);
+        }
+        return out.empty() ? std::string("none") : out;
+    }
+    if (property == "mask-size" || property == "-webkit-mask-size") {
+        std::string out;
+        for (const ComputedStyle::BackgroundSize& size : style.maskSizes) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            out += sizeText(size);
+        }
+        return out.empty() ? std::string("auto") : out;
+    }
+    if (property == "mask-position" || property == "-webkit-mask-position") {
+        std::string out;
+        for (const ComputedStyle::BackgroundPosition& p : style.maskPositions) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            out += positionText(p);
+        }
+        return out.empty() ? std::string("left top") : out;
+    }
+    if (property == "mask-repeat" || property == "-webkit-mask-repeat") {
+        std::string out;
+        for (const ComputedStyle::RepeatPair& repeat : style.maskRepeats) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            out += repeatText(repeat);
+        }
+        return out.empty() ? std::string("repeat") : out;
+    }
+    if (property == "mask-origin" || property == "-webkit-mask-origin") {
+        std::string out;
+        for (ComputedStyle::BackgroundBox box : style.maskOrigins) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            out += backgroundBoxName(box);
+        }
+        return out.empty() ? std::string("border-box") : out;
+    }
+    if (property == "mask-clip" || property == "-webkit-mask-clip") {
+        std::string out;
+        for (ComputedStyle::BackgroundBox box : style.maskClips) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            out += backgroundBoxName(box);
+        }
+        return out.empty() ? std::string("border-box") : out;
+    }
+    if (property == "mask-mode") {
+        std::string out;
+        for (ComputedStyle::MaskMode mode : style.maskModes) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            out += maskModeName(mode);
+        }
+        return out.empty() ? std::string("match-source") : out;
+    }
+    if (property == "mask-composite") {
+        std::string out;
+        for (ComputedStyle::MaskComposite composite : style.maskComposites) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            out += maskCompositeName(composite);
+        }
+        return out.empty() ? std::string("add") : out;
+    }
+    if (property == "mask" || property == "-webkit-mask") {
+        const auto at = [](const auto& list, std::size_t index) -> const auto& {
+            return list[std::min(index, list.size() - 1)];
+        };
+        const std::size_t layers = style.maskImages.empty() ? 1 : style.maskImages.size();
+        std::string out;
+        for (std::size_t i = 0; i < layers; ++i) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            const ComputedStyle::MaskImage image = style.maskImages.empty()
+                                                       ? ComputedStyle::MaskImage{}
+                                                       : at(style.maskImages, i);
+            const ComputedStyle::BackgroundSize size =
+                style.maskSizes.empty() ? ComputedStyle::BackgroundSize{}
+                                        : at(style.maskSizes, i);
+            const ComputedStyle::BackgroundPosition position =
+                style.maskPositions.empty() ? ComputedStyle::BackgroundPosition{}
+                                            : at(style.maskPositions, i);
+            const ComputedStyle::RepeatPair repeat =
+                style.maskRepeats.empty() ? ComputedStyle::RepeatPair{}
+                                          : at(style.maskRepeats, i);
+            const ComputedStyle::BackgroundBox origin =
+                style.maskOrigins.empty() ? ComputedStyle::BackgroundBorderBox
+                                          : at(style.maskOrigins, i);
+            const ComputedStyle::BackgroundBox clip =
+                style.maskClips.empty() ? ComputedStyle::BackgroundBorderBox
+                                        : at(style.maskClips, i);
+            const ComputedStyle::MaskComposite composite =
+                style.maskComposites.empty() ? ComputedStyle::MaskComposite::Add
+                                             : at(style.maskComposites, i);
+            const ComputedStyle::MaskMode mode =
+                style.maskModes.empty() ? ComputedStyle::MaskMode::MatchSource
+                                        : at(style.maskModes, i);
+            out += maskImageText(image) + " " + positionText(position) + " / " +
+                   sizeText(size) + " " + repeatText(repeat) + " " +
+                   backgroundBoxName(origin) + " " + backgroundBoxName(clip) + " " +
+                   maskCompositeName(composite) + " " + maskModeName(mode);
+        }
+        return out;
     }
     if (property == "transform-origin") {
         std::string result = length(style.transformOrigin.x, "50%");

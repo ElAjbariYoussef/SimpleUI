@@ -7063,6 +7063,79 @@ void testMaskShorthand() {
     check(styles[8].maskImages.empty(), "a dangling slash drops the shorthand");
 }
 
+// The mask longhands (and their `-webkit-` aliases) answer with one entry per
+// stored layer, and the shorthand rebuilds each layer in the parser's own
+// grammar, so the readings parse back to the same lists.
+void testMaskReadBack() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"m1\"></div><div id=\"m2\"></div><div id=\"m3\"></div>"
+        "<div id=\"m4\"></div><div id=\"m5\"></div><div id=\"m6\"></div>"
+        "<div id=\"m7\"></div>"
+        "<div id=\"p\" style=\"mask-size:30px 40px\">"
+        "<div id=\"q\" style=\"mask-size:inherit\"></div></div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#m1 { mask-image: url(mask.png), linear-gradient(45deg, #00000080, #ffffff) }"
+        "#m2 { mask-size: 30px 40px, cover; mask-position: right 5px bottom 6px;"
+        " mask-repeat: no-repeat, space }"
+        "#m3 { mask-origin: content-box; mask-clip: padding-box }"
+        "#m4 { mask-mode: luminance, alpha; mask-composite: subtract, exclude }"
+        "#m5 { -webkit-mask-image: radial-gradient(circle at 25% 25%, black, transparent) }"
+        "#m6 { mask: url(a.png) 10px / cover no-repeat content-box intersect alpha }"));
+    const auto value = [&](const char* id, const char* property) {
+        Element* el = document->getElementById(id);
+        return el ? sui::StyleResolver::propertyValue(resolver.resolve(*el), property) : "";
+    };
+    check(value("m1", "mask-image") ==
+              "url(mask.png), linear-gradient(45deg, #00000080, #ffffff)",
+          "mask images read per layer with alpha-safe stops");
+    check(value("m2", "mask-size") == "30px 40px, cover", "mask sizes read per layer");
+    check(value("m2", "mask-position") == "right 5px bottom 6px",
+          "a mask position keeps its edge offsets");
+    check(value("m2", "mask-repeat") == "no-repeat, space", "mask repeats read per layer");
+    check(value("m3", "mask-origin") == "content-box" &&
+              value("m3", "mask-clip") == "padding-box",
+          "mask origin and clip read their boxes");
+    check(value("m4", "mask-mode") == "luminance, alpha", "mask modes read per layer");
+    check(value("m4", "mask-composite") == "subtract, exclude",
+          "mask composites read per layer");
+    check(value("m5", "-webkit-mask-image") == value("m5", "mask-image") &&
+              value("m5", "mask-image") ==
+                  "radial-gradient(circle farthest-corner at 25% 25%, #000000, #00000000)",
+          "the -webkit alias answers the same reading");
+    check(value("m6", "mask") ==
+              "url(a.png) left 10px top 0px / cover no-repeat content-box content-box"
+              " intersect alpha",
+          "the shorthand rebuilds its layer in the parser's grammar");
+    check(value("m1", "mask") ==
+              "url(mask.png) left top / auto repeat border-box border-box add match-source,"
+              " linear-gradient(45deg, #00000080, #ffffff) left top / auto repeat"
+              " border-box border-box add match-source",
+          "a multi-layer shorthand rebuilds every layer");
+    check(value("m3", "mask") ==
+              "none left top / auto repeat content-box padding-box add match-source",
+          "the shorthand keeps origin and clip apart");
+    check(value("m7", "mask-image") == "none" && value("m7", "mask-size") == "auto" &&
+              value("m7", "mask-position") == "left top" &&
+              value("m7", "mask-repeat") == "repeat",
+          "an untouched mask reads the initial values");
+    check(value("m7", "mask-origin") == "border-box" &&
+              value("m7", "mask-clip") == "border-box" &&
+              value("m7", "mask-mode") == "match-source" &&
+              value("m7", "mask-composite") == "add",
+          "including the initial boxes, mode, and composite");
+    check(value("m7", "mask") ==
+              "none left top / auto repeat border-box border-box add match-source",
+          "and the untouched shorthand composes them");
+    check(value("q", "mask-size") == "30px 40px",
+          "mask-size: inherit replays the parent's list");
+}
+
 // `mask-type` stores which component of a mask element masks (nothing reads it
 // yet), and the six `mask-border` longhands plus the shorthand describe a
 // 9-patch border mask. One bad value keeps the previous cascade winner.
@@ -11100,6 +11173,7 @@ int main() {
     testMaskModeComposite();
     testMaskGeometry();
     testMaskShorthand();
+    testMaskReadBack();
     testMaskBorder();
     testBorderImage();
     testScrollSnap();
