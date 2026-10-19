@@ -6751,17 +6751,8 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     // distributes it. Reading them back is also what lets their CSS-wide
     // keywords round-trip, since `inherit`, `unset` and `initial` re-apply this
     // serialisation rather than carrying a style object around.
-    const auto twoSides = [&](const Length& start, const Length& end,
-                              const char* autoKeyword) {
-        const std::string first = length(start, autoKeyword);
-        const std::string second = length(end, autoKeyword);
-        return first == second ? first : first + " " + second;
-    };
-    const auto fourSides = [&](const BoxEdge& edges, const char* autoKeyword) {
-        const std::string top = length(edges.top, autoKeyword);
-        const std::string right = length(edges.right, autoKeyword);
-        const std::string bottom = length(edges.bottom, autoKeyword);
-        const std::string left = length(edges.left, autoKeyword);
+    const auto collapsed = [](const std::string& top, const std::string& right,
+                              const std::string& bottom, const std::string& left) {
         if (top == right && right == bottom && bottom == left) {
             return top;
         }
@@ -6772,6 +6763,16 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             return top + " " + right + " " + bottom;
         }
         return top + " " + right + " " + bottom + " " + left;
+    };
+    const auto twoSides = [&](const Length& start, const Length& end,
+                              const char* autoKeyword) {
+        const std::string first = length(start, autoKeyword);
+        const std::string second = length(end, autoKeyword);
+        return first == second ? first : first + " " + second;
+    };
+    const auto fourSides = [&](const BoxEdge& edges, const char* autoKeyword) {
+        return collapsed(length(edges.top, autoKeyword), length(edges.right, autoKeyword),
+                         length(edges.bottom, autoKeyword), length(edges.left, autoKeyword));
     };
     if (property == "margin") return fourSides(style.margin, "0px");
     if (property == "margin-inline")
@@ -6826,6 +6827,35 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "border-block")
         return borderLines(style.borderWidth.top, style.borderStyles.top,
                            style.borderWidth.bottom, style.borderStyles.bottom);
+    // `border-width` and `border-style` are four-sided shorthands distributed
+    // like `margin`, while `border` writes all three slots at once and therefore
+    // reads back only while all four of its sides agree, as CSSOM asks.
+    if (property == "border-width") return fourSides(style.borderWidth, "0px");
+    if (property == "border-style") {
+        return collapsed(std::string(borderStyleName(style.borderStyles.top)),
+                         std::string(borderStyleName(style.borderStyles.right)),
+                         std::string(borderStyleName(style.borderStyles.bottom)),
+                         std::string(borderStyleName(style.borderStyles.left)));
+    }
+    if (property == "border") {
+        const std::string top = borderLine(style.borderWidth.top, style.borderStyles.top);
+        const std::string right = borderLine(style.borderWidth.right, style.borderStyles.right);
+        const std::string bottom =
+            borderLine(style.borderWidth.bottom, style.borderStyles.bottom);
+        const std::string left = borderLine(style.borderWidth.left, style.borderStyles.left);
+        return top == right && right == bottom && bottom == left ? top : std::string();
+    }
+    // Outlines are the border family's single-sided counterpart: the same
+    // `<width> <style> <colour>` triple, plus an offset that is a plain length.
+    if (property == "outline") {
+        return length(style.outline.width) + " " +
+               std::string(borderStyleName(style.outline.style)) + " " +
+               color(style.outline.color);
+    }
+    if (property == "outline-width") return length(style.outline.width);
+    if (property == "outline-style") return std::string(borderStyleName(style.outline.style));
+    if (property == "outline-color") return color(style.outline.color);
+    if (property == "outline-offset") return length(style.outline.offset);
     if (property == "flex-direction") {
         switch (style.flexDirection) {
             case ComputedStyle::Row: return "row";

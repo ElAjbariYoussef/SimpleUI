@@ -3727,6 +3727,144 @@ void testBorderSideShorthands() {
     }
 }
 
+// `border`, `border-width`, `border-style`, and the whole `outline` family read
+// back in the form the cascade writes them: the four-sided shorthands collapse
+// like `margin`, and `border` answers only while all four of its sides agree.
+// Reading them back is also what lets their CSS-wide keywords round-trip.
+void testBorderAndOutlineShorthands() {
+    auto document = parseOrNull("<sui><body><div id=\"t\">x</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* t = document->getElementById("t");
+    if (!t) {
+        return;
+    }
+
+    const auto styleFrom = [&](const char* css) {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(css));
+        return resolver.resolve(*t);
+    };
+    const auto value = [](const sui::ComputedStyle& s, const char* property) {
+        return sui::StyleResolver::propertyValue(s, property);
+    };
+
+    {
+        const auto s = styleFrom("#t{border:2px solid #ff0000}");
+        check(value(s, "border") == "2px solid #ff0000",
+              "border reads back as its three slots");
+        check(value(s, "border-width") == "2px", "border-width collapses to one value");
+        check(value(s, "border-style") == "solid", "and border-style with it");
+    }
+
+    {
+        const auto s = styleFrom(
+            "#t{border-width:1px 2px 3px 4px;border-style:solid dashed dotted double}");
+        check(value(s, "border-width") == "1px 2px 3px 4px",
+              "four distinct border widths stay four values");
+        check(value(s, "border-style") == "solid dashed dotted double",
+              "border styles read back in the same order");
+        check(value(s, "border") == "",
+              "border itself has no reading while its sides disagree");
+    }
+
+    {
+        const auto s = styleFrom(
+            "#t{border-width:1px 2px;border-style:solid dotted;border-color:#123456}");
+        check(value(s, "border-width") == "1px 2px", "a matching bottom drops out of the widths");
+        check(value(s, "border-style") == "solid dotted", "and out of the styles");
+        check(value(s, "border") == "", "even with one colour, differing sides stay unreadable");
+    }
+
+    {
+        // Widths that agree are not enough: the style slots have to agree too.
+        const auto s = styleFrom("#t{border-width:1px;border-style:solid dotted}");
+        check(value(s, "border-width") == "1px", "the widths are all the same");
+        check(value(s, "border-style") == "solid dotted", "while a style pair differs");
+        check(value(s, "border") == "", "so border still has no reading");
+    }
+
+    {
+        // One differing width is enough to make the shorthand unrepresentable.
+        const auto s = styleFrom(
+            "#t{border-top:1px solid #00ff00;border-right:2px solid #00ff00;"
+            "border-bottom:1px solid #00ff00;border-left:1px solid #00ff00}");
+        check(value(s, "border-width") == "1px 2px 1px 1px",
+              "a single differing side stays in the list");
+        check(value(s, "border") == "", "a differing side still leaves border unreadable");
+    }
+
+    {
+        const auto s = styleFrom("#t{outline:2px dashed #0000ff;outline-offset:4px}");
+        check(value(s, "outline") == "2px dashed #0000ff",
+              "outline reads back as its three slots");
+        check(value(s, "outline-width") == "2px", "outline-width reads back");
+        check(value(s, "outline-style") == "dashed", "outline-style reads back");
+        check(value(s, "outline-color") == "#0000ff", "outline-color reads back");
+        check(value(s, "outline-offset") == "4px", "outline-offset reads back");
+    }
+
+    {
+        // The longhands and the shorthand agree even when only some were written.
+        const auto s = styleFrom("#t{outline-style:dotted;outline-color:#abcdef}");
+        check(value(s, "outline-style") == "dotted" && value(s, "outline-color") == "#abcdef",
+              "author-written outline longhands read back");
+        check(value(s, "outline-width") == "0px",
+              "an unset outline width reads as zero, as it paints");
+        check(value(s, "outline") == "0px dotted #abcdef",
+              "and the shorthand agrees with every longhand");
+    }
+
+    // The CSS-wide keywords re-apply exactly these readings, so each shorthand and
+    // longhand copies the parent's value instead of dropping the declaration.
+    auto inheritDoc = parseOrNull(
+        "<sui><body style=\"margin:0\">"
+        "<div id=\"p1\" style=\"border:3px dashed #123456\">"
+        "<div id=\"b1\" style=\"border:inherit\"></div>"
+        "<div id=\"b2\" style=\"border-width:inherit\"></div>"
+        "<div id=\"b3\" style=\"border-style:inherit\"></div>"
+        "<div id=\"b4\" style=\"border-color:inherit\"></div>"
+        "</div>"
+        "<div id=\"p2\" style=\"outline:1px solid #654321;outline-offset:2px\">"
+        "<div id=\"o1\" style=\"outline:inherit\"></div>"
+        "<div id=\"o2\" style=\"outline-width:inherit\"></div>"
+        "<div id=\"o3\" style=\"outline-style:inherit\"></div>"
+        "<div id=\"o4\" style=\"outline-color:inherit\"></div>"
+        "<div id=\"o5\" style=\"outline-offset:inherit\"></div>"
+        "</div>"
+        "</body></sui>");
+    if (inheritDoc) {
+        sui::StyleResolver resolver;
+        const auto of = [&](const char* id) {
+            return resolver.resolve(*inheritDoc->getElementById(id));
+        };
+        const sui::ComputedStyle b1 = of("b1");
+        checkNear(b1.borderWidth.left.value, 3.0f, 0.01f, "border:inherit takes the width");
+        checkNear(b1.borderWidth.bottom.value, 3.0f, 0.01f, "on every side");
+        check(b1.borderStyles.left == sui::ComputedStyle::BorderDashed &&
+                  b1.borderColor.r == 0x12 && b1.borderColor.b == 0x56,
+              "with the parent's style and colour");
+        checkNear(of("b2").borderWidth.right.value, 3.0f, 0.01f,
+                  "border-width:inherit takes the width alone");
+        check(of("b3").borderStyles.top == sui::ComputedStyle::BorderDashed,
+              "border-style:inherit takes the style alone");
+        check(of("b4").borderColor.g == 0x34, "border-color:inherit takes the colour alone");
+        const sui::ComputedStyle o1 = of("o1");
+        checkNear(o1.outline.width.value, 1.0f, 0.01f, "outline:inherit takes the width");
+        check(o1.outline.style == sui::ComputedStyle::BorderSolid &&
+                  o1.outline.color.b == 0x21,
+              "with the parent's style and colour");
+        checkNear(of("o2").outline.width.value, 1.0f, 0.01f,
+                  "outline-width:inherit takes the width alone");
+        check(of("o3").outline.style == sui::ComputedStyle::BorderSolid,
+              "outline-style:inherit takes the style alone");
+        check(of("o4").outline.color.r == 0x65, "outline-color:inherit takes the colour alone");
+        checkNear(of("o5").outline.offset.value, 2.0f, 0.01f,
+                  "outline-offset:inherit takes the offset alone");
+    }
+}
+
 // `hyphens`: the engine has no hyphenation dictionary, so `auto` offers no
 // breaks of its own and behaves like `manual` — a soft hyphen (U+00AD) the
 // author wrote is the opportunity. The character is invisible unless a break is
@@ -10460,6 +10598,7 @@ int main() {
     testImportantAndCssWideKeywords();
     testBorderWidthLonghands();
     testBorderSideShorthands();
+    testBorderAndOutlineShorthands();
     testHyphens();
     testMediaQueries();
     testCustomProperties();
