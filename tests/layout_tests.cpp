@@ -3727,6 +3727,204 @@ void testBorderSideShorthands() {
     }
 }
 
+// `hyphens`: the engine has no hyphenation dictionary, so `auto` offers no
+// breaks of its own and behaves like `manual` — a soft hyphen (U+00AD) the
+// author wrote is the opportunity. The character is invisible unless a break is
+// taken at it, and a taken break ends its line in `-`; `none` leaves the soft
+// hyphens invisible but never breaks at one. Runs are fontless here, so one
+// character is 8px and a space 4px at the 16px default.
+void testHyphens() {
+    const std::string shy = "\xC2\xAD";
+    auto document = parseOrNull(
+        ("<sui><body style=\"margin:0\">"
+         // One opportunity: the first piece is `hy-`, and `phenation` has no
+         // further break to take, so the rest overflows.
+         "<div id=\"a\" style=\"width:60px\">hy" + shy + "phenation</div>"
+         "<div id=\"b\" style=\"width:60px;hyphens:none\">hy" + shy + "phenation</div>"
+         // Fitting text keeps its soft hyphen invisible, at the plain width.
+         "<div id=\"c\" style=\"width:200px\">hy" + shy + "phen</div>"
+         "<div id=\"d\" style=\"width:60px;hyphens:auto\">hy" + shy + "phenation</div>"
+         // Neither `white-space` nor `text-wrap` wrapping off may break at one.
+         "<div id=\"e\" style=\"width:60px;white-space:nowrap\">hy" + shy + "phenation</div>"
+         "<div id=\"f\" style=\"width:60px;text-wrap:nowrap\">hy" + shy + "phenation</div>"
+         "<div id=\"g\" style=\"width:16px\">hy" + shy + "phenation</div>"
+         // A fitting word is never broken, so the wrap after it is ordinary.
+         "<div id=\"h\" style=\"width:60px\">hy" + shy + "phen ation</div>"
+         // The opportunity is taken before `overflow-wrap: break-word` splits
+         // what is left of an overlong word.
+         "<div id=\"i\" style=\"width:60px;overflow-wrap:break-word\">hy" + shy + "phenation</div>"
+         // Two opportunities: greedy takes the last whose piece and `-` fit.
+         "<div id=\"o\" style=\"width:60px\">hy" + shy + "phen" + shy + "ation</div>"
+         "<div id=\"p\" style=\"width:200px\">hy" + shy + "phen" + shy + "ation</div>"
+         // A trailing soft hyphen has nothing to carry to the next line.
+         "<div id=\"k\" style=\"width:40px\">hyphen" + shy + "</div>"
+         // A piece plus its `-` is what has to fit, not the bare piece.
+         "<div id=\"r\" style=\"width:52px\">hy" + shy + "phen" + shy + "ation</div>"
+         // A textarea keeps one run per word, so no break is taken there.
+         "<textarea id=\"s\" style=\"width:60px\">hy" + shy + "phenation</textarea>"
+         // `text-transform` applies to a taken piece like any other run.
+         "<div id=\"n\" style=\"width:60px;text-transform:uppercase\">hy" + shy +
+         "phenation</div>"
+         // `hyphens: none` never breaks, on the box or inherited.
+         "<div id=\"l\" style=\"width:60px;hyphens:none\"><span>hy" + shy +
+         "phenation</span></div>"
+         "<div id=\"m\" style=\"width:60px;hyphens:none\"><div>hy" + shy + "phenation</div></div>"
+         "</body></sui>")
+            .c_str());
+    if (!document) {
+        return;
+    }
+    Element* t = document->getElementById("a");
+    Element* at = document->getElementById("h");
+    check(t && at, "hyphens elements found");
+    if (!t || !at) {
+        return;
+    }
+
+    sui::StyleResolver resolver;
+    resolver.setRules(
+        sui::CSSParser::parse("body { margin: 0; font-size: 16px } div { margin: 0 }"));
+    layoutRoot(*document, resolver, 400.0f);
+
+    const auto runs = [](Element* box) {
+        std::vector<std::pair<std::string, float>> out;
+        for (const sui::Element::TextRun& run : box->textRuns()) {
+            out.emplace_back(run.text, run.width);
+        }
+        return out;
+    };
+    const auto at2 = [&](const char* id) { return document->getElementById(id); };
+
+    {
+        const auto r = runs(at2("a"));
+        check(r.size() == 2, "a soft hyphen offers a break in an overflowing word");
+        if (r.size() == 2) {
+            check(r[0].first == "hy-", "the taken break ends the line in a hyphen");
+            checkNear(r[0].second, 24.0f, 0.01f, "and measures the piece plus its hyphen");
+            check(r[1].first == "phenation", "the rest of the word carries on");
+            checkNear(r[1].second, 72.0f, 0.01f, "with the soft hyphen weighing nothing");
+        }
+    }
+    {
+        const auto r = runs(at2("b"));
+        check(r.size() == 1 && r[0].first == "hyphenation" && r[0].second > 60.0f,
+              "hyphens:none never breaks at a soft hyphen");
+    }
+    {
+        const auto r = runs(at2("c"));
+        check(r.size() == 1 && r[0].first == "hyphen" &&
+                  std::fabs(r[0].second - 48.0f) < 0.01f,
+              "a soft hyphen in fitting text is invisible and takes no break");
+    }
+    {
+        const auto r = runs(at2("d"));
+        check(r.size() == 2 && r[0].first == "hy-" && r[1].first == "phenation",
+              "hyphens:auto breaks like manual, having no dictionary of its own");
+    }
+    {
+        const auto e = runs(at2("e"));
+        const auto f = runs(at2("f"));
+        check(e.size() == 1 && e[0].first == "hyphenation", "white-space:nowrap keeps it whole");
+        check(f.size() == 1 && f[0].first == "hyphenation", "text-wrap:nowrap keeps it whole");
+    }
+    {
+        const auto r = runs(at2("g"));
+        check(r.size() == 2 && r[0].first == "hy-",
+              "a piece too wide for the box is still the break taken");
+    }
+    {
+        const auto r = runs(at2("h"));
+        check(r.size() == 2 && r[0].first == "hyphen" && r[1].first == "ation",
+              "a word that fits is not broken, and the next word wraps");
+    }
+    {
+        const auto r = runs(at2("i"));
+        check(r.size() == 3, "the soft hyphen break comes before break-word splitting");
+        if (r.size() == 3) {
+            check(r[0].first == "hy-" && r[1].first == "phenati" && r[2].first == "on",
+                  "and the rest still splits by character");
+        }
+    }
+    {
+        const auto r = runs(at2("o"));
+        check(r.size() == 2 && r[0].first == "hyphen-" && r[1].first == "ation",
+              "the last break whose piece and hyphen fit is the one taken");
+        const auto p = runs(at2("p"));
+        check(p.size() == 1 && p[0].first == "hyphenation",
+              "and no break is taken when the whole word fits");
+    }
+    {
+        const auto r = runs(at2("k"));
+        check(r.size() == 1 && r[0].first == "hyphen",
+              "a trailing soft hyphen is no break opportunity");
+    }
+    {
+        const auto n = runs(at2("n"));
+        check(n.size() == 2 && n[0].first == "HY-" && n[1].first == "PHENATION",
+              "text-transform applies to the pieces");
+    }
+    {
+        const auto r = runs(at2("r"));
+        check(r.size() == 3 && r[0].first == "hy-" && r[1].first == "phen-" &&
+                  r[2].first == "ation",
+              "a piece plus its hyphen is what has to fit");
+    }
+    {
+        const auto r = runs(at2("s"));
+        check(r.size() == 1 && r[0].first == "hyphenation",
+              "a textarea takes no soft-hyphen break, keeping runs word-sized");
+    }
+    {
+        Element* l = at2("l");
+        Element* m = document->getElementById("m");
+        if (l && m && !l->textRuns().empty() && !m->textRuns().empty()) {
+            check(l->textRuns()[0].text == "hyphenation",
+                  "a descendant of a hyphens:none box gets no break");
+            check(m->textRuns()[0].text == "hyphenation",
+                  "hyphens inherits into nested boxes");
+        }
+    }
+    // No run anywhere may keep the character: it never paints.
+    bool keptSoftHyphen = false;
+    for (const char* id : {"a", "c", "h", "k", "l", "m"}) {
+        if (Element* el = at2(id)) {
+            for (const sui::Element::TextRun& run : el->textRuns()) {
+                keptSoftHyphen |= run.text.find(shy) != std::string::npos;
+            }
+        }
+    }
+    check(!keptSoftHyphen, "no run ever contains a soft hyphen");
+
+    // Style level: parse, serialize, inherit, and drop garbage.
+    auto styleDoc = parseOrNull(
+        "<sui><body style=\"margin:0\">"
+        "<div id=\"s1\" style=\"hyphens:none\">x</div>"
+        "<div id=\"s2\" style=\"hyphens:auto\">x</div>"
+        "<div id=\"s3\">x</div>"
+        "<div id=\"s4\" style=\"hyphens:manual\">x</div>"
+        "<div id=\"s5\" style=\"hyphens:none;hyphens:banana\">x</div>"
+        "<div style=\"hyphens:none\"><div id=\"s6\">x</div></div>"
+        "<div style=\"hyphens:auto\"><div id=\"s7\" style=\"hyphens:unset\">x</div></div>"
+        "</body></sui>");
+    if (styleDoc) {
+        sui::StyleResolver r;
+        const auto styleOf = [&](const char* id) { return r.resolve(*styleDoc->getElementById(id)); };
+        check(styleOf("s1").hyphens == ComputedStyle::Hyphens::None, "hyphens:none parses");
+        check(styleOf("s2").hyphens == ComputedStyle::Hyphens::Auto, "hyphens:auto parses");
+        check(styleOf("s3").hyphens == ComputedStyle::Hyphens::Manual,
+              "hyphens starts at its initial value, manual");
+        check(styleOf("s4").hyphens == ComputedStyle::Hyphens::Manual, "hyphens:manual parses");
+        check(styleOf("s5").hyphens == ComputedStyle::Hyphens::None,
+              "garbage leaves the cascade winner in place");
+        check(sui::StyleResolver::propertyValue(styleOf("s1"), "hyphens") == "none",
+              "hyphens reads back");
+        check(sui::StyleResolver::propertyValue(styleOf("s2"), "hyphens") == "auto",
+              "and so does auto");
+        check(styleOf("s6").hyphens == ComputedStyle::Hyphens::None, "hyphens inherits");
+        check(styleOf("s7").hyphens == ComputedStyle::Hyphens::Auto, "hyphens:unset inherits");
+    }
+}
+
 void testPositioning() {
     // An absolute box resolves against the padding box of the nearest positioned
     // ancestor, which is only known once the flow has placed that ancestor.
@@ -10123,6 +10321,7 @@ int main() {
     testImportantAndCssWideKeywords();
     testBorderWidthLonghands();
     testBorderSideShorthands();
+    testHyphens();
     testMediaQueries();
     testCustomProperties();
     testCascade();

@@ -1011,6 +1011,13 @@ struct ComputedStyle {
     WordBreak wordBreak = WordBreak::Normal;
     enum class OverflowWrap : std::uint8_t { Normal, BreakWord };
     OverflowWrap overflowWrap = OverflowWrap::Normal;
+    // `hyphens`: whether a soft hyphen (U+00AD) is a break opportunity. The
+    // character is invisible either way; `manual` breaks at it when the word
+    // would overflow, painting the taken break as `-`. `auto` would need a
+    // hyphenation dictionary, which the engine does not carry, so it breaks
+    // exactly like `manual`; `none` never breaks at one. Inherited.
+    enum class Hyphens : std::uint8_t { Manual, None, Auto };
+    Hyphens hyphens = Hyphens::Manual;
     // Mobile browsers inflate small text on wide blocks; this engine never
     // inflates, so every value renders identically at authored sizes. The value
     // is still parsed, inherited, and serialized. `none` and `auto` both mean
@@ -1117,6 +1124,7 @@ struct ComputedStyle {
         SpecifiedWhiteSpace = 1ULL << 41,
         SpecifiedTextWrapMode = 1ULL << 42,
         SpecifiedTextWrapStyle = 1ULL << 43,
+        SpecifiedHyphens = 1ULL << 44,
         SpecifiedScrollBehavior = 1u << 25,
         SpecifiedColorScheme = 1u << 26,
         // A marker, not a property: the element still carries the user-agent
@@ -1401,6 +1409,9 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     }
     if (!(style.specified & ComputedStyle::SpecifiedOverflowWrap)) {
         style.overflowWrap = parent.overflowWrap;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedHyphens)) {
+        style.hyphens = parent.hyphens;
     }
     if (!(style.specified & ComputedStyle::SpecifiedTextSizeAdjust)) {
         style.textSizeAdjust = parent.textSizeAdjust;

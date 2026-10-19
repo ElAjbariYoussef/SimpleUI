@@ -5814,7 +5814,19 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             }
         }
     } else if (property == "hyphens") {
-        // Text shaping hint that the layout engine does not yet implement.
+        // The engine has no hyphenation dictionary, so `auto` gets no breaks of
+        // its own and behaves like `manual`: both take the soft hyphens the
+        // author wrote. `none` leaves them invisible and never breaks at one.
+        if (value == "manual") {
+            s.hyphens = ComputedStyle::Hyphens::Manual;
+            s.specified |= ComputedStyle::SpecifiedHyphens;
+        } else if (value == "none") {
+            s.hyphens = ComputedStyle::Hyphens::None;
+            s.specified |= ComputedStyle::SpecifiedHyphens;
+        } else if (value == "auto") {
+            s.hyphens = ComputedStyle::Hyphens::Auto;
+            s.specified |= ComputedStyle::SpecifiedHyphens;
+        }
     } else if (property == "text-overflow") {
         std::string_view val = trim(value);
         if (val == "ellipsis") {
@@ -6938,6 +6950,14 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         return style.overflowWrap == ComputedStyle::OverflowWrap::BreakWord ? "break-word"
                                                                             : "normal";
     }
+    if (property == "hyphens") {
+        switch (style.hyphens) {
+            case ComputedStyle::Hyphens::None: return "none";
+            case ComputedStyle::Hyphens::Auto: return "auto";
+            case ComputedStyle::Hyphens::Manual: return "manual";
+        }
+        return "manual";
+    }
     if (property == "object-position") {
         const auto length = [](const Length& l) {
             switch (l.unit) {
@@ -7510,7 +7530,8 @@ bool isInheritable(std::string_view property) {
            property == "font-variant" || property == "text-align-last" ||
            property == "empty-cells" || property == "tab-size" ||
            property == "white-space" || property == "text-wrap" ||
-           property == "text-wrap-mode" || property == "text-wrap-style";
+           property == "text-wrap-mode" || property == "text-wrap-style" ||
+           property == "hyphens";
 }
 
 // `inherit` and `unset` are the two CSS-wide keywords the engine can answer

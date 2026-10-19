@@ -61,14 +61,31 @@ Metrics metricsFor(const TextFont* font, const ComputedStyle& s) {
     return m;
 }
 
+// U+00AD SOFT HYPHEN: invisible unless a break is taken at it.
+constexpr std::string_view kSoftHyphen = "\xC2\xAD";
+
+bool isSoftHyphenAt(std::string_view t, std::size_t i) {
+    return i + 1 < t.size() && t[i] == '\xC2' &&
+           static_cast<unsigned char>(t[i + 1]) == 0xAD;
+}
+
 std::string transformText(const ComputedStyle& s, std::string_view t) {
-    if (s.textTransform == ComputedStyle::TransformNone) {
+    // A soft hyphen is invisible unless a break is taken at it, so it never
+    // measures and never paints: dropped here, which is the one place both text
+    // measurement and every emitted run go through.
+    const bool hasSoftHyphen = t.find(kSoftHyphen) != std::string_view::npos;
+    if (s.textTransform == ComputedStyle::TransformNone && !hasSoftHyphen) {
         return std::string(t);
     }
     std::string out;
     out.resize(t.size());
     std::size_t j = 0;
-    for (char c : t) {
+    for (std::size_t i = 0; i < t.size(); ++i) {
+        if (hasSoftHyphen && isSoftHyphenAt(t, i)) {
+            ++i;
+            continue;
+        }
+        const char c = t[i];
         char nc = c;
         if (s.textTransform == ComputedStyle::TransformUppercase) {
             nc = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
@@ -3377,6 +3394,96 @@ private:
             }
         }
 
+        // The soft-hyphen breaks inside a word: `first` is the first one, a
+        // byte offset just before a U+00AD, and `fitting` the last whose piece
+        // plus the `-` a taken break paints fits `avail`. Both are 0 when there
+        // is no break to take.
+        std::pair<std::size_t, std::size_t> softBreaks(std::string_view word,
+                                                       const ComputedStyle& s,
+                                                       float avail) const {
+            const float hyphenWidth = textWidth(owner_.font_, s, "-");
+            std::size_t first = 0;
+            std::size_t fitting = 0;
+            for (std::size_t i = 1; i + 1 < word.size(); ++i) {
+                if (!isSoftHyphenAt(word, i)) {
+                    continue;
+                }
+                if (i + kSoftHyphen.size() >= word.size()) {
+                    break; // Nothing follows: a break here has no rest to hyphenate.
+                }
+                if (first == 0) {
+                    first = i;
+                }
+                if (textWidth(owner_.font_, s, word.substr(0, i)) + hyphenWidth <= avail) {
+                    fitting = i;
+                }
+            }
+            return {first, fitting};
+        }
+
+        // `hyphens`: a word that does not fit its line breaks at its soft
+        // hyphens, and every taken break paints as `-`. Pieces go down lines
+        // until the rest of the word fits; a break is only taken on a line that
+        // then has something on it. `none` is handled by the caller not calling
+        // this at all. Returns what is left of the word, which the caller lays
+        // out through its ordinary path — gap and wrap check included.
+        std::string_view breakAtSoftHyphens(std::string_view word, const ComputedStyle& s,
+                                           const Metrics& m, float ascentDelta,
+                                           bool suppressGap) {
+            while (true) {
+                const bool gapApplies = lineHasContent_ && !spacing_.breakSpaces && !suppressGap;
+                const float checkGap = gapApplies ? metrics_.spaceWidth : 0.0f;
+                const float avail = lineAvail_ - lineIndent_ - penX_ - checkGap;
+                if (textWidth(owner_.font_, s, word) <= avail) {
+                    return word;
+                }
+                const auto [first, fitting] = softBreaks(word, s, avail);
+                if (first == 0) {
+                    return word;
+                }
+                std::size_t cut = fitting;
+                if (cut == 0) {
+                    // Nothing fits the line as it stands. With something already
+                    // on it the word moves down whole; on a bare line the first
+                    // break is taken even though its piece overflows, which is
+                    // how a break opportunity at a soft hyphen behaves.
+                    if (lineHasContent_) {
+                        newLine();
+                        if (clamped_) {
+                            clampSuppressed_ = true;
+                            return {};
+                        }
+                        continue;
+                    }
+                    cut = first;
+                }
+                float space = checkGap;
+                if (gapApplies && s.wordSpacing.unit != sui::Length::Auto) {
+                    space += s.wordSpacing.resolve(s.fontSize, s.fontSize, 16.0f);
+                }
+                const std::string piece = transformText(s, word.substr(0, cut)) + "-";
+                const float pieceWidth = textWidth(owner_.font_, s, piece);
+                ownerEl_.addTextRun(
+                    {piece, originX_ + lineIndent_ + penX_ + space,
+                     originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), pieceWidth,
+                     metrics_.lineHeight, metrics_.ascent + ascentDelta, s.fontSize, s.color.r,
+                     s.color.g, s.color.b, s.color.a, s.fontBold,
+                     s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
+                penX_ += space + pieceWidth;
+                lineHasContent_ = true;
+                widest_ = std::max(widest_, penX_);
+                word.remove_prefix(cut + kSoftHyphen.size());
+                newLine();
+                if (clamped_) {
+                    clampSuppressed_ = true;
+                    return {};
+                }
+                if (word.empty()) {
+                    return {};
+                }
+            }
+        }
+
         void word(std::string_view w, const ComputedStyle& s, const Metrics& m,
                   float ascentDelta, bool suppressGap = false) {
             if (ellipsisAdded_) {
@@ -3388,7 +3495,6 @@ private:
                 clampSuppressed_ = true;
                 return;
             }
-            const float wWidth = textWidth(owner_.font_, s, w);
             // Wrapping has to be on for this run: `white-space` sets the box
             // wide mode, and `text-wrap: nowrap` (inherited or on an inner
             // span) turns the run's own breaks off without touching its
@@ -3402,6 +3508,24 @@ private:
             const bool breakAll = s.wordBreak == ComputedStyle::WordBreak::BreakAll;
             const bool breakWord =
                 !breakAll && s.overflowWrap == ComputedStyle::OverflowWrap::BreakWord;
+            // `hyphens`: a soft hyphen offers a break where the word would
+            // overflow. `auto` has no dictionary to add opportunities of its
+            // own, so it breaks exactly like `manual`; `none` never breaks at
+            // one (the character stays invisible either way, since measurement
+            // and painting both drop it). `break-all` needs no opportunity of
+            // its own, and a textarea keeps its runs word-sized.
+            const bool softHyphens =
+                wraps && !breakAll && !isEllipsisActive() && ownerEl_.tag() != "textarea" &&
+                (s.hyphens == ComputedStyle::Hyphens::Manual ||
+                 s.hyphens == ComputedStyle::Hyphens::Auto) &&
+                w.find(kSoftHyphen) != std::string_view::npos;
+            if (softHyphens) {
+                w = breakAtSoftHyphens(w, s, m, ascentDelta, suppressGap);
+                if (w.empty()) {
+                    return;  // Every piece was laid, or the line cap was reached.
+                }
+            }
+            const float wWidth = textWidth(owner_.font_, s, w);
             if (wraps && !isEllipsisActive() && ownerEl_.tag() != "textarea" &&
                 (breakAll || (breakWord && wWidth > lineAvail_ - lineIndent_))) {
                 breakAcrossLines(w, s, m, ascentDelta);
