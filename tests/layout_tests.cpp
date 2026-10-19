@@ -7408,6 +7408,68 @@ void testBorderImage() {
           "a length in the shorthand drops it all");
 }
 
+// The border-image and mask-border families answer in their own shorthand's
+// grammar: source, slice (with `fill`), width, outset, and per-axis repeat —
+// each collapsed like a box shorthand — so the shorthand readings parse back.
+void testBorderImageReadBack() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"b1\"></div><div id=\"b3\"></div><div id=\"b5\"></div>"
+        "<div id=\"b2\"><div id=\"b4\" style=\"border-image:inherit\"></div></div>"
+        "<div id=\"m1\"></div><div id=\"m3\"></div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#b1 { border-image-source: url(border.png); border-image-slice: 30;"
+        " border-image-width: 10px; border-image-outset: 5px; border-image-repeat: round }"
+        "#b2 { border-image: linear-gradient(45deg, #ff0000, #0000ff80) 25% fill / 2 / 1px"
+        " space }"
+        "#b3 { border-image-slice: 1 2 3 4 fill; border-image-repeat: stretch round }"
+        "#m1 { mask-border-source: url(border-mask.png); mask-border-slice: 10% fill;"
+        " mask-border-width: auto; mask-border-outset: 2; mask-border-repeat: space;"
+        " mask-border-mode: alpha }"));
+    const auto value = [&](const char* id, const char* property) {
+        Element* el = document->getElementById(id);
+        return el ? sui::StyleResolver::propertyValue(resolver.resolve(*el), property) : "";
+    };
+    check(value("b1", "border-image-source") == "url(border.png)" &&
+              value("b1", "border-image-slice") == "30" &&
+              value("b1", "border-image-width") == "10px" &&
+              value("b1", "border-image-outset") == "5px" &&
+              value("b1", "border-image-repeat") == "round",
+          "border-image longhands read back one value at a time");
+    check(value("b2", "border-image") ==
+              "linear-gradient(45deg, #ff0000, #0000ff80) 25% fill / 2 / 1px space",
+          "a border-image shorthand rebuilds in parser grammar");
+    check(value("b3", "border-image-slice") == "1 2 3 4 fill" &&
+              value("b3", "border-image-repeat") == "stretch round",
+          "slices collapse like a box and repeats stay per axis");
+    check(value("b5", "border-image-source") == "none" &&
+              value("b5", "border-image-slice") == "0" &&
+              value("b5", "border-image-width") == "auto" &&
+              value("b5", "border-image-outset") == "0" &&
+              value("b5", "border-image-repeat") == "stretch",
+          "an untouched border image reads the initials");
+    check(value("b5", "border-image") == "none 0 / auto / 0 stretch",
+          "and the untouched shorthand composes them");
+    check(value("b4", "border-image") == value("b2", "border-image"),
+          "border-image: inherit replays the parent's shorthand");
+    check(value("m1", "mask-border-source") == "url(border-mask.png)" &&
+              value("m1", "mask-border-slice") == "10% fill" &&
+              value("m1", "mask-border-width") == "auto" &&
+              value("m1", "mask-border-outset") == "2" &&
+              value("m1", "mask-border-repeat") == "space" &&
+              value("m1", "mask-border-mode") == "alpha",
+          "mask-border longhands read back one value at a time");
+    check(value("m3", "mask-border-mode") == "luminance" &&
+              value("m3", "mask-border-slice") == "0" &&
+              value("m3", "mask-border") == "none 0 / auto / 0 stretch luminance",
+          "an untouched mask border reads its mode and initials");
+}
+
 // `:required`/`:optional` read the attribute on inputs, selects, and
 // textareas; `:valid`/`:invalid` judge candidates (no disabled, hidden, or
 // buttons) by required emptiness, checkable state, numeric shape and min/max,
@@ -11176,6 +11238,7 @@ int main() {
     testMaskReadBack();
     testMaskBorder();
     testBorderImage();
+    testBorderImageReadBack();
     testScrollSnap();
     testSvgLayout();
     testSelectionColors();

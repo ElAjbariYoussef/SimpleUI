@@ -7199,6 +7199,128 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "inset-inline") return twoSides(style.left, style.right, "auto");
     if (property == "inset-block") return twoSides(style.top, style.bottom, "auto");
+    // The two 9-patch families share their shape: a source, slice, width,
+    // outset, and per-axis repeat (plus a mode for masks). An unauthored slice
+    // or outset reads `0`, which is how paint resolves it; an unauthored width
+    // keeps `auto` so it can follow the slice.
+    const auto sliceSides = [&](const Length& top, const Length& right, const Length& bottom,
+                                const Length& left) {
+        const auto value = [&](const Length& l) {
+            return l.isAuto() ? std::string("0") : length(l);
+        };
+        return collapsed(value(top), value(right), value(bottom), value(left));
+    };
+    const auto sizeSides = [&](const Length& top, const Length& right, const Length& bottom,
+                               const Length& left) {
+        return collapsed(length(top, "auto"), length(right, "auto"), length(bottom, "auto"),
+                         length(left, "auto"));
+    };
+    const auto repeatPairText = [](const auto& first, const auto& second, auto&& word) {
+        const std::string a = word(first);
+        const std::string b = word(second);
+        return a == b ? a : a + " " + b;
+    };
+    const auto maskBorderRepeatWord = [](ComputedStyle::MaskBorder::Repeat repeat) {
+        switch (repeat) {
+            case ComputedStyle::MaskBorder::Repeat::Stretch: return "stretch";
+            case ComputedStyle::MaskBorder::Repeat::Repeat: return "repeat";
+            case ComputedStyle::MaskBorder::Repeat::Round: return "round";
+            case ComputedStyle::MaskBorder::Repeat::Space: return "space";
+        }
+        return "stretch";
+    };
+    const auto borderImageRepeatWord = [](ComputedStyle::BorderImage::Repeat repeat) {
+        switch (repeat) {
+            case ComputedStyle::BorderImage::Repeat::Stretch: return "stretch";
+            case ComputedStyle::BorderImage::Repeat::Repeat: return "repeat";
+            case ComputedStyle::BorderImage::Repeat::Round: return "round";
+            case ComputedStyle::BorderImage::Repeat::Space: return "space";
+        }
+        return "stretch";
+    };
+    const auto maskBorderModeWord = [](ComputedStyle::MaskBorder::Mode mode) {
+        return mode == ComputedStyle::MaskBorder::Mode::Alpha ? "alpha" : "luminance";
+    };
+    const auto maskBorderSliceText = [&](const ComputedStyle::MaskBorder& border) {
+        std::string out = sliceSides(border.slice.top, border.slice.right, border.slice.bottom,
+                                     border.slice.left);
+        if (border.slice.fill) {
+            out += " fill";
+        }
+        return out;
+    };
+    const auto borderImageSliceText = [&](const ComputedStyle::BorderImage& image) {
+        std::string out = sliceSides(image.slice.top, image.slice.right, image.slice.bottom,
+                                     image.slice.left);
+        if (image.slice.fill) {
+            out += " fill";
+        }
+        return out;
+    };
+    if (property == "mask-border-source") {
+        return maskImageText(style.maskBorder.source);
+    }
+    if (property == "mask-border-slice") {
+        return maskBorderSliceText(style.maskBorder);
+    }
+    if (property == "mask-border-width") {
+        return sizeSides(style.maskBorder.width.top, style.maskBorder.width.right,
+                         style.maskBorder.width.bottom, style.maskBorder.width.left);
+    }
+    if (property == "mask-border-outset") {
+        return sliceSides(style.maskBorder.outset.top, style.maskBorder.outset.right,
+                          style.maskBorder.outset.bottom, style.maskBorder.outset.left);
+    }
+    if (property == "mask-border-repeat") {
+        return repeatPairText(style.maskBorder.repeatX, style.maskBorder.repeatY,
+                              maskBorderRepeatWord);
+    }
+    if (property == "mask-border-mode") {
+        return maskBorderModeWord(style.maskBorder.mode);
+    }
+    if (property == "mask-border") {
+        return maskImageText(style.maskBorder.source) + " " +
+               maskBorderSliceText(style.maskBorder) + " / " +
+               sizeSides(style.maskBorder.width.top, style.maskBorder.width.right,
+                         style.maskBorder.width.bottom, style.maskBorder.width.left) +
+               " / " +
+               sliceSides(style.maskBorder.outset.top, style.maskBorder.outset.right,
+                          style.maskBorder.outset.bottom, style.maskBorder.outset.left) +
+               " " +
+               repeatPairText(style.maskBorder.repeatX, style.maskBorder.repeatY,
+                              maskBorderRepeatWord) +
+               " " + maskBorderModeWord(style.maskBorder.mode);
+    }
+    if (property == "border-image-source") {
+        return gradientImage(style.borderImage.source);
+    }
+    if (property == "border-image-slice") {
+        return borderImageSliceText(style.borderImage);
+    }
+    if (property == "border-image-width") {
+        return sizeSides(style.borderImage.width.top, style.borderImage.width.right,
+                         style.borderImage.width.bottom, style.borderImage.width.left);
+    }
+    if (property == "border-image-outset") {
+        return sliceSides(style.borderImage.outset.top, style.borderImage.outset.right,
+                          style.borderImage.outset.bottom, style.borderImage.outset.left);
+    }
+    if (property == "border-image-repeat") {
+        return repeatPairText(style.borderImage.repeatX, style.borderImage.repeatY,
+                              borderImageRepeatWord);
+    }
+    if (property == "border-image") {
+        return gradientImage(style.borderImage.source) + " " +
+               borderImageSliceText(style.borderImage) + " / " +
+               sizeSides(style.borderImage.width.top, style.borderImage.width.right,
+                         style.borderImage.width.bottom, style.borderImage.width.left) +
+               " / " +
+               sliceSides(style.borderImage.outset.top, style.borderImage.outset.right,
+                          style.borderImage.outset.bottom, style.borderImage.outset.left) +
+               " " +
+               repeatPairText(style.borderImage.repeatX, style.borderImage.repeatY,
+                              borderImageRepeatWord);
+    }
     if (property == "border-width-top" || property == "border-top-width")
         return length(style.borderWidth.top);
     if (property == "border-width-right" || property == "border-right-width")
