@@ -1181,11 +1181,17 @@ ContentResult parseContent(std::string_view v) {
         const char quote = v[i];
         if (quote == '"' || quote == '\'') {
             ++i;
-            const std::size_t start = i;
             while (i < v.size() && v[i] != quote) {
+                // A backslash escapes the next character, which is how a string
+                // carries a quote (or a backslash) of its own.
+                if (v[i] == '\\' && i + 1 < v.size()) {
+                    res.text.push_back(v[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                res.text.push_back(v[i]);
                 ++i;
             }
-            res.text.append(v.substr(start, i - start));
             if (i < v.size()) {
                 ++i;  // the closing quote
             }
@@ -1249,11 +1255,17 @@ ContentResult parseContent(std::string_view v) {
                 ++i;
                 while (i < v.size() && std::isspace(static_cast<unsigned char>(v[i]))) ++i;
                 if (i < v.size() && (v[i] == '"' || v[i] == '\'')) {
-                    const char quote = v[i++];
-                    const std::size_t sepStart = i;
-                    while (i < v.size() && v[i] != quote) ++i;
-                    const std::string separator =
-                        std::string(v.substr(sepStart, i - sepStart));
+                    const char sepQuote = v[i++];
+                    std::string separator;
+                    while (i < v.size() && v[i] != sepQuote) {
+                        if (v[i] == '\\' && i + 1 < v.size()) {
+                            separator.push_back(v[i + 1]);
+                            i += 2;
+                            continue;
+                        }
+                        separator.push_back(v[i]);
+                        ++i;
+                    }
                     if (i < v.size()) ++i;  // the closing quote
                     nameWithSeparator = std::string(name) + '\x1f' + separator;
                     name = nameWithSeparator;
@@ -6988,6 +7000,92 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             out += '"';
         }
         return out;
+    }
+    if (property == "content") {
+        if (!style.hasContent) {
+            return "none";
+        }
+        // The stored value is the argument list flattened into text plus one
+        // marker byte per function or quote keyword. Rebuild the CSS arguments
+        // in order, quoting each literal run and escaping what quoting needs;
+        // a backslash before a quote is what the parser reads back.
+        const auto isMarker = [](char c) {
+            return c >= '\x01' && c <= '\x0A';
+        };
+        const auto quoted = [](std::string_view text) {
+            std::string result = "\"";
+            for (char c : text) {
+                if (c == '\\' || c == '"') {
+                    result.push_back('\\');
+                }
+                result.push_back(c);
+            }
+            result.push_back('"');
+            return result;
+        };
+        std::string out;
+        const auto add = [&](std::string_view argument) {
+            if (!out.empty()) {
+                out += ' ';
+            }
+            out += argument;
+        };
+        std::size_t i = 0;
+        while (i < style.content.size()) {
+            const char marker = style.content[i];
+            if (marker == '\x01' || marker == '\x03' || marker == '\x05') {
+                const char terminator =
+                    marker == '\x01' ? '\x02' : marker == '\x03' ? '\x04' : '\x06';
+                const std::size_t end = style.content.find(terminator, i + 1);
+                const std::string_view body =
+                    std::string_view(style.content)
+                        .substr(i + 1, (end == std::string::npos ? style.content.size() : end) -
+                                           (i + 1));
+                const std::size_t split = body.find('\x1f');
+                const std::string_view name = body.substr(0, split);
+                const std::string_view extra = split == std::string_view::npos
+                                                   ? std::string_view()
+                                                   : body.substr(split + 1);
+                std::string argument;
+                if (marker == '\x01') {
+                    argument = "attr(" + std::string(name) + ")";
+                } else if (marker == '\x03') {
+                    argument = "counter(" + std::string(name);
+                    if (!extra.empty()) {
+                        argument += ", " + std::string(extra);
+                    }
+                    argument += ")";
+                } else {
+                    argument = "counters(" + std::string(name);
+                    if (!extra.empty()) {
+                        argument += ", " + quoted(extra);
+                    }
+                    argument += ")";
+                }
+                add(argument);
+                i = end == std::string::npos ? style.content.size() : end + 1;
+                continue;
+            }
+            if (marker == '\x07' || marker == '\x08' || marker == '\x09' ||
+                marker == '\x0A') {
+                add(marker == '\x07'   ? "open-quote"
+                    : marker == '\x08' ? "close-quote"
+                    : marker == '\x09' ? "no-open-quote"
+                                       : "no-close-quote");
+                ++i;
+                continue;
+            }
+            std::size_t end = i;
+            while (end < style.content.size() && !isMarker(style.content[end])) {
+                ++end;
+            }
+            add(quoted(std::string_view(style.content).substr(i, end - i)));
+            i = end;
+        }
+        // `content: ""` stores no text but still means "has content"; the empty
+        // string argument is the reading that parses back that way rather than
+        // as the empty reading, which some properties use for "unrepresentable".
+        return out.empty() ? std::string("\"\"") : out;
     }
     if (property == "text-align-last") {
         switch (style.textAlignLast) {

@@ -4707,6 +4707,63 @@ void testPseudoElements() {
     check(card->children()[0]->textContent() == "Prefix: HelloCard", "content: attr(title) resolves attribute");
 }
 
+// `content` reads back as the argument list it was written as: literal runs
+// re-quoted (with `\"`/`\\` escapes), `attr(...)`, `counter(...)` with or
+// without a style, `counters(...)` with its separator re-quoted, and the four
+// quote keywords. The empty string argument stays distinguishable from `none`,
+// which matters because the reading is what the CSS-wide keywords replay.
+void testContentReadBack() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"c1\"></div><div id=\"c2\"></div><div id=\"c3\"></div>"
+        "<div id=\"c4\"></div><div id=\"c7\"></div><div id=\"c8\"></div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(R"(
+        #c1::before { content: "h" attr(title) counter(s) counters(t, "-") open-quote "x" close-quote no-open-quote no-close-quote }
+        #c2::before { content: "say \"hi\"" }
+        #c3::before { content: "back\\slash" }
+        #c4::before { content: "" }
+        #c7::before { content: counter(c, decimal) counters(d, ". ") }
+        #c8 { content: "base" } #c8::before { content: inherit }
+    )"));
+    sui::generatePseudoElements(*document, resolver);
+    const auto contentOf = [&](const char* id) {
+        Element* el = document->getElementById(id);
+        if (!el) {
+            return std::string();
+        }
+        Element* target = el;
+        for (const std::unique_ptr<Element>& child : el->children()) {
+            if (child->isPseudoElement()) {
+                target = child.get();
+                break;
+            }
+        }
+        return sui::StyleResolver::propertyValue(resolver.resolve(*target), "content");
+    };
+    check(contentOf("c1") ==
+              "\"h\" attr(title) counter(s) counters(t, \"-\") open-quote \"x\" close-quote"
+              " no-open-quote no-close-quote",
+          "content rebuilds every argument in order");
+    check(contentOf("c2") == "\"say \\\"hi\\\"\"",
+          "a literal quote round-trips escaped");
+    check(contentOf("c3") == "\"back\\\\slash\"",
+          "a literal backslash round-trips escaped");
+    check(contentOf("c4") == "\"\"", "an empty string argument is not none");
+    check(contentOf("c7") == "counter(c, decimal) counters(d, \". \")",
+          "counter styles and counters separators read back");
+    check(contentOf("c8") == "\"base\"",
+          "content: inherit replays the originating element's reading");
+    Element* plain = document->getElementById("c4");
+    check(plain && sui::StyleResolver::propertyValue(resolver.resolve(*plain), "content") ==
+                       "none",
+          "an element with no content reads none");
+}
+
 // CSS counters: `counter-reset` creates a named counter, `counter-increment`
 // advances it, and `counter()` / `counters()` read the value into generated
 // content. The value is scoped to the resetting element's descendants and
@@ -11145,6 +11202,7 @@ int main() {
     testPositioning();
     testWhiteSpace();
     testPseudoElements();
+    testContentReadBack();
     testCssCounters();
     testHasSelector();
     testFloatsAndClear();
