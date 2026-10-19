@@ -7669,22 +7669,20 @@ bool isInheritable(std::string_view property) {
 void applyCssWideKeyword(ComputedStyle& style, Element* element,
                           const Declaration& decl, const ComputedStyle& parent) {
     const std::string_view value = trim(decl.value);
-    const bool take =
-        value == "inherit" || (value == "unset" && isInheritable(decl.property)) ||
-        value == "initial" || value == "revert";
-    if (!take) {
-        return;
-    }
+    // `unset` is `inherit` for inherited properties and `initial` for the rest,
+    // so it shares both paths instead of doing nothing on the non-inherited half.
     ComputedStyle source;
     if (value == "revert") {
         source = element ? defaultStyleFor(element->tag()) : ComputedStyle();
         if (element && element->tag() == "input") {
             applyInputTypeStyle(source, element->attribute("type"));
         }
-    } else if (value == "initial") {
+    } else if (value == "initial" || (value == "unset" && !isInheritable(decl.property))) {
         source = ComputedStyle();
-    } else {
+    } else if (value == "inherit" || value == "unset") {
         source = parent;
+    } else {
+        return;
     }
     applyDeclaration(style,
                      Declaration{decl.property,

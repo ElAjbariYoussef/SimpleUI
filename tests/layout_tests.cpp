@@ -3485,14 +3485,16 @@ void testLayoutValuesReadBack() {
           "an untouched box reads its defaults");
     check(value("i", "grid-gap") == "normal", "the grid-gap alias reads back too");
 
-    // The CSS-wide keywords replay those readings, so `inherit` now copies the
-    // parent instead of dropping the declaration.
+    // The CSS-wide keywords replay those readings: `inherit` copies the parent,
+    // and `unset` resets a non-inherited property to its initial state.
     auto inheritDoc = parseOrNull(
         "<sui><body style=\"margin:0\">"
         "<div id=\"p\" style=\"position:relative;z-index:5;opacity:0.25;"
-        "flex:2 0 30px;gap:4px 9px\">"
+        "flex:2 0 30px;gap:4px 9px;color:#123456\">"
         "<div id=\"k\" style=\"position:inherit;z-index:inherit;opacity:inherit;"
         "flex:inherit;gap:inherit\"></div>"
+        "<div id=\"u\" style=\"gap:7px;gap:unset\"></div>"
+        "<div id=\"c\" style=\"color:unset\"></div>"
         "</div>"
         "<div id=\"plain\"><div id=\"kn\" style=\"gap:inherit;row-gap:inherit\"></div></div>"
         "</body></sui>");
@@ -3511,6 +3513,9 @@ void testLayoutValuesReadBack() {
                   "and the basis");
         checkNear(k.rowGap, 4.0f, 0.01f, "gap:inherit takes the row gap");
         checkNear(k.columnGap, 9.0f, 0.01f, "and the column gap");
+        checkNear(of("u").rowGap, -1.0f, 0.01f, "gap:unset returns to unauthored");
+        checkNear(of("u").columnGap, -1.0f, 0.01f, "and clears the column gap");
+        check(of("c").color.g == 0x34, "color:unset still inherits");
         checkNear(of("kn").rowGap, -1.0f, 0.01f,
                   "gap:inherit from an unauthored parent stays unauthored");
         checkNear(of("kn").columnGap, -1.0f, 0.01f, "on both axes");
@@ -3623,11 +3628,10 @@ void testImportantAndCssWideKeywords() {
     r5.setRules(sui::CSSParser::parse("body{color:#00ff00} #t{color:unset}"));
     check(r5.resolve(*t).color.g == 0xff, "color:unset inherits");
 
-    // ...and does nothing for one that does not.
+    // ...and resets to the initial value for one that does not.
     sui::StyleResolver r6;
     r6.setRules(sui::CSSParser::parse("#t{width:80px} #t{width:unset}"));
-    checkNear(r6.resolve(*t).width.resolve(0.0f, 16.0f, 16.0f), 80.0f, 0.01f,
-              "width:unset leaves the earlier declaration alone");
+    check(r6.resolve(*t).width.isAuto(), "width:unset resets to the initial auto");
 
     // `initial` resets to the engine's initial value; `revert` falls back to the
     // element's UA/default cascade for this engine's model.
