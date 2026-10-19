@@ -7039,7 +7039,7 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         }
         return "contain";
     }
-    if (property == "list-style-type") {
+    const auto listStyleTypeName = [&]() -> std::string {
         switch (style.listStyleType) {
             case ComputedStyle::LSTCircle: return "circle";
             case ComputedStyle::LSTSquare: return "square";
@@ -7052,6 +7052,20 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             case ComputedStyle::LSTDisc: return "disc";
         }
         return "disc";
+    };
+    if (property == "list-style-type") return listStyleTypeName();
+    if (property == "list-style") {
+        // The shorthand prints the three slots it distributes; the initial
+        // position (`outside`) and image (`none`) are left out, so the only
+        // `none` the string can carry is the type's.
+        std::string out = listStyleTypeName();
+        if (style.listStylePosition == ComputedStyle::LSPInside) {
+            out += " inside";
+        }
+        if (!style.listStyleImage.empty()) {
+            out += " url(" + style.listStyleImage + ")";
+        }
+        return out;
     }
     if (property == "list-style-position") {
         return style.listStylePosition == ComputedStyle::LSPInside ? "inside" : "outside";

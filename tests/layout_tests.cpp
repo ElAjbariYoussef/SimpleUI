@@ -3680,6 +3680,43 @@ void testShadowReadBack() {
           "so parent and child agree");
 }
 
+// The list-style shorthand distributes three inheritable longhands; it reads
+// back all three in the grammar's order, omitting the initial position and
+// image so a lone `none` is unambiguously the type.
+void testListStyleReadBack() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"a\"></div><div id=\"b\"></div><div id=\"c\"></div>"
+        "<div id=\"d\"></div><div id=\"e\"></div>"
+        "<div id=\"p\" style=\"list-style:square inside\">"
+        "<div id=\"q\" style=\"list-style:inherit\"></div></div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#a { list-style: circle inside }"
+        "#b { list-style: url(marker.png) upper-roman }"
+        "#c { list-style: none }"
+        "#d { list-style-position: inside }"));
+    const auto value = [&](const char* id, const char* property) {
+        Element* el = document->getElementById(id);
+        return el ? sui::StyleResolver::propertyValue(resolver.resolve(*el), property) : "";
+    };
+    check(value("a", "list-style") == "circle inside", "the shorthand reads type and position");
+    check(value("a", "list-style-type") == "circle" &&
+              value("a", "list-style-position") == "inside",
+          "and the longhands agree");
+    check(value("b", "list-style") == "upper-roman url(marker.png)",
+          "an image rides after the type");
+    check(value("b", "list-style-image") == "url(marker.png)", "the image longhand agrees");
+    check(value("c", "list-style") == "none" && value("c", "list-style-image") == "none",
+          "a lone none is the type");
+    check(value("d", "list-style") == "disc inside", "an omitted type reads its default");
+    check(value("e", "list-style") == "disc", "an untouched list reads disc");
+    check(value("q", "list-style") == "square inside",
+          "list-style: inherit replays the parent's shorthand");
+}
+
 void testFlexIsBlockLevel() {
     // `display: flex` puts the box in the block formatting context, so a flex
     // container sits on its own line and its sibling lands below it. Only
@@ -10969,6 +11006,7 @@ int main() {
     testBorderRadiusReadBack();
     testContainerAndScrollReadBack();
     testShadowReadBack();
+    testListStyleReadBack();
     testFlexIsBlockLevel();
     testFlexNestedContainer();
     testLengthUnits();
