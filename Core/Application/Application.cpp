@@ -4015,7 +4015,11 @@ WindowConfig Application::windowConfigFrom(Document& document) {
     const std::string_view state = window->attribute("state");
     config.maximized = state == "maximized" || state == "fullscreen";
     config.resizable = attributeFlag(*window, "resizable", !config.maximized);
-    config.borderless = state == "borderless";
+    // `state="borderless"` is the older spelling; `decoration="false"` says the
+    // same thing as an attribute. `decoration` defaults to true, so a page that
+    // never mentions it keeps the system frame, and the state shorthand still
+    // wins over an explicit `decoration="true"`.
+    config.borderless = state == "borderless" || !attributeFlag(*window, "decoration", true);
     config.hidden = attributeFlag(*window, "hidden", false);
 
     return config;

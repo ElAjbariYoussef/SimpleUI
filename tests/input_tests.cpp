@@ -281,6 +281,51 @@ int main() {
         }
     }
 
+    // `<window decoration>`: true (the default) keeps the system frame; false
+    // asks SDL for a borderless window, the same thing state="borderless" means.
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "sui-decoration-check";
+        fs::remove_all(root);
+        fs::create_directories(root);
+        const fs::path previous = fs::current_path();
+        fs::current_path(root);
+        struct RestoreDecoration {
+            fs::path previous;
+            ~RestoreDecoration() {
+                std::error_code ec;
+                fs::current_path(previous, ec);
+            }
+        } restoreDecoration{previous};
+
+        const auto borderlessFor = [&](const char* windowTag) {
+            std::ofstream out(root / "index.sui", std::ios::binary);
+            out << "<sui><head>" << windowTag << "</head><body></body></sui>";
+            out.close();
+            sui::Application app;
+            std::string error;
+            if (!app.start("index.sui", error)) {
+                check(false, "the decoration project starts");
+                return false;
+            }
+            const bool borderless =
+                app.platform() != nullptr &&
+                (SDL_GetWindowFlags(app.platform()->window()) & SDL_WINDOW_BORDERLESS) != 0;
+            app.shutdown();
+            return borderless;
+        };
+        check(!borderlessFor("<window title=\"Framed\"/>"),
+              "a window keeps its decorations by default");
+        check(!borderlessFor("<window title=\"Framed\" decoration=\"true\"/>"),
+              "decoration=true keeps the frame");
+        check(borderlessFor("<window title=\"Bare\" decoration=\"false\"/>"),
+              "decoration=false removes the frame");
+        check(borderlessFor("<window title=\"Bare\" decoration=\"0\"/>"),
+              "zero is false for decoration");
+        check(borderlessFor("<window title=\"Bare\" state=\"borderless\"/>"),
+              "the borderless state still removes the frame");
+    }
+
     // Windows carry their own identity through the event queue. A second window
     // opens beside the first, events name the window they came from, and closing
     // one window closes one window.
