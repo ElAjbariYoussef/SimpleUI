@@ -5640,6 +5640,43 @@ void testTabSize() {
           "a px length serializes");
 }
 
+// A `font-family` value is a list, not just its first name: the cascade
+// stores every comma-separated family, computed-style read-back answers the
+// list, and the laid-out runs carry it so the text engine can try each family
+// before its default face.
+void testFontFamilyList() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"d\">x</div><div id=\"e\">y</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* d = document->getElementById("d");
+    Element* e = document->getElementById("e");
+    check(d && e, "font-family elements found");
+    if (!d || !e) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #d { font-family: Missing, \"Fancy\", serif } "
+        "#e { font-family: serif }"));
+    const sui::ComputedStyle list = resolver.resolve(*d);
+    check(list.fontFamily == "Missing, \"Fancy\", serif",
+          "the whole font-family list is stored");
+    check(sui::StyleResolver::propertyValue(list, "font-family") ==
+              "Missing, \"Fancy\", serif",
+          "font-family reads the whole list back");
+    check(resolver.resolve(*e).fontFamily == "serif",
+          "a one-family declaration still reads back alone");
+
+    layoutRoot(*document, resolver, 200.0f);
+    check(!d->textRuns().empty() &&
+              d->textRuns()[0].fontFamily == "Missing, \"Fancy\", serif",
+          "a text run carries the family list it was measured with");
+    check(!e->textRuns().empty() && e->textRuns()[0].fontFamily == "serif",
+          "a single-family run carries its name");
+}
+
 // `<pre>` is a code block out of the box: whitespace and newlines survive,
 // nested blocks inherit the preserved whitespace, tabs stop at `tab-size`, and
 // the UA asks for the generic monospace family.
@@ -8493,6 +8530,13 @@ void testMarkerFont() {
     sui::MarkerFont family = fontOf("::marker { font-family: \"Fancy\", serif }", *a);
     check(family.familySet && family.family == "Fancy",
           "a marker family keeps its first face");
+    check(family.familySet && family.familyList == "\"Fancy\", serif",
+          "a marker family keeps the whole fallback list");
+    sui::MarkerFont quoted =
+        fontOf("::marker { font-family: \"Fancy, Name\", serif }", *a);
+    check(quoted.familySet && quoted.family == "Fancy, Name" &&
+              quoted.familyList == "\"Fancy, Name\", serif",
+          "a marker's first family may contain a quoted comma");
     sui::MarkerFont weight = fontOf("::marker { font-weight: bold }", *a);
     check(weight.weightSet && weight.weight == 700, "a marker weight reads keywords");
     sui::MarkerFont bolder = fontOf("::marker { font-weight: bolder }", *a);
@@ -8563,6 +8607,8 @@ void testFirstLetterFont() {
         fontOf("::first-letter { font-family: \"Fancy\", serif }", *a);
     check(family.familySet && family.family == "Fancy",
           "a first-letter family keeps its first face");
+    check(family.familySet && family.familyList == "\"Fancy\", serif",
+          "a first-letter family keeps the whole fallback list");
     sui::PseudoFont weight = fontOf("::first-letter { font-weight: bold }", *a);
     check(weight.weightSet && weight.weight == 700,
           "a first-letter weight reads keywords");
@@ -8596,6 +8642,7 @@ void testFirstLetterSizing() {
         "<ul><li id=\"e\" style=\"list-style-position:inside\">Item</li></ul>"
         "<p id=\"f\">Hello</p>"
         "<p id=\"g\" style=\"white-space:pre\"> Hello</p>"
+        "<p id=\"h\">Hello world</p>"
         "</body></sui>");
     if (!document) {
         return;
@@ -8607,7 +8654,8 @@ void testFirstLetterSizing() {
         "#c::first-letter{font-size:40px}"
         "#e::first-letter{font-size:40px}"
         "#f::first-letter{color:#ff0000}"
-        "#g::first-letter{font-size:32px}"));
+        "#g::first-letter{font-size:32px}"
+        "#h::first-letter{font-family:\"Fancy\", serif}"));
     layoutRoot(*document, resolver, 400.0f);
 
     Element* a = document->getElementById("a");
@@ -8616,11 +8664,12 @@ void testFirstLetterSizing() {
     Element* e = document->getElementById("e");
     Element* f = document->getElementById("f");
     Element* g = document->getElementById("g");
-    check(a && b && c && e && f && g, "first-letter layout elements found");
-    if (!a || !b || !c || !e || !f || !g || a->textRuns().empty() ||
+    Element* h = document->getElementById("h");
+    check(a && b && c && e && f && g && h, "first-letter layout elements found");
+    if (!a || !b || !c || !e || !f || !g || !h || a->textRuns().empty() ||
         b->textRuns().size() < 2 || c->textRuns().size() < 2 ||
         e->textRuns().size() < 3 || f->textRuns().empty() ||
-        g->textRuns().size() < 3) {
+        g->textRuns().size() < 3 || h->textRuns().size() < 2) {
         check(false, "first-letter layout produced runs");
         return;
     }
@@ -8628,6 +8677,8 @@ void testFirstLetterSizing() {
     check(a->textRuns().size() == 2 && a->textRuns()[0].text == "Hello" &&
               a->textRuns()[0].fontSize == 16.0f,
           "plain text keeps its whole first word in the base font");
+    check(h->textRuns()[0].fontFamily == "\"Fancy\", serif",
+          "the first-letter run carries the pseudo fallback list");
 
     const auto& letter = b->textRuns()[0];
     const auto& rest = b->textRuns()[1];
@@ -12407,6 +12458,7 @@ int main() {
     testBreakSpaces();
     testTabSize();
     testPreDefaults();
+    testFontFamilyList();
     testTextWrap();
     testEmptyCells();
     testLineClamp();

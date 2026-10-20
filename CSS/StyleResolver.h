@@ -49,6 +49,9 @@ struct PseudoFont {
     float size = 0.0f;
     bool familySet = false;
     std::string family;
+    // The whole `font-family` list; `family` is its first name for callers
+    // that only need one label.
+    std::string familyList;
     bool weightSet = false;
     int weight = 400;
     bool styleSet = false;

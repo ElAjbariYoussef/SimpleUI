@@ -2845,7 +2845,10 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
             const sui::MarkerFont markerFont = resolver.markerFont(el, s);
             const float markerSize = markerFont.sizeSet ? markerFont.size : s.fontSize;
             const std::string& markerFamily =
-                markerFont.familySet ? markerFont.family : s.fontFamily;
+                markerFont.familySet
+                    ? (markerFont.familyList.empty() ? markerFont.family
+                                                     : markerFont.familyList)
+                    : s.fontFamily;
             const int markerWeight = markerFont.weightSet ? markerFont.weight : s.fontWeight;
             const bool markerItalic = markerFont.styleSet
                                           ? markerFont.style != ComputedStyle::FontNormal

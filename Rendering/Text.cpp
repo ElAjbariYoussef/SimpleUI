@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <memory>
@@ -169,17 +170,75 @@ int weightDistance(int wanted, int have) {
     return have < wanted ? 1000 + (wanted - have) : 2000 + (have - wanted);
 }
 
+// A CSS family name never keeps its surrounding space or quotes, but quoted
+// names may hold spaces and commas that must not split the list.
+std::string_view trimFamily(std::string_view text) {
+    std::size_t begin = 0;
+    while (begin < text.size() &&
+           std::isspace(static_cast<unsigned char>(text[begin]))) {
+        ++begin;
+    }
+    std::size_t end = text.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(text[end - 1]))) {
+        --end;
+    }
+    return text.substr(begin, end - begin);
+}
+
+std::string_view dequoteFamily(std::string_view name) {
+    if (name.size() >= 2 && (name.front() == '"' || name.front() == '\'') &&
+        name.back() == name.front()) {
+        name.remove_prefix(1);
+        name.remove_suffix(1);
+    }
+    return name;
+}
+
+std::vector<std::string_view> splitFontFamilies(std::string_view list) {
+    std::vector<std::string_view> families;
+    std::size_t start = 0;
+    char quote = 0;
+    bool escaped = false;
+    for (std::size_t i = 0; i < list.size(); ++i) {
+        const char c = list[i];
+        if (escaped) {
+            escaped = false;
+        } else if (c == '\\') {
+            escaped = true;
+        } else if (quote != 0) {
+            if (c == quote) {
+                quote = 0;
+            }
+        } else if (c == '"' || c == '\'') {
+            quote = c;
+        } else if (c == ',') {
+            families.push_back(trimFamily(list.substr(start, i - start)));
+            start = i + 1;
+        }
+    }
+    families.push_back(trimFamily(list.substr(start)));
+    return families;
+}
+
 }  // namespace
 
-const TextFont::Face& TextFont::faceFor(const FontQuery& query) const noexcept {
-    // Style is one flag here (normal or italic), so it is only exact and
-    // fallback; weight follows the CSS order through weightDistance. A tie
-    // keeps the face loaded first.
+const TextFont::Face* TextFont::defaultFace() const noexcept {
+    if (faces_.empty() || !faces_[0] || !faces_[0]->info) {
+        return nullptr;
+    }
+    return faces_[0].get();
+}
+
+// The best face of one family: style is one flag here (normal or italic), so
+// it is only exact and fallback; weight follows the CSS order through
+// weightDistance. A tie keeps the face loaded first.
+const TextFont::Face* TextFont::bestFaceFor(std::string_view family,
+                                            const FontQuery& query) const noexcept {
     const Face* best = nullptr;
     int bestStyle = 0;
     int bestWeight = 0;
     for (const auto& face : faces_) {
-        if (!face || !sameFamily(face->family, query.family)) {
+        if (!face || !sameFamily(face->family, family)) {
             continue;
         }
         const int style = face->italic == query.italic ? 0 : 1;
@@ -191,14 +250,38 @@ const TextFont::Face& TextFont::faceFor(const FontQuery& query) const noexcept {
             bestWeight = weight;
         }
     }
-    if (best != nullptr) {
-        return *best;
+    return best;
+}
+
+const TextFont::Face* TextFont::resolveFace(const FontQuery& query,
+                                            std::string* matchedFamily) const noexcept {
+    const Face* best = nullptr;
+    if (!query.family.empty()) {
+        for (std::string_view raw : splitFontFamilies(query.family)) {
+            const std::string_view family = dequoteFamily(trimFamily(raw));
+            if (family.empty()) {
+                continue;
+            }
+            const Face* candidate = bestFaceFor(family, query);
+            if (candidate) {
+                best = candidate;
+                break;
+            }
+        }
     }
+    if (!best) {
+        best = defaultFace();
+    }
+    if (matchedFamily) {
+        *matchedFamily = best ? best->family : std::string();
+    }
+    return best;
+}
+
+const TextFont::Face& TextFont::faceFor(const FontQuery& query) const noexcept {
     static const Face empty;
-    if (faces_.empty() || !faces_[0]) {
-        return empty;
-    }
-    return *faces_[0];
+    const Face* face = resolveFace(query, nullptr);
+    return face ? *face : empty;
 }
 
 bool TextFont::hasFamily(std::string_view name) const noexcept {
@@ -225,13 +308,15 @@ std::string TextFont::matchedFamily(const FontQuery& query) const {
 }
 
 TextFont::FaceMatch TextFont::matchFace(const FontQuery& query) const {
-    const Face& face = faceFor(query);
     FaceMatch out;
-    out.weight = face.weight;
-    out.italic = face.italic;
-    if (!face.family.empty() && sameFamily(face.family, query.family)) {
-        out.family = face.family;
+    std::string family;
+    const Face* face = resolveFace(query, &family);
+    if (!face) {
+        return out;
     }
+    out.family = std::move(family);
+    out.weight = face->weight;
+    out.italic = face->italic;
     return out;
 }
 

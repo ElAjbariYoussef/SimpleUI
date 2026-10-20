@@ -598,7 +598,7 @@ struct ComputedStyle {
 
     // Typography
     float fontSize = 16.0f;  // px
-    std::string fontFamily;   // empty = default
+    std::string fontFamily;   // CSS family list; empty = default face
     bool fontBold = false;
     // The 100-900 weight the cascade settled on (400 normal, 700 bold).
     // `fontBold` follows it at the 600 threshold browsers use; the rasterizer

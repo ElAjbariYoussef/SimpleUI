@@ -4229,7 +4229,9 @@ private:
                         letterStyle.fontSize = letterFont.size;
                     }
                     if (letterFont.familySet) {
-                        letterStyle.fontFamily = letterFont.family;
+                        letterStyle.fontFamily = letterFont.familyList.empty()
+                                                     ? letterFont.family
+                                                     : letterFont.familyList;
                     }
                     if (letterFont.weightSet) {
                         letterStyle.fontWeight = letterFont.weight;

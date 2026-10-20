@@ -442,6 +442,30 @@ void testFontFaces() {
     check(font.hasFamily("DISPLAY") && !font.hasFamily("Missing"),
           "hasFamily tests families alone");
 
+    // A family list tries each name in turn: the first loaded family answers,
+    // quoted names may hold commas, and an all-missing list falls back to the
+    // default face.
+    check(font.matchFace({"Missing, Display", 400, false}).family == "Display",
+          "a family list falls through to its first loaded name");
+    check(font.matchFace({"Missing, Display", 700, false}).weight == 700,
+          "the matched family still picks by weight");
+    check(font.matchFace({"  \"Display\"  ", 400, false}).family == "Display",
+          "spaces and quotes around a name are ignored");
+    check(font.matchFace({"Missing, Missing2", 400, false}).family.empty(),
+          "a list with no loaded family answers the default face");
+    check(font.matchedFamily({"Missing, Display"}) == "Display",
+          "matchedFamily reports the family that answered");
+    check(font.measureText({"Missing, Display", 700, false}, "W", 64.0f) >
+              font.measureText({}, "W", 64.0f) + 0.5f,
+          "the later family in a list is the face that draws");
+    check(font.addFace("Fancy, Name", regularPath, 400, false),
+          "a family with a comma in its name loads");
+    check(font.matchFace({"\"Fancy, Name\", Missing", 400, false}).family ==
+              "Fancy, Name",
+          "a quoted comma never splits the family list");
+    check(font.matchFace({"Fancy, Name", 400, false}).family.empty(),
+          "an unquoted comma splits the list into two unknown names");
+
     // The loader reads a sheet's blocks through the resource layer, resolving
     // relative sources against the sheet, and only adds faces whose source
     // resolves and decodes.

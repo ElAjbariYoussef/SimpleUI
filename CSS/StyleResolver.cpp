@@ -29,6 +29,39 @@ std::string_view trim(std::string_view s) {
     return s.substr(b, e - b);
 }
 
+// The first name of a `font-family` list, dequoted. A comma inside quotes is
+// part of the name, not a separator; pseudo-element font slots keep only this
+// label while their `familyList` holds the whole list.
+std::string_view firstFontFamily(std::string_view list) {
+    std::size_t comma = std::string_view::npos;
+    char quote = 0;
+    bool escaped = false;
+    for (std::size_t i = 0; i < list.size(); ++i) {
+        const char c = list[i];
+        if (escaped) {
+            escaped = false;
+        } else if (c == '\\') {
+            escaped = true;
+        } else if (quote != 0) {
+            if (c == quote) {
+                quote = 0;
+            }
+        } else if (c == '"' || c == '\'') {
+            quote = c;
+        } else if (c == ',') {
+            comma = i;
+            break;
+        }
+    }
+    std::string_view name = trim(list.substr(0, comma));
+    if (name.size() >= 2 && (name.front() == '"' || name.front() == '\'') &&
+        name.back() == name.front()) {
+        name.remove_prefix(1);
+        name.remove_suffix(1);
+    }
+    return name;
+}
+
 // Renders a float without a trailing ".000000" and without the trailing zeros a
 // to_string would leave, so a script reading fontSize gets "16" not "16.000000".
 std::string unitless(float value) {
@@ -5014,18 +5047,14 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.specified |= ComputedStyle::SpecifiedFontBold;
         }
     } else if (property == "font-family") {
-        std::string_view family = value;
-        if (const std::size_t comma = family.find(','); comma != std::string_view::npos) {
-            family = family.substr(0, comma);
+        // The whole list survives: the text engine tries each family in turn
+        // before its default face. Quotes are kept so a quoted name's commas
+        // never split the list.
+        const std::string_view family = trim(value);
+        if (!family.empty()) {
+            s.fontFamily = std::string(family);
+            s.specified |= ComputedStyle::SpecifiedFontFamily;
         }
-        if (!family.empty() && (family.front() == '"' || family.front() == '\'')) {
-            family.remove_prefix(1);
-        }
-        if (!family.empty() && (family.back() == '"' || family.back() == '\'')) {
-            family.remove_suffix(1);
-        }
-        s.fontFamily = std::string(trim(family));
-        s.specified |= ComputedStyle::SpecifiedFontFamily;
     } else if (property == "font-style") {
         if (value == "italic") {
             s.fontStyle = ComputedStyle::FontItalic;
@@ -9697,18 +9726,9 @@ PseudoFont StyleResolver::pseudoFont(Element& element, std::string_view pseudo,
         if (text == "initial") {
             out.familySet = true;
         } else if (text != "inherit" && text != "unset") {
-            std::string_view name = text;
-            if (const std::size_t comma = name.find(','); comma != std::string_view::npos) {
-                name = name.substr(0, comma);
-            }
-            if (!name.empty() && (name.front() == '"' || name.front() == '\'')) {
-                name.remove_prefix(1);
-            }
-            if (!name.empty() && (name.back() == '"' || name.back() == '\'')) {
-                name.remove_suffix(1);
-            }
+            out.familyList = std::string(text);
             out.familySet = true;
-            out.family = std::string(trim(name));
+            out.family = std::string(firstFontFamily(text));
         }
     }
     if (weight.set) {

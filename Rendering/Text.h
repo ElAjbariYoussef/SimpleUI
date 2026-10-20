@@ -52,11 +52,11 @@ struct GlyphMetrics {
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
 };
 
-// Which face a measurement or raster uses. The family matches the first
-// loaded face with that family (case-insensitively); weight and italic then
-// pick among that family's faces following the CSS fallback order. When no
-// face carries the family the default face answers. Empty family always
-// means the default face.
+// Which face a measurement or raster uses. `family` is a CSS `font-family`
+// list: each comma-separated family is tried in order (quoted names may hold
+// commas), and within the first family that has a loaded face, weight and
+// italic pick among its faces following the CSS fallback order. When no
+// listed family is loaded, or the list is empty, the default face answers.
 struct FontQuery {
     std::string_view family;
     int weight = 400;
@@ -186,6 +186,9 @@ private:
 
     static bool sameFamily(std::string_view a, std::string_view b) noexcept;
     const Face& faceFor(const FontQuery& query) const noexcept;
+    const Face* bestFaceFor(std::string_view family, const FontQuery& query) const noexcept;
+    const Face* resolveFace(const FontQuery& query, std::string* matchedFamily) const noexcept;
+    const Face* defaultFace() const noexcept;
     static void initFaceHarfBuzz(Face& face);
     static void clearFaceHarfBuzz(Face& face);
     std::vector<std::unique_ptr<Face>> faces_;
