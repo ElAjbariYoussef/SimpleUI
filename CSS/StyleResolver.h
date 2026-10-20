@@ -27,20 +27,24 @@ struct PseudoState {
     bool focusVisible = false;
 };
 
-// A `::selection` rule's winnings for one element's text: explicit foreground
-// and background, each optional. Unset colors fall back to the run color and
-// the default highlight bar.
+// A `::selection` rule's winnings for one element's text: explicit foreground,
+// background, and text-decoration line, each optional. Unset colors fall back
+// to the run color and the default highlight bar; an unset decoration leaves
+// the selected glyphs undecorated.
 struct SelectionColors {
     bool fgSet = false;
     SDL_Color fg{0, 0, 0, 255};
     bool bgSet = false;
     SDL_Color bg{0, 0, 0, 255};
+    bool decorationSet = false;
+    ComputedStyle::TextDecorationLine decoration = ComputedStyle::DecNone;
 };
 
-// The font properties a `::marker` rule can win for one list item. Each slot is
-// optional: an unset slot falls back to the item's own computed font. Sizes are
-// resolved against the item's font size; the rest are already absolute.
-struct MarkerFont {
+// The font properties a pseudo-element mini-cascade can win for one box
+// (`::marker`, `::first-letter`). Each slot is optional: an unset slot falls
+// back to the box's own computed font. Sizes are resolved against the base font
+// size; the rest are already absolute.
+struct PseudoFont {
     bool sizeSet = false;
     float size = 0.0f;
     bool familySet = false;
@@ -50,6 +54,7 @@ struct MarkerFont {
     bool styleSet = false;
     ComputedStyle::FontStyle style = ComputedStyle::FontNormal;
 };
+using MarkerFont = PseudoFont;
 
 // Per-element animation state, kept between resolves. `target` is the previous
 // raw computed style (before interpolation): a transition compares author values
@@ -188,12 +193,18 @@ public:
     SelectionColors firstLetterColors(Element& element) const;
     SelectionColors markerColors(Element& element) const;
     MarkerFont markerFont(Element& element, const ComputedStyle& base) const;
+    // `::first-letter` font slots. Layout splits the first grapheme into its
+    // own run when any slot is set; a color-only rule stays paint-only.
+    PseudoFont firstLetterFont(Element& element, const ComputedStyle& base) const;
 
 private:
     ComputedStyle resolveWithParent(Element& element, const ComputedStyle& parent) const;
 
     // The shared mini-cascade behind the three color pseudos.
     SelectionColors pseudoColors(Element& element, std::string_view pseudo) const;
+    // The shared font mini-cascade behind `::marker` and `::first-letter`.
+    PseudoFont pseudoFont(Element& element, std::string_view pseudo,
+                          const ComputedStyle& base) const;
 
     // Cascade layers (`@layer`), in first-declared order. A rule's layer sorts
     // before its specificity: later layers beat earlier ones, and unlayered

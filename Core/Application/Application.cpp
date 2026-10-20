@@ -2963,6 +2963,16 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
             }
         }
     std::vector<std::tuple<std::size_t, float, float>> selSpans;
+    // One rule per selected line, painted after the glyphs so a line-through
+    // crosses them instead of hiding behind them.
+    struct SelectionRule {
+        float x = 0.0f;
+        float y = 0.0f;
+        float w = 0.0f;
+        float baseline = 0.0f;
+        float fontSize = 0.0f;
+    };
+    std::vector<SelectionRule> selRules;
     sui::SelectionColors selColors;
     if (selStart >= 0 && selEnd > selStart && isEditableField(&el) &&
         !el.textRuns().empty()) {
@@ -3058,6 +3068,9 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                 const float selH = firstRun.height > 0.0f ? firstRun.height : (firstRun.fontSize * 1.2f);
                 const SDL_FRect selRect{std::floor(startX), std::floor(firstRun.y - ty),
                                         std::max(1.0f, endX - startX), selH};
+                selRules.push_back({selRect.x, selRect.y, selRect.w,
+                                    firstRun.y - ty + firstRun.baseline,
+                                    firstRun.fontSize});
                 if (selColors.bgSet) {
                     const SDL_Color bg = selColors.bg;
                     SDL_SetRenderDrawColor(
@@ -3207,6 +3220,27 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
             SDL_RenderFillRect(sdlRenderer, &rule);
         }
         SDL_DestroyTexture(texture);
+    }
+
+    // A `::selection` text-decoration line follows the selected spans, using
+    // the highlight foreground when the rule set one. Each selected line gets
+    // its own rule at the baseline, above the ascender, or through the middle.
+    if (selColors.decorationSet &&
+        selColors.decoration != ComputedStyle::DecNone) {
+        const SDL_Color dec = selColors.fgSet ? selColors.fg : s.color;
+        SDL_SetRenderDrawColor(sdlRenderer, dec.r, dec.g, dec.b,
+                               static_cast<Uint8>(static_cast<float>(dec.a) * opacity));
+        for (const SelectionRule& rule : selRules) {
+            const float thick = std::max(1.0f, rule.fontSize * 0.06f);
+            float y = rule.baseline;
+            if (selColors.decoration == ComputedStyle::DecOverline) {
+                y = rule.baseline - rule.fontSize;
+            } else if (selColors.decoration == ComputedStyle::DecLineThrough) {
+                y = rule.baseline - rule.fontSize * 0.3f;
+            }
+            const SDL_FRect line{std::floor(rule.x), std::floor(y), rule.w, thick};
+            SDL_RenderFillRect(sdlRenderer, &line);
+        }
     }
 
     // A closed select shows the selected option's text and a drop arrow. Its

@@ -3454,6 +3454,92 @@ int main() {
         }
     }
 
+    // `::selection` text-decoration paints after the selected glyphs: the
+    // underline shows below the baseline while the pseudo rule matches, and
+    // disappears when the rule no longer does.
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "sui-selection-decoration-check";
+        fs::remove_all(root);
+        fs::create_directories(root);
+        {
+            std::ofstream out(root / "style.css", std::ios::binary);
+            out << "body { margin: 0; background: #000000 }\n"
+                   "#t { position: absolute; left: 20px; top: 20px; width: 300px;"
+                   " height: 60px; margin: 0; padding: 0; border: 0;"
+                   " background: #000000; color: #ffffff; font-size: 32px }\n"
+                   "::selection { background: #000000; color: #00ff00 }\n"
+                   "input.rule::selection { text-decoration: underline }\n";
+        }
+        {
+            std::ofstream out(root / "index.sui", std::ios::binary);
+            out << "<sui><head><link rel=\"stylesheet\" href=\"style.css\"/></head>"
+                   "<body><input id=\"t\" class=\"rule\" type=\"text\""
+                   " value=\"MMMM\"/></body></sui>";
+        }
+        const fs::path previous = fs::current_path();
+        struct RestoreSelection {
+            fs::path previous;
+            ~RestoreSelection() {
+                std::error_code ec;
+                fs::current_path(previous, ec);
+            }
+        } restoreSelection{previous};
+        fs::current_path(root);
+
+        sui::Application app;
+        std::string error;
+        check(app.start("index.sui", error), "a selection decoration project starts");
+        if (app.platform()) {
+            const sui::WindowId primary = app.platform()->primaryWindow();
+            sui::Element* t = app.document().getElementById("t");
+            check(t != nullptr, "the selection decoration input exists");
+            if (t) {
+                app.document().setFocused(t);
+                app.selectAll();
+                check(app.hasSelection(), "the selection decoration text is selected");
+                check(app.renderFrame(primary), "the selection decoration page lays out");
+                const auto readPixel = [&](float x, float y, int& r, int& g, int& b) -> bool {
+                    SDL_Renderer* renderer = app.platform()->renderer(primary);
+                    if (!renderer) {
+                        return false;
+                    }
+                    const SDL_Rect rect{static_cast<int>(x), static_cast<int>(y), 1, 1};
+                    SDL_Surface* read = SDL_RenderReadPixels(renderer, &rect);
+                    if (!read) {
+                        return false;
+                    }
+                    SDL_Surface* conv = SDL_ConvertSurface(read, SDL_PIXELFORMAT_ABGR8888);
+                    SDL_DestroySurface(read);
+                    if (!conv) {
+                        return false;
+                    }
+                    const Uint8* px = static_cast<const Uint8*>(conv->pixels);
+                    r = px[0];
+                    g = px[1];
+                    b = px[2];
+                    SDL_DestroySurface(conv);
+                    return true;
+                };
+                check(!t->textRuns().empty(), "the selection decoration text has runs");
+                if (!t->textRuns().empty()) {
+                    const sui::Element::TextRun& run = t->textRuns()[0];
+                    const float x = run.x + run.width * 0.5f;
+                    const float y = std::floor(run.y + run.baseline) + 0.5f;
+                    int r = 0, g = 0, b = 0;
+                    check(readPixel(x, y, r, g, b) && g > 180 && r < 80 && b < 80,
+                          "a selection underline paints in the highlight foreground");
+
+                    t->removeAttribute("class");
+                    check(app.renderFrame(primary),
+                          "the decorated selection page lays out without the rule");
+                    check(readPixel(x, y, r, g, b) && r < 60 && g < 60 && b < 60,
+                          "removing the selection rule removes the underline");
+                }
+            }
+        }
+    }
+
     platform->shutdown();
 
     std::printf("input_tests: %d checks, %d failures\n", checks, failures);

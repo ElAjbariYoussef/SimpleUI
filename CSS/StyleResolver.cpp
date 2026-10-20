@@ -9596,7 +9596,17 @@ SelectionColors StyleResolver::markerColors(Element& element) const {
 }
 
 MarkerFont StyleResolver::markerFont(Element& element, const ComputedStyle& base) const {
-    MarkerFont out;
+    return pseudoFont(element, "::marker", base);
+}
+
+PseudoFont StyleResolver::firstLetterFont(Element& element,
+                                          const ComputedStyle& base) const {
+    return pseudoFont(element, "::first-letter", base);
+}
+
+PseudoFont StyleResolver::pseudoFont(Element& element, std::string_view pseudo,
+                                     const ComputedStyle& base) const {
+    PseudoFont out;
     // The same cascade bids the highlight properties use, one per font slot.
     // A tie on importance and specificity goes to the later rule.
     struct Win {
@@ -9613,7 +9623,7 @@ MarkerFont StyleResolver::markerFont(Element& element, const ComputedStyle& base
         }
         const Selector::Kind last = rule.selector.parts.back().kind;
         if (last != Selector::Kind::PseudoElement ||
-            rule.selector.parts.back().value != "::marker") {
+            rule.selector.parts.back().value != pseudo) {
             continue;
         }
         if (!rule.media.empty() &&
@@ -9623,8 +9633,8 @@ MarkerFont StyleResolver::markerFont(Element& element, const ComputedStyle& base
         if (rule.container.active && !containerMatches(rule.container, element)) {
             continue;
         }
-        // The prefix selects the item; `::marker` only names the pseudo. A bare
-        // `::marker` owns every item's marker.
+        // The prefix selects the box; the pseudo part only names the pseudo.
+        // A bare pseudo owns every matching box.
         SimpleSelector prefix = rule.selector;
         prefix.parts.pop_back();
         if (!prefix.combinators.empty()) {
@@ -9753,6 +9763,40 @@ MarkerFont StyleResolver::markerFont(Element& element, const ComputedStyle& base
     return out;
 }
 
+namespace {
+
+// The line a `text-decoration`/`text-decoration-line` value asks for. The
+// engine's decoration model has one line, so the first recognized token wins;
+// `none` and `initial` clear it, while an inherited keyword leaves the slot
+// unset for the caller to fall back.
+bool parseDecorationLine(std::string_view value,
+                         ComputedStyle::TextDecorationLine& out) {
+    for (std::string_view token : splitTokens(value)) {
+        if (token == "underline") {
+            out = ComputedStyle::DecUnderline;
+            return true;
+        }
+        if (token == "overline") {
+            out = ComputedStyle::DecOverline;
+            return true;
+        }
+        if (token == "line-through") {
+            out = ComputedStyle::DecLineThrough;
+            return true;
+        }
+        if (token == "none" || token == "initial") {
+            out = ComputedStyle::DecNone;
+            return true;
+        }
+        if (token == "inherit" || token == "unset") {
+            return false;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
 SelectionColors StyleResolver::pseudoColors(Element& element,
                                             std::string_view pseudo) const {
     SelectionColors out;
@@ -9763,7 +9807,7 @@ SelectionColors StyleResolver::pseudoColors(Element& element,
         std::size_t order = 0;
         bool set = false;
     };
-    Bid fgBid, bgBid;
+    Bid fgBid, bgBid, decBid;
     for (const auto& rule : rules_) {
         if (rule.layerStatement || rule.selector.parts.empty()) {
             continue;
@@ -9798,7 +9842,28 @@ SelectionColors StyleResolver::pseudoColors(Element& element,
             const bool isFg = decl.property == "color";
             const bool isBg = decl.property == "background-color" ||
                               decl.property == "background";
-            if (!isFg && !isBg) {
+            const bool isDec = decl.property == "text-decoration" ||
+                               decl.property == "text-decoration-line";
+            if (!isFg && !isBg && !isDec) {
+                continue;
+            }
+            if (isDec) {
+                ComputedStyle::TextDecorationLine line =
+                    ComputedStyle::DecNone;
+                if (!parseDecorationLine(decl.value, line)) {
+                    continue;
+                }
+                if (decBid.set &&
+                    (decl.important != decBid.important
+                         ? decBid.important > decl.important
+                         : (specificity != decBid.specificity
+                                ? specificity < decBid.specificity
+                                : rule.order < decBid.order))) {
+                    continue;
+                }
+                decBid = Bid{decl.important, specificity, rule.order, true};
+                out.decorationSet = true;
+                out.decoration = line;
                 continue;
             }
             Bid& bid = isFg ? fgBid : bgBid;

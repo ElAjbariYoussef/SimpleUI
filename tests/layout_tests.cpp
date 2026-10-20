@@ -8054,8 +8054,8 @@ void testPlaceholder() {
 }
 
 // `::selection` colors come from rules ending in the pseudo-element whose
-// prefix matches the text owner, won by important/specificity/order. Only
-// `color` and `background-color` apply; anything else never paints a
+// prefix matches the text owner, won by important/specificity/order. `color`,
+// `background-color`, and `text-decoration` apply; anything else never paints a
 // highlight.
 void testSelectionColors() {
     auto document = parseOrNull(
@@ -8098,10 +8098,48 @@ void testSelectionColors() {
         *t);
     check(important.fgSet && important.fg.r == 0x11, "important beats specificity");
 
-    // Anything but the two colors never paints a highlight.
+    // `text-decoration`/`text-decoration-line`: one line, first token wins,
+    // explicit `none` clears it, and the same important/specificity/order
+    // cascade decides.
+    sui::SelectionColors underlined =
+        colorsOf("input::selection { text-decoration: underline }", *t);
+    check(underlined.decorationSet &&
+              underlined.decoration == sui::ComputedStyle::DecUnderline,
+          "a selection rule underlines the selected text");
+    sui::SelectionColors through =
+        colorsOf("input::selection { text-decoration: line-through }", *t);
+    check(through.decorationSet &&
+              through.decoration == sui::ComputedStyle::DecLineThrough,
+          "a selection rule strikes through the selected text");
+    sui::SelectionColors scopedDec = colorsOf(
+        "::selection { text-decoration: line-through } "
+        "input::selection { text-decoration: overline }",
+        *t);
+    check(scopedDec.decorationSet &&
+              scopedDec.decoration == sui::ComputedStyle::DecOverline,
+          "a scoped selection decoration beats a global one");
+    sui::SelectionColors firstToken = colorsOf(
+        "input::selection { text-decoration: underline line-through }", *t);
+    check(firstToken.decorationSet &&
+              firstToken.decoration == sui::ComputedStyle::DecUnderline,
+          "the first decoration token wins");
+    sui::SelectionColors noneDec =
+        colorsOf("input::selection { text-decoration: none }", *t);
+    check(noneDec.decorationSet && noneDec.decoration == sui::ComputedStyle::DecNone,
+          "an explicit selection none clears the line");
+    sui::SelectionColors importantDec = colorsOf(
+        "input::selection { text-decoration: underline !important } "
+        "input::selection { text-decoration: none }",
+        *t);
+    check(importantDec.decorationSet &&
+              importantDec.decoration == sui::ComputedStyle::DecUnderline,
+          "!important wins the selection decoration");
+
+    // Anything else never paints a highlight.
     sui::SelectionColors junk =
         colorsOf("input::selection { border-image: none; font-size: 99px }", *t);
-    check(!junk.fgSet && !junk.bgSet, "other declarations never apply");
+    check(!junk.fgSet && !junk.bgSet && !junk.decorationSet,
+          "other declarations never apply");
 }
 
 // `::first-line` and `::first-letter` read the same mini-cascade as
@@ -8233,6 +8271,176 @@ void testMarkerFont() {
     check(!zero.sizeSet, "a non-positive marker size is dropped");
     sui::MarkerFont div = fontOf("div::marker { font-size: 40px }", *a);
     check(!div.sizeSet, "a marker rule matches its own element only");
+}
+
+// `::first-letter` reads the same font mini-cascade as `::marker`; layout
+// splits the first grapheme when any slot is set.
+void testFirstLetterFont() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"a\" style=\"font-size:20px\">x</div>"
+        "<p id=\"p\">x</p></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* a = document->getElementById("a");
+    Element* p = document->getElementById("p");
+    check(a && p, "first-letter font elements found");
+    if (!a || !p) {
+        return;
+    }
+    const auto fontOf = [&](const char* css, Element& el) {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(css));
+        resolver.setRootFontSize(16.0f);
+        return resolver.firstLetterFont(el, resolver.resolve(el));
+    };
+    sui::PseudoFont none = fontOf("body { margin: 0 }", *a);
+    check(!none.sizeSet && !none.familySet && !none.weightSet && !none.styleSet,
+          "no first-letter rule leaves the font unset");
+    sui::PseudoFont px = fontOf("::first-letter { font-size: 32px }", *a);
+    check(px.sizeSet && px.size == 32.0f,
+          "a first-letter font-size resolves to px");
+    sui::PseudoFont em = fontOf("::first-letter { font-size: 1.5em }", *a);
+    check(em.sizeSet && em.size == 30.0f,
+          "first-letter em follows the element font size");
+    sui::PseudoFont pct = fontOf("::first-letter { font-size: 150% }", *a);
+    check(pct.sizeSet && pct.size == 30.0f,
+          "first-letter percent follows the element font size");
+    sui::PseudoFont rem = fontOf("::first-letter { font-size: 2rem }", *a);
+    check(rem.sizeSet && rem.size == 32.0f,
+          "first-letter rem follows the root font size");
+    sui::PseudoFont scoped =
+        fontOf("::first-letter { font-size: 10px } div::first-letter { font-size: 30px }",
+               *a);
+    check(scoped.sizeSet && scoped.size == 30.0f,
+          "a scoped first-letter rule beats a global");
+    sui::PseudoFont important = fontOf(
+        "::first-letter { font-size: 10px !important } "
+        "div::first-letter { font-size: 30px }",
+        *a);
+    check(important.sizeSet && important.size == 10.0f,
+          "!important wins the first-letter font cascade");
+    sui::PseudoFont family =
+        fontOf("::first-letter { font-family: \"Fancy\", serif }", *a);
+    check(family.familySet && family.family == "Fancy",
+          "a first-letter family keeps its first face");
+    sui::PseudoFont weight = fontOf("::first-letter { font-weight: bold }", *a);
+    check(weight.weightSet && weight.weight == 700,
+          "a first-letter weight reads keywords");
+    sui::PseudoFont bolder = fontOf("::first-letter { font-weight: bolder }", *a);
+    check(bolder.weightSet && bolder.weight == 700,
+          "first-letter bolder follows the element weight");
+    sui::PseudoFont italic = fontOf("::first-letter { font-style: italic }", *a);
+    check(italic.styleSet && italic.style == sui::ComputedStyle::FontItalic,
+          "a first-letter style reads italic");
+    sui::PseudoFont inherit = fontOf("::first-letter { font-size: inherit }", *a);
+    check(!inherit.sizeSet, "first-letter font-size inherit keeps the element size");
+    sui::PseudoFont initial = fontOf("::first-letter { font-size: initial }", *a);
+    check(initial.sizeSet && initial.size == 16.0f,
+          "first-letter font-size initial returns the medium size");
+    sui::PseudoFont zero = fontOf("::first-letter { font-size: 0 }", *a);
+    check(!zero.sizeSet, "a non-positive first-letter size is dropped");
+    sui::PseudoFont paragraph = fontOf("p::first-letter { font-size: 40px }", *a);
+    check(!paragraph.sizeSet, "a first-letter rule matches its own element only");
+}
+
+// `::first-letter` font slots reach layout: the first grapheme becomes its own
+// run with the pseudo metrics, the first line grows to fit it, and the rest of
+// the word continues without an inter-word gap. Later lines keep the element
+// font, a color-only rule never splits, and an inside marker is not the letter.
+void testFirstLetterSizing() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<p id=\"a\">Hello world</p>"
+        "<p id=\"b\" style=\"width:80px\">Hello wonderful world</p>"
+        "<p id=\"c\"><span>Hello</span> world</p>"
+        "<ul><li id=\"e\" style=\"list-style-position:inside\">Item</li></ul>"
+        "<p id=\"f\">Hello</p>"
+        "<p id=\"g\" style=\"white-space:pre\"> Hello</p>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body{margin:0;font-size:16px}"
+        "#b::first-letter{font-size:48px;font-weight:bold;font-style:italic}"
+        "#c::first-letter{font-size:40px}"
+        "#e::first-letter{font-size:40px}"
+        "#f::first-letter{color:#ff0000}"
+        "#g::first-letter{font-size:32px}"));
+    layoutRoot(*document, resolver, 400.0f);
+
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    Element* c = document->getElementById("c");
+    Element* e = document->getElementById("e");
+    Element* f = document->getElementById("f");
+    Element* g = document->getElementById("g");
+    check(a && b && c && e && f && g, "first-letter layout elements found");
+    if (!a || !b || !c || !e || !f || !g || a->textRuns().empty() ||
+        b->textRuns().size() < 2 || c->textRuns().size() < 2 ||
+        e->textRuns().size() < 3 || f->textRuns().empty() ||
+        g->textRuns().size() < 3) {
+        check(false, "first-letter layout produced runs");
+        return;
+    }
+
+    check(a->textRuns().size() == 2 && a->textRuns()[0].text == "Hello" &&
+              a->textRuns()[0].fontSize == 16.0f,
+          "plain text keeps its whole first word in the base font");
+
+    const auto& letter = b->textRuns()[0];
+    const auto& rest = b->textRuns()[1];
+    check(letter.text == "H" && letter.fontSize == 48.0f,
+          "the first grapheme takes the first-letter size");
+    check(letter.bold && letter.italic,
+          "the first grapheme takes the first-letter weight and style");
+    check(letter.width > 20.0f, "the enlarged letter reserves its width");
+    check(rest.text == "ello" && rest.fontSize == 16.0f && !rest.bold && !rest.italic,
+          "the rest of the word keeps the element font");
+    check(std::abs(rest.x - (letter.x + letter.width)) < 0.5f,
+          "the rest follows the letter without a word gap");
+    check(std::abs(letter.height - rest.height) < 0.5f,
+          "the first line shares the enlarged line height");
+    check(b->layoutHeight() > a->layoutHeight() + 20.0f,
+          "the enlarged first line makes the paragraph taller");
+    bool laterLine = false;
+    float laterHeight = 0.0f;
+    float secondLineY = 0.0f;
+    for (const auto& run : b->textRuns()) {
+        if (secondLineY == 0.0f && run.y > letter.y + 0.5f) {
+            secondLineY = run.y;
+        }
+        if (run.y > letter.y + 20.0f && run.fontSize == 16.0f) {
+            laterLine = true;
+            laterHeight = run.height;
+            break;
+        }
+    }
+    check(secondLineY - letter.y > 40.0f,
+          "the enlarged first line pushes the next line down");
+    check(laterLine, "later lines keep the element font and start below the letter");
+    check(laterHeight > 0.0f && laterHeight < 30.0f,
+          "later lines return to the element line height");
+
+    check(c->textRuns()[0].text == "H" && c->textRuns()[0].fontSize == 40.0f &&
+              c->textRuns()[1].text == "ello" && c->textRuns()[1].fontSize == 16.0f,
+          "an inline child's first letter still takes the block pseudo");
+
+    check(e->textRuns()[0].fontSize == 16.0f &&
+              e->textRuns()[1].text == "I" &&
+              e->textRuns()[1].fontSize == 40.0f &&
+              e->textRuns()[2].text == "tem" && e->textRuns()[2].fontSize == 16.0f,
+          "an inside marker stays base-sized and the item letter is not the marker");
+
+    check(f->textRuns().size() == 1 && f->textRuns()[0].text == "Hello",
+          "a color-only first-letter rule does not split the run");
+
+    check(g->textRuns()[0].text == " " && g->textRuns()[0].fontSize == 16.0f &&
+              g->textRuns()[1].text == "H" && g->textRuns()[1].fontSize == 32.0f &&
+              g->textRuns()[2].text == "ello" && g->textRuns()[2].fontSize == 16.0f,
+          "leading preserved space does not consume the first letter");
 }
 
 // `accent-color` tints native controls, inherits like `color`, and resets to
@@ -11935,6 +12143,8 @@ int main() {
     testFirstLineLetter();
     testMarkerColors();
     testMarkerFont();
+    testFirstLetterFont();
+    testFirstLetterSizing();
     testAccentColor();
     testListInside();
     testListStyleImage();

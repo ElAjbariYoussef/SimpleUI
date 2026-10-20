@@ -357,6 +357,10 @@ public:
     // Exposed for Flow, which needs the same answers run() uses.
     bool isLaidOut(Element& el) const { return laidOut(el); }
     ComputedStyle resolveStyle(Element& el) const { return resolver_.resolve(el); }
+    bool hasFirstLetterRules() const { return resolver_.hasFirstLetterRules(); }
+    PseudoFont firstLetterFont(Element& el, const ComputedStyle& base) const {
+        return resolver_.firstLetterFont(el, base);
+    }
 
     // A percentage height has to resolve against a containing block that is
     // usually itself content-sized, which is not knowable while laying out. The
@@ -2677,12 +2681,18 @@ private:
               ownerEl_(owner_el),
               style_(s),
               metrics_(m),
+              lineHeight_(m.lineHeight),
               maxWidth_(maxWidth),
               originX_(originX),
               originY_(originY),
               spacing_(spacingFor(s.whiteSpace)),
               lineClamp_(maxWidth >= kUnbounded / 2 ? 0 : s.lineClamp) {
             lineRunStartIndex_ = owner_el.textRuns().size();
+            // Form controls draw their value, not authored inline content, so
+            // the first-letter pseudo never applies to them.
+            firstLetterPending_ =
+                owner_.hasFirstLetterRules() && owner_el.tag() != "input" &&
+                owner_el.tag() != "textarea" && owner_el.tag() != "select";
             if (s.textIndent.unit != sui::Length::Auto) {
                 penX_ = std::max(0.0f, s.textIndent.resolve(s.fontSize, s.fontSize, 16.0f));
             }
@@ -2697,7 +2707,7 @@ private:
             float right = originX_ + maxWidth_;
             if (owner_.floats_) {
                 owner_.floats_->available(originY_ + cursorY_,
-                                          originY_ + cursorY_ + metrics_.lineHeight, left,
+                                          originY_ + cursorY_ + lineHeight_, left,
                                           right);
             }
             lineIndent_ = std::max(0.0f, left - originX_);
@@ -2757,6 +2767,7 @@ private:
         }
 
         void lineBreak() {
+            firstLetterPending_ = false;
             if (lineHasContent_) {
                 newLine();
             }
@@ -2795,8 +2806,15 @@ private:
                         marker = listMarkerText(own.listStyleType, 0);
                     }
                     // A non-breaking gap survives collapsing where a plain
-                    // space would not.
+                    // space would not. The marker is not the item's first
+                    // letter; re-arm the split for the content after it.
+                    const bool pendingLetter = firstLetterPending_;
+                    firstLetterPending_ = false;
                     text(marker + "\xC2\xA0", own);
+                    if (pendingLetter && linesCommitted_ == 0) {
+                        firstLetterPending_ = true;
+                        firstLetterAfterMarker_ = true;
+                    }
                 }
             }
             // A control draws its current value where a normal element would
@@ -2881,7 +2899,7 @@ private:
                 if (isFloated(cs)) {
                     if (owner_.floats_) {
                         const float floatY = lineHasContent_
-                                                 ? originY_ + cursorY_ + metrics_.lineHeight
+                                                 ? originY_ + cursorY_ + lineHeight_
                                                  : originY_ + cursorY_;
                         owner_.placeFloat(*child, cs, maxWidth_, originX_, floatY);
                         syncLine();
@@ -2897,6 +2915,9 @@ private:
         }
 
         void atomic(Element& child, const ComputedStyle& cs) {
+            firstLetterPending_ = false;
+            firstLetterAfterSpace_ = false;
+            firstLetterAfterMarker_ = false;
             const UsedBox box = owner_.usedBox(cs, maxWidth_);
             // Measure before deciding to wrap: an auto-width atomic box is as
             // wide as its contents want, so the break test needs that number. The
@@ -2950,9 +2971,9 @@ private:
             // together with `top`/`bottom`.
             if (cs.verticalAlign == ComputedStyle::VAlignBottom ||
                 cs.verticalAlign == ComputedStyle::VAlignTextBottom) {
-                child.setLayoutY(lineTop + metrics_.lineHeight - child.layoutHeight() -
+                child.setLayoutY(lineTop + lineHeight_ - child.layoutHeight() -
                                  box.margin.bottom);
-                boxBottom = cursorY_ + metrics_.lineHeight;
+                boxBottom = cursorY_ + lineHeight_;
             } else if (cs.verticalAlign == ComputedStyle::VAlignTop ||
                        cs.verticalAlign == ComputedStyle::VAlignTextTop) {
                 child.setLayoutY(lineTop + box.margin.top);
@@ -3194,7 +3215,8 @@ private:
                 return;
             }
             breakAllowed_ = false;
-            cursorY_ += metrics_.lineHeight;
+            cursorY_ += lineHeight_;
+            lineHeight_ = metrics_.lineHeight;
             penX_ = 0.0f;
             lineHasContent_ = false;
             ellipsisAdded_ = false;
@@ -3233,7 +3255,7 @@ private:
             ownerEl_.addTextRun(
                 {kEllipsis, endX,
                  originY_ + cursorY_ + verticalAlignShift(style_, &metrics_, &metrics_), ellWidth,
-                 metrics_.lineHeight, metrics_.ascent, style_.fontSize, style_.color.r,
+                 lineHeight_, metrics_.ascent, style_.fontSize, style_.color.r,
                  style_.color.g, style_.color.b, style_.color.a, style_.fontBold,
                  style_.fontStyle != ComputedStyle::FontNormal, style_.fontFamily});
             penX_ = endX - originX_ - lineIndent_ + ellWidth;
@@ -3254,7 +3276,7 @@ private:
 
         float cursorY() const {
             // The trailing line is never committed, so count it here.
-            const float tail = lineHasContent_ ? metrics_.lineHeight : 0.0f;
+            const float tail = lineHasContent_ ? lineHeight_ : 0.0f;
             return std::max(cursorY_ + tail, bottom_);
         }
         float penX() const { return penX_; }
@@ -3401,12 +3423,15 @@ private:
             }
             ownerEl_.addTextRun({" ", originX_ + lineIndent_ + penX_,
                                  originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m),
-                                 gap, metrics_.lineHeight, metrics_.ascent + ascentDelta,
+                                 gap, lineHeight_, metrics_.ascent + ascentDelta,
                                  s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
                                  s.fontBold, s.fontStyle != ComputedStyle::FontNormal,
                                  s.fontFamily});
             penX_ += gap;
             lineHasContent_ = true;
+            if (firstLetterPending_ && linesCommitted_ == 0) {
+                firstLetterAfterSpace_ = true;
+            }
             widest_ = std::max(widest_, penX_);
         }
 
@@ -3430,12 +3455,15 @@ private:
             }
             ownerEl_.addTextRun({" ", originX_ + lineIndent_ + penX_,
                                  originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m),
-                                 metrics_.spaceWidth, metrics_.lineHeight,
+                                 metrics_.spaceWidth, lineHeight_,
                                  metrics_.ascent + ascentDelta, s.fontSize, s.color.r, s.color.g,
                                  s.color.b, s.color.a, s.fontBold,
                                  s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
             penX_ += metrics_.spaceWidth;
             lineHasContent_ = true;
+            if (firstLetterPending_ && linesCommitted_ == 0) {
+                firstLetterAfterSpace_ = true;
+            }
             widest_ = std::max(widest_, penX_);
         }
 
@@ -3509,7 +3537,7 @@ private:
                 ownerEl_.addTextRun(
                     {piece, originX_ + lineIndent_ + penX_ + space,
                      originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), pieceWidth,
-                     metrics_.lineHeight, metrics_.ascent + ascentDelta, s.fontSize, s.color.r,
+                     lineHeight_, metrics_.ascent + ascentDelta, s.fontSize, s.color.r,
                      s.color.g, s.color.b, s.color.a, s.fontBold,
                      s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
                 penX_ += space + pieceWidth;
@@ -3595,7 +3623,7 @@ private:
                 ownerEl_.addTextRun(
                     {piece, originX_ + lineIndent_ + penX_ + space,
                      originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), pieceWidth,
-                     metrics_.lineHeight, metrics_.ascent + ascentDelta, s.fontSize, s.color.r,
+                     lineHeight_, metrics_.ascent + ascentDelta, s.fontSize, s.color.r,
                      s.color.g, s.color.b, s.color.a, s.fontBold,
                      s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
                 penX_ += space + pieceWidth;
@@ -3623,6 +3651,89 @@ private:
                 breakAllowed_ = false;
                 clampSuppressed_ = true;
                 return;
+            }
+            // A preserved-space run may hand the whole leading whitespace
+            // along with the word. It belongs before the letter and never
+            // consumes the first-letter opportunity.
+            if (firstLetterPending_ && !w.empty()) {
+                std::size_t lead = 0;
+                while (lead < w.size() &&
+                       std::isspace(static_cast<unsigned char>(w[lead]))) {
+                    ++lead;
+                }
+                if (lead > 0) {
+                    for (std::size_t k = 0; k < lead; ++k) {
+                        preservedSpace(s, m, ascentDelta);
+                    }
+                    w.remove_prefix(lead);
+                    if (w.empty()) {
+                        return;
+                    }
+                }
+            }
+            // `::first-letter` splits the first grapheme of the first formatted
+            // line into its own run, so the pseudo font can change its metrics
+            // and the first line's height. Leading preserved spaces and an
+            // inside marker may already sit on the line; they do not consume
+            // the letter.
+            if (firstLetterPending_ && !w.empty() && linesCommitted_ == 0 &&
+                (!lineHasContent_ || firstLetterAfterSpace_ ||
+                 firstLetterAfterMarker_)) {
+                firstLetterPending_ = false;
+                firstLetterAfterSpace_ = false;
+                firstLetterAfterMarker_ = false;
+                const PseudoFont letterFont = owner_.firstLetterFont(ownerEl_, s);
+                if (letterFont.sizeSet || letterFont.familySet ||
+                    letterFont.weightSet || letterFont.styleSet) {
+                    // One codepoint plus its UTF-8 continuations. A grapheme
+                    // that joins several codepoints (a ZWJ emoji) is wider than
+                    // this split, matching the engine's per-codepoint runs.
+                    std::size_t bytes = 1;
+                    while (bytes < w.size() &&
+                           (static_cast<unsigned char>(w[bytes]) & 0xC0) == 0x80) {
+                        ++bytes;
+                    }
+                    ComputedStyle letterStyle = s;
+                    if (letterFont.sizeSet) {
+                        letterStyle.fontSize = letterFont.size;
+                    }
+                    if (letterFont.familySet) {
+                        letterStyle.fontFamily = letterFont.family;
+                    }
+                    if (letterFont.weightSet) {
+                        letterStyle.fontWeight = letterFont.weight;
+                        letterStyle.fontBold = letterFont.weight >= 600;
+                    }
+                    if (letterFont.styleSet) {
+                        letterStyle.fontStyle = letterFont.style;
+                    }
+                    const Metrics letterMetrics = metricsFor(owner_.font_, letterStyle);
+                    lineHeight_ = std::max(lineHeight_, letterMetrics.lineHeight);
+                    syncLine();
+                    const std::string_view letter = w.substr(0, bytes);
+                    const float letterWidth =
+                        textWidth(owner_.font_, letterStyle, letter);
+                    ownerEl_.addTextRun(
+                        {transformText(letterStyle, letter),
+                         originX_ + lineIndent_ + penX_,
+                         originY_ + cursorY_ +
+                             verticalAlignShift(letterStyle, &metrics_, &letterMetrics),
+                         letterWidth, letterMetrics.lineHeight, letterMetrics.ascent,
+                         letterStyle.fontSize, letterStyle.color.r, letterStyle.color.g,
+                         letterStyle.color.b, letterStyle.color.a, letterStyle.fontBold,
+                         letterStyle.fontStyle != ComputedStyle::FontNormal,
+                         letterStyle.fontFamily});
+                    penX_ += letterWidth;
+                    lineHasContent_ = true;
+                    widest_ = std::max(widest_, penX_);
+                    w.remove_prefix(bytes);
+                    // The rest is the same word: it must continue without an
+                    // inter-word gap, even though the line now has content.
+                    if (!w.empty()) {
+                        word(w, s, m, ascentDelta, true);
+                    }
+                    return;
+                }
             }
             // Wrapping has to be on for this run: `white-space` sets the box
             // wide mode, and `text-wrap: nowrap` (inherited or on an inner
@@ -3660,8 +3771,9 @@ private:
                 breakAcrossLines(w, s, m, ascentDelta);
                 return;
             }
+            const float wrapGap = suppressGap ? 0.0f : metrics_.spaceWidth;
             if (wraps && lineHasContent_ &&
-                lineIndent_ + penX_ + metrics_.spaceWidth + wWidth > lineAvail_) {
+                lineIndent_ + penX_ + wrapGap + wWidth > lineAvail_) {
                 newLine();
                 if (clamped_) {
                     clampSuppressed_ = true;
@@ -3718,7 +3830,7 @@ private:
                         const float rWidth = textWidth(owner_.font_, s, result);
                         ownerEl_.addTextRun({result, originX_ + lineIndent_ + penX_ + space,
                                              originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), rWidth,
-                                             metrics_.lineHeight, metrics_.ascent + ascentDelta,
+                                             lineHeight_, metrics_.ascent + ascentDelta,
                                              s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
                                              s.fontBold, s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
                         penX_ += space + rWidth;
@@ -3732,7 +3844,7 @@ private:
                 if (lineAvail_ - (lineIndent_ + penX_ + space) >= ellWidth) {
                     ownerEl_.addTextRun({kEllipsis, originX_ + lineIndent_ + penX_ + space,
                                          originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), ellWidth,
-                                         metrics_.lineHeight, metrics_.ascent + ascentDelta,
+                                         lineHeight_, metrics_.ascent + ascentDelta,
                                          s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
                                          s.fontBold, s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
                     penX_ += space + ellWidth;
@@ -3767,7 +3879,7 @@ private:
 
                 ownerEl_.addTextRun({kEllipsis, originX_ + lineIndent_,
                                      originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), ellWidth,
-                                     metrics_.lineHeight, metrics_.ascent + ascentDelta,
+                                     lineHeight_, metrics_.ascent + ascentDelta,
                                      s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
                                      s.fontBold, s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
                 penX_ = ellWidth;
@@ -3780,7 +3892,7 @@ private:
             std::string wt = transformText(s, w);
             ownerEl_.addTextRun({wt, originX_ + lineIndent_ + penX_ + space,
                                  originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), wWidth,
-                                 metrics_.lineHeight, metrics_.ascent + ascentDelta,
+                                 lineHeight_, metrics_.ascent + ascentDelta,
                                  s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
                                  s.fontBold, s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
             penX_ += space + wWidth;
@@ -3792,6 +3904,9 @@ private:
         Element& ownerEl_;
         const ComputedStyle& style_;
         Metrics metrics_;
+        // The current line's height. A larger `::first-letter` grows the first
+        // line; newLine() restores the container's height for later lines.
+        float lineHeight_ = 0.0f;
         float maxWidth_ = 0.0f;
         float originX_ = 0.0f;
         float originY_ = 0.0f;
@@ -3804,6 +3919,12 @@ private:
         float lineIndent_ = 0.0f;
         float lineAvail_ = 0.0f;
         bool lineHasContent_ = false;
+        // The first formatted line still owes its first-grapheme split. Leading
+        // preserved spaces or an inside marker may already have content on the
+        // line, so those paths remember that the letter still follows.
+        bool firstLetterPending_ = false;
+        bool firstLetterAfterSpace_ = false;
+        bool firstLetterAfterMarker_ = false;
         // Set when floats narrow a line, which rules `text-wrap` re-breaking out:
         // the inset changes per line, so one target width is meaningless.
         bool sawFloat_ = false;
