@@ -326,6 +326,90 @@ int main() {
               "the borderless state still removes the frame");
     }
 
+    // Minimize to tray: the window hides behind a tray icon, painting stops, and
+    // restoring brings it back. The script-facing WindowApi drives the same
+    // calling-window path.
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "sui-tray-check";
+        fs::remove_all(root);
+        fs::create_directories(root);
+        {
+            std::ofstream out(root / "index.sui", std::ios::binary);
+            out << "<sui><body><p id=\"where\">tray</p></body></sui>";
+        }
+        const fs::path previous = fs::current_path();
+        fs::current_path(root);
+        struct RestoreTray {
+            fs::path previous;
+            ~RestoreTray() {
+                std::error_code ec;
+                fs::current_path(previous, ec);
+            }
+        } restoreTray{previous};
+
+        sui::Application app;
+        std::string error;
+        check(app.start("index.sui", error), "the tray project starts");
+        const sui::WindowId primary = app.platform()->primaryWindow();
+        check(app.renderFrame(primary), "the tray page frames");
+        check(!app.inTray(), "a fresh window is not in the tray");
+
+        sui::script::WindowApi windowApi;
+        if (windowApi.minimizeToTray()) {
+            check(app.platform()->isMinimizedToTray(primary),
+                  "the platform holds a tray icon");
+            check((SDL_GetWindowFlags(app.platform()->window(primary)) &
+                   SDL_WINDOW_HIDDEN) != 0,
+                  "a minimized window is hidden");
+            check(windowApi.inTray(), "the API reports the tray state");
+            check(windowApi.minimizeToTray(), "minimizing again is harmless");
+            check(app.platform()->isMinimizedToTray(primary), "still one tray icon");
+
+            // Nothing changed while hidden, so the repaint after restoring relies
+            // on the frame stamp being invalidated, not on page staleness.
+            windowApi.restoreFromTray();
+            check(!app.platform()->isMinimizedToTray(primary),
+                  "restoring drops the tray icon");
+            check((SDL_GetWindowFlags(app.platform()->window(primary)) &
+                   SDL_WINDOW_HIDDEN) == 0,
+                  "restoring shows the window");
+            check(app.renderFrame(primary), "the restored window paints");
+            check(!windowApi.inTray(), "the API reports the restored state");
+
+            // A page that did change while hidden still paints nothing: the tray
+            // skip comes before the stale check.
+            check(windowApi.minimizeToTray(), "a window can return to the tray");
+            sui::script::DocumentApi{}.invalidate();
+            check(!app.renderFrame(primary), "a window in the tray paints nothing");
+            windowApi.restoreFromTray();
+            check(app.renderFrame(primary), "a stale page paints after restore");
+            check(app.platform()->pumpEvents(), "restoring does not quit the app");
+        } else {
+            // A session with no SNI host (a bare CI box) must degrade to a
+            // visible window rather than trapping it off screen. Prove the
+            // failure came from the platform and not from the script wrapper.
+            std::string retryError;
+            if (app.platform()->minimizeToTray(primary, retryError)) {
+                check(false, "the script window API fails only without a tray");
+                app.platform()->restoreFromTray(primary);
+            } else {
+                check(!app.inTray(),
+                      "a platform without a tray leaves the window out of it");
+                check((SDL_GetWindowFlags(app.platform()->window(primary)) &
+                       SDL_WINDOW_HIDDEN) == 0,
+                      "a failed minimize leaves the window visible");
+                sui::script::DocumentApi{}.invalidate();
+                check(app.renderFrame(primary),
+                      "the window still paints after a failed minimize");
+            }
+        }
+
+        std::string trayError;
+        check(!app.platform()->minimizeToTray(sui::kInvalidWindow, trayError),
+              "an unknown window cannot minimize to the tray");
+    }
+
     // Windows carry their own identity through the event queue. A second window
     // opens beside the first, events name the window they came from, and closing
     // one window closes one window.

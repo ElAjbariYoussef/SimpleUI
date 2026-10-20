@@ -1,6 +1,7 @@
 #include "SUI/Script/Script.h"
 
 #include "CSS/StyleResolver.h"
+#include "Core/Application/Application.h"
 #include "SUI/DOM/Document.h"
 
 #include <SDL3/SDL.h>
@@ -217,6 +218,21 @@ void DocumentApi::invalidate() const {
     if (g_context) {
         g_context->invalidate();
     }
+}
+
+bool WindowApi::minimizeToTray() const {
+    return g_context && g_context->application &&
+           g_context->application->minimizeToTray();
+}
+
+void WindowApi::restoreFromTray() const {
+    if (g_context && g_context->application) {
+        g_context->application->restoreFromTray();
+    }
+}
+
+bool WindowApi::inTray() const {
+    return g_context && g_context->application && g_context->application->inTray();
 }
 
 std::string ComputedStyleApi::getPropertyValue(std::string_view property) const {

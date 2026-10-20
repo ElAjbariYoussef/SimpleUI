@@ -11,6 +11,25 @@ std::string describe(const char* context) {
     return std::string(context) + ": " + SDL_GetError();
 }
 
+// The tray icon is drawn here rather than loaded: a tray must work in a project
+// with no assets, and a 16x16 window glyph reads at that size everywhere. White
+// frame, blue title bar, white body on a transparent field.
+SDL_Surface* makeTrayIcon() {
+    SDL_Surface* icon = SDL_CreateSurface(16, 16, SDL_PIXELFORMAT_ARGB8888);
+    if (!icon) {
+        return nullptr;
+    }
+    const auto fill = [&](int x, int y, int w, int h, Uint8 r, Uint8 g, Uint8 b) {
+        SDL_Rect rect{x, y, w, h};
+        SDL_FillSurfaceRect(icon, &rect, SDL_MapSurfaceRGBA(icon, r, g, b, 255));
+    };
+    SDL_FillSurfaceRect(icon, nullptr, SDL_MapSurfaceRGBA(icon, 0, 0, 0, 0));
+    fill(2, 2, 12, 12, 235, 235, 240);
+    fill(3, 3, 10, 10, 255, 255, 255);
+    fill(3, 3, 10, 3, 70, 130, 250);
+    return icon;
+}
+
 // SDL reports the held buttons as a bitmask; the engine wants a single index, with
 // 0 meaning none, so that a move can say whether it is part of a drag.
 int heldButton(Uint32 state) {
@@ -115,6 +134,8 @@ bool LinuxPlatform::initialize(const WindowConfig& config, std::string& error) {
         error = describe("SDL_Init(VIDEO)");
         return false;
     }
+    // A custom event type carries tray clicks back to the main thread.
+    trayRestoreEvent_ = SDL_RegisterEvents(1);
     // The entry window keeps the identity every un-threaded call site assumes.
     if (!createWindow(nextId_++, config, error)) {
         SDL_Quit();
@@ -182,6 +203,13 @@ bool LinuxPlatform::createWindow(WindowId id, const WindowConfig& config, std::s
 }
 
 void LinuxPlatform::destroyWindow(Window& window) {
+    // The icon represents this window, so it goes with it; leaving it behind
+    // would offer a menu for a window that no longer exists.
+    if (const auto tray = trays_.find(window.id); tray != trays_.end()) {
+        SDL_Tray* icon = tray->second.tray;
+        trays_.erase(tray);
+        SDL_DestroyTray(icon);
+    }
     if (window.renderer) {
         SDL_DestroyRenderer(window.renderer);
         window.renderer = nullptr;
@@ -206,6 +234,11 @@ void LinuxPlatform::shutdown() {
     }
     windows_.clear();
     closed_.clear();
+    if (trayIcon_) {
+        SDL_DestroySurface(trayIcon_);
+        trayIcon_ = nullptr;
+    }
+    trayRestoreEvent_ = 0;
     SDL_Quit();
 }
 
@@ -303,6 +336,98 @@ void LinuxPlatform::present(WindowId id) {
     }
 }
 
+bool LinuxPlatform::minimizeToTray(WindowId id, std::string& error) {
+    Window* target = find(id);
+    if (!target) {
+        error = "no such window";
+        return false;
+    }
+    if (trays_.contains(id)) {
+        return true;
+    }
+    if (trayRestoreEvent_ == 0) {
+        error = "tray events are not registered";
+        return false;
+    }
+    if (!trayIcon_) {
+        trayIcon_ = makeTrayIcon();
+    }
+    // Clicking the icon restores the window. A Show/Quit menu would be the
+    // usual tray shape, but SDL's DBus tray backend crashes while tearing a
+    // populated menu down (the icon itself is stable), so v1 is click-only.
+    SDL_PropertiesID props = SDL_CreateProperties();
+    if (!props) {
+        error = describe("SDL_CreateProperties");
+        return false;
+    }
+    Tray& entry = trays_[id];
+    entry.platform = this;
+    entry.window = id;
+    const char* title = SDL_GetWindowTitle(target->window);
+    SDL_SetPointerProperty(props, SDL_PROP_TRAY_CREATE_ICON_POINTER, trayIcon_);
+    SDL_SetStringProperty(props, SDL_PROP_TRAY_CREATE_TOOLTIP_STRING,
+                          title && *title ? title : "SimpleUI");
+    // The map node's address is the callback's userdata and stays put for as
+    // long as the entry lives.
+    SDL_SetPointerProperty(props, SDL_PROP_TRAY_CREATE_USERDATA_POINTER, &entry);
+    SDL_SetPointerProperty(props, SDL_PROP_TRAY_CREATE_LEFTCLICK_CALLBACK_POINTER,
+                           reinterpret_cast<void*>(trayClicked));
+    SDL_SetPointerProperty(props, SDL_PROP_TRAY_CREATE_RIGHTCLICK_CALLBACK_POINTER,
+                           reinterpret_cast<void*>(trayClicked));
+    SDL_Tray* tray = SDL_CreateTrayWithProperties(props);
+    SDL_DestroyProperties(props);
+    if (!tray) {
+        error = describe("SDL_CreateTrayWithProperties");
+        trays_.erase(id);
+        return false;
+    }
+    entry.tray = tray;
+    // The icon stands in for the window now; hiding it is what "minimize" means.
+    SDL_HideWindow(target->window);
+    return true;
+}
+
+void LinuxPlatform::restoreFromTray(WindowId id) {
+    // Show the window before the icon goes: unregistering the last tray while
+    // every window is hidden makes SDL post a quit, which would end the app
+    // instead of restoring it.
+    Window* target = find(id);
+    if (target) {
+        SDL_ShowWindow(target->window);
+    }
+    const auto found = trays_.find(id);
+    if (found == trays_.end()) {
+        return;
+    }
+    SDL_Tray* tray = found->second.tray;
+    trays_.erase(found);
+    SDL_DestroyTray(tray);
+    if (target) {
+        SDL_RaiseWindow(target->window);
+    }
+}
+
+bool LinuxPlatform::isMinimizedToTray(WindowId id) const {
+    return trays_.contains(id);
+}
+
+bool LinuxPlatform::trayClicked(void* userdata, SDL_Tray*) {
+    auto* tray = static_cast<Tray*>(userdata);
+    if (!tray || !tray->platform) {
+        return false;
+    }
+    // Clicks arrive on SDL's DBus thread, so they only post: pumpEvents
+    // touches the window list on the thread that owns it.
+    SDL_Event event{};
+    event.type = tray->platform->trayRestoreEvent_;
+    if (event.type == 0) {
+        return false;
+    }
+    event.user.code = static_cast<Sint32>(tray->window);
+    SDL_PushEvent(&event);
+    return false;
+}
+
 void LinuxPlatform::windowSize(WindowId id, int& width, int& height) const {
     width = 0;
     height = 0;
@@ -352,6 +477,12 @@ bool LinuxPlatform::pumpEvents() {
         if (event.type == SDL_EVENT_QUIT) {
             // The app is going away entirely, unlike one window closing.
             running_ = false;
+            continue;
+        }
+        // Tray clicks arrive as custom events (they are posted from another
+        // thread), so they are resolved before the window routing below.
+        if (trayRestoreEvent_ != 0 && event.type == trayRestoreEvent_) {
+            restoreFromTray(static_cast<WindowId>(event.user.code));
             continue;
         }
         // Every event names the window it came from, and an event for a window the

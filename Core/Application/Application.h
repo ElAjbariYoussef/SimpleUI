@@ -252,6 +252,17 @@ public:
     // when there is no window to close.
     bool closePage();
 
+    // Minimizes the calling page's window to a tray icon, or restores it. The
+    // calling window is the same one `closePage` means: the bound page's window
+    // while handling one of its events, else the primary. A minimized window is
+    // hidden and skipped by the frame loop, but its page keeps running; the
+    // tray icon's menu restores the window or quits the app. `minimizeToTray`
+    // answers false when there is no window or the platform cannot make an
+    // icon, reporting the reason.
+    bool minimizeToTray();
+    void restoreFromTray();
+    bool inTray() const;
+
     // Advances every `scroll-behavior: smooth` scroll one frame and reports
     // whether one is still moving. The frame loop calls it before deciding the
     // page is stale, so an animating scroller keeps repainting.
@@ -542,6 +553,10 @@ private:
     int pageForEvent(const InputEvent& event) const;
     // The page a window shows, or -1 for a panel.
     int pageForWindow(WindowId id) const;
+    // The window the calling page is shown in: the bound page's window while
+    // handling one of its events or frames, else the primary. `kInvalidWindow`
+    // when there is no platform, no such window, or a bound page with no window.
+    WindowId callingWindow() const;
     // Moves the working copy into the named page (`bindPage`) or back out of
     // whichever page holds it (`flushBound`). The script context follows the
     // working copy so handlers always see the page they belong to.

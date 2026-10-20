@@ -12,6 +12,8 @@
 struct SDL_Window;
 struct SDL_Renderer;
 struct SDL_Cursor;
+struct SDL_Tray;
+struct SDL_Surface;
 
 namespace sui {
 
@@ -98,6 +100,16 @@ public:
     // Windows closed since the last pumpEvents(), oldest first. The application
     // reads this to drop the page each one was showing.
     virtual const std::vector<WindowId>& closedWindows() const = 0;
+
+    // --- Tray ---
+    //
+    // A window minimized to the tray is hidden and represented by a tray icon
+    // whose menu brings it back or quits the app. `minimizeToTray` answers
+    // false with `error` when the platform cannot place an icon, leaving the
+    // window visible; a window already in the tray is a no-op success.
+    virtual bool minimizeToTray(WindowId id, std::string& error) = 0;
+    virtual void restoreFromTray(WindowId id) = 0;
+    virtual bool isMinimizedToTray(WindowId id) const = 0;
 
     virtual SDL_Window* window(WindowId id) const = 0;
     virtual SDL_Renderer* renderer(WindowId id) const = 0;

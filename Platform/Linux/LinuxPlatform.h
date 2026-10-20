@@ -2,6 +2,8 @@
 
 #include "Platform/Platform.h"
 
+#include <map>
+
 namespace sui {
 
 class LinuxPlatform final : public Platform {
@@ -15,6 +17,10 @@ public:
     WindowId primaryWindow() const override;
     std::vector<WindowId> windows() const override;
     const std::vector<WindowId>& closedWindows() const override { return closed_; }
+
+    bool minimizeToTray(WindowId id, std::string& error) override;
+    void restoreFromTray(WindowId id) override;
+    bool isMinimizedToTray(WindowId id) const override;
 
     SDL_Window* window(WindowId id) const override;
     SDL_Renderer* renderer(WindowId id) const override;
@@ -47,6 +53,19 @@ private:
     // window keeps the identity the rest of startup expects.
     bool createWindow(WindowId id, const WindowConfig& config, std::string& error);
     void destroyWindow(Window& window);
+
+    // One window's tray icon. The node's address is the click callback's
+    // userdata, which is stable for as long as the icon lives (std::map keeps
+    // nodes in place across insertions and erasures of other nodes).
+    struct Tray {
+        LinuxPlatform* platform = nullptr;
+        SDL_Tray* tray = nullptr;
+        WindowId window = kInvalidWindow;
+    };
+    // Click callbacks can run off the main thread, so they only post a custom
+    // event; pumpEvents does the window work on the main thread. Linux's
+    // SDLCALL is empty, so the plain signature matches SDL_TrayClickCallback.
+    static bool trayClicked(void* userdata, SDL_Tray* tray);
     Window* find(WindowId id);
     const Window* find(WindowId id) const;
     // The engine id for an SDL window id, or `kInvalidWindow` for one the engine
@@ -69,6 +88,12 @@ private:
     // The keyword already in effect, kept so an unchanged hover does not re-issue
     // SDL_SetCursor on every motion event.
     std::string cursorName_;
+    // Tray icons by window, the shared lazily built glyph every icon uses, and
+    // the custom SDL event types the menu callbacks post. 0 means "not
+    // registered" (the platform failed to reserve them).
+    std::map<WindowId, Tray> trays_;
+    SDL_Surface* trayIcon_ = nullptr;
+    std::uint32_t trayRestoreEvent_ = 0;
 };
 
 }  // namespace sui

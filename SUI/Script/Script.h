@@ -126,6 +126,17 @@ public:
     StyleSheetApi styleSheets() const { return StyleSheetApi{}; }
 };
 
+// window.minimizeToTray() / window.restoreFromTray() / window.inTray() — the
+// calling page's window, the same window its event handlers act on. Minimizing
+// hides the window behind a tray icon whose menu restores it or quits the app;
+// the page keeps running (timers included) while hidden.
+class WindowApi {
+public:
+    bool minimizeToTray() const;
+    void restoreFromTray() const;
+    bool inTray() const;
+};
+
 struct ConsoleApi {
     void log(std::string_view message) const { sui::script::log(message); }
     void warn(std::string_view message) const { sui::script::warn(message); }
@@ -146,6 +157,7 @@ using sui::Element;
 inline sui::script::DocumentApi document{};
 inline sui::script::ConsoleApi console{};
 inline sui::script::PerformanceApi performance{};
+inline sui::script::WindowApi window{};
 
 // Date.now() is not expressible in C++ — a class name cannot take the dot
 // syntax — so the closest C++ spelling, Date::now(), is the one on offer.

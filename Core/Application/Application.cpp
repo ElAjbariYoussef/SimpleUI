@@ -4192,28 +4192,62 @@ WindowId Application::openPage(std::string_view href, std::string& error) {
     return id;
 }
 
-bool Application::closePage() {
+WindowId Application::callingWindow() const {
     if (!platform_) {
-        return false;
+        return kInvalidWindow;
     }
     // The caller's own window while handling one of its events or frames, else
-    // the primary window's. A headless page has no window to close.
-    WindowId window = kInvalidWindow;
+    // the primary window's. A headless page has no window.
     if (boundPage_ >= 0) {
         for (const auto& [id, index] : bindings_) {
             if (index == static_cast<std::size_t>(boundPage_)) {
-                window = id;
-                break;
+                return platform_->hasWindow(id) ? id : kInvalidWindow;
             }
         }
-    } else {
-        window = platform_->primaryWindow();
+        return kInvalidWindow;
     }
-    if (window == kInvalidWindow || !platform_->hasWindow(window)) {
+    const WindowId primary = platform_->primaryWindow();
+    return platform_->hasWindow(primary) ? primary : kInvalidWindow;
+}
+
+bool Application::closePage() {
+    const WindowId window = callingWindow();
+    if (window == kInvalidWindow) {
         return false;
     }
     platform_->closeWindow(window);
     return true;
+}
+
+bool Application::minimizeToTray() {
+    const WindowId window = callingWindow();
+    if (window == kInvalidWindow) {
+        return false;
+    }
+    std::string error;
+    if (!platform_->minimizeToTray(window, error)) {
+        script::warn("cannot minimize to tray: " + error);
+        return false;
+    }
+    return true;
+}
+
+void Application::restoreFromTray() {
+    const WindowId window = callingWindow();
+    if (window == kInvalidWindow) {
+        return;
+    }
+    platform_->restoreFromTray(window);
+    // A backbuffer does not necessarily survive being hidden, so the next frame
+    // has to paint even when nothing in the page changed.
+    if (WindowFrame* frame = frameFor(window)) {
+        frame->drawn = false;
+    }
+}
+
+bool Application::inTray() const {
+    const WindowId window = callingWindow();
+    return window != kInvalidWindow && platform_->isMinimizedToTray(window);
 }
 
 void Application::dropClosedPages() {
@@ -5707,6 +5741,11 @@ bool Application::renderFrame(WindowId id) {
     ensureFrameStartup();
     dropClosedFrames();
     if (!platform_) {
+        return false;
+    }
+    if (platform_->isMinimizedToTray(id)) {
+        // A window in the tray is not on screen; painting it would only burn
+        // frames nobody sees.
         return false;
     }
     WindowFrame* frame = frameFor(id);
