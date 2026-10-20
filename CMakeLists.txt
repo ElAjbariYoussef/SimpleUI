@@ -29,6 +29,7 @@ add_library(sui STATIC
     SUI/Script/Timers.cpp
     SUI/DOM/Element.cpp
     SUI/DOM/Document.cpp
+    SUI/DOM/MutationObserver.cpp
     CSS/DefaultStyle.cpp
     CSS/Easing.cpp
     CSS/Animation.cpp

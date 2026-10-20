@@ -6171,6 +6171,13 @@ bool Application::renderFrame(WindowId id) {
         // CSS transition or keyframe animation keeps the frame stale on its own,
         // so an animated page repaints without any script.
         const bool timerFired = sui::script::pumpTimers();
+        // MutationObserver callbacks are microtasks: after timers and before
+        // the stale check, drain everything queued by events, scripts, or an
+        // earlier callback. A callback that changes the tree sets the mutation
+        // counter, and this return also marks the frame stale even when it only
+        // reads the records.
+        const bool mutationsDelivered =
+            document_ ? document_->deliverMutationObservers() : false;
         // A CSS animation or a smooth scroll keeps moving on its own, so either
         // holds the frame stale until it finishes -- in the page or in any of
         // its frames.
@@ -6216,7 +6223,7 @@ bool Application::renderFrame(WindowId id) {
         }
         const bool stale =
             !frame->drawn || width != frame->stamp.width || height != frame->stamp.height ||
-            timerFired || moving || caretPhaseChanged || windowEvents ||
+            timerFired || mutationsDelivered || moving || caretPhaseChanged || windowEvents ||
             (isPrimary &&
              (!scriptedClicks_.empty() || !scriptedMoves_.empty() || !scriptedWheels_.empty())) ||
             (document_ && document_->mutationCount() != frame->stamp.mutations) ||

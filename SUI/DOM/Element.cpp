@@ -56,18 +56,29 @@ void Element::insertChild(std::unique_ptr<Element> child, std::size_t index) {
         return;
     }
     child->parent_ = this;
-    children_.insert(children_.begin() +
-                         static_cast<std::ptrdiff_t>(std::min(index, children_.size())),
+    const std::size_t at = std::min(index, children_.size());
+    children_.insert(children_.begin() + static_cast<std::ptrdiff_t>(at),
                      std::move(child));
+    if (document_) {
+        Element* inserted = children_[at].get();
+        Element* previous = at > 0 ? children_[at - 1].get() : nullptr;
+        Element* next = at + 1 < children_.size() ? children_[at + 1].get() : nullptr;
+        document_->recordChildList(this, {inserted}, {}, previous, next);
+    }
 }
 
 std::unique_ptr<Element> Element::removeChild(std::size_t index) {
     if (index >= children_.size()) {
         return nullptr;
     }
+    Element* previous = index > 0 ? children_[index - 1].get() : nullptr;
+    Element* next = index + 1 < children_.size() ? children_[index + 1].get() : nullptr;
     std::unique_ptr<Element> child = std::move(children_[index]);
     children_.erase(children_.begin() + static_cast<std::ptrdiff_t>(index));
     child->parent_ = nullptr;
+    if (document_) {
+        document_->recordChildList(this, {}, {child.get()}, previous, next);
+    }
     return child;
 }
 
@@ -88,15 +99,27 @@ std::string_view Element::attribute(std::string_view key) const {
 }
 
 void Element::setAttribute(std::string key, std::string value) {
+    const auto existing = attributes_.find(key);
+    const bool hadOldValue = existing != attributes_.end();
+    std::string oldValue = hadOldValue ? existing->second : std::string();
+    const std::string name = key;
     attributes_.insert_or_assign(std::move(key), std::move(value));
     touch();
+    if (document_) {
+        document_->recordAttribute(this, name, std::move(oldValue), hadOldValue);
+    }
 }
 
 void Element::removeAttribute(std::string_view key) {
     auto it = attributes_.find(key);
     if (it != attributes_.end()) {
+        std::string oldValue = it->second;
+        const std::string name(key);
         attributes_.erase(it);
         touch();
+        if (document_) {
+            document_->recordAttribute(this, name, std::move(oldValue), true);
+        }
     }
 }
 
@@ -230,8 +253,12 @@ void Element::setScrollTop(float v) {
 }
 
 void Element::setText(std::string text) {
+    std::string oldValue = text_;
     text_ = std::move(text);
     touch();
+    if (document_ && isTextNode()) {
+        document_->recordCharacterData(this, std::move(oldValue));
+    }
 }
 
 void Element::collectText(std::string& out) const {
@@ -265,12 +292,28 @@ bool Element::hasVisibleContent() const {
 }
 
 void Element::setTextContent(std::string text) {
-    children_.clear();
-    touch();
     if (isTextNode()) {
+        std::string oldValue = text_;
         text_ = std::move(text);
+        touch();
+        if (document_) {
+            document_->recordCharacterData(this, std::move(oldValue));
+        }
         return;
     }
+    std::vector<Element*> removed;
+    removed.reserve(children_.size());
+    for (const auto& child : children_) {
+        if (child) {
+            removed.push_back(child.get());
+            child->parent_ = nullptr;
+        }
+    }
+    children_.clear();
+    if (document_ && !removed.empty()) {
+        document_->recordChildList(this, {}, removed, nullptr, nullptr);
+    }
+    touch();
     if (text.empty()) {
         return;
     }

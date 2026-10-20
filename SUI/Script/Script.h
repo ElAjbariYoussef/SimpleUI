@@ -11,6 +11,7 @@
 #pragma once
 
 #include "SUI/DOM/Element.h"
+#include "SUI/DOM/MutationObserver.h"
 #include "SUI/Script/Timers.h"
 
 #include <cstdint>
@@ -156,6 +157,11 @@ struct ConsoleApi {
 #ifndef SUI_NO_WEB_GLOBALS
 using sui::Document;
 using sui::Element;
+using sui::MutationCallback;
+using sui::MutationObserver;
+using sui::MutationObserverInit;
+using sui::MutationRecord;
+using sui::MutationType;
 
 inline sui::script::DocumentApi document{};
 inline sui::script::ConsoleApi console{};

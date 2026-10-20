@@ -29,6 +29,20 @@ void intervalCb() { ++intervalFires; }
 int rafFires = 0;
 void rafCb() { ++rafFires; }
 
+// MutationObserver callbacks are plain functions too, so their records land in
+// file-scope storage the test can inspect after delivery.
+int observerBatches = 0;
+int filterBatches = 0;
+std::vector<sui::MutationRecord> observerRecords;
+void observerCb(const std::vector<sui::MutationRecord>& records) {
+    ++observerBatches;
+    observerRecords.insert(observerRecords.end(), records.begin(), records.end());
+}
+void filterCb(const std::vector<sui::MutationRecord>& records) {
+    ++filterBatches;
+    observerRecords.insert(observerRecords.end(), records.begin(), records.end());
+}
+
 void check(bool condition, const char* what) {
     if (!condition) {
         std::printf("FAIL: %s\n", what);
@@ -469,6 +483,141 @@ void testTimersAndAnimationFrames() {
     check(Date::now() >= epoch - 1.0, "Date::now() reads the wall clock");
 }
 
+// MutationObserver: childList, attribute, and characterData records queue per
+// observer, honour subtree/filter/old-value options, and drain on delivery.
+void testMutationObserver() {
+    auto doc = parseOrNull(
+        "<sui><body><div id=\"host\"><p id=\"child\">one</p></div>"
+        "<div id=\"other\"></div></body></sui>");
+    if (!doc) {
+        return;
+    }
+    Element* host = doc->getElementById("host");
+    Element* child = doc->getElementById("child");
+    Element* other = doc->getElementById("other");
+    check(host && child && other && !child->children().empty(),
+          "the mutation fixtures exist");
+    if (!host || !child || !other || child->children().empty()) {
+        return;
+    }
+    Element* text = child->children()[0].get();
+    observerBatches = 0;
+    filterBatches = 0;
+    observerRecords.clear();
+
+    sui::MutationObserver observer(observerCb);
+    observer.observe(host, sui::MutationObserverInit{true, true, true, true, true, true});
+    check(observer.valid(), "an observer arms on a target");
+
+    // childList: an append reports the inserted node and its siblings.
+    auto span = std::make_unique<Element>("span", doc.get());
+    Element* spanPtr = span.get();
+    host->appendChild(std::move(span));
+    check(doc->deliverMutationObservers(), "a childList mutation delivers");
+    check(observerBatches == 1, "one batch reaches the observer");
+    check(observerRecords.size() == 1 &&
+              observerRecords[0].type == sui::MutationType::ChildList &&
+              observerRecords[0].target == host &&
+              observerRecords[0].addedNodes.size() == 1 &&
+              observerRecords[0].addedNodes[0] == spanPtr &&
+              observerRecords[0].previousSibling == child &&
+              observerRecords[0].nextSibling == nullptr,
+          "the append record names the node and siblings");
+    check(!doc->deliverMutationObservers(), "a drained queue delivers nothing");
+
+    // characterData records the old text when asked.
+    observerBatches = 0;
+    observerRecords.clear();
+    text->setText("two");
+    check(doc->deliverMutationObservers() && observerBatches == 1,
+          "a text mutation delivers one batch");
+    check(observerRecords.size() == 1 &&
+              observerRecords[0].type == sui::MutationType::CharacterData &&
+              observerRecords[0].target == text &&
+              observerRecords[0].hadOldValue && observerRecords[0].oldValue == "one",
+          "characterData carries the old value");
+
+    // attributes queue in order; the second sees the first as its old value.
+    observerBatches = 0;
+    observerRecords.clear();
+    host->setAttribute("data-mode", "a");
+    host->setAttribute("data-mode", "b");
+    check(doc->deliverMutationObservers(), "attribute mutations deliver");
+    check(observerRecords.size() == 2 && observerBatches == 1,
+          "two attribute writes make two records in one batch");
+    check(observerRecords[0].type == sui::MutationType::Attributes &&
+              observerRecords[0].attributeName == "data-mode" &&
+              !observerRecords[0].hadOldValue &&
+              observerRecords[1].hadOldValue && observerRecords[1].oldValue == "a",
+          "attribute records carry names and old values");
+
+    // subtree reaches a nested target.
+    observerBatches = 0;
+    observerRecords.clear();
+    other->setAttribute("data-out", "1");
+    check(!doc->deliverMutationObservers(), "a mutation outside the subtree stays silent");
+    child->setAttribute("data-in", "1");
+    check(doc->deliverMutationObservers() && observerRecords.size() == 1 &&
+              observerRecords[0].target == child,
+          "subtree observes nested attributes");
+    observer.disconnect();
+    check(!observer.valid(), "disconnect deactivates the observer");
+
+    // takeRecords drains without calling the callback.
+    observer.observe(host, sui::MutationObserverInit{false, true, false, true, true, false});
+    observerBatches = 0;
+    observerRecords.clear();
+    host->setAttribute("data-taken", "yes");
+    const std::vector<sui::MutationRecord> taken = observer.takeRecords();
+    check(taken.size() == 1 && taken[0].attributeName == "data-taken",
+          "takeRecords returns the pending batch");
+    check(observerBatches == 0 && !doc->deliverMutationObservers(),
+          "taken records are not delivered twice");
+    observer.disconnect();
+
+    // attributeFilter keeps only named attributes.
+    sui::MutationObserver filtered(filterCb);
+    filtered.observe(host, sui::MutationObserverInit{false, true, false, true, true, false,
+                                                     {"data-keep"}});
+    filterBatches = 0;
+    observerRecords.clear();
+    host->setAttribute("data-drop", "1");
+    host->setAttribute("data-keep", "1");
+    check(doc->deliverMutationObservers(), "a filtered attribute delivers");
+    check(filterBatches == 1 && observerRecords.size() == 1 &&
+              observerRecords[0].attributeName == "data-keep",
+          "attributeFilter drops unrelated names");
+    filtered.disconnect();
+
+    // characterDataOldValue off strips the old text.
+    sui::MutationObserver chars(observerCb);
+    chars.observe(text, sui::MutationObserverInit{false, false, true, false, false, false});
+    observerBatches = 0;
+    observerRecords.clear();
+    text->setText("three");
+    check(doc->deliverMutationObservers() && observerRecords.size() == 1 &&
+              observerRecords[0].type == sui::MutationType::CharacterData &&
+              !observerRecords[0].hadOldValue && observerRecords[0].oldValue.empty(),
+          "characterDataOldValue off omits the old text");
+    chars.disconnect();
+
+    // A removal record keeps the detached node address while the caller owns it.
+    sui::MutationObserver removals(observerCb);
+    removals.observe(host, sui::MutationObserverInit{true, false, false, false});
+    observerBatches = 0;
+    observerRecords.clear();
+    std::unique_ptr<Element> removed = host->removeChild(1);
+    check(removed != nullptr && doc->deliverMutationObservers(),
+          "a removal delivers a childList record");
+    check(observerRecords.size() == 1 &&
+              observerRecords[0].type == sui::MutationType::ChildList &&
+              observerRecords[0].removedNodes.size() == 1 &&
+              observerRecords[0].removedNodes[0] == removed.get(),
+          "the removal record names the detached node");
+    removals.disconnect();
+    check(!doc->deliverMutationObservers(), "an empty registry is silent");
+}
+
 }  // namespace
 
 int main() {
@@ -484,6 +633,7 @@ int main() {
     testComputedStyleReads();
     testRuntimeStyleSheet();
     testTimersAndAnimationFrames();
+    testMutationObserver();
 
     if (failures) {
         std::printf("\n%d check(s) failed\n", failures);

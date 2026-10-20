@@ -2,6 +2,8 @@
 // and inline handlers will use.
 #pragma once
 
+#include "SUI/DOM/MutationObserver.h"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -58,6 +60,12 @@ public:
     std::uint64_t mutationCount() const noexcept { return mutations_; }
     void noteMutation() noexcept { ++mutations_; }
 
+    // Delivers every queued MutationObserver batch, including records queued by
+    // a callback during delivery. Returns true when at least one callback ran,
+    // so the frame loop can treat the frame as stale. Application calls this
+    // once per pumped frame; tests can call it directly.
+    bool deliverMutationObservers();
+
     // The element that last had focus, so focus-driven restyles can be diffed.
     Element* focused() const noexcept { return focused_; }
     void setFocused(Element* element) noexcept {
@@ -66,11 +74,32 @@ public:
     }
 
 private:
+    friend class Element;
+    friend class MutationObserver;
+
+    std::shared_ptr<MutationObserverState> newMutationObserver(MutationCallback callback);
+    void attachMutationObserver(const std::shared_ptr<MutationObserverState>& observer,
+                                Element* target, MutationObserverInit options);
+    void detachMutationObserver(const std::shared_ptr<MutationObserverState>& observer);
+    std::vector<MutationRecord> takeMutationRecords(
+        const std::shared_ptr<MutationObserverState>& observer);
+    void recordChildList(Element* target, const std::vector<Element*>& added,
+                         const std::vector<Element*>& removed,
+                         Element* previousSibling, Element* nextSibling);
+    void recordAttribute(Element* target, std::string_view name, std::string oldValue,
+                         bool hadOldValue);
+    void recordCharacterData(Element* target, std::string oldValue);
+    void queueMutation(MutationRecord record);
+    bool observerMatches(const MutationObserverRegistration& registration,
+                         const MutationRecord& record) const;
+    static bool isWithin(const Element* node, const Element* root);
+
     std::unique_ptr<Element> root_;
     std::vector<StylesheetLink> stylesheets_;
     std::vector<ScriptReference> scripts_;
     std::uint64_t mutations_ = 0;
     Element* focused_ = nullptr;
+    std::vector<std::weak_ptr<MutationObserverState>> mutationObservers_;
 };
 
 }  // namespace sui
