@@ -679,8 +679,9 @@ struct ComputedStyle {
     // eases toward it over several frames. Not inherited.
     enum class ScrollBehavior : std::uint8_t { Auto, Smooth };
     ScrollBehavior scrollBehavior = ScrollBehavior::Auto;
-    // Which user-agent colour pair the canvas takes. Not inherited: it
-    // describes the element it is declared on, and only the document root paints.
+    // Which user-agent colour pair the canvas and native controls take.
+    // Inherited, so `color-scheme: light` on a subtree restyles its widgets;
+    // `normal` follows the host preference.
     enum class ColorScheme : std::uint8_t { Normal, Light, Dark };
     ColorScheme colorScheme = ColorScheme::Normal;
     // `only light` / `only dark`: the page refuses the other scheme entirely.
@@ -1456,6 +1457,10 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     if (!(style.specified & ComputedStyle::SpecifiedCaretColor)) {
         style.caretColor = parent.caretColor;
         style.hasCaretColor = parent.hasCaretColor;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedColorScheme)) {
+        style.colorScheme = parent.colorScheme;
+        style.colorSchemeOnly = parent.colorSchemeOnly;
     }
     if (!(style.specified & ComputedStyle::SpecifiedFontKerning)) {
         style.fontKerning = parent.fontKerning;

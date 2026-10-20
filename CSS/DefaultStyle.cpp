@@ -23,6 +23,32 @@ const UaCanvas& uaCanvas(bool dark) noexcept {
     return dark ? kDark : kLight;
 }
 
+const UaWidgets& uaWidgets(bool dark) noexcept {
+    static const UaWidgets kDark{
+        {24, 24, 27, 255},   // surface
+        {39, 39, 42, 255},   // raised
+        {82, 82, 91, 255},   // border
+        {63, 63, 70, 255},   // raisedBorder
+        {228, 228, 231, 255},// text
+        {244, 244, 245, 255},// icon
+        {39, 39, 42, 255},   // track
+        {113, 113, 122, 255},// thumb
+        {63, 63, 70, 255},   // selected
+    };
+    static const UaWidgets kLight{
+        {255, 255, 255, 255},
+        {239, 239, 244, 255},
+        {181, 181, 190, 255},
+        {212, 212, 216, 255},
+        {24, 24, 27, 255},
+        {24, 24, 27, 255},
+        {241, 241, 245, 255},
+        {160, 160, 170, 255},
+        {229, 229, 234, 255},
+    };
+    return dark ? kDark : kLight;
+}
+
 void applyPhrasingStyle(ComputedStyle& style, std::string_view tag,
                         const ComputedStyle& parent) {
     const bool smaller = tag == "small" || tag == "sub" || tag == "sup";

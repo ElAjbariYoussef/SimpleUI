@@ -8821,7 +8821,7 @@ bool isInheritable(std::string_view property) {
            property == "empty-cells" || property == "tab-size" ||
            property == "white-space" || property == "text-wrap" ||
            property == "text-wrap-mode" || property == "text-wrap-style" ||
-           property == "hyphens";
+           property == "hyphens" || property == "color-scheme";
 }
 
 // `inherit` and `unset` are the two CSS-wide keywords the engine can answer
@@ -9092,6 +9092,37 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
     applyLevel(true);
 
     applyDimensionAttributes(style, element);
+    // Native controls take their user-agent colours from the used colour
+    // scheme too. The UA colours carry no `specified` bit, so a colour still
+    // holding the dark pair is the one the UA chose; an author value survives
+    // unless it happens to be that literal pair, the same trade the canvas
+    // makes below. Runs before currentColor so a border written
+    // `currentColor` follows the converted foreground.
+    const std::string_view widgetTag = element.tag();
+    const bool widgetFace = widgetTag == "button" || widgetTag == "input" ||
+                            widgetTag == "textarea" || widgetTag == "select" ||
+                            widgetTag == "meter" || widgetTag == "progress";
+    if (widgetFace && !colorSchemeUsesDark(style, systemDark_)) {
+        const UaWidgets& from = uaWidgets(true);
+        const UaWidgets& to = uaWidgets(false);
+        const bool raised = widgetTag == "button" || widgetTag == "meter" ||
+                            widgetTag == "progress";
+        const SDL_Color oldBackground = raised ? from.raised : from.surface;
+        const SDL_Color oldBorder =
+            widgetTag == "button" ? from.raisedBorder : from.border;
+        const auto sameColor = [](const SDL_Color& a, const SDL_Color& b) {
+            return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+        };
+        if (sameColor(style.backgroundColor, oldBackground)) {
+            style.backgroundColor = raised ? to.raised : to.surface;
+        }
+        if (sameColor(style.borderColor, oldBorder)) {
+            style.borderColor = widgetTag == "button" ? to.raisedBorder : to.border;
+        }
+        if (sameColor(style.color, from.text)) {
+            style.color = to.text;
+        }
+    }
     substituteCurrentColor(style);
     // The document root still wears the user-agent canvas colours, which
     // `color-scheme` re-picks. Either pair an author set survives, and the UA

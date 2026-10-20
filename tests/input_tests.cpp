@@ -3326,6 +3326,134 @@ int main() {
         }
     }
 
+    // `color-scheme` reaches the chrome the engine paints itself: a light file
+    // input, button, scrollbar, and media bar take the light user-agent palette.
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "sui-color-scheme-check";
+        fs::remove_all(root);
+        fs::create_directories(root);
+        {
+            std::ofstream out(root / "style.css", std::ios::binary);
+            out << "body { margin: 0; background: #000000 }\n";
+        }
+        {
+            std::ofstream out(root / "index.sui", std::ios::binary);
+            out << "<sui><head><link rel=\"stylesheet\" href=\"style.css\"/></head><body>"
+                   "<input id=\"darkfile\" type=\"file\" style=\"position:absolute;"
+                   "left:10px;top:10px;width:300px;height:40px\"/>"
+                   "<input id=\"lightfile\" type=\"file\" style=\"position:absolute;"
+                   "left:10px;top:70px;width:300px;height:40px;color-scheme:light\"/>"
+                   "<button id=\"darkbtn\" style=\"position:absolute;left:10px;top:130px;"
+                   "width:100px;height:40px\">B</button>"
+                   "<button id=\"lightbtn\" style=\"position:absolute;left:130px;top:130px;"
+                   "width:100px;height:40px;color-scheme:light\">B</button>"
+                   "<div style=\"position:absolute;left:330px;top:10px;width:80px;"
+                   "height:60px;overflow-y:scroll;background:#000000\">"
+                   "<div style=\"height:400px\">x</div></div>"
+                   "<div style=\"position:absolute;left:430px;top:10px;width:80px;"
+                   "height:60px;overflow-y:scroll;background:#000000;"
+                   "color-scheme:light\"><div style=\"height:400px\">x</div></div>"
+                   "<audio style=\"position:absolute;left:10px;top:220px\"></audio>"
+                   "<audio style=\"position:absolute;left:10px;top:270px;"
+                   "color-scheme:light\"></audio>"
+                   "</body></sui>";
+        }
+        const fs::path previous = fs::current_path();
+        struct RestoreScheme {
+            fs::path previous;
+            ~RestoreScheme() {
+                std::error_code ec;
+                fs::current_path(previous, ec);
+            }
+        } restoreScheme{previous};
+        fs::current_path(root);
+
+        sui::Application app;
+        std::string error;
+        check(app.start("index.sui", error), "a colour-scheme project starts");
+        if (app.platform()) {
+            const sui::WindowId primary = app.platform()->primaryWindow();
+            check(app.renderFrame(primary), "the colour-scheme page lays out");
+            const auto readPixel = [&](float x, float y, int& r, int& g, int& b) -> bool {
+                SDL_Renderer* renderer = app.platform()->renderer(primary);
+                if (!renderer) {
+                    return false;
+                }
+                const SDL_Rect rect{static_cast<int>(x), static_cast<int>(y), 1, 1};
+                SDL_Surface* read = SDL_RenderReadPixels(renderer, &rect);
+                if (!read) {
+                    return false;
+                }
+                SDL_Surface* conv = SDL_ConvertSurface(read, SDL_PIXELFORMAT_ABGR8888);
+                SDL_DestroySurface(read);
+                if (!conv) {
+                    return false;
+                }
+                const Uint8* px = static_cast<const Uint8*>(conv->pixels);
+                r = px[0];
+                g = px[1];
+                b = px[2];
+                SDL_DestroySurface(conv);
+                return true;
+            };
+            const auto near = [](int value, int expected, int tolerance = 4) {
+                return std::abs(value - expected) <= tolerance;
+            };
+            int r = 0, g = 0, b = 0;
+
+            const sui::UaWidgets& dark = sui::uaWidgets(true);
+            const sui::UaWidgets& light = sui::uaWidgets(false);
+
+            check(readPixel(50.0f, 25.0f, r, g, b) &&
+                      near(r, dark.raised.r) && near(g, dark.raised.g) &&
+                      near(b, dark.raised.b),
+                  "a dark file control paints its dark Browse button");
+            check(readPixel(50.0f, 85.0f, r, g, b) &&
+                      near(r, light.raised.r) && near(g, light.raised.g) &&
+                      near(b, light.raised.b),
+                  "a light file control paints its light Browse button");
+            check(readPixel(200.0f, 25.0f, r, g, b) &&
+                      near(r, dark.surface.r) && near(g, dark.surface.g) &&
+                      near(b, dark.surface.b),
+                  "a dark file control keeps the dark input surface");
+            check(readPixel(200.0f, 85.0f, r, g, b) &&
+                      near(r, light.surface.r) && near(g, light.surface.g) &&
+                      near(b, light.surface.b),
+                  "a light file control takes the light input surface");
+            check(readPixel(50.0f, 150.0f, r, g, b) &&
+                      near(r, dark.raised.r) && near(g, dark.raised.g) &&
+                      near(b, dark.raised.b),
+                  "a dark button paints the dark raised surface");
+            check(readPixel(170.0f, 150.0f, r, g, b) &&
+                      near(r, light.raised.r) && near(g, light.raised.g) &&
+                      near(b, light.raised.b),
+                  "a light button paints the light raised surface");
+            check(readPixel(407.0f, 15.0f, r, g, b) &&
+                      near(r, dark.thumb.r) && near(g, dark.thumb.g) &&
+                      near(b, dark.thumb.b),
+                  "a dark scrollbar paints the dark thumb");
+            check(readPixel(507.0f, 15.0f, r, g, b) &&
+                      near(r, light.thumb.r) && near(g, light.thumb.g) &&
+                      near(b, light.thumb.b),
+                  "a light scrollbar paints the light thumb");
+            check(readPixel(407.0f, 65.0f, r, g, b) && r < 60 && g < 60 && b < 60,
+                  "a dark scrollbar paints its dark track");
+            check(readPixel(507.0f, 65.0f, r, g, b) && r > 150 && g > 150 && b > 150,
+                  "a light scrollbar paints its light track");
+            check(readPixel(250.0f, 226.0f, r, g, b) &&
+                      near(r, static_cast<int>(dark.raised.r * 220.0f / 255.0f), 6) &&
+                      near(g, static_cast<int>(dark.raised.g * 220.0f / 255.0f), 6) &&
+                      near(b, static_cast<int>(dark.raised.b * 220.0f / 255.0f), 6),
+                  "a dark media bar paints the dark raised colour");
+            check(readPixel(250.0f, 276.0f, r, g, b) &&
+                      near(r, static_cast<int>(light.raised.r * 220.0f / 255.0f), 6) &&
+                      near(g, static_cast<int>(light.raised.g * 220.0f / 255.0f), 6) &&
+                      near(b, static_cast<int>(light.raised.b * 220.0f / 255.0f), 6),
+                  "a light media bar paints the light raised colour");
+        }
+    }
+
     platform->shutdown();
 
     std::printf("input_tests: %d checks, %d failures\n", checks, failures);

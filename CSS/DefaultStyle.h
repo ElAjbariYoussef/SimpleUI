@@ -26,6 +26,30 @@ struct UaCanvas {
 };
 const UaCanvas& uaCanvas(bool dark) noexcept;
 
+// The native-control palette the user agent paints with: control surfaces and
+// borders, their foreground, and the chrome the engine draws itself (the file
+// Browse button, popup rows, scrollbars, media bars). `color-scheme` picks a
+// pair for a subtree, so a light page gets light controls.
+struct UaWidgets {
+    SDL_Color surface;       // input/textarea/select background
+    SDL_Color raised;        // button/gauge background, media bar, popup panel
+    SDL_Color border;        // input/textarea/select/gauge border
+    SDL_Color raisedBorder;  // button border
+    SDL_Color text;          // control foreground
+    SDL_Color icon;          // media-control glyphs
+    SDL_Color track;         // scrollbar and media track
+    SDL_Color thumb;         // scrollbar thumb
+    SDL_Color selected;      // selected option row
+};
+const UaWidgets& uaWidgets(bool dark) noexcept;
+
+// Which palette an element uses: an explicit scheme wins, `normal` follows the
+// host preference the resolver carries.
+inline bool colorSchemeUsesDark(const ComputedStyle& style, bool systemDark) noexcept {
+    return style.colorScheme == ComputedStyle::ColorScheme::Dark ||
+           (style.colorScheme == ComputedStyle::ColorScheme::Normal && systemDark);
+}
+
 // Layers the type-specific form-control defaults over the generic `<input>`
 // UA style: a checkbox/radio is a control-sized square or circle with no
 // text padding, a range is a fixed-size groove with no border, and

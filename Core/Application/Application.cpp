@@ -1083,7 +1083,7 @@ bool isReachable(Element& root, const Element* el) {
 // without one.
 void paintSelectPopup(Element& select, Renderer& renderer, SDL_Renderer* sdlRenderer,
                       const ComputedStyle& style, TextFont& font, float offX, float offY,
-                      std::size_t highlight, float opacity) {
+                      std::size_t highlight, float opacity, bool systemDark) {
     const std::vector<Element*> options = select.selectOptions();
     if (options.empty()) {
         return;
@@ -1099,7 +1099,9 @@ void paintSelectPopup(Element& select, Renderer& renderer, SDL_Renderer* sdlRend
         if (hot) {
             renderer.fillRect(row, multiplyAlpha(sui::Color{59, 130, 246, 255}, opacity));
         } else if (i == selected) {
-            renderer.fillRect(row, multiplyAlpha(sui::Color{63, 63, 70, 255}, opacity));
+            const sui::UaWidgets& widgets =
+                sui::uaWidgets(sui::colorSchemeUsesDark(style, systemDark));
+            renderer.fillRect(row, multiplyAlpha(toColor(widgets.selected), opacity));
         }
         if (!font.hasFont()) {
             continue;
@@ -2435,14 +2437,18 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                 float barH = el.tag() == "audio" ? content.h : std::min(32.0f, content.h * 0.25f);
                 float barY = el.tag() == "audio" ? content.y : (content.y + content.h - barH);
                 const SDL_FRect barRect{content.x, barY, content.w, barH};
-                const sui::Color barBg = multiplyAlpha(sui::Color{39, 39, 42, 220}, opacity);
+                const sui::UaWidgets& widgets = sui::uaWidgets(
+                    sui::colorSchemeUsesDark(s, resolver.systemColorSchemeDark()));
+                const sui::Color barBg = multiplyAlpha(
+                    toColor(SDL_Color{widgets.raised.r, widgets.raised.g, widgets.raised.b, 220}),
+                    opacity);
                 SDL_SetRenderDrawColor(sdlRenderer, barBg.r, barBg.g, barBg.b, barBg.a);
                 SDL_RenderFillRect(sdlRenderer, &barRect);
 
                 float iconSize = std::min(12.0f, barH * 0.5f);
                 float iconX = content.x + 8.0f;
                 float iconY = barY + (barH - iconSize) * 0.5f;
-                const sui::Color iconCol = multiplyAlpha(sui::Color{244, 244, 245, 255}, opacity);
+                const sui::Color iconCol = multiplyAlpha(toColor(widgets.icon), opacity);
                 const SDL_FPoint tri[4] = {
                     {iconX, iconY},
                     {iconX + iconSize, iconY + iconSize * 0.5f},
@@ -2456,7 +2462,10 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                 float trackW = std::max(0.0f, content.x + content.w - 12.0f - trackX);
                 if (trackW > 0.0f) {
                     const SDL_FRect track{trackX, barY + (barH - 4.0f) * 0.5f, trackW, 4.0f};
-                    const sui::Color trackCol = multiplyAlpha(sui::Color{82, 82, 91, 200}, opacity);
+                    const sui::Color trackCol = multiplyAlpha(
+                        toColor(SDL_Color{widgets.border.r, widgets.border.g,
+                                          widgets.border.b, 200}),
+                        opacity);
                     SDL_SetRenderDrawColor(sdlRenderer, trackCol.r, trackCol.g, trackCol.b, trackCol.a);
                     SDL_RenderFillRect(sdlRenderer, &track);
                 }
@@ -2535,10 +2544,12 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                 box.x, box.y, box.w, box.h, el.clientWidth(), el.clientHeight(),
                 el.scrollWidth(), el.scrollHeight(), el.scrollTop(), el.scrollLeft(),
                 allowX, allowY);
-            const sui::Color trackCol =
-                multiplyAlpha(sui::Color{39, 39, 42, 200}, opacity);
-            const sui::Color thumbCol =
-                multiplyAlpha(sui::Color{113, 113, 122, 255}, opacity);
+            const sui::UaWidgets& widgets = sui::uaWidgets(
+                sui::colorSchemeUsesDark(s, resolver.systemColorSchemeDark()));
+            const sui::Color trackCol = multiplyAlpha(
+                toColor(SDL_Color{widgets.track.r, widgets.track.g, widgets.track.b, 200}),
+                opacity);
+            const sui::Color thumbCol = multiplyAlpha(toColor(widgets.thumb), opacity);
             if (bars.vertical) {
                 renderer.fillRect(bars.vTrack, trackCol);
                 renderer.fillRect(bars.vThumb, thumbCol);
@@ -2713,10 +2724,11 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                     // A Browse button hangs in the left padding room.
                     const SDL_FRect button{content.x - 78.0f, content.y - 4.0f, 72.0f,
                                            content.h + 8.0f};
-                    renderer.fillRect(button,
-                                      multiplyAlpha(sui::Color{39, 39, 42, 255}, opacity));
+                    const sui::UaWidgets& widgets = sui::uaWidgets(
+                        sui::colorSchemeUsesDark(s, resolver.systemColorSchemeDark()));
+                    renderer.fillRect(button, multiplyAlpha(toColor(widgets.raised), opacity));
                     renderer.strokeRect(button,
-                                        multiplyAlpha(sui::Color{63, 63, 70, 255}, opacity),
+                                        multiplyAlpha(toColor(widgets.raisedBorder), opacity),
                                         1.0f);
                     if (font.hasFont()) {
                         const sui::FontQuery browseQuery{
@@ -6568,7 +6580,8 @@ bool Application::renderFrame(WindowId id) {
                     SDL_SetRenderClipRect(sdlRenderer, nullptr);
                     paintSelectPopup(*openSelect_, renderer, sdlRenderer,
                                      resolver_.resolve(*openSelect_), *font_, popupOffX,
-                                     popupOffY, selectHighlight_, popupOpacity);
+                                     popupOffY, selectHighlight_, popupOpacity,
+                                     resolver_.systemColorSchemeDark());
                 } else if (openSelect_) {
                     openSelect_ = nullptr;
                 }

@@ -8990,12 +8990,18 @@ void testColorScheme() {
           "dark parses");
     check(style.backgroundColor.r == dark.background.r && style.color.r == dark.text.r,
           "dark keeps the default pair");
-    // The scheme belongs to the root, not to everything below it.
-    if (child) {
+    // The scheme is inherited, so a subtree follows the root until it chooses
+    // its own. The document stays alive while the child is resolved; the
+    // `bodyOf` helper's pointer would dangle once its document is gone.
+    auto inherited = parseOrNull(
+        "<sui><body style=\"color-scheme:dark\"><div id=\"d\">x</div></body></sui>");
+    if (inherited) {
+        Element* inheritedChild = inherited->getElementById("d");
         sui::StyleResolver resolver;
         resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
-        check(resolver.resolve(*child).colorScheme == Scheme::Normal,
-              "the scheme does not inherit");
+        check(inheritedChild &&
+                  resolver.resolve(*inheritedChild).colorScheme == Scheme::Dark,
+              "the scheme inherits into the subtree");
     }
 
     check(bodyOf("color-scheme:light", style, child) &&
@@ -9030,6 +9036,105 @@ void testColorScheme() {
                  child) &&
               style.backgroundColor.r == 0x01 && style.color.r == 0x04,
           "an author keeps the colors it set");
+}
+
+// Native controls take the used scheme's user-agent palette: a light subtree
+// swaps input/button/gauge surfaces, borders, and text, an author colour keeps
+// its value, and an explicit `normal`/`dark` inside the subtree opts out.
+void testColorSchemeWidgets() {
+    auto document = parseOrNull(
+        "<sui><body style=\"color-scheme:light\">"
+        "<input id=\"in\"/>"
+        "<button id=\"btn\"></button>"
+        "<meter id=\"m\" value=\"0.5\"></meter>"
+        "<input id=\"author\" style=\"background-color:#010203;border-color:#040506;"
+        "color:#070809\"/>"
+        "<div><input id=\"nested\"/></div>"
+        "<div style=\"color-scheme:normal\"><input id=\"reset\"/></div>"
+        "<div style=\"color-scheme:dark\"><input id=\"darkin\"/></div>"
+        "<div style=\"color-scheme:unset\"><input id=\"unsetin\"/></div>"
+        "<button id=\"cc\" style=\"border-color:currentColor\"></button>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    const auto el = [&](const char* id) { return document->getElementById(id); };
+    if (!el("in") || !el("btn") || !el("m") || !el("author") || !el("nested") ||
+        !el("reset") || !el("darkin") || !el("unsetin") || !el("cc")) {
+        check(false, "colour-scheme widget elements found");
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0 }"));
+    const auto resolve = [&](const char* id) { return resolver.resolve(*el(id)); };
+    const auto same = [](const SDL_Color& a, const SDL_Color& b) {
+        return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+    };
+
+    const sui::ComputedStyle input = resolve("in");
+    check(input.colorScheme == sui::ComputedStyle::ColorScheme::Light,
+          "a light body gives its controls the light scheme");
+    check(same(input.backgroundColor, SDL_Color{255, 255, 255, 255}),
+          "a light input takes the light surface");
+    check(same(input.borderColor, SDL_Color{181, 181, 190, 255}),
+          "a light input takes the light border");
+    check(same(input.color, SDL_Color{24, 24, 27, 255}),
+          "a light input takes the light text");
+
+    const sui::ComputedStyle button = resolve("btn");
+    check(same(button.backgroundColor, SDL_Color{239, 239, 244, 255}),
+          "a light button takes the raised light surface");
+    check(same(button.borderColor, SDL_Color{212, 212, 216, 255}),
+          "a light button takes the light raised border");
+
+    const sui::ComputedStyle meter = resolve("m");
+    check(same(meter.backgroundColor, SDL_Color{239, 239, 244, 255}) &&
+              same(meter.borderColor, SDL_Color{181, 181, 190, 255}),
+          "a light gauge takes the light raised palette");
+
+    const sui::ComputedStyle author = resolve("author");
+    check(author.colorScheme == sui::ComputedStyle::ColorScheme::Light &&
+              same(author.backgroundColor, SDL_Color{1, 2, 3, 255}) &&
+              same(author.borderColor, SDL_Color{4, 5, 6, 255}) &&
+              same(author.color, SDL_Color{7, 8, 9, 255}),
+          "an author control colour survives the scheme swap");
+
+    check(resolve("nested").colorScheme == sui::ComputedStyle::ColorScheme::Light &&
+              same(resolve("nested").backgroundColor, SDL_Color{255, 255, 255, 255}),
+          "the scheme inherits through a plain wrapper");
+
+    const sui::ComputedStyle reset = resolve("reset");
+    check(reset.colorScheme == sui::ComputedStyle::ColorScheme::Normal,
+          "an explicit normal opts out of the inherited scheme");
+    check(same(reset.backgroundColor, SDL_Color{24, 24, 27, 255}) &&
+              same(reset.borderColor, SDL_Color{82, 82, 91, 255}) &&
+              same(reset.color, SDL_Color{228, 228, 231, 255}),
+          "a normal control under a light body stays dark");
+
+    const sui::ComputedStyle darkin = resolve("darkin");
+    check(darkin.colorScheme == sui::ComputedStyle::ColorScheme::Dark &&
+              same(darkin.backgroundColor, SDL_Color{24, 24, 27, 255}),
+          "an explicit dark control inside a light body stays dark");
+
+    const sui::ComputedStyle cc = resolve("cc");
+    const sui::ComputedStyle unsetin = resolve("unsetin");
+    check(unsetin.colorScheme == sui::ComputedStyle::ColorScheme::Light &&
+              same(unsetin.backgroundColor, SDL_Color{255, 255, 255, 255}),
+          "color-scheme unset inherits like every inherited property");
+
+    check(cc.colorScheme == sui::ComputedStyle::ColorScheme::Light &&
+              same(cc.borderColor, SDL_Color{24, 24, 27, 255}),
+          "currentColor follows the converted control foreground");
+
+    auto neutral = parseOrNull("<sui><body><input id=\"n\"/></body></sui>");
+    if (neutral) {
+        sui::StyleResolver host;
+        host.setSystemColorSchemeDark(false);
+        const sui::ComputedStyle normal = host.resolve(*neutral->getElementById("n"));
+        check(normal.colorScheme == sui::ComputedStyle::ColorScheme::Normal &&
+                  same(normal.backgroundColor, SDL_Color{255, 255, 255, 255}),
+              "a normal control follows a light host preference");
+    }
 }
 
 // `prefers-color-scheme` asks the host, which the resolver carries: the engine
@@ -11860,6 +11965,7 @@ int main() {
     testDialog();
     testModalDialog();
     testColorScheme();
+    testColorSchemeWidgets();
     testPrefersColorScheme();
     testCurrentColor();
     testValidationApi();
