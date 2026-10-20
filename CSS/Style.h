@@ -248,7 +248,11 @@ struct ComputedStyle {
     // order, lowest first.
     int order = 0;
 
-    BoxEdge margin;
+    // Margins start at zero, not the `Length` default of `auto`: an unauthored
+    // margin has to read as zero so block auto-margin centring can tell an
+    // authored `auto` from one that was never set. Insets still default to
+    // `auto` (their initial value).
+    BoxEdge margin{Length(0.0f), Length(0.0f), Length(0.0f), Length(0.0f)};
     BoxEdge padding;
     BoxEdge borderWidth;
 

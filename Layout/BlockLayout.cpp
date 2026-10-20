@@ -20,7 +20,7 @@ bool isBlockLevel(const ComputedStyle& s) {
     // `inline-flex` behaves like an inline-level box. A `display: table` box is
     // block-level too (an `inline-table` is not).
     return s.display == ComputedStyle::Block || s.display == ComputedStyle::Flex ||
-           s.display == ComputedStyle::Table;
+           s.display == ComputedStyle::Grid || s.display == ComputedStyle::Table;
 }
 
 // CSS clamps by max-* first and then by min-*, so min-width and min-height win
@@ -468,8 +468,47 @@ public:
             return 0.0f;
         }
 
-        const float contentX = originX + box.margin.left + box.borderWidth.left +
-                               box.padding.left;
+        // Auto margins in normal flow: a block-level box with a definite width
+        // that does not fill its containing block splits the leftover space.
+        // `margin: 0 auto` is how a page centres a column; one auto side pushes
+        // the box to the other. Vertical auto margins stay zero in flow, as CSS
+        // specifies.
+        UsedBox placed = box;
+        const float chromeW = box.horizontalChrome();
+        // An `auto` width normally fills the line, so it has nothing to split;
+        // once `max-width` clamps it below the line, though, the usual
+        // `max-width: 60ch; margin: 0 auto` container pattern needs the
+        // margins distributed just like a definite width.
+        const bool clampedAuto = s.width.isAuto() && box.maxWidth > 0.0f &&
+                                 box.maxWidth + chromeW < availableWidth;
+        if (isBlockLevel(s) && !isFloated(s) &&
+            s.position != ComputedStyle::Absolute &&
+            s.position != ComputedStyle::Fixed && availableWidth < kUnbounded &&
+            (box.width > 0.0f || clampedAuto) &&
+            (s.margin.left.isAuto() || s.margin.right.isAuto())) {
+            const float usedContent = box.width > 0.0f
+                                          ? applyMinMax(box.width, box)
+                                          : applyMinMax(
+                                                std::max(0.0f, availableWidth - chromeW),
+                                                box);
+            const float borderW = usedContent + box.borderWidth.left +
+                                  box.borderWidth.right + box.padding.left +
+                                  box.padding.right;
+            const float fixed = (s.margin.left.isAuto() ? 0.0f : box.margin.left) +
+                                (s.margin.right.isAuto() ? 0.0f : box.margin.right);
+            const float space = std::max(0.0f, availableWidth - borderW - fixed);
+            if (s.margin.left.isAuto() && s.margin.right.isAuto()) {
+                placed.margin.left = space * 0.5f;
+                placed.margin.right = space * 0.5f;
+            } else if (s.margin.left.isAuto()) {
+                placed.margin.left = space;
+            } else {
+                placed.margin.right = space;
+            }
+        }
+
+        const float contentX = originX + placed.margin.left + placed.borderWidth.left +
+                               placed.padding.left;
         const float contentY = originY + box.margin.top + box.borderWidth.top +
                                box.padding.top;
 
@@ -514,7 +553,7 @@ public:
         const float borderH = contentHeight + box.borderWidth.top + box.borderWidth.bottom +
                               box.padding.top + box.padding.bottom;
 
-        el.setLayoutX(originX + box.margin.left);
+        el.setLayoutX(originX + placed.margin.left);
         el.setLayoutY(originY + box.margin.top);
         el.setLayoutWidth(borderW);
         el.setLayoutHeight(borderH);

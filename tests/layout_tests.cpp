@@ -3390,6 +3390,121 @@ void testFlexItemMarginsAndPadding() {
     checkNear(a2->layoutWidth(), 110.0f, 0.5f, "the padded item is wider by its padding");
 }
 
+void testBlockAutoMargins() {
+    // A fixed-width block that does not fill its containing block splits the
+    // leftover space into its auto margins: both halves centre it, one side
+    // pushes it against the other edge, and an auto-width block fills the line
+    // with no margins at all.
+    auto document = parseOrNull(
+        "<sui><body><div id=\"outer\">"
+        "<div id=\"both\"></div>"
+        "<div id=\"left\"></div>"
+        "<div id=\"right\"></div>"
+        "<div id=\"fill\"></div>"
+        "<div id=\"padded\"></div>"
+        "<div id=\"over\"></div>"
+        "<div id=\"clamped\"></div>"
+        "<div id=\"borderbox\"></div>"
+        "<div id=\"flex\"></div>"
+        "<div id=\"grid\"></div>"
+        "<div id=\"percent\"></div>"
+        "<div id=\"offset\"></div>"
+        "<div id=\"maxed\"></div>"
+        "<div id=\"relative\"></div>"
+        "<div id=\"vertical\"></div>"
+        "<div id=\"paddedouter\"><div id=\"inner\"></div></div>"
+        "<span id=\"inline\"></span>"
+        "</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #outer { width: 400px }"
+        "#both, #left, #right, #fill, #over, #clamped { height: 10px }"
+        "#grid, #percent, #offset, #maxed, #relative, #vertical, #inner { height: 10px }"
+        "#both { width: 100px; margin: 0 auto }"
+        "#left { width: 100px; margin-left: auto }"
+        "#right { width: 100px; margin-right: auto }"
+        "#fill { margin: 0 auto }"
+        "#padded { width: 100px; height: 10px; padding: 10px;"
+        " border: 1px solid #000; margin: 0 auto }"
+        "#over { width: 500px; margin: 0 auto }"
+        "#clamped { width: 50px; min-width: 100px; margin: 0 auto }"
+        "#borderbox { box-sizing: border-box; width: 100px; height: 10px;"
+        " padding: 10px; border: 1px solid #000; margin: 0 auto }"
+        "#flex { display: flex; width: 100px; height: 10px; margin: 0 auto }"
+        "#grid { display: grid; width: 100px; margin: 0 auto }"
+        "#percent { width: 50%; margin: 0 auto }"
+        "#offset { width: 100px; margin-left: auto; margin-right: 20px }"
+        "#maxed { max-width: 100px; margin: 0 auto }"
+        "#relative { position: relative; left: 5px; width: 100px; margin: 0 auto }"
+        "#vertical { width: 100px; margin: auto 0 }"
+        "#paddedouter { width: 300px; padding: 25px }"
+        "#inner { width: 100px; margin: 0 auto }"
+        "#inline { display: inline-block; width: 100px; height: 10px;"
+        " margin: 0 auto }"));
+    layoutRoot(*document, resolver, 800.0f);
+    Element* both = document->getElementById("both");
+    Element* left = document->getElementById("left");
+    Element* right = document->getElementById("right");
+    Element* fill = document->getElementById("fill");
+    Element* padded = document->getElementById("padded");
+    Element* over = document->getElementById("over");
+    Element* clamped = document->getElementById("clamped");
+    Element* borderbox = document->getElementById("borderbox");
+    Element* flex = document->getElementById("flex");
+    Element* grid = document->getElementById("grid");
+    Element* percent = document->getElementById("percent");
+    Element* offset = document->getElementById("offset");
+    Element* maxed = document->getElementById("maxed");
+    Element* relative = document->getElementById("relative");
+    Element* vertical = document->getElementById("vertical");
+    Element* inner = document->getElementById("inner");
+    Element* inlineBox = document->getElementById("inline");
+    if (!both || !left || !right || !fill || !padded || !over || !clamped ||
+        !borderbox || !flex || !grid || !percent || !offset || !maxed ||
+        !relative || !vertical || !inner || !inlineBox) {
+        check(false, "auto-margin fixture elements found");
+        return;
+    }
+    checkNear(both->layoutX(), 150.0f, 0.01f, "margin:0 auto centres a fixed-width block");
+    checkNear(both->layoutWidth(), 100.0f, 0.01f, "centring keeps the authored width");
+    checkNear(left->layoutX(), 300.0f, 0.01f, "an auto left margin pushes the block right");
+    checkNear(right->layoutX(), 0.0f, 0.01f, "an auto right margin leaves the block at the start");
+    checkNear(fill->layoutX(), 0.0f, 0.01f, "an auto width fills the line instead of centring");
+    checkNear(fill->layoutWidth(), 400.0f, 0.01f, "the auto-width block spans the container");
+    checkNear(padded->layoutX(), 139.0f, 0.01f,
+              "padding and border join the centred border box");
+    checkNear(padded->layoutWidth(), 122.0f, 0.01f, "the centred box keeps its chrome");
+    checkNear(over->layoutX(), 0.0f, 0.01f, "an oversized block clamps its auto margin to zero");
+    checkNear(over->layoutWidth(), 500.0f, 0.01f, "the oversized block still overflows");
+    checkNear(clamped->layoutX(), 150.0f, 0.01f, "min-width sets the centred width");
+    checkNear(clamped->layoutWidth(), 100.0f, 0.01f, "the clamped block is 100px wide");
+    checkNear(borderbox->layoutX(), 150.0f, 0.01f,
+              "a border-box width is what gets centred");
+    checkNear(borderbox->layoutWidth(), 100.0f, 0.01f,
+              "border-box chrome stays inside the centred width");
+    checkNear(flex->layoutX(), 150.0f, 0.01f, "a block-level flex container centres too");
+    checkNear(grid->layoutX(), 150.0f, 0.01f, "a block-level grid container centres too");
+    checkNear(percent->layoutX(), 100.0f, 0.01f,
+              "a percentage width leaves the rest to the auto margins");
+    checkNear(percent->layoutWidth(), 200.0f, 0.01f, "the percentage width is kept");
+    checkNear(offset->layoutX(), 280.0f, 0.01f,
+              "the other auto margin gives way to a fixed margin");
+    checkNear(maxed->layoutX(), 150.0f, 0.01f,
+              "max-width clamps an auto width and then centres it");
+    checkNear(maxed->layoutWidth(), 100.0f, 0.01f, "the max-clamped width is kept");
+    checkNear(relative->layoutX(), 155.0f, 0.01f,
+              "a relative offset shifts the centred box");
+    checkNear(vertical->layoutX(), 0.0f, 0.01f,
+              "vertical auto margins do not centre in flow");
+    checkNear(inner->layoutX(), 125.0f, 0.01f,
+              "the containing block's padding shifts the centre");
+    checkNear(inlineBox->layoutX(), 0.0f, 0.01f,
+              "inline-level auto margins still resolve to zero");
+}
+
 void testFlexMinMaxClamp() {
     // The items ask for 300px each in a 400px row, so something has to give. A
     // min-width stops that from going too far.
@@ -11516,6 +11631,7 @@ int main() {
     testFlexWrap();
     testFlexReverseDirections();
     testFlexItemMarginsAndPadding();
+    testBlockAutoMargins();
     testFlexMinMaxClamp();
     testFlexInlineFlexShrinks();
     testFlexPropertyParsing();
