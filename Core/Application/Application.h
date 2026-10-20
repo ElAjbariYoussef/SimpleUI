@@ -570,6 +570,11 @@ private:
     // frame's document, resolver, and state into the working copy; `flushFrame`
     // moves them back. Between events the working copy is always on a page.
     void bindFrame(Element* frameEl);
+    // A link pressed inside a frame navigates the frame's own document: the
+    // href resolves against the frame's current source and lands on the
+    // element's src, so the next `syncFrames` reloads the frame while the host
+    // page stays where it is. External schemes and fragments are refused.
+    bool navigateFrame(Element& frameEl, std::string_view href);
     void flushFrame();
     // The frame whose loaded document contains `el`, or null. A frame element
     // itself is not "inside" its frame document; callers handle that.

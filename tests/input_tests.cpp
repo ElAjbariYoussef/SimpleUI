@@ -2594,7 +2594,7 @@ int main() {
                    "<body><div id=\"box\">frame</div><div id=\"wide\"></div>"
                    "<input id=\"name\"/><button id=\"btn\">ok</button>"
                    "<div id=\"scroll\"><div id=\"tall\"></div></div>"
-                   "<a id=\"flink\" href=\"/other.sui\">go</a>"
+                   "<a id=\"flink\" href=\"other.sui\">go</a>"
                    "<div id=\"smooth\"><div id=\"stall\"></div></div></body></sui>";
         }
         {
@@ -2807,13 +2807,25 @@ int main() {
                             check(frameSmooth->scrollTop() == 40.0f,
                                   "the frame's smooth scroll lands on the notch");
                         }
-                        // A frame's link must not navigate the host page.
+                        // A frame's link navigates the frame's own document:
+                        // the host page stays put while the frame reloads from
+                        // the resolved href.
                         const std::string before = app.currentPage();
                         pressAt(frameLink->layoutX() + 5.0f, frameLink->layoutY() + 4.0f);
                         check(app.currentPage() == before,
-                              "a link inside a frame does not navigate the page");
-                        check(app.frameDocument(*frameEl) == frame,
-                              "the frame survives the link press");
+                              "a link inside a frame never navigates the host page");
+                        check(app.renderFrame(primary),
+                              "the frame's navigation repaints the host");
+                        sui::Document* navigated = app.frameDocument(*frameEl);
+                        check(navigated != nullptr && navigated != frame,
+                              "the frame navigates its own document");
+                        check(frameEl->attribute("src") == "/other.sui",
+                              "a relative frame href resolves against the frame source");
+                        if (navigated) {
+                            check(navigated->getElementById("other") != nullptr &&
+                                      navigated->getElementById("box") == nullptr,
+                                  "the frame shows the link's target document");
+                        }
                     }
                 }
             }

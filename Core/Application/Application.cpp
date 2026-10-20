@@ -52,6 +52,24 @@ float smoothScrollStep(float current, float target) {
     return current + gap * kSmoothScrollShare;
 }
 
+// Resolves a frame link's href against the frame's current source. A
+// project-root href stands, a relative one joins the source's directory, and
+// an external scheme or a same-document fragment is refused (frames do not
+// implement fragment scrolling).
+std::string resolveFrameHref(std::string_view base, std::string_view href) {
+    if (href.empty() || href.find("://") != std::string_view::npos ||
+        href.front() == '#') {
+        return {};
+    }
+    if (href.front() == '/') {
+        return std::string(href);
+    }
+    const std::filesystem::path joined =
+        (std::filesystem::path(base).parent_path() / std::filesystem::path(href))
+            .lexically_normal();
+    return joined.generic_string();
+}
+
 const Element* resolveSvgUse(const Element& svg, std::string_view href) {
     // Only a same-document fragment resolves: anything without a `#id` shape
     // (an external URL, a bare name, nothing at all) is left alone.
@@ -3867,6 +3885,38 @@ void Application::bindFrame(Element* frameEl) {
     boundPage_ = owner;
 }
 
+bool Application::navigateFrame(Element& frameEl, std::string_view href) {
+    // While a frame is bound the working page's map belongs to the page, so
+    // the owner page is where the state lives.
+    FrameState* state = nullptr;
+    if (boundPage_ >= 0 && static_cast<std::size_t>(boundPage_) < pages_.size() &&
+        pages_[static_cast<std::size_t>(boundPage_)]) {
+        const auto& map = pages_[static_cast<std::size_t>(boundPage_)]->iframeFrames;
+        const auto it = map.find(&frameEl);
+        if (it != map.end()) {
+            state = it->second.get();
+        }
+    }
+    if (!state) {
+        const auto it = iframeFrames_.find(&frameEl);
+        if (it != iframeFrames_.end()) {
+            state = it->second.get();
+        }
+    }
+    if (!state || state->failed) {
+        return false;
+    }
+    const std::string resolved = resolveFrameHref(state->src, href);
+    if (resolved.empty()) {
+        return false;
+    }
+    // The frame element's src is the single source of truth for what the frame
+    // loads: syncFrames notices the mismatch on the next layout pass, replaces
+    // the document, and the frame keeps its own stylesheet pipeline.
+    frameEl.setAttribute("src", resolved);
+    return true;
+}
+
 // Moves the frame's state back where `bindFrame` found it. The page keeps the
 // keyboard hand-off: `focusedFrame_` names the frame whose document holds
 // focus, and the host tree mirrors it (the frame element itself is what
@@ -5243,17 +5293,24 @@ void Application::dispatchEvent(const InputEvent& event) {
             // handler that drives navigation itself; `target="_blank"` opens a
             // new window instead of replacing this one. Only the left button
             // navigates; other buttons are for the host to interpret. A link
-            // inside a frame does not navigate the page (a frame's own
-            // navigation is not supported).
-            if (target && event.button == 1 && !boundFrame_) {
+            // inside a frame navigates the frame's own document: the source is
+            // rewritten and the frame reloads, while the host page stays put.
+            // A `_blank` frame link is left alone (frames do not open windows).
+            if (target && event.button == 1) {
                 for (Element* anchor = target; anchor; anchor = anchor->parent()) {
                     if (anchor->tag() != "a") {
                         continue;
                     }
                     const std::string_view href = anchor->attribute("href");
                     if (!href.empty() && anchor->attribute("data-navigate") != "false") {
-                        navigateInWindow(event.window, href,
-                                         anchor->attribute("target") == "_blank");
+                        const std::string_view linkTarget = anchor->attribute("target");
+                        if (boundFrame_) {
+                            if (linkTarget.empty() || linkTarget == "_self") {
+                                navigateFrame(*boundFrame_, href);
+                            }
+                        } else {
+                            navigateInWindow(event.window, href, linkTarget == "_blank");
+                        }
                     }
                     break;
                 }
