@@ -3552,6 +3552,82 @@ int main() {
         }
     }
 
+    // An SVG url(#id) fill resolves to its gradient in the paint pass: the
+    // rect spans the viewport with the ramp, so its left and right thirds
+    // prove the stops reached the renderer.
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "sui-svg-gradient-check";
+        fs::remove_all(root);
+        fs::create_directories(root);
+        {
+            std::ofstream out(root / "index.sui", std::ios::binary);
+            out << "<sui><body style=\"margin:0;background:#000000\">"
+                   "<svg id=\"g\" width=\"100\" height=\"50\" viewBox=\"0 0 100 50\">"
+                   "<defs>"
+                   "<linearGradient id=\"lg\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\">"
+                   "<stop offset=\"0\" stop-color=\"#ff0000\"/>"
+                   "<stop offset=\"1\" stop-color=\"#0000ff\"/>"
+                   "</linearGradient>"
+                   "</defs>"
+                   "<rect x=\"0\" y=\"0\" width=\"100\" height=\"50\" "
+                   "fill=\"url(#lg)\"/>"
+                   "</svg></body></sui>";
+        }
+        const fs::path previous = fs::current_path();
+        struct RestoreGradient {
+            fs::path previous;
+            ~RestoreGradient() {
+                std::error_code ec;
+                fs::current_path(previous, ec);
+            }
+        } restoreGradient{previous};
+        fs::current_path(root);
+
+        sui::Application app;
+        std::string error;
+        check(app.start("index.sui", error), "the gradient project starts");
+        if (app.platform()) {
+            const sui::WindowId primary = app.platform()->primaryWindow();
+            check(app.renderFrame(primary), "the gradient page lays out");
+            sui::Element* svg = app.document().getElementById("g");
+            check(svg != nullptr, "the gradient svg element exists");
+            if (svg) {
+                const auto readPixel = [&](float x, float y, int& r, int& g, int& b) -> bool {
+                    SDL_Renderer* renderer = app.platform()->renderer(primary);
+                    if (!renderer) {
+                        return false;
+                    }
+                    const SDL_Rect rect{static_cast<int>(x), static_cast<int>(y), 1, 1};
+                    SDL_Surface* read = SDL_RenderReadPixels(renderer, &rect);
+                    if (!read) {
+                        return false;
+                    }
+                    SDL_Surface* conv = SDL_ConvertSurface(read, SDL_PIXELFORMAT_ABGR8888);
+                    SDL_DestroySurface(read);
+                    if (!conv) {
+                        return false;
+                    }
+                    const Uint8* px = static_cast<const Uint8*>(conv->pixels);
+                    r = px[0];
+                    g = px[1];
+                    b = px[2];
+                    SDL_DestroySurface(conv);
+                    return true;
+                };
+                const float x = svg->contentX();
+                const float y = svg->contentY() + 25.0f;
+                int r = 0, g = 0, b = 0;
+                const bool leftRead = readPixel(x + 5.0f, y, r, g, b);
+                check(leftRead && r > 200 && b < 60,
+                      "the gradient's first stop paints the left edge");
+                const bool rightRead = readPixel(x + 95.0f, y, r, g, b);
+                check(rightRead && b > 200 && r < 60,
+                      "the gradient's last stop paints the right edge");
+            }
+        }
+    }
+
     platform->shutdown();
 
     std::printf("input_tests: %d checks, %d failures\n", checks, failures);

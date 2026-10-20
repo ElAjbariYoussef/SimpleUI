@@ -14,6 +14,7 @@
 #include "Rendering/ImageCache.h"
 #include "Rendering/Renderer.h"
 #include "Rendering/SvgMarker.h"
+#include "Rendering/SvgPaint.h"
 #include "Rendering/SvgText.h"
 #include "Rendering/Tessellate.h"
 #include "Rendering/Text.h"
@@ -36,6 +37,7 @@
 #include <cstring>
 #include <cstdio>
 #include <limits>
+#include <optional>
 #include <utility>
 
 namespace sui {
@@ -1599,6 +1601,11 @@ std::string_view svgToken(std::string_view text) {
 struct SvgPaint {
     bool hasFill = false;
     Color fill{0, 0, 0, 255};
+    // A `fill: url(#id)` gradient server, or null for a solid fill. The
+    // fallback colour (when `url(#g) red` names one) is already in `fill`, so
+    // a gradient that fails to parse still paints something sensible.
+    const Element* fillGradient = nullptr;
+    bool fillGradientRadial = false;
     bool hasStroke = false;
     Color stroke{0, 0, 0, 255};
     float strokeWidth = 1.0f;
@@ -1622,13 +1629,33 @@ SvgPaint svgInheritedPaint(const Element& el, float diagBase) {
                     // painted; garbage keeps searching, as invalid values
                     // leave the property unset.
                     paint.hasFill = false;
+                    paint.fillGradient = nullptr;
                     fillSeen = true;
                 } else {
-                    Color fill{0, 0, 0, 255};
-                    if (svgPaint(raw, fill)) {
-                        paint.fill = fill;
+                    bool radial = false;
+                    const Element* gradient = resolveSvgGradientRef(*node, raw, radial);
+                    if (gradient) {
+                        Color fallback{0, 0, 0, 255};
+                        svgPaintFallbackColor(raw, fallback);
+                        paint.fill = fallback;
+                        paint.fillGradient = gradient;
+                        paint.fillGradientRadial = radial;
                         paint.hasFill = true;
                         fillSeen = true;
+                    } else {
+                        Color fill{0, 0, 0, 255};
+                        if (svgPaint(raw, fill)) {
+                            paint.fill = fill;
+                            paint.fillGradient = nullptr;
+                            paint.hasFill = true;
+                            fillSeen = true;
+                        } else if (svgPaintIsUrl(raw)) {
+                            // `url()` naming nothing and carrying no fallback
+                            // paints nothing, like an invalid paint server.
+                            paint.hasFill = false;
+                            paint.fillGradient = nullptr;
+                            fillSeen = true;
+                        }
                     }
                 }
             }
@@ -1640,10 +1667,27 @@ SvgPaint svgInheritedPaint(const Element& el, float diagBase) {
                     paint.hasStroke = false;
                     strokeSeen = true;
                 } else {
+                    bool radial = false;
+                    const Element* gradient = resolveSvgGradientRef(*node, raw, radial);
                     Color stroke{0, 0, 0, 255};
-                    if (svgPaint(raw, stroke)) {
+                    if (gradient) {
+                        // Strokes take the first stop colour; gradient strokes
+                        // are not shaded along the line.
+                        SvgGradient parsed;
+                        if (parseSvgGradient(*gradient, radial, parsed)) {
+                            stroke = parsed.stops.front().color;
+                        } else {
+                            svgPaintFallbackColor(raw, stroke);
+                        }
                         paint.stroke = stroke;
                         paint.hasStroke = true;
+                        strokeSeen = true;
+                    } else if (svgPaint(raw, stroke)) {
+                        paint.stroke = stroke;
+                        paint.hasStroke = true;
+                        strokeSeen = true;
+                    } else if (svgPaintIsUrl(raw)) {
+                        paint.hasStroke = false;
                         strokeSeen = true;
                     }
                 }
@@ -1872,6 +1916,35 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
         const auto tint = [&](Color color) {
             return multiplyAlpha(color, alpha);
         };
+        // The device-space bounding box of a point set, which objectBoundingBox
+        // gradients scale against.
+        const auto bboxOf = [](const std::vector<SDL_FPoint>& points) {
+            SDL_FRect box{0.0f, 0.0f, 0.0f, 0.0f};
+            if (points.empty()) {
+                return box;
+            }
+            float minX = points[0].x, maxX = points[0].x;
+            float minY = points[0].y, maxY = points[0].y;
+            for (const SDL_FPoint& point : points) {
+                minX = std::min(minX, point.x);
+                maxX = std::max(maxX, point.x);
+                minY = std::min(minY, point.y);
+                maxY = std::max(maxY, point.y);
+            }
+            return SDL_FRect{minX, minY, maxX - minX, maxY - minY};
+        };
+        // The shader for a gradient fill over `bbox`, or nothing when the
+        // paint is solid or the gradient has no stops.
+        const auto fillShaderFor = [&](const SDL_FRect& bbox) -> std::optional<Shader> {
+            if (!paint.fillGradient) {
+                return std::nullopt;
+            }
+            SvgGradient parsed;
+            if (!parseSvgGradient(*paint.fillGradient, paint.fillGradientRadial, parsed)) {
+                return std::nullopt;
+            }
+            return svgGradientShader(parsed, bbox, frame.view, alpha);
+        };
         if (tag == "rect") {
             const float w = std::max(0.0f, len("width"));
             const float h = std::max(0.0f, len("height"));
@@ -1888,7 +1961,11 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                 radii.topRight = {rx, ry};
                 radii.bottomRight = {rx, ry};
                 radii.bottomLeft = {rx, ry};
-                renderer.fillRect(rect, Shader::solid(tint(paint.fill)), radii);
+                if (std::optional<Shader> shader = fillShaderFor(rect)) {
+                    renderer.fillRect(rect, *shader, radii);
+                } else {
+                    renderer.fillRect(rect, Shader::solid(tint(paint.fill)), radii);
+                }
             }
             if (paint.hasStroke && paint.strokeWidth > 0.0f) {
                 renderer.strokeRect(rect, tint(paint.stroke), paint.strokeWidth);
@@ -1901,7 +1978,24 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
             const SDL_FPoint center = place(len("cx"), len("cy"));
             const float radius = (scaleX(r) + scaleY(r)) * 0.5f;
             if (paint.hasFill) {
-                renderer.fillCircle(center.x, center.y, radius, tint(paint.fill));
+                const SDL_FRect box{center.x - radius, center.y - radius, radius * 2.0f,
+                                    radius * 2.0f};
+                if (std::optional<Shader> shader = fillShaderFor(box)) {
+                    const int samples =
+                        std::clamp(static_cast<int>(std::ceil(radius * 1.6f)), 8, 128);
+                    std::vector<SDL_FPoint> disc;
+                    disc.reserve(static_cast<std::size_t>(samples));
+                    const float twoPi = 2.0f * 3.14159265f;
+                    for (int k = 0; k < samples; ++k) {
+                        const float a =
+                            twoPi * static_cast<float>(k) / static_cast<float>(samples);
+                        disc.push_back(SDL_FPoint{center.x + radius * std::cos(a),
+                                                  center.y + radius * std::sin(a)});
+                    }
+                    renderer.fillPolygon(disc, *shader);
+                } else {
+                    renderer.fillCircle(center.x, center.y, radius, tint(paint.fill));
+                }
             }
             if (paint.hasStroke && paint.strokeWidth > 0.0f) {
                 std::vector<SDL_FPoint> ring;
@@ -1928,7 +2022,13 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                                           center.y + scaleY(ry) * std::sin(a)});
             }
             if (paint.hasFill) {
-                renderer.fillPolygon(disc, tint(paint.fill));
+                const SDL_FRect box{center.x - scaleX(rx), center.y - scaleY(ry),
+                                    scaleX(rx) * 2.0f, scaleY(ry) * 2.0f};
+                if (std::optional<Shader> shader = fillShaderFor(box)) {
+                    renderer.fillPolygon(disc, *shader);
+                } else {
+                    renderer.fillPolygon(disc, tint(paint.fill));
+                }
             }
             if (paint.hasStroke && paint.strokeWidth > 0.0f) {
                 renderer.strokePath(disc, tint(paint.stroke), paint.strokeWidth, true);
@@ -1960,12 +2060,26 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
                 paintMarkers(path, sub.closed);
             }
             if (!loops.empty()) {
+                std::vector<SDL_FPoint> allPoints;
+                for (const auto& loop : loops) {
+                    allPoints.insert(allPoints.end(), loop.begin(), loop.end());
+                }
+                const std::optional<Shader> shader = fillShaderFor(bboxOf(allPoints));
                 const bool evenOdd = svgFillEvenOdd(el);
                 if (!evenOdd && loops.size() == 1 && isConvexLoop(loops[0])) {
-                    renderer.fillPolygon(loops[0], tint(paint.fill));
+                    if (shader) {
+                        renderer.fillPolygon(loops[0], *shader);
+                    } else {
+                        renderer.fillPolygon(loops[0], tint(paint.fill));
+                    }
                 } else {
-                    renderer.fillTriangles(tessellateFill(loops, evenOdd),
-                                           tint(paint.fill));
+                    const std::vector<SDL_FPoint> triangles =
+                        tessellateFill(loops, evenOdd);
+                    if (shader) {
+                        renderer.fillTriangles(triangles, *shader);
+                    } else {
+                        renderer.fillTriangles(triangles, tint(paint.fill));
+                    }
                 }
             }
         } else if (tag == "line") {
@@ -1990,12 +2104,22 @@ void paintSvgShapes(const Element& svg, const SvgView& view, Renderer& renderer,
             }
             const bool closed = tag == "polygon";
             if (closed && paint.hasFill) {
+                const std::optional<Shader> shader = fillShaderFor(bboxOf(path));
                 const bool evenOdd = svgFillEvenOdd(el);
                 if (!evenOdd && isConvexLoop(path)) {
-                    renderer.fillPolygon(path, tint(paint.fill));
+                    if (shader) {
+                        renderer.fillPolygon(path, *shader);
+                    } else {
+                        renderer.fillPolygon(path, tint(paint.fill));
+                    }
                 } else {
-                    renderer.fillTriangles(tessellateFill({path}, evenOdd),
-                                           tint(paint.fill));
+                    const std::vector<SDL_FPoint> triangles =
+                        tessellateFill({path}, evenOdd);
+                    if (shader) {
+                        renderer.fillTriangles(triangles, *shader);
+                    } else {
+                        renderer.fillTriangles(triangles, tint(paint.fill));
+                    }
                 }
             }
             if (paint.hasStroke && paint.strokeWidth > 0.0f) {

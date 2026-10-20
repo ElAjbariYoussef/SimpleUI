@@ -211,6 +211,9 @@ public:
     // emits for fills a fan cannot cover. Empty and degenerate lists paint
     // nothing.
     void fillTriangles(const std::vector<SDL_FPoint>& triangles, const Color& color);
+    // The same triangle soup with a gradient (or image) shader: each triangle
+    // becomes its own fan, so a gradient reaches tessellated path fills too.
+    void fillTriangles(const std::vector<SDL_FPoint>& triangles, const Shader& shader);
     void fillCircle(float cx, float cy, float radius, const Color& color);
 
     // Strokes. The band runs inward from the path, not centred on it, because that is

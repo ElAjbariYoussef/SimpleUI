@@ -8,6 +8,7 @@
 #include "Rendering/Tessellate.h"
 #include "Rendering/SvgText.h"
 #include "Rendering/SvgMarker.h"
+#include "Rendering/SvgPaint.h"
 #include "CSS/Parser.h"
 #include "CSS/Style.h"
 #include "CSS/StyleResolver.h"
@@ -1285,6 +1286,131 @@ void testSvgPath() {
           "a leading lineto opens a bare subpath");
 }
 
+// SVG paint servers: a `url(#id)` fill resolves to a gradient element, the
+// parser reads its units, geometry, and stops, and the shader builder maps
+// objectBoundingBox or userSpaceOnUse coordinates onto a shape's box.
+void testSvgGradients() {
+    const char* markup =
+        "<sui><body><svg>"
+        "<defs>"
+        "<linearGradient id=\"lg\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\">"
+        "<stop offset=\"0\" stop-color=\"#ff0000\"/>"
+        "<stop offset=\"100%\" stop-color=\"#0000ff\" stop-opacity=\"0.5\"/>"
+        "</linearGradient>"
+        "<linearGradient id=\"ug\" gradientUnits=\"userSpaceOnUse\" "
+        "x1=\"0\" y1=\"0\" x2=\"10\" y2=\"0\">"
+        "<stop offset=\"0\" stop-color=\"#00ff00\"/>"
+        "<stop offset=\"1\" stop-color=\"#ffffff\"/>"
+        "</linearGradient>"
+        "<radialGradient id=\"rg\">"
+        "<stop offset=\"0\" stop-color=\"#ffffff\"/>"
+        "<stop offset=\"1\" stop-color=\"#000000\"/>"
+        "</radialGradient>"
+        "<linearGradient id=\"empty\"></linearGradient>"
+        "</defs>"
+        "<rect id=\"r\" width=\"10\" height=\"10\" fill=\"url(#lg)\"/>"
+        "</svg></body></sui>";
+    sui::ParseError error;
+    auto document = sui::MarkupParser::parse(markup, error);
+    check(document != nullptr, "the gradient document parses");
+    if (!document) {
+        return;
+    }
+    Element* lg = document->getElementById("lg");
+    Element* ug = document->getElementById("ug");
+    Element* rg = document->getElementById("rg");
+    Element* empty = document->getElementById("empty");
+    Element* rect = document->getElementById("r");
+    check(lg && ug && rg && empty && rect, "the gradient elements exist");
+    if (!lg || !ug || !rg || !empty || !rect) {
+        return;
+    }
+
+    bool radial = false;
+    check(sui::resolveSvgGradientRef(*rect, "url(#lg)", radial) == lg && !radial,
+          "a linear gradient reference resolves");
+    check(sui::resolveSvgGradientRef(*rect, "url(#rg)", radial) == rg && radial,
+          "a radial gradient reference resolves");
+    check(sui::resolveSvgGradientRef(*rect, "url(#missing)", radial) == nullptr,
+          "a missing gradient resolves to nothing");
+    check(sui::resolveSvgGradientRef(*rect, "red", radial) == nullptr,
+          "a plain colour is not a gradient reference");
+    check(sui::svgPaintIsUrl("url(#lg)") && !sui::svgPaintIsUrl("red"),
+          "url() detection reads paint values");
+    sui::Color fallback;
+    check(sui::svgPaintFallbackColor("url(#missing) #00ff00", fallback) &&
+              fallback.g == 255 && fallback.r == 0,
+          "a fallback colour after url() parses");
+    check(!sui::svgPaintFallbackColor("url(#missing)", fallback),
+          "no fallback means no fallback colour");
+
+    sui::SvgGradient parsed;
+    check(sui::parseSvgGradient(*lg, false, parsed) && parsed.stops.size() == 2,
+          "the linear gradient parses its stops");
+    check(parsed.objectBoundingBox && parsed.x1 == 0.0f && parsed.x2 == 1.0f &&
+              parsed.y2 == 0.0f,
+          "objectBoundingBox coordinates and defaults parse");
+    check(parsed.stops[0].offset == 0.0f && parsed.stops[1].offset == 1.0f,
+          "offsets read as numbers and percentages");
+    check(parsed.stops[0].color == (sui::Color{255, 0, 0, 255}) &&
+              parsed.stops[1].color == (sui::Color{0, 0, 255, 128}),
+          "stop colours and stop-opacity fold together");
+    check(sui::parseSvgGradient(*ug, false, parsed) && !parsed.objectBoundingBox &&
+              parsed.x2 == 10.0f,
+          "userSpaceOnUse units and coordinates parse");
+    check(sui::parseSvgGradient(*rg, true, parsed) && parsed.radial &&
+              parsed.cx == 0.5f && parsed.cy == 0.5f && parsed.r == 0.5f,
+          "a radial gradient takes the 50% defaults");
+    check(!sui::parseSvgGradient(*empty, false, parsed),
+          "a gradient with no usable stop fails to parse");
+
+    // The bounding-box mapping stretches the ramp across the shape.
+    sui::parseSvgGradient(*lg, false, parsed);
+    const sui::SvgView unit = sui::svgViewport(100.0f, 50.0f, 0.0f, 0.0f, 100.0f, 50.0f,
+                                               false);
+    const sui::Shader linear = sui::svgGradientShader(
+        parsed, SDL_FRect{0.0f, 0.0f, 100.0f, 50.0f}, unit, 1.0f);
+    const sui::Color left = linear.colorAt(0.0f, 25.0f);
+    const sui::Color right = linear.colorAt(100.0f, 25.0f);
+    check(left.r > 200 && left.b < 60, "the ramp starts at the first stop");
+    check(right.b > 200 && right.r < 60, "the ramp ends at the last stop");
+    const sui::Color middle = linear.colorAt(50.0f, 25.0f);
+    check(middle.r > 90 && middle.r < 165 && middle.b > 90 && middle.b < 165,
+          "the ramp interpolates through the middle");
+
+    // userSpaceOnUse maps user units through the viewport.
+    sui::parseSvgGradient(*ug, false, parsed);
+    sui::SvgView view{};
+    view.sx = 2.0f;
+    view.sy = 2.0f;
+    view.x = 5.0f;
+    view.y = 3.0f;
+    const sui::Shader userSpace =
+        sui::svgGradientShader(parsed, SDL_FRect{0.0f, 0.0f, 1.0f, 1.0f}, view, 1.0f);
+    const sui::Color start = userSpace.colorAt(5.0f, 10.0f);
+    const sui::Color finish = userSpace.colorAt(25.0f, 10.0f);
+    check(start.g > 200 && start.r < 60, "userSpaceOnUse starts at the gradient origin");
+    check(finish.r > 200 && finish.g > 200 && finish.b > 200,
+          "userSpaceOnUse ends at the mapped second stop");
+
+    // A radial ramp runs from the centre to the bounding-box edge.
+    sui::parseSvgGradient(*rg, true, parsed);
+    const sui::Shader radialShader =
+        sui::svgGradientShader(parsed, SDL_FRect{0.0f, 0.0f, 100.0f, 100.0f}, unit, 1.0f);
+    const sui::Color centre = radialShader.colorAt(50.0f, 50.0f);
+    const sui::Color edge = radialShader.colorAt(0.0f, 50.0f);
+    check(centre.r > 200 && centre.g > 200 && centre.b > 200,
+          "the radial ramp starts white");
+    check(edge.r < 60 && edge.g < 60 && edge.b < 60, "the radial ramp ends black");
+
+    // Frame opacity reaches every stop.
+    const sui::Shader faded = sui::svgGradientShader(
+        parsed, SDL_FRect{0.0f, 0.0f, 100.0f, 100.0f}, unit, 0.5f);
+    const sui::Color fadedCentre = faded.colorAt(50.0f, 50.0f);
+    check(fadedCentre.a > 100 && fadedCentre.a < 160,
+          "frame opacity halves the stop alpha");
+}
+
 // SVG viewports map user units onto the box: uniform meet scaling centred,
 // or independent axes for `none`. viewBox text parses strictly.
 void testSvgViewport() {
@@ -2406,6 +2532,7 @@ int main() {
     testBorderImageTiles();
     testShaping();
     testSvgPath();
+    testSvgGradients();
     testSvgViewport();
     testSvgText();
     testSvgViewBoxUnits();

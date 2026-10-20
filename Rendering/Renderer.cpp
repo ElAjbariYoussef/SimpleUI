@@ -596,6 +596,16 @@ void Renderer::fillTriangles(const std::vector<SDL_FPoint>& triangles, const Col
                        static_cast<int>(indices.size()));
 }
 
+void Renderer::fillTriangles(const std::vector<SDL_FPoint>& triangles,
+                             const Shader& shader) {
+    if (triangles.size() < 3) {
+        return;
+    }
+    for (std::size_t i = 0; i + 2 < triangles.size(); i += 3) {
+        emit({triangles[i], triangles[i + 1], triangles[i + 2]}, shader);
+    }
+}
+
 void Renderer::fillCircle(float cx, float cy, float radius, const Color& color) {
     if (radius <= 0.0f || color.a == 0) {
         return;
