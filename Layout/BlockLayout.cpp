@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <map>
 #include <string>
 #include <string_view>
 
@@ -197,6 +198,23 @@ float textWidth(const TextFont* font, const ComputedStyle& s, std::string_view t
 bool isFloated(const ComputedStyle& s) {
     return s.floatType != ComputedStyle::FloatNone;
 }
+
+// A vertical margin strut: the largest positive and most negative margins seen
+// by one adjoining margin chain. Their sum is the collapsed margin.
+struct MarginStrut {
+    float positive = 0.0f;
+    float negative = 0.0f;
+
+    void add(float value) {
+        if (value >= 0.0f) {
+            positive = std::max(positive, value);
+        } else {
+            negative = std::min(negative, value);
+        }
+    }
+
+    float value() const noexcept { return positive + negative; }
+};
 
 // The HTML `colspan` / `rowspan` value, clamped to a sane range. An absent or
 // malformed value falls back to one cell.
@@ -456,7 +474,477 @@ public:
 
     // Lays out `el` with the given available width. Returns the outer height
     // consumed, margins included.
-    float run(Element& el, float availableWidth, float originX, float originY) {
+    // A block formatting context root separates its children's margins from
+    // its own. Floats, out-of-flow boxes, scroll containers, flex/grid/table
+    // containers, and layout/paint containment all establish one.
+    bool isBfcRoot(const ComputedStyle& s) const {
+        if (isFloated(s) || s.position == ComputedStyle::Absolute ||
+            s.position == ComputedStyle::Fixed) {
+            return true;
+        }
+        if (s.overflowX != ComputedStyle::Visible ||
+            s.overflowY != ComputedStyle::Visible) {
+            return true;
+        }
+        if (s.isFlexContainer() || s.isGridContainer() || s.isTableContainer()) {
+            return true;
+        }
+        return (s.contain & (ComputedStyle::ContainLayout |
+                             ComputedStyle::ContainPaint)) != 0;
+    }
+
+    // Whether a text node produces a line box in this context. Collapsible
+    // whitespace between blocks does not, preserved whitespace does.
+    bool textCreatesLine(std::string_view text, const ComputedStyle& s) const {
+        bool onlySpace = true;
+        for (unsigned char c : text) {
+            if (!std::isspace(c)) {
+                onlySpace = false;
+                break;
+            }
+        }
+        if (!onlySpace) {
+            return true;
+        }
+        if (text.empty()) {
+            return false;
+        }
+        return s.whiteSpace != ComputedStyle::WrapText &&
+               s.whiteSpace != ComputedStyle::WrapNone;
+    }
+
+    // Generated marker boxes sit before an item's first child and prevent its
+    // top margin from adjoining that child's.
+    bool hasGeneratedBox(const Element& el, const ComputedStyle& s) const {
+        return el.tag() == "li" && s.listStyleType != ComputedStyle::LSTNone;
+    }
+
+    // The first in-flow block-level child, or null when inline content (or a
+    // preserved blank) comes first. Floats and out-of-flow boxes are skipped.
+    Element* firstBlockChild(Element& el, const ComputedStyle& parent) const {
+        for (const auto& child : el.children()) {
+            if (!child) {
+                continue;
+            }
+            if (child->isTextNode()) {
+                if (textCreatesLine(child->text(), parent)) {
+                    return nullptr;
+                }
+                continue;
+            }
+            if (!laidOut(*child)) {
+                continue;
+            }
+            const ComputedStyle cs = resolver_.resolve(*child);
+            if (cs.display == ComputedStyle::None || !cs.visible) {
+                continue;
+            }
+            if (isFloated(cs) || cs.position == ComputedStyle::Absolute ||
+                cs.position == ComputedStyle::Fixed) {
+                continue;
+            }
+            return isBlockLevel(cs) ? child.get() : nullptr;
+        }
+        return nullptr;
+    }
+
+    // The last in-flow block-level child, or null when inline content follows.
+    Element* lastBlockChild(Element& el, const ComputedStyle& parent) const {
+        const auto& children = el.children();
+        for (std::size_t i = children.size(); i-- > 0;) {
+            const auto& child = children[i];
+            if (!child) {
+                continue;
+            }
+            if (child->isTextNode()) {
+                if (textCreatesLine(child->text(), parent)) {
+                    return nullptr;
+                }
+                continue;
+            }
+            if (!laidOut(*child)) {
+                continue;
+            }
+            const ComputedStyle cs = resolver_.resolve(*child);
+            if (cs.display == ComputedStyle::None || !cs.visible) {
+                continue;
+            }
+            if (isFloated(cs) || cs.position == ComputedStyle::Absolute ||
+                cs.position == ComputedStyle::Fixed) {
+                continue;
+            }
+            return isBlockLevel(cs) ? child.get() : nullptr;
+        }
+        return nullptr;
+    }
+
+    // A box's top margin collapses with its first in-flow block child's when no
+    // border, padding, cleared top, or inline content separates them.
+    bool canCollapseTop(Element& el, const ComputedStyle& s, float width) const {
+        if (!isBlockLevel(s) || isBfcRoot(s) ||
+            s.clearType != ComputedStyle::ClearNone || hasGeneratedBox(el, s) ||
+            !pureBlockFlow(el, s)) {
+            return false;
+        }
+        const UsedBox b = usedBox(s, width);
+        if (b.borderWidth.top > 0.0f || b.padding.top > 0.0f) {
+            return false;
+        }
+        Element* first = firstBlockChild(el, s);
+        if (!first) {
+            return false;
+        }
+        const ComputedStyle cs = resolver_.resolve(*first);
+        return cs.clearType == ComputedStyle::ClearNone;
+    }
+
+    // A box's bottom margin collapses with its last in-flow block child's when
+    // no border, padding, definite height, min-height, or trailing inline
+    // content separates them.
+    bool canCollapseBottom(Element& el, const ComputedStyle& s,
+                           const UsedBox& b) const {
+        if (!isBlockLevel(s) || isBfcRoot(s) || hasGeneratedBox(el, s) ||
+            !pureBlockFlow(el, s)) {
+            return false;
+        }
+        if (b.borderWidth.bottom > 0.0f || b.padding.bottom > 0.0f ||
+            b.height > 0.0f || b.minHeight > 0.0f) {
+            return false;
+        }
+        if (s.height.isAuto() && s.aspectRatio() > 0.0f) {
+            return false;
+        }
+        return lastBlockChild(el, s) != nullptr;
+    }
+
+    // The used content width of a child, for resolving its descendants'
+    // percentage margins while precomputing margin struts.
+    float childContentWidth(const ComputedStyle& cs, float containingWidth) const {
+        const UsedBox b = usedBox(cs, containingWidth);
+        const float width = b.width > 0.0f
+                                ? b.width
+                                : std::max(0.0f, containingWidth - b.horizontalChrome());
+        return applyMinMax(width, b);
+    }
+
+    // An empty block's top and bottom margins collapse through it. A block is
+    // empty for this purpose only when it has no height, border, padding,
+    // inline content, floats, or non-through block children.
+    bool collapsesThrough(Element& el, const ComputedStyle& s, const UsedBox& b,
+                          float width) const {
+        const MarginKey key{&el, width};
+        auto cached = throughCache_.find(key);
+        if (cached != throughCache_.end()) {
+            return cached->second;
+        }
+        const bool result = [&]() -> bool {
+        if (!isBlockLevel(s) || isBfcRoot(s) ||
+            s.clearType != ComputedStyle::ClearNone || hasGeneratedBox(el, s)) {
+            return false;
+        }
+        if (b.borderWidth.top > 0.0f || b.borderWidth.bottom > 0.0f ||
+            b.padding.top > 0.0f || b.padding.bottom > 0.0f) {
+            return false;
+        }
+        if (b.height > 0.0f || b.minHeight > 0.0f ||
+            (s.height.isAuto() && s.aspectRatio() > 0.0f)) {
+            return false;
+        }
+        for (const auto& child : el.children()) {
+            if (!child) {
+                continue;
+            }
+            if (child->isTextNode()) {
+                if (textCreatesLine(child->text(), s)) {
+                    return false;
+                }
+                continue;
+            }
+            if (!laidOut(*child)) {
+                continue;
+            }
+            const ComputedStyle cs = resolver_.resolve(*child);
+            if (cs.display == ComputedStyle::None || !cs.visible) {
+                continue;
+            }
+            if (isFloated(cs)) {
+                return false;
+            }
+            if (cs.position == ComputedStyle::Absolute ||
+                cs.position == ComputedStyle::Fixed) {
+                continue;
+            }
+            if (!isBlockLevel(cs)) {
+                return false;
+            }
+            const UsedBox cb = usedBox(cs, width);
+            if (!collapsesThrough(*child, cs, cb, childContentWidth(cs, width))) {
+                return false;
+            }
+        }
+        return true;
+        }();
+        throughCache_.emplace(key, result);
+        return result;
+    }
+
+    // The collapsed top margin of a box: its own top margin plus the adjoining
+    // chain down its first in-flow block descendants. A through box contributes
+    // both of its margins.
+    MarginStrut collapsedTop(Element& el, float width) const {
+        const MarginKey key{&el, width};
+        auto cached = topCache_.find(key);
+        if (cached != topCache_.end()) {
+            return cached->second;
+        }
+        const MarginStrut result = [&]() -> MarginStrut {
+        const ComputedStyle s = resolver_.resolve(el);
+        const UsedBox b = usedBox(s, width);
+        MarginStrut out;
+        out.add(b.margin.top);
+        if (collapsesThrough(el, s, b, width)) {
+            out.add(b.margin.bottom);
+            for (const auto& child : el.children()) {
+                if (!child || child->isTextNode() || !laidOut(*child)) {
+                    continue;
+                }
+                const ComputedStyle cs = resolver_.resolve(*child);
+                if (cs.display == ComputedStyle::None || !cs.visible ||
+                    isFloated(cs) || cs.position == ComputedStyle::Absolute ||
+                    cs.position == ComputedStyle::Fixed || !isBlockLevel(cs)) {
+                    continue;
+                }
+                const MarginStrut inner =
+                    collapsedTop(*child, childContentWidth(cs, width));
+                out.add(inner.positive);
+                out.add(inner.negative);
+            }
+            return out;
+        }
+        if (!canCollapseTop(el, s, width)) {
+            return out;
+        }
+        for (const auto& child : el.children()) {
+            if (!child) {
+                continue;
+            }
+            if (child->isTextNode()) {
+                if (textCreatesLine(child->text(), s)) {
+                    break;
+                }
+                continue;
+            }
+            if (!laidOut(*child)) {
+                continue;
+            }
+            const ComputedStyle cs = resolver_.resolve(*child);
+            if (cs.display == ComputedStyle::None || !cs.visible ||
+                isFloated(cs) || cs.position == ComputedStyle::Absolute ||
+                cs.position == ComputedStyle::Fixed) {
+                continue;
+            }
+            if (!isBlockLevel(cs)) {
+                break;
+            }
+            const float cw = childContentWidth(cs, width);
+            const MarginStrut inner = collapsedTop(*child, cw);
+            out.add(inner.positive);
+            out.add(inner.negative);
+            if (!collapsesThrough(*child, cs, usedBox(cs, width), cw)) {
+                break;
+            }
+        }
+        return out;
+        }();
+        topCache_.emplace(key, result);
+        return result;
+    }
+
+    // The mirror strut for the bottom edge.
+    MarginStrut collapsedBottom(Element& el, float width) const {
+        const MarginKey key{&el, width};
+        auto cached = bottomCache_.find(key);
+        if (cached != bottomCache_.end()) {
+            return cached->second;
+        }
+        const MarginStrut result = [&]() -> MarginStrut {
+        const ComputedStyle s = resolver_.resolve(el);
+        const UsedBox b = usedBox(s, width);
+        MarginStrut out;
+        out.add(b.margin.bottom);
+        if (collapsesThrough(el, s, b, width)) {
+            out.add(b.margin.top);
+            const auto& children = el.children();
+            for (std::size_t i = children.size(); i-- > 0;) {
+                const auto& child = children[i];
+                if (!child || child->isTextNode() || !laidOut(*child)) {
+                    continue;
+                }
+                const ComputedStyle cs = resolver_.resolve(*child);
+                if (cs.display == ComputedStyle::None || !cs.visible ||
+                    isFloated(cs) || cs.position == ComputedStyle::Absolute ||
+                    cs.position == ComputedStyle::Fixed || !isBlockLevel(cs)) {
+                    continue;
+                }
+                const MarginStrut inner =
+                    collapsedBottom(*child, childContentWidth(cs, width));
+                out.add(inner.positive);
+                out.add(inner.negative);
+            }
+            return out;
+        }
+        if (!canCollapseBottom(el, s, b)) {
+            return out;
+        }
+        const auto& children = el.children();
+        for (std::size_t i = children.size(); i-- > 0;) {
+            const auto& child = children[i];
+            if (!child) {
+                continue;
+            }
+            if (child->isTextNode()) {
+                if (textCreatesLine(child->text(), s)) {
+                    break;
+                }
+                continue;
+            }
+            if (!laidOut(*child)) {
+                continue;
+            }
+            const ComputedStyle cs = resolver_.resolve(*child);
+            if (cs.display == ComputedStyle::None || !cs.visible ||
+                isFloated(cs) || cs.position == ComputedStyle::Absolute ||
+                cs.position == ComputedStyle::Fixed) {
+                continue;
+            }
+            if (!isBlockLevel(cs)) {
+                break;
+            }
+            const float cw = childContentWidth(cs, width);
+            const MarginStrut inner = collapsedBottom(*child, cw);
+            out.add(inner.positive);
+            out.add(inner.negative);
+            if (!collapsesThrough(*child, cs, usedBox(cs, width), cw)) {
+                break;
+            }
+        }
+        return out;
+        }();
+        bottomCache_.emplace(key, result);
+        return result;
+    }
+
+    // Repositions an all-block child list with collapsed sibling margins. The
+    // first child's top and the last child's bottom are already outside the
+    // parent when suppress* is set, so they are not counted inside.
+    float collapseBlockMargins(Element& el, float contentY, float contentWidth,
+                               bool suppressFirstTop, bool suppressLastBottom) {
+        MarginStrut pending;
+        float prevBottom = contentY;
+        bool first = true;
+        bool any = false;
+        for (const auto& child : el.children()) {
+            if (!child || child->isTextNode() || !laidOut(*child)) {
+                continue;
+            }
+            const ComputedStyle cs = resolver_.resolve(*child);
+            if (cs.display == ComputedStyle::None || !cs.visible ||
+                isFloated(cs) || cs.position == ComputedStyle::Absolute ||
+                cs.position == ComputedStyle::Fixed) {
+                continue;
+            }
+            if (!isBlockLevel(cs)) {
+                continue;
+            }
+            const UsedBox cb = usedBox(cs, contentWidth);
+            const float cw = childContentWidth(cs, contentWidth);
+            const bool through = collapsesThrough(*child, cs, cb, cw);
+            const MarginStrut top = collapsedTop(*child, contentWidth);
+            const MarginStrut bottom = collapsedBottom(*child, contentWidth);
+            if (through) {
+                pending.add(top.positive);
+                pending.add(top.negative);
+                pending.add(bottom.positive);
+                pending.add(bottom.negative);
+                const float desired = prevBottom + pending.value();
+                shiftSubtree(*child, 0.0f, desired - child->layoutY());
+                continue;
+            }
+            float desired = 0.0f;
+            if (first) {
+                if (suppressFirstTop) {
+                    desired = contentY;
+                } else {
+                    MarginStrut gap = pending;
+                    gap.add(top.positive);
+                    gap.add(top.negative);
+                    desired = contentY + gap.value();
+                }
+            } else {
+                MarginStrut gap = pending;
+                gap.add(top.positive);
+                gap.add(top.negative);
+                desired = prevBottom + gap.value();
+            }
+            shiftSubtree(*child, 0.0f, desired - child->layoutY());
+            prevBottom = desired + child->layoutHeight();
+            pending = bottom;
+            first = false;
+            any = true;
+        }
+        float height = any ? prevBottom - contentY : 0.0f;
+        if (!suppressLastBottom) {
+            height += pending.value();
+        }
+        return std::max(0.0f, height);
+    }
+
+    // True when the container's children form a pure block flow, so its own
+    // first/last margins may join theirs. Line boxes, inline-level boxes,
+    // floats, and clearance all keep the container's contents from collapsing
+    // with its edges.
+    bool pureBlockFlow(Element& el, const ComputedStyle& s) const {
+        auto cached = pureCache_.find(&el);
+        if (cached != pureCache_.end()) {
+            return cached->second;
+        }
+        const bool result = [&]() -> bool {
+        if (hasFloatChild(el)) {
+            return false;
+        }
+        for (const auto& child : el.children()) {
+            if (!child) {
+                continue;
+            }
+            if (child->isTextNode()) {
+                if (textCreatesLine(child->text(), s)) {
+                    return false;
+                }
+                continue;
+            }
+            if (!laidOut(*child)) {
+                continue;
+            }
+            const ComputedStyle cs = resolver_.resolve(*child);
+            if (cs.display == ComputedStyle::None || !cs.visible) {
+                continue;
+            }
+            if (isFloated(cs) || cs.position == ComputedStyle::Absolute ||
+                cs.position == ComputedStyle::Fixed) {
+                continue;
+            }
+            if (!isBlockLevel(cs) || cs.clearType != ComputedStyle::ClearNone) {
+                return false;
+            }
+        }
+        return true;
+        }();
+        pureCache_.emplace(&el, result);
+        return result;
+    }
+
+    float run(Element& el, float availableWidth, float originX, float originY,
+              bool collapseMargins = false) {
         ComputedStyle s = resolver_.resolve(el);
         applyTextAreaSize(el, s);
         applySelectSize(el, s);
@@ -511,10 +999,21 @@ public:
             }
         }
 
+        // A block in normal flow folds its first/last child's adjoining margins
+        // into its own. The caller positions it by this collapsed top margin, and
+        // its outer height carries the collapsed bottom margin.
+        const bool collapsible =
+            collapseMargins && isBlockLevel(s) && !isBfcRoot(s) && !isFloated(s) &&
+            s.position != ComputedStyle::Absolute &&
+            s.position != ComputedStyle::Fixed && pureBlockFlow(el, s);
+        const float flowTop =
+            collapsible ? collapsedTop(el, availableWidth).value() : box.margin.top;
+        const float flowBottom =
+            collapsible ? collapsedBottom(el, availableWidth).value() : box.margin.bottom;
+
         const float contentX = originX + placed.margin.left + placed.borderWidth.left +
                                placed.padding.left;
-        const float contentY = originY + box.margin.top + box.borderWidth.top +
-                               box.padding.top;
+        const float contentY = originY + flowTop + box.borderWidth.top + box.padding.top;
 
         // An inline-level box with auto width shrinks to fit its contents, the
         // way a browser sizes a button or an image. The probe below measures
@@ -536,7 +1035,7 @@ public:
         float contentWidth = 0.0f;
         float contentHeight = 0.0f;
         contentHeight = layoutContents(el, s, box, availableWidth, contentX, contentY,
-                                       contentWidth);
+                                       contentWidth, collapsible);
         cbOwner_ = savedOwner;
 
         if (box.height > 0.0f) {
@@ -558,7 +1057,7 @@ public:
                               box.padding.top + box.padding.bottom;
 
         el.setLayoutX(originX + placed.margin.left);
-        el.setLayoutY(originY + box.margin.top);
+        el.setLayoutY(originY + flowTop);
         el.setLayoutWidth(borderW);
         el.setLayoutHeight(borderH);
         recordBoxes(el, contentX, contentY, contentWidth, contentHeight, box);
@@ -580,7 +1079,7 @@ public:
                 relative_.push_back({&el, s});
             }
         }
-        return borderH + box.margin.top + box.margin.bottom;
+        return borderH + flowTop + flowBottom;
     }
 
     // Out-of-flow boxes are placed after the in-flow layout, because their
@@ -936,11 +1435,17 @@ private:
     FloatContext* floats_ = nullptr;
 
     bool laidOut(Element& el) const {
-        if (!el.isVisual()) {
-            return false;
+        auto found = laidOutCache_.find(&el);
+        if (found != laidOutCache_.end()) {
+            return found->second;
         }
-        const ComputedStyle cs = resolver_.resolve(el);
-        return cs.display != ComputedStyle::None && cs.visible;
+        bool result = false;
+        if (el.isVisual()) {
+            const ComputedStyle cs = resolver_.resolve(el);
+            result = cs.display != ComputedStyle::None && cs.visible;
+        }
+        laidOutCache_.emplace(&el, result);
+        return result;
     }
 
     bool hasBlockChild(Element& el) const {
@@ -958,13 +1463,20 @@ private:
     }
 
     bool hasFloatChild(Element& el) const {
+        auto found = floatChildCache_.find(&el);
+        if (found != floatChildCache_.end()) {
+            return found->second;
+        }
+        bool result = false;
         for (const auto& child : el.children()) {
             if (child && !child->isTextNode() && laidOut(*child) &&
                 isFloated(resolver_.resolve(*child))) {
-                return true;
+                result = true;
+                break;
             }
         }
-        return false;
+        floatChildCache_.emplace(&el, result);
+        return result;
     }
 
     // Places a floated child's margin box against the container's left or right
@@ -1023,9 +1535,10 @@ private:
         ctx.add({top, bottom, x, x + outerW, left});
     }
 
-    float layoutBlockContainer(Element& el, const UsedBox& box, float availableWidth,
-                               float contentX, float contentY, float& outHeight,
-                               float& outWidth) {
+    float layoutBlockContainer(Element& el, const ComputedStyle& s, const UsedBox& box,
+                               float availableWidth, float contentX, float contentY,
+                               float& outHeight, float& outWidth,
+                               bool allowParentChild) {
         float contentWidth = applyMinMax(
             box.width > 0.0f ? box.width
                              : std::max(0.0f, availableWidth - box.horizontalChrome()),
@@ -1050,6 +1563,16 @@ private:
             }
         }
 
+        // Margin collapsing needs a pure block flow: no line boxes, floats,
+        // clearance, or inline-level boxes between the blocks. Otherwise the
+        // existing additive flow is kept, and run() had already left this
+        // container's own margins additive too.
+        const bool allBlockFlow = pureBlockFlow(el, s);
+        const bool suppressFirstTop =
+            allowParentChild && canCollapseTop(el, s, contentWidth);
+        const bool suppressLastBottom =
+            allowParentChild && canCollapseBottom(el, s, box);
+
         FloatContext* const ctx = floats_;
         float cursorY = 0.0f;
         for (const auto& child : el.children()) {
@@ -1069,11 +1592,18 @@ private:
                 const float clearY = ctx->clearBottom(cs.clearType, contentY);
                 cursorY = std::max(cursorY, clearY - contentY);
             }
-            cursorY += run(*child, contentWidth, contentX, contentY + cursorY);
+            const bool collapseChild = allBlockFlow && isBlockLevel(cs);
+            cursorY += run(*child, contentWidth, contentX, contentY + cursorY,
+                           collapseChild);
         }
-        outHeight = cursorY;
+        if (allBlockFlow) {
+            outHeight = collapseBlockMargins(el, contentY, contentWidth,
+                                             suppressFirstTop, suppressLastBottom);
+        } else {
+            outHeight = cursorY;
+        }
         outWidth = contentWidth;
-        return cursorY;
+        return outHeight;
     }
 
     // Zeroes a subtree past a `line-clamp` cap: no box, no runs, nothing to
@@ -1146,7 +1676,7 @@ private:
 
     float layoutContents(Element& el, const ComputedStyle& s, const UsedBox& box,
                          float availableWidth, float contentX, float contentY,
-                         float& outWidth) {
+                         float& outWidth, bool allowParentChild = false) {
         if (s.isFlexContainer()) {
             return layoutFlexContainer(el, s, box, availableWidth, contentX, contentY,
                                        outWidth);
@@ -1171,7 +1701,8 @@ private:
 
         float height = 0.0f;
         if (hasBlockChild(el)) {
-            layoutBlockContainer(el, box, availableWidth, contentX, contentY, height, outWidth);
+            layoutBlockContainer(el, s, box, availableWidth, contentX, contentY, height,
+                                 outWidth, allowParentChild);
         } else {
             height = layoutInlineContainer(el, s, box, availableWidth, contentX, contentY,
                                            outWidth);
@@ -4021,6 +4552,17 @@ private:
     float viewportWidth_ = 0.0f;
     float viewportHeight_ = 0.0f;
     const TextFont* font_ = nullptr;
+
+    // Margin collapsing asks the same questions repeatedly while a pass walks
+    // nested blocks. Cache the structural answers for this layout pass; width
+    // is part of the key because percentage margins/padding resolve against it.
+    using MarginKey = std::pair<const Element*, float>;
+    mutable std::map<MarginKey, MarginStrut> topCache_;
+    mutable std::map<MarginKey, MarginStrut> bottomCache_;
+    mutable std::map<MarginKey, bool> throughCache_;
+    mutable std::map<const Element*, bool> pureCache_;
+    mutable std::map<const Element*, bool> floatChildCache_;
+    mutable std::map<const Element*, bool> laidOutCache_;
 };
 
 struct ScrollExtent {

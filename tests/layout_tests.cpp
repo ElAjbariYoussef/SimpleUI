@@ -1396,9 +1396,248 @@ void testBlockStacking() {
     }
     checkNear(a->layoutX(), 10.0f, 0.01f, "first box x includes its margin");
     checkNear(a->layoutY(), 10.0f, 0.01f, "first box y includes its margin");
-    checkNear(b->layoutY(), 60.0f, 0.01f, "second box stacks below the first");
-    checkNear(document->root()->layoutHeight(), 100.0f, 0.01f,
-              "root height sums children and margins");
+    checkNear(b->layoutY(), 50.0f, 0.01f,
+              "adjacent block margins collapse to the larger margin");
+    checkNear(document->root()->layoutHeight(), 90.0f, 0.01f,
+              "root height includes the collapsed margins once");
+}
+
+// Vertical margins collapse in normal block flow: siblings take the larger of
+// the two margins (plus the most negative), a parent's first/last child margins
+// join its own, empty blocks collapse through, and formatting-context roots or
+// padding/borders stop the parent-child join. The old additive model is still
+// used for mixed inline/block content and float-bearing containers.
+void testMarginCollapsing() {
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"a\"></div><div id=\"b\"></div>"
+            "<div id=\"c\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} div{height:20px} #a{margin-bottom:30px} "
+            "#b{margin-top:10px;margin-bottom:30px} #c{margin-top:-10px}"));
+        layoutRoot(*document, resolver, 200.0f);
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        check(a && b && c, "sibling margin elements found");
+        if (a && b && c) {
+            checkNear(a->layoutY(), 0.0f, 0.01f, "the first sibling starts at the top");
+            checkNear(b->layoutY(), 50.0f, 0.01f,
+                      "sibling margins use the larger positive value");
+            checkNear(c->layoutY(), 90.0f, 0.01f,
+                      "a negative sibling margin reduces the collapsed gap");
+        }
+    }
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"outer\"><div id=\"inner\"></div></div>"
+            "<div id=\"after\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #outer{margin-top:20px;margin-bottom:5px} "
+            "#inner{margin-top:40px;margin-bottom:30px;height:10px} "
+            "#after{height:10px}"));
+        layoutRoot(*document, resolver, 200.0f);
+        Element* outer = document->getElementById("outer");
+        Element* inner = document->getElementById("inner");
+        Element* after = document->getElementById("after");
+        check(outer && inner && after, "parent margin elements found");
+        if (outer && inner && after) {
+            checkNear(outer->layoutY(), 40.0f, 0.01f,
+                      "the parent's top margin collapses with its first child");
+            checkNear(inner->layoutY(), 40.0f, 0.01f,
+                      "the first child starts at the collapsed parent edge");
+            checkNear(outer->layoutHeight(), 10.0f, 0.01f,
+                      "the parent's height excludes the first child's top margin");
+            checkNear(after->layoutY(), 80.0f, 0.01f,
+                      "the last child's bottom margin collapses with the parent's");
+        }
+    }
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"outer\"><div id=\"empty\"></div>"
+            "<div id=\"b\"></div></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #outer{margin-top:10px} "
+            "#empty{margin-top:20px;margin-bottom:30px} "
+            "#b{margin-top:5px;height:10px}"));
+        layoutRoot(*document, resolver, 200.0f);
+        Element* outer = document->getElementById("outer");
+        Element* empty = document->getElementById("empty");
+        Element* b = document->getElementById("b");
+        check(outer && empty && b, "empty margin elements found");
+        if (outer && empty && b) {
+            checkNear(outer->layoutY(), 30.0f, 0.01f,
+                      "an empty block's margins join the parent's top chain");
+            checkNear(empty->layoutHeight(), 0.0f, 0.01f,
+                      "an empty block has no border-box height");
+            checkNear(b->layoutY(), 30.0f, 0.01f,
+                      "the next block starts at the same collapsed edge");
+            checkNear(outer->layoutHeight(), 10.0f, 0.01f,
+                      "the through block leaves only the real content height");
+        }
+    }
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"outer\"><div id=\"inner\"></div></div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #outer{margin-top:20px;overflow:hidden} "
+            "#inner{margin-top:40px;height:10px}"));
+        layoutRoot(*document, resolver, 200.0f);
+        Element* outer = document->getElementById("outer");
+        Element* inner = document->getElementById("inner");
+        check(outer && inner, "BFC margin elements found");
+        if (outer && inner) {
+            checkNear(outer->layoutY(), 20.0f, 0.01f,
+                      "a formatting-context root keeps its own top margin");
+            checkNear(inner->layoutY(), 60.0f, 0.01f,
+                      "a formatting-context root keeps the child margin inside");
+            checkNear(outer->layoutHeight(), 50.0f, 0.01f,
+                      "a formatting-context root contains the child's margin");
+        }
+    }
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"outer\"><div id=\"inner\"></div></div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #outer{margin-top:20px;padding-top:5px} "
+            "#inner{margin-top:40px;height:10px}"));
+        layoutRoot(*document, resolver, 200.0f);
+        Element* outer = document->getElementById("outer");
+        Element* inner = document->getElementById("inner");
+        check(outer && inner, "padded margin elements found");
+        if (outer && inner) {
+            checkNear(outer->layoutY(), 20.0f, 0.01f,
+                      "padding stops the parent's top margin from collapsing");
+            checkNear(inner->layoutY(), 65.0f, 0.01f,
+                      "the child margin stays inside the padded parent");
+            checkNear(outer->layoutHeight(), 55.0f, 0.01f,
+                      "the padded parent contains the child margin");
+        }
+    }
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"a\"></div><div id=\"b\"></div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} div{height:20px} #a{margin-bottom:-10px} "
+            "#b{margin-top:-20px}"));
+        layoutRoot(*document, resolver, 200.0f);
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        check(a && b, "negative sibling elements found");
+        if (a && b) {
+            checkNear(b->layoutY(), 0.0f, 0.01f,
+                      "two negative sibling margins collapse to the most negative");
+        }
+    }
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"bfc\"></div><div id=\"next\"></div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #bfc{overflow:hidden;height:10px;margin-bottom:20px} "
+            "#next{margin-top:5px;height:10px}"));
+        layoutRoot(*document, resolver, 200.0f);
+        Element* bfc = document->getElementById("bfc");
+        Element* next = document->getElementById("next");
+        check(bfc && next, "formatting-context sibling elements found");
+        if (bfc && next) {
+            checkNear(next->layoutY(), 30.0f, 0.01f,
+                      "a formatting-context root still collapses with siblings");
+        }
+    }
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"a\"></div>text<div id=\"b\"></div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #a{margin-top:20px;height:10px;margin-bottom:20px} "
+            "#b{height:10px;margin-top:30px;margin-bottom:20px}"));
+        layoutRoot(*document, resolver, 200.0f);
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        check(a && b, "mixed-content margin elements found");
+        if (a && b) {
+            checkNear(a->layoutY(), 20.0f, 0.01f,
+                      "mixed content keeps the first block's top margin additive");
+            checkNear(b->layoutY(), 80.0f, 0.01f,
+                      "inline content between blocks keeps their margins additive");
+        }
+    }
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"outer\"><div id=\"inner\"></div></div>"
+            "<div id=\"after\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #outer{height:10px;margin-bottom:5px} "
+            "#inner{height:5px;margin-bottom:30px} #after{height:10px}"));
+        layoutRoot(*document, resolver, 200.0f);
+        Element* outer = document->getElementById("outer");
+        Element* after = document->getElementById("after");
+        check(outer && after, "fixed-height parent elements found");
+        if (outer && after) {
+            checkNear(after->layoutY(), 15.0f, 0.01f,
+                      "a definite parent height stops the last child's bottom collapse");
+        }
+    }
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"a\"></div><div id=\"empty\"></div>"
+            "<div id=\"b\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #a{height:10px} "
+            "#empty{margin-top:20px;margin-bottom:30px} "
+            "#b{height:10px;margin-top:5px}"));
+        layoutRoot(*document, resolver, 200.0f);
+        Element* b = document->getElementById("b");
+        check(b != nullptr, "between-sibling empty element found");
+        if (b) {
+            checkNear(b->layoutY(), 40.0f, 0.01f,
+                      "an empty block's margins join the following sibling's top");
+        }
+    }
 }
 
 void testNestedContainer() {
@@ -12072,6 +12311,7 @@ int main() {
     testGridLinePlacement();
     testGridTemplateAreas();
     testBlockStacking();
+    testMarginCollapsing();
     testNestedContainer();
     testTextWrappingAndBr();
     testGridLayout();
