@@ -3241,6 +3241,91 @@ int main() {
         }
     }
 
+    // `::marker` typography reaches the painted glyph: a 48px marker covers
+    // far more red pixels than a 16px one on the same red page.
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "sui-marker-font-check";
+        fs::remove_all(root);
+        fs::create_directories(root);
+        {
+            std::ofstream out(root / "style.css", std::ios::binary);
+            out << "body { margin: 0; background: #000000 }\n"
+                   "ul { margin: 0; padding: 0 }\n"
+                   "li { margin-left: 80px; color: #ffffff }\n"
+                   "::marker { color: #ff0000 }\n"
+                   "#small::marker { font-size: 16px }\n"
+                   "#big::marker { font-size: 48px }\n";
+        }
+        {
+            std::ofstream out(root / "index.sui", std::ios::binary);
+            out << "<sui><head><link rel=\"stylesheet\" href=\"style.css\"/></head>"
+                   "<body><ul><li id=\"small\">x</li></ul>"
+                   "<div style=\"height:100px\"></div>"
+                   "<ul><li id=\"big\">x</li></ul></body></sui>";
+        }
+        const fs::path previous = fs::current_path();
+        struct RestoreMarker {
+            fs::path previous;
+            ~RestoreMarker() {
+                std::error_code ec;
+                fs::current_path(previous, ec);
+            }
+        } restoreMarker{previous};
+        fs::current_path(root);
+
+        sui::Application app;
+        std::string error;
+        check(app.start("index.sui", error), "a marker font project starts");
+        if (app.platform()) {
+            const sui::WindowId primary = app.platform()->primaryWindow();
+            check(app.renderFrame(primary), "the marker font page lays out");
+            SDL_Renderer* renderer = app.platform()->renderer(primary);
+            const auto countRed = [&](float x, float y, float w, float h) {
+                if (!renderer) {
+                    return -1;
+                }
+                const SDL_Rect rect{static_cast<int>(x), static_cast<int>(y),
+                                    static_cast<int>(w), static_cast<int>(h)};
+                SDL_Surface* read = SDL_RenderReadPixels(renderer, &rect);
+                if (!read) {
+                    return -1;
+                }
+                SDL_Surface* conv = SDL_ConvertSurface(read, SDL_PIXELFORMAT_ABGR8888);
+                SDL_DestroySurface(read);
+                if (!conv) {
+                    return -1;
+                }
+                int count = 0;
+                const Uint8* pixels = static_cast<const Uint8*>(conv->pixels);
+                for (int row = 0; row < conv->h; ++row) {
+                    const Uint8* line = pixels + row * conv->pitch;
+                    for (int col = 0; col < conv->w; ++col) {
+                        const Uint8* px = line + col * 4;
+                        if (px[0] > 200 && px[1] < 80 && px[2] < 80) {
+                            ++count;
+                        }
+                    }
+                }
+                SDL_DestroySurface(conv);
+                return count;
+            };
+            sui::Element* small = app.document().getElementById("small");
+            sui::Element* big = app.document().getElementById("big");
+            check(small && big, "marker list items laid out");
+            if (small && big) {
+                const int smallRed =
+                    countRed(20.0f, small->layoutY(), small->layoutX() - 20.0f, 50.0f);
+                const int bigRed =
+                    countRed(20.0f, big->layoutY(), big->layoutX() - 20.0f, 60.0f);
+                check(smallRed > 0, "a ::marker font-size paints the bullet");
+                check(bigRed > 0, "a large ::marker font-size paints the bullet");
+                check(bigRed > smallRed * 3,
+                      "a marker font-size scales the painted glyph");
+            }
+        }
+    }
+
     platform->shutdown();
 
     std::printf("input_tests: %d checks, %d failures\n", checks, failures);

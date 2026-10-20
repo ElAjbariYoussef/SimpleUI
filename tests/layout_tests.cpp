@@ -8173,6 +8173,68 @@ void testMarkerColors() {
     check(div.fgSet, "marker rules match by prefix tag too");
 }
 
+// The `::marker` mini-cascade also wins font properties. A marker font-size is
+// resolved against the item's own size, so em and percentages follow the item
+// while rem follows the root.
+void testMarkerFont() {
+    auto document = parseOrNull(
+        "<sui><body><ul><li id=\"a\" style=\"font-size:20px\">x</li></ul>"
+        "<div id=\"d\">x</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* a = document->getElementById("a");
+    Element* d = document->getElementById("d");
+    check(a && d, "marker font elements found");
+    if (!a || !d) {
+        return;
+    }
+    const auto fontOf = [&](const char* css, Element& el) {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(css));
+        resolver.setRootFontSize(16.0f);
+        return resolver.markerFont(el, resolver.resolve(el));
+    };
+    sui::MarkerFont none = fontOf("body { margin: 0 }", *a);
+    check(!none.sizeSet && !none.familySet && !none.weightSet && !none.styleSet,
+          "no marker rule leaves the marker font unset");
+    sui::MarkerFont px = fontOf("::marker { font-size: 32px }", *a);
+    check(px.sizeSet && px.size == 32.0f, "a marker font-size resolves to px");
+    sui::MarkerFont em = fontOf("::marker { font-size: 1.5em }", *a);
+    check(em.sizeSet && em.size == 30.0f, "marker em follows the item font size");
+    sui::MarkerFont pct = fontOf("::marker { font-size: 150% }", *a);
+    check(pct.sizeSet && pct.size == 30.0f, "marker percent follows the item font size");
+    sui::MarkerFont rem = fontOf("::marker { font-size: 2rem }", *a);
+    check(rem.sizeSet && rem.size == 32.0f, "marker rem follows the root font size");
+    sui::MarkerFont scoped =
+        fontOf("::marker { font-size: 10px } li::marker { font-size: 30px }", *a);
+    check(scoped.sizeSet && scoped.size == 30.0f, "a scoped marker rule beats a global");
+    sui::MarkerFont important =
+        fontOf("::marker { font-size: 10px !important } li::marker { font-size: 30px }", *a);
+    check(important.sizeSet && important.size == 10.0f,
+          "!important wins the marker font cascade");
+    sui::MarkerFont family = fontOf("::marker { font-family: \"Fancy\", serif }", *a);
+    check(family.familySet && family.family == "Fancy",
+          "a marker family keeps its first face");
+    sui::MarkerFont weight = fontOf("::marker { font-weight: bold }", *a);
+    check(weight.weightSet && weight.weight == 700, "a marker weight reads keywords");
+    sui::MarkerFont bolder = fontOf("::marker { font-weight: bolder }", *a);
+    check(bolder.weightSet && bolder.weight == 700,
+          "marker bolder follows the item weight");
+    sui::MarkerFont italic = fontOf("::marker { font-style: italic }", *a);
+    check(italic.styleSet && italic.style == sui::ComputedStyle::FontItalic,
+          "a marker style reads italic");
+    sui::MarkerFont inherit = fontOf("::marker { font-size: inherit }", *a);
+    check(!inherit.sizeSet, "marker font-size inherit keeps the item size");
+    sui::MarkerFont initial = fontOf("::marker { font-size: initial }", *a);
+    check(initial.sizeSet && initial.size == 16.0f,
+          "marker font-size initial returns the medium size");
+    sui::MarkerFont zero = fontOf("::marker { font-size: 0 }", *a);
+    check(!zero.sizeSet, "a non-positive marker size is dropped");
+    sui::MarkerFont div = fontOf("div::marker { font-size: 40px }", *a);
+    check(!div.sizeSet, "a marker rule matches its own element only");
+}
+
 // `accent-color` tints native controls, inherits like `color`, and resets to
 // `auto`. Garbage keeps the previous cascade winner.
 void testAccentColor() {
@@ -11767,6 +11829,7 @@ int main() {
     testSelectionColors();
     testFirstLineLetter();
     testMarkerColors();
+    testMarkerFont();
     testAccentColor();
     testListInside();
     testListStyleImage();

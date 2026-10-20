@@ -2828,12 +2828,20 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                     : SDL_Color{
                           s.color.r, s.color.g, s.color.b,
                           static_cast<Uint8>(static_cast<float>(s.color.a) * opacity)};
-            const sui::FontQuery markerQuery{
-                s.fontFamily, s.fontWeight,
-                s.fontStyle != ComputedStyle::FontNormal};
+            // `::marker` may size and shape the glyph; every unset slot follows
+            // the list item's own font.
+            const sui::MarkerFont markerFont = resolver.markerFont(el, s);
+            const float markerSize = markerFont.sizeSet ? markerFont.size : s.fontSize;
+            const std::string& markerFamily =
+                markerFont.familySet ? markerFont.family : s.fontFamily;
+            const int markerWeight = markerFont.weightSet ? markerFont.weight : s.fontWeight;
+            const bool markerItalic = markerFont.styleSet
+                                          ? markerFont.style != ComputedStyle::FontNormal
+                                          : s.fontStyle != ComputedStyle::FontNormal;
+            const sui::FontQuery markerQuery{markerFamily, markerWeight, markerItalic};
             SDL_Texture* markerTex =
-                font.renderText(sdlRenderer, markerQuery, marker, s.fontSize, markerColor,
-                                s.fontBold, s.fontStyle != ComputedStyle::FontNormal,
+                font.renderText(sdlRenderer, markerQuery, marker, markerSize, markerColor,
+                                markerWeight >= 600, markerItalic,
                                 s.fontKerning, s.fontStretch,
                                 s.fontVariant == ComputedStyle::FontVariant::SmallCaps);
             if (markerTex) {

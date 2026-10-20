@@ -9564,6 +9564,164 @@ SelectionColors StyleResolver::markerColors(Element& element) const {
     return pseudoColors(element, "::marker");
 }
 
+MarkerFont StyleResolver::markerFont(Element& element, const ComputedStyle& base) const {
+    MarkerFont out;
+    // The same cascade bids the highlight properties use, one per font slot.
+    // A tie on importance and specificity goes to the later rule.
+    struct Win {
+        bool important = false;
+        int specificity = -1;
+        std::size_t order = 0;
+        bool set = false;
+        std::string value;
+    };
+    Win size, family, weight, style;
+    for (const auto& rule : rules_) {
+        if (rule.layerStatement || rule.selector.parts.empty()) {
+            continue;
+        }
+        const Selector::Kind last = rule.selector.parts.back().kind;
+        if (last != Selector::Kind::PseudoElement ||
+            rule.selector.parts.back().value != "::marker") {
+            continue;
+        }
+        if (!rule.media.empty() &&
+            !mediaMatches(rule.media, viewportWidth_, viewportHeight_, systemDark_)) {
+            continue;
+        }
+        if (rule.container.active && !containerMatches(rule.container, element)) {
+            continue;
+        }
+        // The prefix selects the item; `::marker` only names the pseudo. A bare
+        // `::marker` owns every item's marker.
+        SimpleSelector prefix = rule.selector;
+        prefix.parts.pop_back();
+        if (!prefix.combinators.empty()) {
+            prefix.combinators.pop_back();
+        }
+        const bool ownsAll = prefix.parts.empty() && prefix.pseudoClasses.empty();
+        if (!ownsAll && !selectorMatches(prefix, element, &state_)) {
+            continue;
+        }
+        const int specificity = specificityOf(prefix);
+        for (const auto& decl : rule.declarations) {
+            Win* slot = nullptr;
+            if (decl.property == "font-size") {
+                slot = &size;
+            } else if (decl.property == "font-family") {
+                slot = &family;
+            } else if (decl.property == "font-weight") {
+                slot = &weight;
+            } else if (decl.property == "font-style") {
+                slot = &style;
+            }
+            if (!slot) {
+                continue;
+            }
+            if (slot->set &&
+                (decl.important != slot->important
+                     ? slot->important > decl.important
+                     : (specificity != slot->specificity
+                            ? specificity < slot->specificity
+                            : rule.order < slot->order))) {
+                continue;
+            }
+            slot->important = decl.important;
+            slot->specificity = specificity;
+            slot->order = rule.order;
+            slot->set = true;
+            slot->value = decl.value;
+        }
+    }
+
+    if (size.set) {
+        const std::string_view text = trim(size.value);
+        if (text == "initial") {
+            out.sizeSet = true;
+            out.size = 16.0f;
+        } else if (text != "inherit" && text != "unset") {
+            const Length length = parseLength(text);
+            if (!length.isAuto()) {
+                const float resolved =
+                    length.resolve(base.fontSize, base.fontSize, rootFontSize());
+                if (resolved > 0.0f) {
+                    out.sizeSet = true;
+                    out.size = resolved;
+                }
+            }
+        }
+    }
+    if (family.set) {
+        const std::string_view text = trim(family.value);
+        if (text == "initial") {
+            out.familySet = true;
+        } else if (text != "inherit" && text != "unset") {
+            std::string_view name = text;
+            if (const std::size_t comma = name.find(','); comma != std::string_view::npos) {
+                name = name.substr(0, comma);
+            }
+            if (!name.empty() && (name.front() == '"' || name.front() == '\'')) {
+                name.remove_prefix(1);
+            }
+            if (!name.empty() && (name.back() == '"' || name.back() == '\'')) {
+                name.remove_suffix(1);
+            }
+            out.familySet = true;
+            out.family = std::string(trim(name));
+        }
+    }
+    if (weight.set) {
+        const std::string_view text = trim(weight.value);
+        if (text == "initial") {
+            out.weightSet = true;
+            out.weight = 400;
+        } else if (text != "inherit" && text != "unset") {
+            int parsed = base.fontWeight;
+            bool ok = true;
+            if (text == "normal") {
+                parsed = 400;
+            } else if (text == "bold") {
+                parsed = 700;
+            } else if (text == "bolder") {
+                parsed = parsed < 400 ? 400 : (parsed < 600 ? 700 : 900);
+            } else if (text == "lighter") {
+                parsed = parsed <= 500 ? 100 : (parsed <= 700 ? 400 : 700);
+            } else {
+                char* stop = nullptr;
+                const long number = std::strtol(std::string(text).c_str(), &stop, 10);
+                if (!stop || *stop != '\0' || number < 1 || number > 1000) {
+                    ok = false;
+                } else {
+                    parsed = static_cast<int>(number);
+                }
+            }
+            if (ok) {
+                out.weightSet = true;
+                out.weight = parsed;
+            }
+        }
+    }
+    if (style.set) {
+        const std::string_view text = trim(style.value);
+        if (text == "initial") {
+            out.styleSet = true;
+            out.style = ComputedStyle::FontNormal;
+        } else if (text != "inherit" && text != "unset") {
+            if (text == "italic") {
+                out.styleSet = true;
+                out.style = ComputedStyle::FontItalic;
+            } else if (text == "oblique") {
+                out.styleSet = true;
+                out.style = ComputedStyle::FontOblique;
+            } else if (text == "normal") {
+                out.styleSet = true;
+                out.style = ComputedStyle::FontNormal;
+            }
+        }
+    }
+    return out;
+}
+
 SelectionColors StyleResolver::pseudoColors(Element& element,
                                             std::string_view pseudo) const {
     SelectionColors out;

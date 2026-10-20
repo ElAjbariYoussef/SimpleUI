@@ -37,6 +37,20 @@ struct SelectionColors {
     SDL_Color bg{0, 0, 0, 255};
 };
 
+// The font properties a `::marker` rule can win for one list item. Each slot is
+// optional: an unset slot falls back to the item's own computed font. Sizes are
+// resolved against the item's font size; the rest are already absolute.
+struct MarkerFont {
+    bool sizeSet = false;
+    float size = 0.0f;
+    bool familySet = false;
+    std::string family;
+    bool weightSet = false;
+    int weight = 400;
+    bool styleSet = false;
+    ComputedStyle::FontStyle style = ComputedStyle::FontNormal;
+};
+
 // Per-element animation state, kept between resolves. `target` is the previous
 // raw computed style (before interpolation): a transition compares author values
 // against it, so an interpolated output can never restart its own transition.
@@ -173,6 +187,7 @@ public:
     SelectionColors firstLineColors(Element& element) const;
     SelectionColors firstLetterColors(Element& element) const;
     SelectionColors markerColors(Element& element) const;
+    MarkerFont markerFont(Element& element, const ComputedStyle& base) const;
 
 private:
     ComputedStyle resolveWithParent(Element& element, const ComputedStyle& parent) const;
