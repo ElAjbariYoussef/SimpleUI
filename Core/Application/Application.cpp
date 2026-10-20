@@ -2485,8 +2485,10 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
 
     // A checked checkbox/radio draws its own control: a tick for the box, a dot
     // for the circle. The background and border were painted above, and neither
-    // mark needs a font.
-    if (el.tag() == "input" && el.hasAttribute("checked")) {
+    // mark needs a font. `appearance: none` removes the native mark, which is
+    // what lets an author draw the whole control.
+    if (s.appearance != ComputedStyle::AppearanceNone &&
+        el.tag() == "input" && el.hasAttribute("checked")) {
         const std::string_view type = el.attribute("type");
         if (type == "checkbox" || type == "radio") {
             const SDL_FRect content{el.contentX() - offX, el.contentY() - offY,
@@ -2514,7 +2516,9 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
 
     // A range draws its own slider: a groove across the content box and a thumb
     // at the value's fraction. No font needed, and a disabled range still paints.
-    if (el.tag() == "input" && el.attribute("type") == "range") {
+    // `appearance: none` drops the native groove and thumb together.
+    if (s.appearance != ComputedStyle::AppearanceNone &&
+        el.tag() == "input" && el.attribute("type") == "range") {
         const SDL_FRect content{el.contentX() - offX, el.contentY() - offY,
                                 el.contentWidth(), el.contentHeight()};
         if (content.w > 0.0f && content.h > 0.0f) {
@@ -2538,8 +2542,10 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
     // at the value's fraction. A valueless progress shows a fixed
     // indeterminate block instead of animating. Meters colour by zone: green
     // beside the optimum, yellow inside the band, red outside it. An authored
-    // `accent-color` retints a progress fill.
-    if (el.tag() == "meter" || el.tag() == "progress") {
+    // `accent-color` retints a progress fill. `appearance: none` leaves the
+    // element's own box for the author to fill instead.
+    if (s.appearance != ComputedStyle::AppearanceNone &&
+        (el.tag() == "meter" || el.tag() == "progress")) {
         const SDL_FRect content{el.contentX() - offX, el.contentY() - offY,
                                 el.contentWidth(), el.contentHeight()};
         if (content.w > 0.0f && content.h > 0.0f) {

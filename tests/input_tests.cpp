@@ -2921,6 +2921,108 @@ int main() {
         }
     }
 
+    // `appearance: none` keeps the element's own box but drops the native
+    // chrome. Each control pair sits on white over a black page: the native one
+    // must paint its mark at the sampled point, and the suppressed one must
+    // leave the box's white background untouched.
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "sui-appearance-check";
+        fs::remove_all(root);
+        fs::create_directories(root);
+        const std::string box =
+            "position:absolute;width:40px;height:40px;border:0;padding:0;"
+            "margin:0;background:#ffffff;box-sizing:border-box;";
+        {
+            std::ofstream out(root / "index.sui", std::ios::binary);
+            out << "<sui><body style=\"margin:0;background:#000000\">"
+                   "<input type=\"radio\" checked style=\"" << box
+                << "left:10px;top:10px;color:#ff0000\"/>"
+                   "<input type=\"radio\" checked style=\"" << box
+                << "left:70px;top:10px;color:#ff0000;appearance:none\"/>"
+                   "<input type=\"checkbox\" checked style=\"" << box
+                << "left:10px;top:60px;color:#ff0000\"/>"
+                   "<input type=\"checkbox\" checked style=\"" << box
+                << "left:70px;top:60px;color:#ff0000;appearance:none\"/>"
+                   "<input type=\"range\" value=\"50\" style=\"" << box
+                << "left:10px;top:110px;color:#ff0000\"/>"
+                   "<input type=\"range\" value=\"50\" style=\"" << box
+                << "left:70px;top:110px;color:#ff0000;appearance:none\"/>"
+                   "<meter value=\"0.75\" style=\"" << box
+                << "left:10px;top:160px\"></meter>"
+                   "<meter value=\"0.75\" style=\"" << box
+                << "left:70px;top:160px;appearance:none\"></meter>"
+                   "<progress value=\"0.75\" style=\"" << box
+                << "left:10px;top:210px\"></progress>"
+                   "<progress value=\"0.75\" style=\"" << box
+                << "left:70px;top:210px;appearance:none\"></progress>"
+                   "</body></sui>";
+        }
+        const fs::path previous = fs::current_path();
+        struct RestoreAppearance {
+            fs::path previous;
+            ~RestoreAppearance() {
+                std::error_code ec;
+                fs::current_path(previous, ec);
+            }
+        } restoreAppearance{previous};
+        fs::current_path(root);
+
+        sui::Application app;
+        std::string error;
+        check(app.start("index.sui", error), "an appearance project starts");
+        if (app.platform()) {
+            const sui::WindowId primary = app.platform()->primaryWindow();
+            check(app.renderFrame(primary), "the appearance page lays out");
+            const auto readPixel = [&](float x, float y, int& r, int& g, int& b) -> bool {
+                SDL_Renderer* renderer = app.platform()->renderer(primary);
+                if (!renderer) {
+                    return false;
+                }
+                const SDL_Rect rect{static_cast<int>(x), static_cast<int>(y), 1, 1};
+                SDL_Surface* read = SDL_RenderReadPixels(renderer, &rect);
+                if (!read) {
+                    return false;
+                }
+                SDL_Surface* conv = SDL_ConvertSurface(read, SDL_PIXELFORMAT_ABGR8888);
+                SDL_DestroySurface(read);
+                if (!conv) {
+                    return false;
+                }
+                const Uint8* px = static_cast<const Uint8*>(conv->pixels);
+                r = px[0];
+                g = px[1];
+                b = px[2];
+                SDL_DestroySurface(conv);
+                return true;
+            };
+            int r = 0, g = 0, b = 0;
+            const auto white = [](int cr, int cg, int cb) {
+                return cr == 255 && cg == 255 && cb == 255;
+            };
+            check(readPixel(30.0f, 30.0f, r, g, b) && r == 255 && g == 0 && b == 0,
+                  "a checked radio paints its dot");
+            check(readPixel(90.0f, 30.0f, r, g, b) && white(r, g, b),
+                  "appearance:none hides the radio dot");
+            check(readPixel(34.0f, 80.0f, r, g, b) && r > 200 && g < 80 && b < 80,
+                  "a checked checkbox paints its tick");
+            check(readPixel(94.0f, 80.0f, r, g, b) && white(r, g, b),
+                  "appearance:none hides the checkbox tick");
+            check(readPixel(30.0f, 130.0f, r, g, b) && r == 255 && g == 0 && b == 0,
+                  "a range paints its thumb");
+            check(readPixel(90.0f, 130.0f, r, g, b) && white(r, g, b),
+                  "appearance:none hides the range chrome");
+            check(readPixel(20.0f, 180.0f, r, g, b) && r == 34 && g == 197 && b == 94,
+                  "a meter paints its bar");
+            check(readPixel(80.0f, 180.0f, r, g, b) && white(r, g, b),
+                  "appearance:none hides the meter bar");
+            check(readPixel(20.0f, 230.0f, r, g, b) && r == 96 && g == 165 && b == 250,
+                  "a progress paints its bar");
+            check(readPixel(80.0f, 230.0f, r, g, b) && white(r, g, b),
+                  "appearance:none hides the progress bar");
+        }
+    }
+
     platform->shutdown();
 
     std::printf("input_tests: %d checks, %d failures\n", checks, failures);
