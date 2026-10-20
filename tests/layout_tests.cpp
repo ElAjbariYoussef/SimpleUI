@@ -9763,6 +9763,69 @@ void testBackgroundShorthand() {
           "background: inherit replays the parent's shorthand");
 }
 
+// The properties this engine accepts but does not act on still carry their
+// authored value, so a stylesheet can use them and the CSSOM round-trips:
+// `appearance` and `user-select` (with their `-webkit-` aliases),
+// `transition-behavior`, `will-change`, and `contain` (shorthands expanded).
+void testAcceptedPropertyReadBack() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"a\"></div><div id=\"a2\"></div><div id=\"a3\"></div>"
+        "<div id=\"u\"></div><div id=\"u2\"></div><div id=\"u3\"></div>"
+        "<div id=\"tb\"></div><div id=\"tb2\"></div><div id=\"tb3\"></div>"
+        "<div id=\"wc\"></div><div id=\"wc2\"></div>"
+        "<div id=\"ct\"></div><div id=\"ct2\"></div><div id=\"ct3\"></div>"
+        "<div id=\"ct4\"></div><div id=\"ct5\"></div><div id=\"ct6\"></div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#a { appearance: none }"
+        "#a2 { -webkit-appearance: checkbox }"
+        "#u { user-select: none }"
+        "#u2 { -webkit-user-select: text }"
+        "#tb { transition-behavior: allow-discrete, normal }"
+        "#tb2 { transition-behavior: banana }"
+        "#wc { will-change: transform, opacity }"
+        "#ct { contain: strict }"
+        "#ct2 { contain: content }"
+        "#ct3 { contain: size paint }"
+        "#ct4 { contain: none }"
+        "#ct5 { contain: banana }"
+        "#ct6 { contain: inline-size layout }"));
+    const auto value = [&](const char* id, const char* property) {
+        Element* el = document->getElementById(id);
+        return el ? sui::StyleResolver::propertyValue(resolver.resolve(*el), property) : "";
+    };
+    check(value("a", "appearance") == "none" && value("a", "-webkit-appearance") == "none",
+          "appearance reads back the authored keyword");
+    check(value("a2", "appearance") == "checkbox", "a compat keyword round-trips");
+    check(value("a3", "appearance") == "auto", "the initial appearance is auto");
+    check(value("u", "user-select") == "none" && value("u", "-webkit-user-select") == "none",
+          "user-select reads back");
+    check(value("u2", "user-select") == "text", "the -webkit- alias feeds the same value");
+    check(value("u3", "user-select") == "auto", "the initial user-select is auto");
+    check(value("tb", "transition-behavior") == "allow-discrete, normal",
+          "transition-behavior reads its list in order");
+    check(value("tb2", "transition-behavior") == "normal",
+          "an invalid behaviour drops the declaration");
+    check(value("tb3", "transition-behavior") == "normal",
+          "the initial transition-behavior is normal");
+    check(value("wc", "will-change") == "transform, opacity", "will-change reads its list");
+    check(value("wc2", "will-change") == "auto", "the initial will-change is auto");
+    check(value("ct", "contain") == "size layout style paint",
+          "strict expands to its four keywords");
+    check(value("ct2", "contain") == "layout style paint",
+          "content expands to its three keywords");
+    check(value("ct3", "contain") == "size paint", "the keyword list reads canonically");
+    check(value("ct4", "contain") == "none", "none reads none");
+    check(value("ct5", "contain") == "none", "an invalid contain drops the declaration");
+    check(value("ct6", "contain") == "inline-size layout",
+          "inline-size is its own containment mode");
+}
+
 // A flex item's own cross size is a content-box length, so the border and padding
 // have to come off the line's cross extent when it stretches to fill it, and must not
 // be added a second time when the size is written back onto the item.
@@ -11533,6 +11596,7 @@ int main() {
     testBackgroundSizeAndPositionKeywords();
     testBackgroundReadBack();
     testBackgroundShorthand();
+    testAcceptedPropertyReadBack();
     testFlexCrossSizeExcludesChrome();
     testFlexBoxSizingIsNotAppliedTwice();
 

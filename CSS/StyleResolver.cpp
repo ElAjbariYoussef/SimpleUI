@@ -5479,8 +5479,24 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.transitionDelaysMs.push_back(ms);
         }
     } else if (property == "transition-behavior") {
-        // Accepted and ignored: the engine animates style values only, so there
-        // is no discrete/animate distinction for it to switch.
+        // A discrete value only animates when `allow-discrete` is named. The
+        // engine animates values only, so the list is stored for the reading.
+        std::vector<bool> behaviours;
+        bool ok = true;
+        for (const std::string& part : splitCommaList(decl.value)) {
+            const std::string_view word = trim(part);
+            if (word == "normal") {
+                behaviours.push_back(false);
+            } else if (word == "allow-discrete") {
+                behaviours.push_back(true);
+            } else {
+                ok = false;
+                break;
+            }
+        }
+        if (ok && !behaviours.empty()) {
+            s.transitionAllowDiscrete = std::move(behaviours);
+        }
     } else if (property == "animation") {
         applyAnimationShorthand(decl.value, s);
     } else if (property == "animation-name") {
@@ -5805,7 +5821,32 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.specified |= ComputedStyle::SpecifiedResize;
         }
     } else if (property == "appearance" || property == "-webkit-appearance") {
-        // Accepted; these control browser chrome that this engine does not draw.
+        // The compat keywords name a browser control look; only `none` changes
+        // what this engine draws, but all of them round-trip.
+        struct Word {
+            std::string_view name;
+            ComputedStyle::Appearance value;
+        };
+        static constexpr Word kWords[] = {
+            {"auto", ComputedStyle::AppearanceAuto},
+            {"none", ComputedStyle::AppearanceNone},
+            {"button", ComputedStyle::AppearanceButton},
+            {"textfield", ComputedStyle::AppearanceTextField},
+            {"searchfield", ComputedStyle::AppearanceSearchField},
+            {"textarea", ComputedStyle::AppearanceTextarea},
+            {"checkbox", ComputedStyle::AppearanceCheckbox},
+            {"radio", ComputedStyle::AppearanceRadio},
+            {"menulist", ComputedStyle::AppearanceMenuList},
+            {"listbox", ComputedStyle::AppearanceListBox},
+            {"meter", ComputedStyle::AppearanceMeter},
+            {"progress-bar", ComputedStyle::AppearanceProgressBar},
+        };
+        for (const Word& word : kWords) {
+            if (value == word.name) {
+                s.appearance = word.value;
+                break;
+            }
+        }
     } else if (property == "isolation") {
         // `isolate` opens the element's own group; `auto` is the initial
         // value, and garbage keeps the previous cascade winner.
@@ -5814,8 +5855,50 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         } else if (value == "auto") {
             s.isolate = false;
         }
-    } else if (property == "will-change" || property == "contain") {
-        // Performance / compositing hints: accepted and ignored.
+    } else if (property == "will-change") {
+        // Performance hint: an empty list is `auto`, and the property never
+        // changes rendering here.
+        if (value == "auto") {
+            s.willChange.clear();
+        } else {
+            s.willChange = splitCommaList(decl.value);
+        }
+    } else if (property == "contain") {
+        // `none`, `strict`, and `content` are the shorthands; otherwise the
+        // keywords combine. Store the expanded mask so the reading is the
+        // keyword list.
+        const std::vector<std::string_view> tokens = splitTokens(value);
+        std::uint8_t flags = 0;
+        bool ok = !tokens.empty();
+        if (ok && tokens.size() == 1 && tokens[0] == "none") {
+            flags = 0;
+        } else if (ok && tokens.size() == 1 && tokens[0] == "strict") {
+            flags = ComputedStyle::ContainSize | ComputedStyle::ContainLayout |
+                    ComputedStyle::ContainStyle | ComputedStyle::ContainPaint;
+        } else if (ok && tokens.size() == 1 && tokens[0] == "content") {
+            flags = ComputedStyle::ContainLayout | ComputedStyle::ContainStyle |
+                    ComputedStyle::ContainPaint;
+        } else {
+            for (std::string_view token : tokens) {
+                if (token == "size") {
+                    flags |= ComputedStyle::ContainSize;
+                } else if (token == "inline-size") {
+                    flags |= ComputedStyle::ContainInlineSize;
+                } else if (token == "layout") {
+                    flags |= ComputedStyle::ContainLayout;
+                } else if (token == "style") {
+                    flags |= ComputedStyle::ContainStyle;
+                } else if (token == "paint") {
+                    flags |= ComputedStyle::ContainPaint;
+                } else {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if (ok) {
+            s.contain = flags;
+        }
     } else if (property == "mask" || property == "-webkit-mask") {
         // Shorthand: every layer expands into all eight longhands, resetting
         // whatever they set. One bad token drops the whole declaration.
@@ -6117,7 +6200,19 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             }
         }
     } else if (property == "user-select" || property == "-webkit-user-select") {
-        // Selection control: accepted; non-editable elements already ignore selection.
+        // Selection control: only the reading exists until the engine grows
+        // document selection; editable fields manage their own caret.
+        if (value == "auto") {
+            s.userSelect = ComputedStyle::UserSelectAuto;
+        } else if (value == "text") {
+            s.userSelect = ComputedStyle::UserSelectText;
+        } else if (value == "none") {
+            s.userSelect = ComputedStyle::UserSelectNone;
+        } else if (value == "contain") {
+            s.userSelect = ComputedStyle::UserSelectContain;
+        } else if (value == "all") {
+            s.userSelect = ComputedStyle::UserSelectAll;
+        }
     } else {
         warnUnknownProperty(property);
     }
@@ -7884,7 +7979,7 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "transition" || property == "transition-property" ||
         property == "transition-duration" || property == "transition-delay" ||
-        property == "transition-timing-function") {
+        property == "transition-timing-function" || property == "transition-behavior") {
         return serializeTransition(property, style);
     }
     if (property == "animation" || property == "animation-name" ||
@@ -7956,6 +8051,33 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "cursor") {
         return std::string(cursorName(style.cursor));
+    }
+    if (property == "appearance" || property == "-webkit-appearance") {
+        switch (style.appearance) {
+            case ComputedStyle::AppearanceNone: return "none";
+            case ComputedStyle::AppearanceButton: return "button";
+            case ComputedStyle::AppearanceTextField: return "textfield";
+            case ComputedStyle::AppearanceSearchField: return "searchfield";
+            case ComputedStyle::AppearanceTextarea: return "textarea";
+            case ComputedStyle::AppearanceCheckbox: return "checkbox";
+            case ComputedStyle::AppearanceRadio: return "radio";
+            case ComputedStyle::AppearanceMenuList: return "menulist";
+            case ComputedStyle::AppearanceListBox: return "listbox";
+            case ComputedStyle::AppearanceMeter: return "meter";
+            case ComputedStyle::AppearanceProgressBar: return "progress-bar";
+            case ComputedStyle::AppearanceAuto: return "auto";
+        }
+        return "auto";
+    }
+    if (property == "user-select" || property == "-webkit-user-select") {
+        switch (style.userSelect) {
+            case ComputedStyle::UserSelectText: return "text";
+            case ComputedStyle::UserSelectNone: return "none";
+            case ComputedStyle::UserSelectContain: return "contain";
+            case ComputedStyle::UserSelectAll: return "all";
+            case ComputedStyle::UserSelectAuto: return "auto";
+        }
+        return "auto";
     }
     if (property == "counter-reset" || property == "counter-increment" ||
         property == "counter-set") {
@@ -8064,6 +8186,39 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             case ComputedStyle::ResizeNone: return "none";
         }
         return "none";
+    }
+    if (property == "contain") {
+        if (style.contain == 0) {
+            return "none";
+        }
+        std::string out;
+        const auto add = [&](std::uint8_t flag, const char* word) {
+            if ((style.contain & flag) != 0) {
+                if (!out.empty()) {
+                    out += ' ';
+                }
+                out += word;
+            }
+        };
+        add(ComputedStyle::ContainSize, "size");
+        add(ComputedStyle::ContainInlineSize, "inline-size");
+        add(ComputedStyle::ContainLayout, "layout");
+        add(ComputedStyle::ContainStyle, "style");
+        add(ComputedStyle::ContainPaint, "paint");
+        return out;
+    }
+    if (property == "will-change") {
+        if (style.willChange.empty()) {
+            return "auto";
+        }
+        std::string out;
+        for (const std::string& word : style.willChange) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            out += word;
+        }
+        return out;
     }
     if (property == "empty-cells") {
         return style.emptyCells == ComputedStyle::EmptyCellsHide ? "hide" : "show";

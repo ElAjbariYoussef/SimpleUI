@@ -775,6 +775,10 @@ struct ComputedStyle {
     std::vector<float> transitionDurationsMs;
     std::vector<Easing> transitionEasings;
     std::vector<float> transitionDelaysMs;
+    // `transition-behavior`: `allow-discrete` would let discrete properties
+    // (like `display`) animate. The engine animates values only, so the list
+    // is carried for the CSSOM rather than acted on.
+    std::vector<bool> transitionAllowDiscrete;
 
     std::vector<std::string> animationNames;
     std::vector<float> animationDurationsMs;
@@ -957,6 +961,53 @@ struct ComputedStyle {
     // `line-clamp` caps the block at N lines with an ellipsis; 0 is `none`.
     // Not inherited: each container declares its own cap.
     int lineClamp = 0;
+
+    // `appearance`: the browser-control look an element asks for. The engine
+    // draws its own controls, so only `none` (the author takes over the look)
+    // and `auto` change anything; the compat keywords are carried so a
+    // stylesheet written for a browser round-trips.
+    enum Appearance : std::uint8_t {
+        AppearanceAuto,
+        AppearanceNone,
+        AppearanceButton,
+        AppearanceTextField,
+        AppearanceSearchField,
+        AppearanceTextarea,
+        AppearanceCheckbox,
+        AppearanceRadio,
+        AppearanceMenuList,
+        AppearanceListBox,
+        AppearanceMeter,
+        AppearanceProgressBar
+    };
+    Appearance appearance = AppearanceAuto;
+
+    // `will-change`: the properties the author expects to change. An empty list
+    // is `auto`; the hint never changes rendering here.
+    std::vector<std::string> willChange;
+
+    // `contain`: a mask of containment modes, the shorthands already expanded.
+    // The engine changes nothing for them yet; the mask is carried so the
+    // reading is the expanded keyword list.
+    enum ContainFlag : std::uint8_t {
+        ContainSize = 1,
+        ContainInlineSize = 2,
+        ContainLayout = 4,
+        ContainStyle = 8,
+        ContainPaint = 16
+    };
+    std::uint8_t contain = 0;
+
+    // `user-select`: whether the element's text may be selected. Only the
+    // reading exists for now — the engine has no document selection to steer.
+    enum UserSelect : std::uint8_t {
+        UserSelectAuto,
+        UserSelectText,
+        UserSelectNone,
+        UserSelectContain,
+        UserSelectAll
+    };
+    UserSelect userSelect = UserSelectAuto;
 
     bool isTableContainer() const noexcept {
         return display == Display::Table || display == Display::InlineTable;

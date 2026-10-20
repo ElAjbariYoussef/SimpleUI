@@ -559,6 +559,17 @@ std::string serializeEasing(const Easing& easing) {
 
 std::string serializeTransition(std::string_view property, const ComputedStyle& style) {
     const std::size_t n = style.transitionProperties.size();
+    if (property == "transition-behavior") {
+        if (style.transitionAllowDiscrete.empty()) {
+            return "normal";
+        }
+        std::vector<std::string> words;
+        words.reserve(style.transitionAllowDiscrete.size());
+        for (bool allow : style.transitionAllowDiscrete) {
+            words.push_back(allow ? "allow-discrete" : "normal");
+        }
+        return joinWords(words);
+    }
     if (property == "transition") {
         std::string out;
         for (std::size_t i = 0; i < n; ++i) {
