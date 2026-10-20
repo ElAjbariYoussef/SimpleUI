@@ -81,6 +81,16 @@ void recordNavPage() {
     }
 }
 
+// Form submission probes: one counts valid submissions, the other records the
+// order the button click and the form submit ran in.
+int g_formSubmits = 0;
+std::string g_formOrder;
+void recordFormSubmit() {
+    ++g_formSubmits;
+    g_formOrder += 's';
+}
+void recordFormClick() { g_formOrder += 'c'; }
+
 // Pumps once and asserts the queue held exactly the one event the test pushed.
 void expectOne(sui::Platform& platform, sui::InputKind kind, float x, float y, int button,
                const char* what) {
@@ -2949,6 +2959,153 @@ int main() {
             check(readPixel(15.0f, 140.0f, r, g, b) && std::abs(r - 127) <= 2 &&
                       std::abs(g - 0) <= 2 && std::abs(b - 127) <= 2,
                   "a half-opacity group composites its content");
+        }
+    }
+
+    // Forms validate before they submit: an invalid control blocks the form's
+    // `onsubmit` and takes focus, a valid one runs the button's click handler
+    // first and then the form's, `novalidate`/`formnovalidate` skip validation,
+    // non-submit and disabled controls do nothing, readonly fields are barred,
+    // and Enter in a single-line field implicitly submits unless the default
+    // submit button is disabled.
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "sui-form-submit-check";
+        fs::remove_all(root);
+        fs::create_directories(root);
+        {
+            std::ofstream out(root / "index.sui", std::ios::binary);
+            out << "<sui><body style=\"margin:0\">"
+                   "<form id=\"f\" onsubmit=\"recordFormSubmit()\">"
+                   "<div><input id=\"name\" required "
+                   "style=\"display:block;width:120px;height:20px\"/></div>"
+                   "<button id=\"go\" type=\"submit\" onclick=\"recordFormClick()\" "
+                   "style=\"display:block;width:60px;height:20px\">go</button>"
+                   "<button id=\"bgo\" type=\"button\" "
+                   "style=\"display:block;width:60px;height:20px\">no</button>"
+                   "<button id=\"dgo\" type=\"submit\" disabled "
+                   "style=\"display:block;width:60px;height:20px\">no</button>"
+                   "</form>"
+                   "<form id=\"nv\" novalidate onsubmit=\"recordFormSubmit()\">"
+                   "<input id=\"nvname\" required "
+                   "style=\"display:block;width:120px;height:20px\"/>"
+                   "<button id=\"nvgo\" type=\"submit\" "
+                   "style=\"display:block;width:60px;height:20px\">go</button>"
+                   "</form>"
+                   "<form id=\"fn\" onsubmit=\"recordFormSubmit()\">"
+                   "<input id=\"fnname\" required "
+                   "style=\"display:block;width:120px;height:20px\"/>"
+                   "<button id=\"fngo\" type=\"submit\" formnovalidate "
+                   "style=\"display:block;width:60px;height:20px\">go</button>"
+                   "</form>"
+                   "<form id=\"enter\" onsubmit=\"recordFormSubmit()\">"
+                   "<input id=\"ename\" required "
+                   "style=\"display:block;width:120px;height:20px\"/>"
+                   "</form>"
+                   "<form id=\"ed\" onsubmit=\"recordFormSubmit()\">"
+                   "<input id=\"edname\" required "
+                   "style=\"display:block;width:120px;height:20px\"/>"
+                   "<button id=\"edgo\" type=\"submit\" disabled "
+                   "style=\"display:block;width:60px;height:20px\">no</button>"
+                   "</form>"
+                   "<form id=\"ro\" onsubmit=\"recordFormSubmit()\">"
+                   "<input id=\"roname\" required readonly "
+                   "style=\"display:block;width:120px;height:20px\"/>"
+                   "<button id=\"rogo\" type=\"submit\" "
+                   "style=\"display:block;width:60px;height:20px\">go</button>"
+                   "</form>"
+                   "</body></sui>";
+        }
+        const fs::path previous = fs::current_path();
+        struct RestoreForm {
+            fs::path previous;
+            ~RestoreForm() {
+                std::error_code ec;
+                fs::current_path(previous, ec);
+            }
+        } restoreForm{previous};
+        fs::current_path(root);
+
+        sui::Application app;
+        std::string error;
+        check(app.start("index.sui", error), "a form project starts");
+        sui::script::registerHandler("recordFormSubmit", recordFormSubmit);
+        sui::script::registerHandler("recordFormClick", recordFormClick);
+        if (app.platform()) {
+            const sui::WindowId primary = app.platform()->primaryWindow();
+            check(app.renderFrame(primary), "the form page lays out");
+            const auto element = [&](const char* id) {
+                return app.document().getElementById(id);
+            };
+            const auto press = [&](const char* id) {
+                sui::Element* el = element(id);
+                if (!el) {
+                    check(false, "form target still on screen");
+                    return;
+                }
+                sui::InputEvent event(sui::InputKind::PointerDown, el->layoutX() + 2.0f,
+                                      el->layoutY() + 2.0f, 1, 0.0f, 0.0f, 0, {}, 0, 0,
+                                      primary);
+                app.dispatch(event);
+            };
+            const auto enter = [&]() {
+                sui::InputEvent event(sui::InputKind::KeyDown, 0.0f, 0.0f, 0, 0.0f, 0.0f,
+                                      0x0D, {}, 0, 0, primary);
+                app.dispatch(event);
+            };
+            const auto reset = [&]() {
+                g_formSubmits = 0;
+                g_formOrder.clear();
+            };
+            reset();
+            press("go");
+            check(g_formSubmits == 0, "an invalid form does not submit");
+            check(g_formOrder == "c",
+                  "the button click runs before the blocked submit");
+            check(app.document().focused() == element("name"),
+                  "an invalid submit focuses the failing control");
+            if (sui::Element* name = element("name")) {
+                name->setValue("Ada");
+            }
+            reset();
+            press("go");
+            check(g_formSubmits == 1, "a valid form submits once");
+            check(g_formOrder == "cs", "the click runs before the form submit");
+            check(app.document().focused() == element("go"),
+                  "submitting leaves focus on the button");
+            reset();
+            press("nvgo");
+            check(g_formSubmits == 1, "form novalidate skips validation");
+            reset();
+            press("fngo");
+            check(g_formSubmits == 1, "formnovalidate skips validation");
+            reset();
+            press("bgo");
+            check(g_formSubmits == 0, "a type=button control does not submit");
+            reset();
+            press("dgo");
+            check(g_formSubmits == 0, "a disabled submit control does not submit");
+            reset();
+            press("rogo");
+            check(g_formSubmits == 1, "a readonly required field does not block");
+            press("ename");
+            reset();
+            enter();
+            check(g_formSubmits == 0, "Enter validates the field it submits from");
+            if (sui::Element* ename = element("ename")) {
+                ename->setValue("Ada");
+            }
+            reset();
+            enter();
+            check(g_formSubmits == 1, "Enter submits a valid single-line field");
+            press("edname");
+            if (sui::Element* edname = element("edname")) {
+                edname->setValue("Ada");
+            }
+            reset();
+            enter();
+            check(g_formSubmits == 0,
+                  "Enter does nothing while the default submit button is disabled");
         }
     }
 

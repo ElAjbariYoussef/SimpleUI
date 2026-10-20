@@ -685,6 +685,88 @@ void activateControl(Element& el, Element& root) {
     }
 }
 
+// The form a control belongs to, or null outside one. Nested forms are invalid
+// HTML, so the nearest ancestor is the form the browser would use.
+Element* closestForm(Element* element) {
+    for (Element* current = element; current; current = current->parent()) {
+        if (current->tag() == "form") {
+            return current;
+        }
+    }
+    return nullptr;
+}
+
+// The submit control a press activates: the nearest button/input on the path
+// to the form, when its type submits. A child element inside the button still
+// activates it, and a disabled control activates nothing.
+Element* submitControlFrom(Element* target, Element& form) {
+    for (Element* current = target; current && current != &form;
+         current = current->parent()) {
+        if (current->hasAttribute("disabled")) {
+            return nullptr;
+        }
+        if (current->tag() == "button") {
+            const std::string_view type = current->attribute("type");
+            return type.empty() || type == "submit" ? current : nullptr;
+        }
+        if (current->tag() == "input") {
+            const std::string_view type = current->attribute("type");
+            return type == "submit" || type == "image" ? current : nullptr;
+        }
+    }
+    return nullptr;
+}
+
+// The first submit control in tree order, which is the one Enter presses when
+// it implicitly submits. It may be disabled: implicit submission then stops.
+Element* defaultSubmitControl(Element& form) {
+    Element* found = nullptr;
+    form.visit([&](Element& element) {
+        if (found || element.isTextNode()) {
+            return;
+        }
+        if (element.tag() == "button") {
+            const std::string_view type = element.attribute("type");
+            if (type.empty() || type == "submit") {
+                found = &element;
+            }
+        } else if (element.tag() == "input" && element.attribute("type") == "submit") {
+            found = &element;
+        }
+    });
+    return found;
+}
+
+// Constraint validation over a whole form: the first control that fails owns
+// the focus, exactly what reportValidity() does for one element.
+void collectInvalidControl(Element& form, Element*& first) {
+    form.visit([&](Element& element) {
+        if (!first && !element.isTextNode() && element.willValidate() &&
+            !element.checkValidity()) {
+            first = &element;
+        }
+    });
+}
+
+bool submitForm(Element& form, bool skipValidation) {
+    if (!skipValidation) {
+        Element* invalid = nullptr;
+        collectInvalidControl(form, invalid);
+        if (invalid) {
+            invalid->reportValidity();
+            return false;
+        }
+    }
+    // The engine has no action/method navigation: a valid submit only fires
+    // the form's handler. The handler must not steal focus from the control
+    // that submitted, the way clicking a button focuses it.
+    const std::string_view handler = form.attribute("onsubmit");
+    if (!handler.empty()) {
+        script::invokeInlineHandler(handler, &form, false);
+    }
+    return true;
+}
+
 // A decimal HTML attribute (a range's `min`/`max`/`step`/`value`): surrounding
 // whitespace is ignored and anything unparsable falls back, so markup can
 // never smuggle a NaN into the slider.
@@ -4619,6 +4701,12 @@ void Application::dispatchEvent(const InputEvent& event) {
     // A datalist pick refocuses its input, which must not reopen suggestions
     // on the same press.
     bool suppressDatalistOpen = false;
+    // A submit control (or Enter in a field) queues its form here. The
+    // submission runs after the click/key handlers, as it does on the web, so
+    // those handlers can fill a field before validation and the onsubmit sees
+    // the final tree.
+    Element* pendingSubmitForm = nullptr;
+    bool pendingSubmitSkipValidation = false;
     if (keyboard) {
         target = document_->focused();
     } else {
@@ -4965,6 +5053,19 @@ void Application::dispatchEvent(const InputEvent& event) {
             // so the handler observes the control's new state.
             if (target && document_->root()) {
                 activateControl(*target, *document_->root());
+            }
+            // A submit control activates its form on a left press. Validation
+            // and the form's handler run at the end of this dispatch, after
+            // the click handlers.
+            if (target && !boundFrame_ && event.button == 1) {
+                if (Element* form = closestForm(target)) {
+                    if (Element* control = submitControlFrom(target, *form)) {
+                        pendingSubmitForm = form;
+                        pendingSubmitSkipValidation =
+                            form->hasAttribute("novalidate") ||
+                            control->hasAttribute("formnovalidate");
+                    }
+                }
             }
             // A summary toggles its <details> open on click, the same way: the
             // press anywhere in the summary flips the attribute and the tree
@@ -5396,6 +5497,19 @@ void Application::dispatchEvent(const InputEvent& event) {
                     caretBytePos_ += 1;
                     selectionAnchor_ = caretBytePos_;
                     target->setValue(std::move(value));
+                } else if (target->tag() == "input" &&
+                           (event.key == kReturn || event.key == kKPEnter)) {
+                    // Enter in a single-line field is implicit form submission.
+                    // A disabled default submit button leaves the form alone.
+                    if (Element* form = closestForm(target)) {
+                        Element* button = defaultSubmitControl(*form);
+                        if (!button || !button->hasAttribute("disabled")) {
+                            pendingSubmitForm = form;
+                            pendingSubmitSkipValidation =
+                                form->hasAttribute("novalidate") ||
+                                (button && button->hasAttribute("formnovalidate"));
+                        }
+                    }
                 } else if (!readOnly && (event.key == kBackspace || event.key == kDelete)) {
                     if (selectionAnchor_ != caretBytePos_) {
                         const std::size_t sStart = std::min(selectionAnchor_, caretBytePos_);
@@ -5601,6 +5715,12 @@ void Application::dispatchEvent(const InputEvent& event) {
             if (current->attribute("data-stoppropagation") == "true") {
                 break;
             }
+        }
+        // A handler may have navigated away or removed the form; only submit
+        // one that is still in the live tree.
+        if (pendingSubmitForm && document_ && document_->root() &&
+            isReachable(*document_->root(), pendingSubmitForm)) {
+            submitForm(*pendingSubmitForm, pendingSubmitSkipValidation);
         }
     }
 }

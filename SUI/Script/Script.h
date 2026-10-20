@@ -72,8 +72,11 @@ std::vector<std::string> registeredHrefs();
 
 // Runs the entry point named by an inline attribute such as `onclick="addone();"`.
 // A bare call is the supported form; anything the engine cannot resolve is logged
-// and skipped rather than throwing.
-void invokeInlineHandler(std::string_view attributeValue, Element* target);
+// and skipped rather than throwing. A handler normally focuses its target first,
+// which is what a click on a control does; `onsubmit` passes false so firing it
+// from a submit control does not move focus onto the form.
+void invokeInlineHandler(std::string_view attributeValue, Element* target,
+                         bool focusTarget = true);
 
 // console.log / warn / error, routed through SDL_Log.
 void log(std::string_view message);

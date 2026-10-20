@@ -525,6 +525,12 @@ bool Element::willValidate() const {
     if (hasAttribute("disabled")) {
         return false;
     }
+    // A readonly control cannot be corrected by the user, so it is not a
+    // validation candidate (HTML bars input and textarea; select has no
+    // readonly state).
+    if (tag_ != "select" && hasAttribute("readonly")) {
+        return false;
+    }
     if (tag_ == "input") {
         const std::string_view type = attribute("type");
         if (type == "hidden" || type == "submit" || type == "button" ||

@@ -9257,6 +9257,7 @@ void testValidationApi() {
         "<input id=\"b\" type=\"number\" value=\"5\" min=\"10\"/>"
         "<input id=\"c\" type=\"text\" value=\"ok\"/>"
         "<input id=\"d\" type=\"text\" disabled=\"\" value=\"\"/>"
+        "<input id=\"f\" type=\"text\" readonly=\"\" required=\"\" value=\"\"/>"
         "<div id=\"e\"></div>"
         "</body></sui>");
     if (!document) {
@@ -9268,12 +9269,15 @@ void testValidationApi() {
     Element* c = el("c");
     Element* d = el("d");
     Element* e = el("e");
-    check(a && b && c && d && e, "api elements found");
-    if (!a || !b || !c || !d || !e) {
+    Element* f = el("f");
+    check(a && b && c && d && e && f, "api elements found");
+    if (!a || !b || !c || !d || !e || !f) {
         return;
     }
-    check(a->willValidate() && !d->willValidate() && !e->willValidate(),
+    check(a->willValidate() && !d->willValidate() && !f->willValidate() &&
+              !e->willValidate(),
           "candidates validate, barred elements do not");
+    check(f->checkValidity(), "a readonly field is barred from validation");
     check(!a->checkValidity() && a->validity().valueMissing,
           "required emptiness flags valueMissing");
     check(!a->validationMessage().empty(), "a failure explains itself");
