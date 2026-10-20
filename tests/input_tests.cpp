@@ -2987,6 +2987,22 @@ int main() {
                 << "left:10px;top:210px\"></progress>"
                    "<progress value=\"0.75\" style=\"" << box
                 << "left:70px;top:210px;appearance:none\"></progress>"
+                   "<input type=\"color\" style=\"" << box
+                << "left:10px;top:260px\"/>"
+                   "<input type=\"color\" style=\"" << box
+                << "left:70px;top:260px;appearance:none\"/>"
+                   "<select style=\"" << box
+                << "left:10px;top:310px\"><option selected>x</option></select>"
+                   "<select style=\"" << box
+                << "left:70px;top:310px;appearance:none\">"
+                   "<option selected>x</option></select>"
+                   "<input type=\"date\" style=\"" << box
+                << "left:10px;top:360px\"/>"
+                   "<input type=\"date\" style=\"" << box
+                << "left:70px;top:360px;appearance:none\"/>"
+                   "<input type=\"file\" style=\"position:absolute;left:10px;top:420px;"
+                   "width:300px;height:40px;border:0;margin:0;background:#ffffff;"
+                   "box-sizing:border-box;appearance:none\"/>"
                    "</body></sui>";
         }
         const fs::path previous = fs::current_path();
@@ -3051,6 +3067,20 @@ int main() {
                   "a progress paints its bar");
             check(readPixel(80.0f, 230.0f, r, g, b) && white(r, g, b),
                   "appearance:none hides the progress bar");
+            check(readPixel(30.0f, 280.0f, r, g, b) && r < 40 && g < 40 && b < 40,
+                  "a color input paints its swatch");
+            check(readPixel(90.0f, 280.0f, r, g, b) && white(r, g, b),
+                  "appearance:none hides the color swatch");
+            check(readPixel(43.0f, 330.0f, r, g, b) && r < 245 && g < 245 && b < 245,
+                  "a closed select paints its arrow");
+            check(readPixel(103.0f, 330.0f, r, g, b) && white(r, g, b),
+                  "appearance:none hides the select arrow");
+            check(readPixel(38.0f, 376.0f, r, g, b) && r < 245 && g < 245 && b < 245,
+                  "a date input paints its calendar");
+            check(readPixel(98.0f, 376.0f, r, g, b) && white(r, g, b),
+                  "appearance:none hides the calendar");
+            check(readPixel(14.0f, 425.0f, r, g, b) && r == 39 && g == 39 && b == 42,
+                  "appearance:none keeps the file Browse button");
         }
     }
 

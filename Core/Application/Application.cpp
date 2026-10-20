@@ -2582,7 +2582,15 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         const std::string_view type = el.attribute("type");
         const bool calendar = type == "date" || type == "month" || type == "week" ||
                               type == "datetime-local";
-        if (calendar || type == "time" || type == "color" || type == "file") {
+        // `appearance: none` hands the look to the author, so the calendar,
+        // clock, and swatch icons go away with the rest of the native chrome.
+        // The Browse button on a file input stays: it is the control's only
+        // way to open the picker, and browsers keep it too.
+        const bool suppressed =
+            s.appearance == ComputedStyle::AppearanceNone &&
+            (calendar || type == "time" || type == "color");
+        if (!suppressed && (calendar || type == "time" || type == "color" ||
+                            type == "file")) {
             const SDL_FRect content{el.contentX() - offX, el.contentY() - offY,
                                     el.contentWidth(), el.contentHeight()};
             if (content.w > 0.0f && content.h > 0.0f) {
@@ -3124,10 +3132,15 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                 SDL_DestroyTexture(texture);
             }
         }
-        const float ax = content.x + content.w - 7.0f;
-        const float ay = content.y + content.h * 0.5f;
-        renderer.fillPolygon({{ax - 5.0f, ay - 2.5f}, {ax + 5.0f, ay - 2.5f}, {ax, ay + 3.5f}},
-                             multiplyAlpha(toColor(s.color), opacity));
+        // `appearance: none` drops the drop arrow along with the rest of the
+        // native look; the selected label still paints.
+        if (s.appearance != ComputedStyle::AppearanceNone) {
+            const float ax = content.x + content.w - 7.0f;
+            const float ay = content.y + content.h * 0.5f;
+            renderer.fillPolygon(
+                {{ax - 5.0f, ay - 2.5f}, {ax + 5.0f, ay - 2.5f}, {ax, ay + 3.5f}},
+                multiplyAlpha(toColor(s.color), opacity));
+        }
     }
 
     if (caretBytePos >= 0 && isEditableField(&el) && !el.hasAttribute("disabled")) {
