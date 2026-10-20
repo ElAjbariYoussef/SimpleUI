@@ -1003,6 +1003,17 @@ struct ComputedStyle {
     };
     std::uint8_t contain = 0;
 
+    // `content-visibility`: `hidden` skips the subtree's layout and paint and
+    // sizes the content box from contain-intrinsic-size. `auto` is carried for
+    // the CSSOM but lays out like visible, because this engine does not re-run
+    // layout as a skipped box scrolls into view.
+    enum ContentVisibility : std::uint8_t { ContentVisible, ContentAuto, ContentHidden };
+    ContentVisibility contentVisibility = ContentVisible;
+    // `contain-intrinsic-size`: one length applies to both axes, two give width
+    // then height. Auto is the initial `none`/unremembered case.
+    Length containIntrinsicWidth;
+    Length containIntrinsicHeight;
+
     // `user-select`: whether the element's text may be selected. Only the
     // reading exists for now — the engine has no document selection to steer.
     enum UserSelect : std::uint8_t {

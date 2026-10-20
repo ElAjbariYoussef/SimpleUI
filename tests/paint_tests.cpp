@@ -1649,6 +1649,38 @@ void testFrameSplicing() {
         check(hiddenFrame && !leaked, "a hidden frame element splices nothing");
     }
 }
+// content-visibility: hidden paints the element box itself and drops every
+// descendant box, even one with its own background.
+void testContentVisibilityPaint() {
+    auto document = parseOrNull(
+        "<sui><body style=\"margin:0\">"
+        "<div id=\"hidden\" style=\"content-visibility:hidden;background:#f00\">"
+        "<div id=\"inside\" style=\"background:#0f0;width:10px;height:10px\"></div>"
+        "</div>"
+        "<div id=\"shown\" style=\"background:#00f\">"
+        "<div id=\"shownInside\" style=\"background:#ff0;width:10px;height:10px\"></div>"
+        "</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    layoutRoot(*document, resolver);
+    const std::vector<PaintItem> items =
+        flattened(sui::computePaintOps(*document->root(), resolver));
+    Element* hidden = document->getElementById("hidden");
+    Element* inside = document->getElementById("inside");
+    Element* shown = document->getElementById("shown");
+    Element* shownInside = document->getElementById("shownInside");
+    check(hidden && inside && shown && shownInside, "the visibility boxes parsed");
+    if (!hidden || !inside || !shown || !shownInside) {
+        return;
+    }
+    check(paintIndex(items, hidden) >= 0, "the hidden box still paints itself");
+    check(paintIndex(items, inside) < 0, "a hidden descendant paints nothing");
+    check(paintIndex(items, shown) >= 0 && paintIndex(items, shownInside) >= 0,
+          "a visible descendant still paints");
+}
+
 int main() {
     testPlainOrder();
     testPositionedGroupsInFlow();
@@ -1678,6 +1710,7 @@ int main() {
     testExtendedTransformFunctions();
     testPointerEventsNone();
     testFrameSplicing();
+    testContentVisibilityPaint();
     if (failures > 0) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

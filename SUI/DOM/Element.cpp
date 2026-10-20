@@ -208,6 +208,27 @@ void Element::touch() {
     }
 }
 
+void Element::clearLayoutSubtree() {
+    clearTextRuns();
+    layoutX_ = 0.0f;
+    layoutY_ = 0.0f;
+    layoutW_ = 0.0f;
+    layoutH_ = 0.0f;
+    paddingX_ = 0.0f;
+    paddingY_ = 0.0f;
+    paddingW_ = 0.0f;
+    paddingH_ = 0.0f;
+    contentX_ = 0.0f;
+    contentY_ = 0.0f;
+    contentW_ = 0.0f;
+    contentH_ = 0.0f;
+    for (const auto& child : children_) {
+        if (child) {
+            child->clearLayoutSubtree();
+        }
+    }
+}
+
 namespace {
 
 // A scroll offset lives in `[0, scroll - client]`. Once the layout pass has a

@@ -489,6 +489,9 @@ public:
         if (s.isFlexContainer() || s.isGridContainer() || s.isTableContainer()) {
             return true;
         }
+        if (s.contentVisibility == ComputedStyle::ContentHidden) {
+            return true;
+        }
         return (s.contain & (ComputedStyle::ContainLayout |
                              ComputedStyle::ContainPaint)) != 0;
     }
@@ -639,6 +642,7 @@ public:
         }
         const bool result = [&]() -> bool {
         if (!isBlockLevel(s) || isBfcRoot(s) ||
+            s.contentVisibility == ComputedStyle::ContentHidden ||
             s.clearType != ComputedStyle::ClearNone || hasGeneratedBox(el, s)) {
             return false;
         }
@@ -1018,7 +1022,8 @@ public:
         // An inline-level box with auto width shrinks to fit its contents, the
         // way a browser sizes a button or an image. The probe below measures
         // the unwrapped width; run() then repeats the layout at the real width.
-        if (box.width <= 0.0f && s.display != ComputedStyle::Block) {
+        if (box.width <= 0.0f && s.display != ComputedStyle::Block &&
+            s.contentVisibility != ComputedStyle::ContentHidden) {
             availableWidth =
                 std::min(availableWidth, probeWidth(el, box) + box.horizontalChrome());
             el.clearTextRuns();  // the probe's runs are throwaway measurements
@@ -1033,9 +1038,8 @@ public:
         }
 
         float contentWidth = 0.0f;
-        float contentHeight = 0.0f;
-        contentHeight = layoutContents(el, s, box, availableWidth, contentX, contentY,
-                                       contentWidth, collapsible);
+        float contentHeight = layoutContents(el, s, box, availableWidth, contentX, contentY,
+                                             contentWidth, collapsible);
         cbOwner_ = savedOwner;
 
         if (box.height > 0.0f) {
@@ -1630,8 +1634,24 @@ private:
         return width;
     }
 
-    // The natural content size on one axis, used as a flex item's automatic basis.
+    // The natural content size on one axis, used as a flex item's automatic
+    // basis. Hidden content has no natural content, so its placeholder is the
+    // authored size or contain-intrinsic-size rather than the unbounded line.
     float measureNatural(Element& el, const ComputedStyle& s, bool row) {
+        if (s.contentVisibility == ComputedStyle::ContentHidden) {
+            const float em = s.fontSize;
+            const float rem = resolver_.rootFontSize();
+            if (row) {
+                return s.width.isAuto()
+                           ? std::max(0.0f, s.containIntrinsicWidth.resolve(
+                                               kUnbounded, em, rem))
+                           : std::max(0.0f, s.width.resolve(kUnbounded, em, rem));
+            }
+            return s.height.isAuto()
+                       ? std::max(0.0f, s.containIntrinsicHeight.resolve(
+                                           kUnbounded, em, rem))
+                       : std::max(0.0f, s.height.resolve(kUnbounded, em, rem));
+        }
         float width = 0.0f;
         const float height = layoutContents(el, s, usedBox(s, kUnbounded), kUnbounded, 0.0f,
                                             0.0f, width);
@@ -1677,6 +1697,24 @@ private:
     float layoutContents(Element& el, const ComputedStyle& s, const UsedBox& box,
                          float availableWidth, float contentX, float contentY,
                          float& outWidth, bool allowParentChild = false) {
+        if (s.contentVisibility == ComputedStyle::ContentHidden) {
+            // Hidden content contributes no boxes: drop everything below this
+            // element so a previous pass cannot leave runs at old positions,
+            // then use the CSS size or contain-intrinsic-size placeholder.
+            el.clearLayoutSubtree();
+            const float em = s.fontSize;
+            const float rem = resolver_.rootFontSize();
+            if (box.width > 0.0f) {
+                outWidth = box.width;
+            } else if (isBlockLevel(s)) {
+                outWidth = std::max(0.0f, availableWidth - box.horizontalChrome());
+            } else {
+                outWidth = std::max(
+                    0.0f, s.containIntrinsicWidth.resolve(availableWidth, em, rem));
+            }
+            return std::max(
+                0.0f, s.containIntrinsicHeight.resolve(viewportHeight_, em, rem));
+        }
         if (s.isFlexContainer()) {
             return layoutFlexContainer(el, s, box, availableWidth, contentX, contentY,
                                        outWidth);

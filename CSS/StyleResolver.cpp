@@ -5892,6 +5892,40 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         } else {
             s.willChange = splitCommaList(decl.value);
         }
+    } else if (property == "content-visibility") {
+        if (value == "visible") {
+            s.contentVisibility = ComputedStyle::ContentVisible;
+        } else if (value == "auto") {
+            s.contentVisibility = ComputedStyle::ContentAuto;
+        } else if (value == "hidden") {
+            s.contentVisibility = ComputedStyle::ContentHidden;
+        }
+    } else if (property == "contain-intrinsic-size") {
+        // One length applies to both axes; two set width then height. A leading
+        // `auto` is the remembered-size keyword and has no memory to spend here,
+        // so the explicit length still gives the placeholder its size.
+        if (value == "none") {
+            s.containIntrinsicWidth = Length{};
+            s.containIntrinsicHeight = Length{};
+        } else {
+            std::vector<Length> lengths;
+            bool ok = true;
+            for (std::string_view token : splitTokens(value)) {
+                if (token == "auto") {
+                    continue;
+                }
+                const Length length = parseLength(token);
+                if (length.isAuto()) {
+                    ok = false;
+                    break;
+                }
+                lengths.push_back(length);
+            }
+            if (ok && !lengths.empty() && lengths.size() <= 2) {
+                s.containIntrinsicWidth = lengths[0];
+                s.containIntrinsicHeight = lengths.size() == 2 ? lengths[1] : lengths[0];
+            }
+        }
     } else if (property == "contain") {
         // `none`, `strict`, and `content` are the shorthands; otherwise the
         // keywords combine. Store the expanded mask so the reading is the
@@ -8215,6 +8249,26 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             case ComputedStyle::ResizeNone: return "none";
         }
         return "none";
+    }
+    if (property == "content-visibility") {
+        switch (style.contentVisibility) {
+            case ComputedStyle::ContentVisible: return "visible";
+            case ComputedStyle::ContentAuto: return "auto";
+            case ComputedStyle::ContentHidden: return "hidden";
+        }
+        return "visible";
+    }
+    if (property == "contain-intrinsic-size") {
+        if (style.containIntrinsicWidth.isAuto() &&
+            style.containIntrinsicHeight.isAuto()) {
+            return "none";
+        }
+        std::string out = length(style.containIntrinsicWidth, "auto");
+        if (!style.containIntrinsicHeight.isAuto() ||
+            style.containIntrinsicWidth.isAuto()) {
+            out += " " + length(style.containIntrinsicHeight, "auto");
+        }
+        return out;
     }
     if (property == "contain") {
         if (style.contain == 0) {

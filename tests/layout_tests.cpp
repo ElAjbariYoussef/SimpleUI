@@ -10642,6 +10642,105 @@ void testBackgroundShorthand() {
           "background: inherit replays the parent's shorthand");
 }
 
+// content-visibility: hidden skips a subtree's layout and paint, while the box
+// itself keeps its borders and padding. contain-intrinsic-size supplies the
+// placeholder content size; auto is carried but lays out like visible.
+void testContentVisibility() {
+    auto document = parseOrNull(
+        "<sui><body style=\"margin:0\">"
+        "<div id=\"hidden\" style=\"width:100px;padding:5px;border:2px solid #000;"
+        "content-visibility:hidden\"><div id=\"inner\" style=\"height:50px\"></div>"
+        "<span id=\"hiddenText\">secret</span></div>"
+        "<div id=\"after\" style=\"height:10px\"></div>"
+        "<div id=\"intrinsic\" style=\"display:inline-block;content-visibility:hidden;"
+        "contain-intrinsic-size:120px 40px\"><span style=\"height:99px\"></span></div>"
+        "<div id=\"shown\" style=\"content-visibility:visible\">"
+        "<div id=\"shownInner\" style=\"height:50px\"></div></div>"
+        "<div id=\"auto\" style=\"content-visibility:auto\">"
+        "<div id=\"autoInner\" style=\"height:50px\"></div></div>"
+        "<div id=\"flex\" style=\"display:flex\">"
+        "<div id=\"flexHidden\" style=\"content-visibility:hidden;"
+        "contain-intrinsic-size:70px 30px\"><span style=\"height:99px\"></span></div>"
+        "</div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    Element* hidden = document->getElementById("hidden");
+    Element* inner = document->getElementById("inner");
+    Element* hiddenText = document->getElementById("hiddenText");
+    Element* after = document->getElementById("after");
+    Element* intrinsic = document->getElementById("intrinsic");
+    Element* shown = document->getElementById("shown");
+    Element* shownInner = document->getElementById("shownInner");
+    Element* autoEl = document->getElementById("auto");
+    Element* autoInner = document->getElementById("autoInner");
+    Element* flexHidden = document->getElementById("flexHidden");
+    check(hidden && inner && hiddenText && after && intrinsic && shown && shownInner &&
+              autoEl && autoInner && flexHidden,
+          "the content-visibility elements found");
+    if (!hidden || !inner || !hiddenText || !after || !intrinsic || !shown ||
+        !shownInner || !autoEl || !autoInner || !flexHidden) {
+        return;
+    }
+
+    layoutRoot(*document, resolver, 400.0f);
+    checkNear(inner->layoutWidth(), 0.0f, 0.01f,
+              "hidden content contributes no child width");
+    checkNear(inner->layoutHeight(), 0.0f, 0.01f,
+              "hidden content contributes no child height");
+    check(hiddenText->textRuns().empty(), "hidden content leaves no text runs");
+    checkNear(hidden->layoutHeight(), 14.0f, 0.01f,
+              "the hidden box keeps only its padding and borders");
+    checkNear(after->layoutY(), hidden->layoutY() + hidden->layoutHeight(), 0.01f,
+              "the next block starts after the hidden box");
+    checkNear(intrinsic->contentWidth(), 120.0f, 0.01f,
+              "contain-intrinsic-size supplies a hidden inline-block width");
+    checkNear(intrinsic->layoutHeight(), 40.0f, 0.01f,
+              "contain-intrinsic-size supplies a hidden height");
+    checkNear(shown->layoutHeight(), 50.0f, 0.01f,
+              "content-visibility: visible keeps its content");
+    checkNear(shownInner->layoutHeight(), 50.0f, 0.01f,
+              "visible child layout is unchanged");
+    checkNear(autoEl->layoutHeight(), 50.0f, 0.01f,
+              "content-visibility: auto lays out like visible");
+    checkNear(autoInner->layoutHeight(), 50.0f, 0.01f,
+              "auto content is not skipped in this engine");
+    checkNear(flexHidden->layoutWidth(), 70.0f, 0.01f,
+              "a hidden flex item uses its intrinsic width");
+    checkNear(flexHidden->layoutHeight(), 30.0f, 0.01f,
+              "a hidden flex item uses its intrinsic height");
+
+    const auto value = [&](Element* el, const char* property) {
+        return el ? sui::StyleResolver::propertyValue(resolver.resolve(*el), property) : "";
+    };
+    check(value(hidden, "content-visibility") == "hidden",
+          "content-visibility reads back");
+    check(value(autoEl, "content-visibility") == "auto",
+          "the auto reading round-trips");
+    check(value(shown, "content-visibility") == "visible",
+          "the initial content-visibility is visible");
+    check(value(intrinsic, "contain-intrinsic-size") == "120px 40px",
+          "contain-intrinsic-size reads both axes");
+    check(value(shown, "contain-intrinsic-size") == "none",
+          "the initial contain-intrinsic-size is none");
+
+    // Toggling back to visible lays the old subtree out again; hiding it again
+    // must clear the runs the previous pass produced.
+    hidden->style().setProperty("content-visibility", "visible");
+    layoutRoot(*document, resolver, 400.0f);
+    checkNear(inner->layoutHeight(), 50.0f, 0.01f,
+              "turning content-visibility off restores the child");
+    check(!hiddenText->textRuns().empty(), "the restored text paints again");
+    hidden->style().setProperty("content-visibility", "hidden");
+    layoutRoot(*document, resolver, 400.0f);
+    checkNear(inner->layoutHeight(), 0.0f, 0.01f,
+              "turning content-visibility back on skips the child again");
+    check(hiddenText->textRuns().empty(),
+          "the second hide clears the stale text runs");
+}
+
 // The properties this engine accepts but does not act on still carry their
 // authored value, so a stylesheet can use them and the CSSOM round-trips:
 // `appearance` and `user-select` (with their `-webkit-` aliases),
@@ -12484,6 +12583,7 @@ int main() {
     testBackgroundReadBack();
     testBackgroundShorthand();
     testAcceptedPropertyReadBack();
+    testContentVisibility();
     testFlexCrossSizeExcludesChrome();
     testFlexBoxSizingIsNotAppliedTwice();
 

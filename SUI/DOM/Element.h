@@ -197,6 +197,11 @@ public:
     float layoutWidth() const noexcept { return layoutW_; }
     float layoutHeight() const noexcept { return layoutH_; }
 
+    // Drops the text runs and geometry of this node and every descendant, used
+    // when `content-visibility: hidden` skips a subtree so stale runs from a
+    // previous layout pass cannot paint at old positions.
+    void clearLayoutSubtree();
+
     // The padding box, which is what `overflow` clips to, and the content box, which is
     // what `background-clip: content-box` is relative to. Layout records both because
     // padding percentages were already resolved against the right containing block and

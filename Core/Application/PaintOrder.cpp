@@ -1113,6 +1113,9 @@ struct Collector {
         float persp3d = 0.0f;
         float originZ = 0.0f;
         bool culled = false;
+        // content-visibility: hidden paints this box itself but none of its
+        // descendants; the layout pass has already cleared their geometry.
+        bool hiddenContents = false;
         SDL_FPoint origin{0.0f, 0.0f};
         float blur = 0.0f;
         bool shift = false;
@@ -1135,6 +1138,7 @@ struct Collector {
         }
         const ComputedStyle s = resolver.resolve(el);
         const bool drawable = s.display != ComputedStyle::None && s.visible;
+        box.hiddenContents = s.contentVisibility == ComputedStyle::ContentHidden;
         const float groupAlpha = s.opacity * filterOpacity(s.filter);
         // A parent's `perspective` funnels every descendant's 3D through its
         // viewer, display or no display.
@@ -1329,7 +1333,9 @@ struct Collector {
             return;
         }
         if (!box.paints) {
-            walkChildren(el, box.child, target, escape);
+            if (!box.hiddenContents) {
+                walkChildren(el, box.child, target, escape);
+            }
             return;
         }
         // A positioned box found inside a pseudo-context belongs to the context
@@ -1343,7 +1349,9 @@ struct Collector {
         if (box.kind == GroupKind::None) {
             // Not a group: children share the context this box was found in, and
             // a positioned child may still escape through it.
-            walkChildren(el, box.child, *into, escape);
+            if (!box.hiddenContents) {
+                walkChildren(el, box.child, *into, escape);
+            }
             into->push_back(std::move(entry));
             return;
         }
@@ -1374,7 +1382,9 @@ struct Collector {
         // A pseudo-context holds its in-flow content but lets positioned
         // descendants rejoin the list its own box sits in; a real one holds all.
         std::vector<PaintEntry>* childEscape = box.kind == GroupKind::Pseudo ? into : nullptr;
-        walkChildren(el, box.child, entry.inner, childEscape);
+        if (!box.hiddenContents) {
+            walkChildren(el, box.child, entry.inner, childEscape);
+        }
         into->push_back(std::move(entry));
     }
 
@@ -1668,7 +1678,9 @@ std::vector<PaintOp> computePaintOps(Element& root, const StyleResolver& resolve
         out.push_back(boxOp(box.item));
     }
     std::vector<PaintEntry> entries;
-    collector.walkChildren(root, box.child, entries, nullptr);
+    if (resolver.resolve(root).contentVisibility != ComputedStyle::ContentHidden) {
+        collector.walkChildren(root, box.child, entries, nullptr);
+    }
     collector.emit(entries, out);
     if (box.paints && (box.groupAlpha < 1.0f || box.transformed || box.projective ||
                        box.blur > 0.0f || box.shift || box.dropShadow.present)) {
