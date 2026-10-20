@@ -3505,6 +3505,101 @@ void testBlockAutoMargins() {
               "inline-level auto margins still resolve to zero");
 }
 
+void testFlexAutoMargins() {
+    // Auto margins take the free space before alignment sees it: both sides
+    // centre, one side pushes to the far edge, several auto edges share alike,
+    // and a negative remainder leaves them at zero. Cross-axis margins do the
+    // same inside a line, overriding align-self, and the start margin is part
+    // of the item's place (a fixed one too).
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"centre\"><div id=\"c1\"></div></div>"
+        "<div id=\"pushright\"><div id=\"r1\"></div></div>"
+        "<div id=\"pushleft\"><div id=\"l1\"></div></div>"
+        "<div id=\"split\"><div id=\"s1\"></div><div id=\"s2\"></div>"
+        "<div id=\"s3\"></div></div>"
+        "<div id=\"tight\"><div id=\"t1\"></div></div>"
+        "<div id=\"crossboth\"><div id=\"cb\"></div></div>"
+        "<div id=\"crossend\"><div id=\"ce\"></div></div>"
+        "<div id=\"fixedcross\"><div id=\"fc\"></div></div>"
+        "<div id=\"fixedend\"><div id=\"fe\"></div></div>"
+        "<div id=\"colmain\"><div id=\"cm\"></div></div>"
+        "<div id=\"colcross\"><div id=\"cc\"></div></div>"
+        "<div id=\"rev\"><div id=\"rv\"></div></div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 }"
+        "#centre { display: flex; width: 400px; height: 100px; justify-content: flex-end }"
+        "#c1 { width: 100px; height: 20px; margin: 0 auto }"
+        "#pushright { display: flex; width: 400px; height: 40px }"
+        "#r1 { width: 100px; height: 20px; margin-left: auto }"
+        "#pushleft { display: flex; width: 400px; height: 40px }"
+        "#l1 { width: 100px; height: 20px; margin-right: auto }"
+        "#split { display: flex; width: 400px; height: 40px }"
+        "#s1, #s2, #s3 { width: 50px; height: 20px; margin-left: auto }"
+        "#tight { display: flex; width: 80px; height: 40px }"
+        "#t1 { width: 100px; height: 20px; margin: 0 auto }"
+        "#crossboth { display: flex; width: 400px; height: 100px; align-items: flex-end }"
+        "#cb { width: 100px; height: 20px; margin: auto 0 }"
+        "#crossend { display: flex; width: 400px; height: 100px; align-items: center }"
+        "#ce { width: 100px; height: 20px; margin-top: auto }"
+        "#fixedcross { display: flex; width: 400px; height: 100px; align-items: flex-start }"
+        "#fc { width: 100px; height: 20px; margin-top: 10px; margin-bottom: 30px }"
+        "#fixedend { display: flex; width: 400px; height: 100px; align-items: flex-end }"
+        "#fe { width: 100px; height: 20px; margin-top: 10px; margin-bottom: 30px }"
+        "#colmain { display: flex; flex-direction: column; width: 400px; height: 100px }"
+        "#cm { width: 100px; height: 20px; margin: auto 0 }"
+        "#colcross { display: flex; flex-direction: column; width: 400px; height: 100px;"
+        " align-items: flex-start }"
+        "#cc { width: 100px; height: 20px; margin: 0 auto }"
+        "#rev { display: flex; flex-direction: row-reverse; width: 400px; height: 40px }"
+        "#rv { width: 100px; height: 20px; margin-left: auto }"));
+    layoutRoot(*document, resolver, 800.0f);
+    const auto at = [&](const char* id, const char* container, float x, float y,
+                        const char* what) {
+        Element* el = document->getElementById(id);
+        Element* box = document->getElementById(container);
+        if (!el || !box) {
+            check(false, "flex auto-margin fixture found");
+            return;
+        }
+        checkNear(el->layoutX() - box->layoutX(), x, 0.05f, what);
+        checkNear(el->layoutY() - box->layoutY(), y, 0.05f, what);
+    };
+    at("c1", "centre", 150.0f, 0.0f,
+       "both main auto margins centre against justify-content");
+    at("r1", "pushright", 300.0f, 0.0f,
+       "an auto left margin pushes the item to the end");
+    at("l1", "pushleft", 0.0f, 0.0f,
+       "an auto right margin leaves the item at the start");
+    at("s1", "split", 83.333f, 0.0f, "three auto margins share the free space");
+    at("s2", "split", 216.667f, 0.0f,
+       "the second share lands after the first item");
+    at("s3", "split", 350.0f, 0.0f, "the third share ends at the container edge");
+    at("t1", "tight", 0.0f, 0.0f, "no room leaves the auto margins at zero");
+    at("cb", "crossboth", 0.0f, 40.0f,
+       "both cross auto margins centre against align-self");
+    at("ce", "crossend", 0.0f, 80.0f,
+       "an auto start margin pushes to the cross end");
+    at("fc", "fixedcross", 0.0f, 10.0f,
+       "a fixed cross start margin offsets the item");
+    at("fe", "fixedend", 0.0f, 50.0f,
+       "a fixed cross end margin is part of the alignment");
+    at("cm", "colmain", 0.0f, 40.0f, "column main auto margins centre vertically");
+    at("cc", "colcross", 150.0f, 0.0f,
+       "column cross auto margins centre horizontally");
+    Element* cc = document->getElementById("cc");
+    if (cc) {
+        checkNear(cc->layoutWidth(), 100.0f, 0.05f,
+                  "a cross auto margin stops the stretch");
+    }
+    at("rv", "rev", 300.0f, 0.0f, "a reversed row mirrors the auto-margin box");
+}
+
 void testFlexMinMaxClamp() {
     // The items ask for 300px each in a 400px row, so something has to give. A
     // min-width stops that from going too far.
@@ -11632,6 +11727,7 @@ int main() {
     testFlexReverseDirections();
     testFlexItemMarginsAndPadding();
     testBlockAutoMargins();
+    testFlexAutoMargins();
     testFlexMinMaxClamp();
     testFlexInlineFlexShrinks();
     testFlexPropertyParsing();

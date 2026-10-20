@@ -1451,11 +1451,14 @@ private:
             }
         }
 
-        // A container with a definite cross size stretches its single line to fill
-        // it, which is what makes a row of cards fill its panel. Without a definite
-        // cross size the line is only as tall as its tallest item.
+        // A single-line container sizes its line to the container's inner cross
+        // size when that is definite, which is what makes a row of cards fill its
+        // panel. `nowrap` is always single-line; a wrapping container does the
+        // same only under `align-content: stretch`, since `align-items` aligns
+        // items inside a line rather than sizing the line itself.
         if (lines.size() == 1 && crossDefinite > 0.0f &&
-            (row ? s.alignContent : s.alignItems) == ComputedStyle::AlignStretch) {
+            (s.flexWrap == ComputedStyle::NoWrap ||
+             s.alignContent == ComputedStyle::AlignStretch)) {
             lines[0].crossSize = crossAvailable;
         }
 
@@ -1479,8 +1482,46 @@ private:
                 outer += item.mainSize + mainChrome(item.box, row) + mainMargins(item.box, row);
             }
             // Recomputed from the final sizes, because growing changed the total.
-            const float freeSpace = mainAvailable - outer;
+            float freeSpace = mainAvailable - outer;
             const float n = static_cast<float>(l.items.size());
+            // Positive free space goes to the auto margins before
+            // `justify-content` sees it: every auto edge takes an equal share,
+            // and `justify-content` then has nothing left to distribute. With
+            // no room the auto margins are zero and alignment works as usual.
+            int mainAutos = 0;
+            for (const std::size_t idx : l.items) {
+                const FlexItem& item = items[idx];
+                if (row ? item.style.margin.left.isAuto()
+                        : item.style.margin.top.isAuto()) {
+                    ++mainAutos;
+                }
+                if (row ? item.style.margin.right.isAuto()
+                        : item.style.margin.bottom.isAuto()) {
+                    ++mainAutos;
+                }
+            }
+            if (mainAutos > 0 && freeSpace > 0.5f) {
+                const float share = freeSpace / static_cast<float>(mainAutos);
+                for (const std::size_t idx : l.items) {
+                    FlexItem& item = items[idx];
+                    if (row) {
+                        if (item.style.margin.left.isAuto()) {
+                            item.box.margin.left = share;
+                        }
+                        if (item.style.margin.right.isAuto()) {
+                            item.box.margin.right = share;
+                        }
+                    } else {
+                        if (item.style.margin.top.isAuto()) {
+                            item.box.margin.top = share;
+                        }
+                        if (item.style.margin.bottom.isAuto()) {
+                            item.box.margin.bottom = share;
+                        }
+                    }
+                }
+                freeSpace = 0.0f;
+            }
             float before = 0.0f;
             float between = mainGap;
             switch (s.justifyContent) {
@@ -1528,9 +1569,11 @@ private:
                 FlexItem& item = items[l.items[k]];
                 const float start = row ? item.box.margin.left : item.box.margin.top;
                 const float end = row ? item.box.margin.right : item.box.margin.bottom;
-                const float pos = reverse ? mainAvailable -
-                                                (natural[k] + item.mainSize + end) -
-                                                mainChrome(item.box, row)
+                // `natural[k]` is the item's margin-box start, so mirroring has
+                // to move the whole margin box, start margin included.
+                const float outerW = start + item.mainSize + end +
+                                     mainChrome(item.box, row);
+                const float pos = reverse ? mainAvailable - (natural[k] + outerW)
                                           : natural[k];
                 item.mainPos = pos + start;
             }
@@ -1547,28 +1590,54 @@ private:
                     item.style.alignSelf != ComputedStyle::AlignStretch
                         ? item.style.alignSelf
                         : s.alignItems;
-                // Stretch fills the line only when the item has no definite size on
-                // the cross axis: its height in a row, its width in a column.
-                // `crossSize` is a content-box length, so stretching to the line's
-                // cross extent has to give the chrome back before it can be used as
-                // one, and the two are kept apart because the extent is what the
-                // alignment arithmetic needs while the content box is what the item
-                // is actually laid out at.
+                // `align-self: stretch` fills the line only when the item has no
+                // definite size on the cross axis and neither cross margin is
+                // auto: an auto margin takes the free space instead, which is
+                // what makes the margin win over the alignment.
                 float crossContent = item.crossSize;
                 const float authored = row ? item.box.height : item.box.width;
-                if (align == ComputedStyle::AlignStretch && authored <= 0.0f) {
-                    crossContent =
-                        std::max(0.0f, l.crossSize - crossChrome(item.box, row));
+                const bool crossStartAuto =
+                    row ? item.style.margin.top.isAuto()
+                        : item.style.margin.left.isAuto();
+                const bool crossEndAuto =
+                    row ? item.style.margin.bottom.isAuto()
+                        : item.style.margin.right.isAuto();
+                const bool crossAuto = crossStartAuto || crossEndAuto;
+                float crossStart = row ? item.box.margin.top : item.box.margin.left;
+                float crossEnd = row ? item.box.margin.bottom : item.box.margin.right;
+                if (align == ComputedStyle::AlignStretch && authored <= 0.0f &&
+                    !crossAuto) {
+                    crossContent = std::max(0.0f, l.crossSize - crossChrome(item.box, row) -
+                                                     crossStart - crossEnd);
                 }
-                const float cross = crossMargins(item.box, row) +
-                                    crossChrome(item.box, row) + crossContent;
-                const float freeSpace = std::max(0.0f, l.crossSize - cross);
-                if (align == ComputedStyle::AlignEnd) {
-                    item.crossPos = l.crossPos + freeSpace;
+                float freeSpace =
+                    std::max(0.0f, l.crossSize - crossStart - crossChrome(item.box, row) -
+                                       crossContent - crossEnd);
+                if (crossAuto) {
+                    if (crossStartAuto && crossEndAuto) {
+                        crossStart = freeSpace * 0.5f;
+                        crossEnd = freeSpace - crossStart;
+                    } else if (crossStartAuto) {
+                        crossStart = freeSpace;
+                        crossEnd = 0.0f;
+                    } else {
+                        crossStart = 0.0f;
+                        crossEnd = freeSpace;
+                    }
+                    if (row) {
+                        item.box.margin.top = crossStart;
+                        item.box.margin.bottom = crossEnd;
+                    } else {
+                        item.box.margin.left = crossStart;
+                        item.box.margin.right = crossEnd;
+                    }
+                    item.crossPos = l.crossPos + crossStart;
+                } else if (align == ComputedStyle::AlignEnd) {
+                    item.crossPos = l.crossPos + freeSpace + crossStart;
                 } else if (align == ComputedStyle::AlignCenter) {
-                    item.crossPos = l.crossPos + freeSpace * 0.5f;
+                    item.crossPos = l.crossPos + freeSpace * 0.5f + crossStart;
                 } else {
-                    item.crossPos = l.crossPos;
+                    item.crossPos = l.crossPos + crossStart;
                 }
 
                 // Both sizes are content-box lengths, since `resolveBox` already
@@ -1590,12 +1659,19 @@ private:
                 runWith(*item.el, sized, std::max(0.0f, sized.width.resolve()), x, y);
                 // How far the items reach along each axis. For a column the main
                 // extent is a height and the cross one a width.
+                // `mainPos`/`crossPos` are the border-box starts, so the
+                // reach adds only the trailing margin; the leading one is
+                // already inside the position.
                 maxMain = std::max(maxMain, item.mainPos +
                                                  (row ? item.el->layoutWidth()
                                                       : item.el->layoutHeight()) +
-                                                 mainMargins(item.box, row));
-                maxCross = std::max(maxCross, item.crossPos + item.el->layoutHeight() +
-                                                 crossMargins(item.box, row));
+                                                 (row ? item.box.margin.right
+                                                      : item.box.margin.bottom));
+                maxCross = std::max(maxCross, item.crossPos +
+                                                  (row ? item.el->layoutHeight()
+                                                       : item.el->layoutWidth()) +
+                                                  (row ? item.box.margin.bottom
+                                                       : item.box.margin.right));
             }
         }
 
