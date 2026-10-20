@@ -59,6 +59,8 @@ private:
     // nodes in place across insertions and erasures of other nodes).
     struct Tray {
         LinuxPlatform* platform = nullptr;
+        // Null while a headless test simulates an icon without touching the
+        // session bus (SUI_TEST_TRAY=1).
         SDL_Tray* tray = nullptr;
         WindowId window = kInvalidWindow;
     };

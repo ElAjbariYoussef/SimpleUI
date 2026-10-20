@@ -355,6 +355,37 @@ int main() {
         check(app.renderFrame(primary), "the tray page frames");
         check(!app.inTray(), "a fresh window is not in the tray");
 
+        // Tests run on the dummy video driver, where a real icon would register
+        // with the session bus and can outlive the process as a ghost in panels.
+        // Prove the refusal first, then opt into a simulated icon that exercises
+        // the hide/restore state machine without touching the desktop.
+        std::string headlessError;
+        check(!app.platform()->minimizeToTray(primary, headlessError),
+              "a headless session refuses a real tray icon");
+        check(headlessError == "the headless video driver has no system tray",
+              "the refusal names the missing tray");
+        check((SDL_GetWindowFlags(app.platform()->window(primary)) &
+               SDL_WINDOW_HIDDEN) == 0,
+              "a refused tray minimize leaves the window visible");
+
+        const char* previousTrayMode =
+            SDL_GetEnvironmentVariable(SDL_GetEnvironment(), "SUI_TEST_TRAY");
+        struct RestoreTrayMode {
+            std::string value;
+            bool had = false;
+            RestoreTrayMode(const char* previous, bool hadPrevious)
+                : value(previous ? previous : ""), had(hadPrevious) {}
+            ~RestoreTrayMode() {
+                if (had) {
+                    SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "SUI_TEST_TRAY",
+                                               value.c_str(), true);
+                } else {
+                    SDL_UnsetEnvironmentVariable(SDL_GetEnvironment(), "SUI_TEST_TRAY");
+                }
+            }
+        } restoreTrayMode(previousTrayMode, previousTrayMode != nullptr);
+        SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "SUI_TEST_TRAY", "1", true);
+
         sui::script::WindowApi windowApi;
         if (windowApi.minimizeToTray()) {
             check(app.platform()->isMinimizedToTray(primary),

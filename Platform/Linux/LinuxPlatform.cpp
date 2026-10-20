@@ -30,6 +30,25 @@ SDL_Surface* makeTrayIcon() {
     return icon;
 }
 
+// A headless video driver has no desktop to put an icon on, yet SDL's Unix tray
+// backend still registers with the session bus under it. Those registrations
+// outlive the process's tray in some panels, leaving ghost icons, so headless
+// sessions refuse to minimize unless a test opts into a simulated icon with
+// SUI_TEST_TRAY=1.
+bool headlessVideo() {
+    const char* name = SDL_GetCurrentVideoDriver();
+    if (!name) {
+        return false;
+    }
+    const std::string_view driver(name);
+    return driver == "dummy" || driver == "offscreen";
+}
+
+bool traySimulationEnabled() {
+    const char* value = SDL_GetEnvironmentVariable(SDL_GetEnvironment(), "SUI_TEST_TRAY");
+    return value && std::string_view(value) == "1";
+}
+
 // SDL reports the held buttons as a bitmask; the engine wants a single index, with
 // 0 meaning none, so that a move can say whether it is part of a drag.
 int heldButton(Uint32 state) {
@@ -208,7 +227,9 @@ void LinuxPlatform::destroyWindow(Window& window) {
     if (const auto tray = trays_.find(window.id); tray != trays_.end()) {
         SDL_Tray* icon = tray->second.tray;
         trays_.erase(tray);
-        SDL_DestroyTray(icon);
+        if (icon) {
+            SDL_DestroyTray(icon);
+        }
     }
     if (window.renderer) {
         SDL_DestroyRenderer(window.renderer);
@@ -349,39 +370,48 @@ bool LinuxPlatform::minimizeToTray(WindowId id, std::string& error) {
         error = "tray events are not registered";
         return false;
     }
-    if (!trayIcon_) {
-        trayIcon_ = makeTrayIcon();
-    }
-    // Clicking the icon restores the window. A Show/Quit menu would be the
-    // usual tray shape, but SDL's DBus tray backend crashes while tearing a
-    // populated menu down (the icon itself is stable), so v1 is click-only.
-    SDL_PropertiesID props = SDL_CreateProperties();
-    if (!props) {
-        error = describe("SDL_CreateProperties");
+    const bool headless = headlessVideo();
+    const bool simulate = headless && traySimulationEnabled();
+    if (headless && !simulate) {
+        error = "the headless video driver has no system tray";
         return false;
     }
     Tray& entry = trays_[id];
     entry.platform = this;
     entry.window = id;
-    const char* title = SDL_GetWindowTitle(target->window);
-    SDL_SetPointerProperty(props, SDL_PROP_TRAY_CREATE_ICON_POINTER, trayIcon_);
-    SDL_SetStringProperty(props, SDL_PROP_TRAY_CREATE_TOOLTIP_STRING,
-                          title && *title ? title : "SimpleUI");
-    // The map node's address is the callback's userdata and stays put for as
-    // long as the entry lives.
-    SDL_SetPointerProperty(props, SDL_PROP_TRAY_CREATE_USERDATA_POINTER, &entry);
-    SDL_SetPointerProperty(props, SDL_PROP_TRAY_CREATE_LEFTCLICK_CALLBACK_POINTER,
-                           reinterpret_cast<void*>(trayClicked));
-    SDL_SetPointerProperty(props, SDL_PROP_TRAY_CREATE_RIGHTCLICK_CALLBACK_POINTER,
-                           reinterpret_cast<void*>(trayClicked));
-    SDL_Tray* tray = SDL_CreateTrayWithProperties(props);
-    SDL_DestroyProperties(props);
-    if (!tray) {
-        error = describe("SDL_CreateTrayWithProperties");
-        trays_.erase(id);
-        return false;
+    if (!simulate) {
+        if (!trayIcon_) {
+            trayIcon_ = makeTrayIcon();
+        }
+        // Clicking the icon restores the window. A Show/Quit menu would be the
+        // usual tray shape, but SDL's DBus tray backend crashes while tearing a
+        // populated menu down (the icon itself is stable), so v1 is click-only.
+        SDL_PropertiesID props = SDL_CreateProperties();
+        if (!props) {
+            error = describe("SDL_CreateProperties");
+            trays_.erase(id);
+            return false;
+        }
+        const char* title = SDL_GetWindowTitle(target->window);
+        SDL_SetPointerProperty(props, SDL_PROP_TRAY_CREATE_ICON_POINTER, trayIcon_);
+        SDL_SetStringProperty(props, SDL_PROP_TRAY_CREATE_TOOLTIP_STRING,
+                              title && *title ? title : "SimpleUI");
+        // The map node's address is the callback's userdata and stays put for
+        // as long as the entry lives.
+        SDL_SetPointerProperty(props, SDL_PROP_TRAY_CREATE_USERDATA_POINTER, &entry);
+        SDL_SetPointerProperty(props, SDL_PROP_TRAY_CREATE_LEFTCLICK_CALLBACK_POINTER,
+                               reinterpret_cast<void*>(trayClicked));
+        SDL_SetPointerProperty(props, SDL_PROP_TRAY_CREATE_RIGHTCLICK_CALLBACK_POINTER,
+                               reinterpret_cast<void*>(trayClicked));
+        SDL_Tray* tray = SDL_CreateTrayWithProperties(props);
+        SDL_DestroyProperties(props);
+        if (!tray) {
+            error = describe("SDL_CreateTrayWithProperties");
+            trays_.erase(id);
+            return false;
+        }
+        entry.tray = tray;
     }
-    entry.tray = tray;
     // The icon stands in for the window now; hiding it is what "minimize" means.
     SDL_HideWindow(target->window);
     return true;
@@ -401,7 +431,9 @@ void LinuxPlatform::restoreFromTray(WindowId id) {
     }
     SDL_Tray* tray = found->second.tray;
     trays_.erase(found);
-    SDL_DestroyTray(tray);
+    if (tray) {
+        SDL_DestroyTray(tray);
+    }
     if (target) {
         SDL_RaiseWindow(target->window);
     }
