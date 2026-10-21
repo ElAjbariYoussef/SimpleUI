@@ -1,5 +1,7 @@
 #include "CSS/Parser.h"
 
+#include "CSS/StyleResolver.h"
+
 #include <SDL3/SDL.h>
 
 #include <algorithm>
@@ -74,6 +76,254 @@ std::string anonymousLayerName() {
     return "@anonymous-" + std::to_string(++count);
 }
 
+// --- @supports conditions ---------------------------------------------------
+
+// Index of the `)` matching the `(` at `open`, skipping quoted strings. Returns
+// npos when the group is not closed.
+std::size_t findClosingParen(std::string_view source, std::size_t open) {
+    if (open >= source.size() || source[open] != '(') {
+        return std::string_view::npos;
+    }
+    int depth = 0;
+    char quote = 0;
+    for (std::size_t i = open; i < source.size(); ++i) {
+        const char c = source[i];
+        if (quote != 0) {
+            if (c == '\\' && i + 1 < source.size()) {
+                ++i;
+            } else if (c == quote) {
+                quote = 0;
+            }
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            quote = c;
+        } else if (c == '(') {
+            ++depth;
+        } else if (c == ')') {
+            --depth;
+            if (depth == 0) {
+                return i;
+            }
+        }
+    }
+    return std::string_view::npos;
+}
+
+void skipConditionSpace(std::string_view source, std::size_t& i) {
+    while (i < source.size()) {
+        if (isSpace(source[i])) {
+            ++i;
+        } else if (source[i] == '/' && i + 1 < source.size() && source[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < source.size() &&
+                   !(source[i] == '*' && source[i + 1] == '/')) {
+                ++i;
+            }
+            i = std::min(i + 2, source.size());
+        } else {
+            break;
+        }
+    }
+}
+
+bool conditionWordAt(std::string_view source, std::size_t at, std::string_view word) {
+    if (at > source.size() || source.size() - at < word.size() ||
+        source.compare(at, word.size(), word) != 0) {
+        return false;
+    }
+    if (at > 0 && isIdentChar(source[at - 1])) {
+        return false;
+    }
+    const std::size_t after = at + word.size();
+    return after >= source.size() || !isIdentChar(source[after]);
+}
+
+bool validSupportsProperty(std::string_view property) {
+    if (property.empty()) {
+        return false;
+    }
+    for (const char c : property) {
+        const auto u = static_cast<unsigned char>(c);
+        if (std::isalnum(u) == 0 && c != '-' && c != '_' && u < 0x80) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Parses the condition grammar used by `@supports`: parenthesised declarations
+// or nested conditions joined by `and`/`or`, with `not` in front, plus
+// `selector(...)`. General-enclosed functions are syntactically valid but never
+// supported. `and` binds tighter than `or`; parentheses remain the way to mix
+// them unambiguously.
+class SupportsConditionParser {
+public:
+    bool parse(std::string_view source) {
+        source_ = source;
+        pos_ = 0;
+        const bool value = parseOr();
+        skip();
+        return ok_ && pos_ == source_.size() && value;
+    }
+
+private:
+    bool parseOr() {
+        bool value = parseAnd();
+        while (ok_) {
+            skip();
+            if (!consumeWord("or")) {
+                break;
+            }
+            const bool right = parseAnd();
+            value = right || value;
+        }
+        return value;
+    }
+
+    bool parseAnd() {
+        bool value = parseNot();
+        while (ok_) {
+            skip();
+            if (!consumeWord("and")) {
+                break;
+            }
+            const bool right = parseNot();
+            value = right && value;
+        }
+        return value;
+    }
+
+    bool parseNot() {
+        skip();
+        if (consumeWord("not")) {
+            return !parseInParens();
+        }
+        return parseInParens();
+    }
+
+    bool parseInParens() {
+        skip();
+        if (pos_ >= source_.size()) {
+            ok_ = false;
+            return false;
+        }
+        if (source_[pos_] == '(') {
+            const std::size_t close = findClosingParen(source_, pos_);
+            if (close == std::string_view::npos) {
+                ok_ = false;
+                return false;
+            }
+            const std::string_view inner =
+                trim(source_.substr(pos_ + 1, close - pos_ - 1));
+            pos_ = close + 1;
+            return evaluateParens(inner);
+        }
+        if (conditionWordAt(source_, pos_, "selector")) {
+            const std::size_t open = pos_ + 8;
+            if (open >= source_.size() || source_[open] != '(') {
+                ok_ = false;
+                return false;
+            }
+            const std::size_t close = findClosingParen(source_, open);
+            if (close == std::string_view::npos) {
+                ok_ = false;
+                return false;
+            }
+            const std::string_view inner =
+                trim(source_.substr(open + 1, close - open - 1));
+            pos_ = close + 1;
+            if (inner.empty()) {
+                return false;
+            }
+            // A bare pseudo-class has no parts of its own, so an empty part
+            // list is valid as long as the selector parser understood it.
+            const SimpleSelector selector = CSSParser::parseSelector(inner);
+            return !selector.unsupported;
+        }
+        // General-enclosed: `name(...)` parses but is unknown, so it is false.
+        if (const auto u = static_cast<unsigned char>(source_[pos_]);
+            std::isalpha(u) != 0 || source_[pos_] == '_' || source_[pos_] == '-') {
+            while (pos_ < source_.size() && isIdentChar(source_[pos_])) {
+                ++pos_;
+            }
+            if (pos_ < source_.size() && source_[pos_] == '(') {
+                const std::size_t close = findClosingParen(source_, pos_);
+                if (close == std::string_view::npos) {
+                    ok_ = false;
+                    return false;
+                }
+                pos_ = close + 1;
+                return false;
+            }
+        }
+        ok_ = false;
+        return false;
+    }
+
+    bool evaluateParens(std::string_view inner) {
+        if (inner.empty()) {
+            return false;
+        }
+        // A parenthesised condition, `not (...)`, or `selector(...)` is a
+        // condition, not a declaration.
+        if (inner.front() == '(' || conditionWordAt(inner, 0, "not") ||
+            conditionWordAt(inner, 0, "selector")) {
+            SupportsConditionParser nested;
+            return nested.parse(inner);
+        }
+        const std::size_t colon = inner.find(':');
+        if (colon == std::string_view::npos) {
+            return false;
+        }
+        const std::string_view property = trim(inner.substr(0, colon));
+        const std::string_view value = trim(inner.substr(colon + 1));
+        return validSupportsProperty(property) &&
+               StyleResolver::supportsDeclaration(property, value);
+    }
+
+    void skip() { skipConditionSpace(source_, pos_); }
+
+    bool consumeWord(std::string_view word) {
+        skip();
+        if (!conditionWordAt(source_, pos_, word)) {
+            return false;
+        }
+        pos_ += word.size();
+        return true;
+    }
+
+    std::string_view source_;
+    std::size_t pos_ = 0;
+    bool ok_ = true;
+};
+
+bool supportsConditionMatches(std::string_view source) {
+    SupportsConditionParser parser;
+    return parser.parse(source);
+}
+
+// `@import` wraps its condition in a `supports(...)` function, whose argument may
+// be a bare declaration (`supports(display: grid)`) or a full condition.
+bool supportsImportConditionMatches(std::string_view source) {
+    source = trim(source);
+    if (source.empty()) {
+        return false;
+    }
+    if (source.front() == '(' || conditionWordAt(source, 0, "not") ||
+        conditionWordAt(source, 0, "selector")) {
+        return supportsConditionMatches(source);
+    }
+    const std::size_t colon = source.find(':');
+    if (colon == std::string_view::npos) {
+        return false;
+    }
+    const std::string_view property = trim(source.substr(0, colon));
+    const std::string_view value = trim(source.substr(colon + 1));
+    return validSupportsProperty(property) &&
+           StyleResolver::supportsDeclaration(property, value);
+}
+
 // Threaded through nested blocks so `@import` resolves hrefs, dedupes sheets,
 // and stays in order wherever it nests. Copies are cheap (one function plus
 // one path); the seen set is shared.
@@ -91,6 +341,7 @@ struct ImportSpec {
     bool hasMedia = false;
     std::string layerName;  // empty for a bare `layer`
     bool hasLayer = false;
+    bool hasSupports = false;
 };
 
 // Resolves an imported href against the importing sheet: absolute paths and
@@ -150,62 +401,69 @@ bool readImportHref(std::string_view& rest, std::string& href) {
     return true;
 }
 
-// Parses `@import <url> [media] [layer | layer(name)]`. A `supports(...)`
-// condition cannot be evaluated, so like an `@supports` block it drops the
-// import. Unparsable media drops it too, the way `@media` itself drops.
+// Parses `@import <url> [layer | layer(name)] [supports(condition)] [media]`.
+// The layer and supports conditions come before the media query, as the grammar
+// requires. A false supports condition drops the import; unparsable media drops
+// it too, the way `@media` itself drops.
 bool parseImportPrelude(std::string_view prelude, ImportSpec& spec) {
     std::string_view rest = trim(prelude);
     if (!readImportHref(rest, spec.href)) {
         return false;
     }
     rest = trim(rest);
-    if (rest.empty()) {
-        return true;
-    }
-    if (rest.size() >= 8 && rest.compare(0, 8, "supports") == 0 &&
-        (rest.size() == 8 || !isIdentChar(rest[8]))) {
-        return false;
-    }
-    // A depth-zero `layer` word splits media from layer. Neither may nest
-    // inside the other's parens here.
-    std::size_t depth = 0;
-    std::size_t split = std::string_view::npos;
-    for (std::size_t i = 0; i + 5 <= rest.size(); ++i) {
-        const char c = rest[i];
-        if (c == '(') {
-            ++depth;
-        } else if (c == ')') {
-            depth = depth > 0 ? depth - 1 : 0;
-        } else if (depth == 0 && rest.compare(i, 5, "layer") == 0 &&
-                   (i + 5 >= rest.size() || !isIdentChar(rest[i + 5]))) {
-            split = i;
-            break;
+
+    while (!rest.empty()) {
+        if (conditionWordAt(rest, 0, "layer")) {
+            if (spec.hasLayer) {
+                return false;
+            }
+            if (rest.size() == 5 || isSpace(rest[5])) {
+                spec.hasLayer = true;
+                rest = trim(rest.substr(5));
+                continue;
+            }
+            if (rest[5] == '(') {
+                const std::size_t close = findClosingParen(rest, 5);
+                if (close == std::string_view::npos) {
+                    return false;
+                }
+                const std::string_view name = trim(rest.substr(6, close - 6));
+                if (name.empty() || name.find(',') != std::string_view::npos) {
+                    return false;
+                }
+                spec.layerName = std::string(name);
+                spec.hasLayer = true;
+                rest = trim(rest.substr(close + 1));
+                continue;
+            }
+            return false;
         }
+        if (conditionWordAt(rest, 0, "supports") && rest.size() > 8 &&
+            rest[8] == '(') {
+            if (spec.hasSupports) {
+                return false;
+            }
+            const std::size_t close = findClosingParen(rest, 8);
+            if (close == std::string_view::npos) {
+                return false;
+            }
+            const std::string_view condition = trim(rest.substr(9, close - 9));
+            if (!supportsImportConditionMatches(condition)) {
+                return false;
+            }
+            spec.hasSupports = true;
+            rest = trim(rest.substr(close + 1));
+            continue;
+        }
+        break;
     }
-    std::string_view mediaPart = trim(split == std::string_view::npos
-                                          ? rest
-                                          : rest.substr(0, split));
-    if (!mediaPart.empty()) {
-        spec.media = parseMediaList(mediaPart);
+
+    if (!rest.empty()) {
+        spec.media = parseMediaList(rest);
         if (spec.media.empty()) {
             return false;
         }
         spec.hasMedia = true;
-    }
-    if (split != std::string_view::npos) {
-        std::string_view layerPart = trim(rest.substr(split + 5));
-        if (layerPart.empty()) {
-            spec.hasLayer = true;
-        } else if (layerPart.front() == '(' && layerPart.back() == ')') {
-            const std::string_view name = trim(layerPart.substr(1, layerPart.size() - 2));
-            if (name.empty() || name.find(',') != std::string_view::npos) {
-                return false;
-            }
-            spec.layerName = std::string(name);
-            spec.hasLayer = true;
-        } else {
-            return false;
-        }
     }
     return true;
 }
@@ -1224,6 +1482,32 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                 }
                 parseRules(source.substr(bodyStart, bodyEnd - bodyStart), combined, order, out,
                            keyframes, layer, container, imports);
+                importAllowed = false;
+                continue;
+            }
+
+            if (name == "supports" && i < source.size() && source[i] == '{') {
+                const std::string_view prelude =
+                    trim(source.substr(preludeStart, i - preludeStart));
+                ++i;  // '{'
+                const std::size_t bodyStart = i;
+                int depth = 1;
+                while (i < source.size() && depth > 0) {
+                    if (source[i] == '{') {
+                        ++depth;
+                    } else if (source[i] == '}') {
+                        --depth;
+                    }
+                    ++i;
+                }
+                const std::size_t bodyEnd =
+                    (i > bodyStart && source[i - 1] == '}') ? i - 1 : i;
+                // A false or unparsable condition drops the block. Nested
+                // supports blocks are evaluated independently as they parse.
+                if (supportsConditionMatches(prelude)) {
+                    parseRules(source.substr(bodyStart, bodyEnd - bodyStart), media, order,
+                               out, keyframes, layer, container, imports);
+                }
                 importAllowed = false;
                 continue;
             }

@@ -72,11 +72,11 @@ Element* layoutRoot(Document& document, sui::StyleResolver& resolver, float widt
 void testRuleParsing() {
     const auto rules = sui::CSSParser::parse(R"(
         /* a comment */
-        @supports (display: grid) { .ignored { color: #fff; } }
+        @unknown (display: grid) { .ignored { color: #fff; } }
         .sidebar, #main > p { color: #123456; font-size: 18px }
         p { margin: 4px 8px !important; }
     )");
-    check(rules.size() == 3, "comments and unimplemented at-rules skipped");
+    check(rules.size() == 3, "comments and unknown at-rules skipped");
     if (rules.size() < 3) {
         return;
     }
@@ -93,6 +93,99 @@ void testRuleParsing() {
         }
     }
     check(foundImportant, "!important flag recorded");
+}
+
+// `@supports` gates a block on whether the engine implements the declarations
+// and selectors inside it. The conditions are evaluated while parsing, so a
+// false block contributes no rules at all.
+void testSupports() {
+    check(sui::StyleResolver::supportsDeclaration("display", "grid"),
+          "a supported declaration is recognised");
+    check(!sui::StyleResolver::supportsDeclaration("display", "contents"),
+          "a display value the engine falls back on is not supported");
+    check(!sui::StyleResolver::supportsDeclaration("not-a-property", "red"),
+          "an unknown property is not supported");
+    check(sui::StyleResolver::supportsDeclaration("--brand", "10px"),
+          "custom properties are supported");
+    check(sui::StyleResolver::supportsDeclaration("grid-template-columns", "1fr"),
+          "grid track values are supported");
+    check(sui::StyleResolver::supportsDeclaration("display", "inherit"),
+          "CSS-wide keywords are supported for known properties");
+    check(!sui::StyleResolver::supportsDeclaration("color", "not-a-colour"),
+          "an invalid colour value is not supported");
+    check(sui::StyleResolver::supportsDeclaration("color", "var(--brand)"),
+          "a var() value is supported on a known property");
+
+    const auto rules = sui::CSSParser::parse(R"(
+        @supports (display: grid) { .a { color: #fff } }
+        @supports (display: nonsense) { .b { color: #fff } }
+        @supports not (display: grid) { .c { color: #fff } }
+        @supports (display: grid) and (grid-template-columns: 1fr) {
+            .d { color: #fff }
+        }
+        @supports (display: nonsense) or (grid-template-columns: 1fr) {
+            .e { color: #fff }
+        }
+        @supports (unknown-property: red) { .f { color: #fff } }
+        @supports ((display: grid) and (not (display: nonsense))) {
+            .g { color: #fff }
+        }
+        @supports selector(:has(.item)) { .h { color: #fff } }
+        @supports selector(:made-up) { .i { color: #fff } }
+        @supports (--brand: 10px) { .j { color: #fff } }
+        @supports (display: block) { .k { color: #fff } }
+        @supports (opacity: 1.0) { .l { color: #fff } }
+        @supports (display: contents) { .m { color: #fff } }
+        @supports (display: grid) and (unknown-property: red) {
+            .n { color: #fff }
+        }
+        @media (min-width: 100px) {
+            @supports (display: grid) { .o { color: #fff } }
+        }
+        @supports (display: grid) {
+            @unknown at-rule { .p { color: #fff } }
+            .q { color: #fff }
+        }
+    )");
+    check(rules.size() == 10, "only true @supports blocks contribute rules");
+    const auto hasClass = [&](std::string_view name) {
+        for (const sui::Rule& rule : rules) {
+            if (rule.selector.parts.size() == 1 &&
+                rule.selector.parts[0].kind == sui::Selector::Kind::Class &&
+                rule.selector.parts[0].value == name) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (const char* name : {"a", "d", "e", "g", "h", "j", "k", "l", "o", "q"}) {
+        check(hasClass(name), (std::string("@supports keeps .") + name).c_str());
+    }
+    for (const char* name : {"b", "c", "f", "i", "m", "n", "p"}) {
+        check(!hasClass(name), (std::string("@supports drops .") + name).c_str());
+    }
+    for (const sui::Rule& rule : rules) {
+        if (rule.selector.parts.size() == 1 && rule.selector.parts[0].value == "o") {
+            check(rule.media.size() == 1,
+                  "an @supports rule nested in @media keeps the media condition");
+        }
+    }
+
+    auto document = parseOrNull("<sui><body><div id=\"x\">x</div></body></sui>");
+    Element* x = document ? document->getElementById("x") : nullptr;
+    if (!x) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "#x { width: 10px }"
+        "@supports (display: grid) { #x { width: 120px } }"
+        "@supports (display: nonsense) { #x { height: 90px } }"));
+    layoutRoot(*document, resolver, 400.0f);
+    checkNear(resolver.resolve(*x).width.resolve(0.0f, 16.0f, 16.0f), 120.0f, 0.01f,
+              "a true @supports block wins the cascade");
+    check(resolver.resolve(*x).height.isAuto(),
+          "a false @supports block contributes nothing");
 }
 
 void testSelectorMatching() {
@@ -2862,8 +2955,7 @@ void testCssImports() {
         layoutRoot(*document, resolver, 400.0f);
         check(isRed(resolver.resolve(*x).color), "unlayered rules beat an import layer");
     }
-    // A bare `layer` wraps the sheet anonymously; a `supports()` condition the
-    // engine cannot evaluate drops the import.
+    // A bare `layer` wraps the sheet anonymously.
     {
         std::vector<sui::Rule> rules;
         std::vector<sui::KeyframeBlock> keyframes;
@@ -2872,12 +2964,58 @@ void testCssImports() {
         check(rules.size() == 1 && rules[0].layer.rfind("@anonymous-", 0) == 0,
               "a bare import layer is anonymous");
     }
+    // `supports()` gates the sheet. A true condition keeps and applies it; a
+    // false one drops it before it is even fetched.
     {
+        sui::StyleResolver resolver;
         std::vector<sui::Rule> rules;
         std::vector<sui::KeyframeBlock> keyframes;
         sui::CSSParser::parseWithKeyframes(
             "@import \"l.css\" supports(display:grid);", rules, keyframes, fetch);
-        check(rules.empty(), "an unevaluable supports() drops the import");
+        check(rules.size() == 1, "a true supports() keeps the import");
+        resolver.setRules(std::move(rules));
+        layoutRoot(*document, resolver, 400.0f);
+        check(isGreen(resolver.resolve(*x).color), "a true supports() import applies");
+    }
+    {
+        std::vector<sui::Rule> rules;
+        std::vector<sui::KeyframeBlock> keyframes;
+        fetched.clear();
+        sui::CSSParser::parseWithKeyframes(
+            "@import \"l.css\" supports(display:nonsense);", rules, keyframes, fetch);
+        check(rules.empty(), "a false supports() drops the import");
+        check(fetched.empty(), "a false supports() does not fetch the sheet");
+    }
+    {
+        std::vector<sui::Rule> rules;
+        std::vector<sui::KeyframeBlock> keyframes;
+        sui::CSSParser::parseWithKeyframes(
+            "@import \"l.css\" layer(foo) supports((display:grid) and (color:red)) "
+            "(min-width:100px);",
+            rules, keyframes, fetch);
+        check(rules.size() == 1 && rules[0].layer == "foo" &&
+                  rules[0].media.size() == 1,
+              "layer, supports(), and media compose in an import");
+        sui::StyleResolver resolver;
+        resolver.setRules(std::move(rules));
+        resolver.setViewportSize(800.0f, 600.0f);
+        layoutRoot(*document, resolver, 400.0f);
+        check(isGreen(resolver.resolve(*x).color),
+              "an import with layer, supports(), and matching media applies");
+    }
+    {
+        std::vector<sui::Rule> rules;
+        std::vector<sui::KeyframeBlock> keyframes;
+        sui::CSSParser::parseWithKeyframes(
+            "@import \"l.css\" supports(selector(:has(.x)));", rules, keyframes, fetch);
+        check(rules.size() == 1, "selector() can gate an import");
+    }
+    {
+        std::vector<sui::Rule> rules;
+        std::vector<sui::KeyframeBlock> keyframes;
+        sui::CSSParser::parseWithKeyframes(
+            "@import \"l.css\" supports(not (display:grid));", rules, keyframes, fetch);
+        check(rules.empty(), "a false not() supports condition drops the import");
     }
 }
 
@@ -12946,6 +13084,7 @@ int main() {
     testCalc();
     testScroll();
     testRuleParsing();
+    testSupports();
     testSelectorMatching();
     testInteractivePseudoClasses();
     testStructuralPseudoClasses();

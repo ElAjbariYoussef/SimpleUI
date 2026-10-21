@@ -4143,12 +4143,22 @@ bool parseBorderImage(std::string_view value, ComputedStyle& s) {
 }
 
 
+// `@supports` evaluates a declaration by running it through the same parser as
+// the cascade. That probe must not pollute the once-per-name warning log, and it
+// needs to know whether the property branch was reached at all.
+thread_local bool probingDeclarationSupport = false;
+thread_local bool probedUnknownProperty = false;
+
 // A property the engine does not implement is dropped by CSS anyway, but saying so
 // here is what makes the gap debuggable: it turns a hover rule with an unsupported
 // `transition` in it from "hover is broken" into a message. Logged once per name,
 // because resolve() walks every element of every stale frame and a repeat would
 // bury everything else in the log.
 void warnUnknownProperty(std::string_view property) {
+    if (probingDeclarationSupport) {
+        probedUnknownProperty = true;
+        return;
+    }
     static std::set<std::string, std::less<>> reported;
     if (reported.emplace(property).second) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "ignoring unsupported CSS property '%.*s'",
@@ -6812,6 +6822,101 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         warnUnknownProperty(property);
     }
 }
+
+}  // namespace
+
+bool StyleResolver::supportsDeclaration(std::string_view property, std::string_view value) {
+    property = trim(property);
+    value = trim(value);
+    if (property.empty() || value.empty()) {
+        return false;
+    }
+    // Custom properties are stored as raw token streams, so any non-empty value
+    // is accepted; their grammar is checked only when substituted.
+    if (isCustomProperty(property)) {
+        return true;
+    }
+
+    const bool wideKeyword = value == "inherit" || value == "initial" ||
+                             value == "unset" || value == "revert";
+    const std::string before = propertyValue(ComputedStyle{}, property);
+    ComputedStyle probe;
+    Declaration decl{std::string(property), std::string(value), false};
+    probingDeclarationSupport = true;
+    probedUnknownProperty = false;
+    applyDeclaration(probe, decl, 16.0f);
+    probingDeclarationSupport = false;
+    if (probedUnknownProperty) {
+        return false;
+    }
+    // Every CSS-wide keyword is valid for every property the engine knows.
+    if (wideKeyword) {
+        return true;
+    }
+    // `var()` is substituted after parsing; a declaration carrying one is
+    // syntactically supported even when the fallback value alone would not be.
+    if (value.find("var(") != std::string_view::npos) {
+        return true;
+    }
+
+    const std::string after = propertyValue(probe, property);
+    // A recognised property with no serialiser still counts as supported.
+    if (after.empty() && before.empty()) {
+        return true;
+    }
+    if (after.empty()) {
+        return false;
+    }
+    // A value that changed the serialised reading is the common case.
+    if (after != before) {
+        return true;
+    }
+
+    // The value may legitimately be the property's initial value. Compare
+    // canonical forms so `display:block`, `opacity:1.0`, and `border-color:black`
+    // are accepted while `display:contents` (which the resolver leaves at its
+    // default) is not.
+    auto lower = [](std::string_view text) {
+        std::string out(text);
+        for (char& c : out) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return out;
+    };
+    const std::string lowered = lower(value);
+    if (lowered == lower(after)) {
+        return true;
+    }
+    auto fullNumber = [](std::string_view text, float& out) {
+        const std::string copy(text);
+        char* end = nullptr;
+        out = std::strtof(copy.c_str(), &end);
+        return end && *end == '\0';
+    };
+    float requested = 0.0f;
+    float canonical = 0.0f;
+    if (fullNumber(value, requested) && fullNumber(after, canonical) &&
+        std::fabs(requested - canonical) < 0.0001f) {
+        return true;
+    }
+    if (after == "0px" && value == "0") {
+        return true;
+    }
+    SDL_Color requestedColor{};
+    SDL_Color canonicalColor{};
+    if (parseColor(value, requestedColor) && parseColor(after, canonicalColor) &&
+        requestedColor.r == canonicalColor.r && requestedColor.g == canonicalColor.g &&
+        requestedColor.b == canonicalColor.b && requestedColor.a == canonicalColor.a) {
+        return true;
+    }
+    // `font-weight: normal` canonicalises to 400, which is also the initial value.
+    if (property == "font-weight" && lowered == "normal" && after == "400") {
+        return true;
+    }
+    return false;
+}
+
+namespace {
 
 // Inline `width`/`height` attributes are a SimpleUI convenience on top of CSS.
 void applyDimensionAttributes(ComputedStyle& s, Element& element) {

@@ -143,6 +143,12 @@ public:
     // can read what it sees. Returns an empty string for an unsupported name.
     static std::string propertyValue(const ComputedStyle& style, std::string_view property);
 
+    // Whether this engine implements `property: value`. `@supports` asks this at
+    // parse time; unknown properties and values the resolver would reject are
+    // both false. Custom properties count as supported because their values are
+    // stored as raw tokens.
+    static bool supportsDeclaration(std::string_view property, std::string_view value);
+
     // The rule-ordering weight of a selector: ids * 10000 + classes * 100 + types,
     // with attribute selectors counted as classes and pseudo-elements as types.
     static int specificityOf(const SimpleSelector& selector);

@@ -142,7 +142,8 @@ struct FontFaceRule {
 
 class CSSParser {
 public:
-    // Parses CSS source into rules, skipping comments and at-rules.
+    // Parses CSS source into rules, expanding conditional blocks it can evaluate
+    // (`@media`, `@container`, `@supports`) and skipping unknown at-rules.
     static std::vector<Rule> parse(std::string_view source);
 
     // Fetches an imported stylesheet by its resolved href. The application
