@@ -3168,11 +3168,72 @@ private:
             }
             columns = std::max(columns, col);
         }
+
+        // `<col>` and `<colgroup>` author column widths before any cell is
+        // measured. A col inherits its group's width unless it declares one;
+        // `span` repeats the definition. These columns also count when the
+        // table's cells do not reach them, so a trailing `<col span>` can make
+        // an empty column.
+        const float basis = box.width > 0.0f
+                                ? box.width
+                                : (availableWidth > 0.0f && availableWidth < kUnbounded
+                                       ? availableWidth
+                                       : 0.0f);
+        std::vector<float> hintWidth;
+        auto addHint = [&](float width, int span) {
+            for (int i = 0; i < span; ++i) {
+                hintWidth.push_back(width);
+            }
+        };
+        auto addCol = [&](Element& colEl, float inherited) {
+            const ComputedStyle cs = resolver_.resolve(colEl);
+            if (cs.display == ComputedStyle::None) {
+                return;
+            }
+            const float width = cs.width.isAuto()
+                                    ? inherited
+                                    : std::max(0.0f, usedBox(cs, basis).width);
+            addHint(width, spanAttribute(colEl, "span"));
+        };
+        for (const auto& child : el.children()) {
+            if (!child || child->isTextNode()) {
+                continue;
+            }
+            if (child->tag() == "colgroup") {
+                const ComputedStyle groupStyle = resolver_.resolve(*child);
+                if (groupStyle.display == ComputedStyle::None) {
+                    continue;
+                }
+                const float groupWidth =
+                    groupStyle.width.isAuto()
+                        ? -1.0f
+                        : std::max(0.0f, usedBox(groupStyle, basis).width);
+                bool sawCol = false;
+                for (const auto& gc : child->children()) {
+                    if (gc && !gc->isTextNode() && gc->tag() == "col") {
+                        sawCol = true;
+                        addCol(*gc, groupWidth);
+                    }
+                }
+                if (!sawCol) {
+                    addHint(groupWidth, spanAttribute(*child, "span"));
+                }
+            } else if (child->tag() == "col") {
+                addCol(*child, -1.0f);
+            }
+        }
+        columns = std::max(columns, static_cast<int>(hintWidth.size()));
         columns = std::max(1, columns);
 
-        // Column widths: the widest single-column cell, then any excess a spanning
-        // cell asks for is shared across the columns it covers.
+        // Column widths: an authored column width is a floor, then the widest
+        // single-column cell, then any excess a spanning cell asks for is shared
+        // across the columns it covers.
         std::vector<float> colWidth(columns, 0.0f);
+        for (int c = 0; c < static_cast<int>(hintWidth.size()) && c < columns; ++c) {
+            if (hintWidth[c] >= 0.0f) {
+                colWidth[c] = hintWidth[c];
+            }
+        }
         auto cellNatural = [&](Cell& cell) {
             const float natural = measureNatural(*cell.el, cell.style, true);
             return (cell.box.width > 0.0f ? cell.box.width : natural) +
@@ -3278,9 +3339,18 @@ private:
         if (s.tableLayout == ComputedStyle::TableLayoutFixed && columns > 0) {
             std::vector<float> fixed(columns, -1.0f);
             bool anyFixed = false;
+            // A `<col>`/`<colgroup>` width wins over the first row's cell width;
+            // cells only fill columns the column definitions left automatic.
+            for (int c = 0; c < static_cast<int>(hintWidth.size()) && c < columns; ++c) {
+                if (hintWidth[c] >= 0.0f) {
+                    fixed[c] = hintWidth[c];
+                    anyFixed = true;
+                }
+            }
             if (!rows.empty()) {
                 for (Cell& cell : rows[0].cells) {
-                    if (cell.colspan == 1 && cell.box.width > 0.0f) {
+                    if (cell.colspan == 1 && cell.box.width > 0.0f &&
+                        fixed[cell.col] < 0.0f) {
                         fixed[cell.col] = cell.box.width + cell.box.horizontalChrome();
                         anyFixed = true;
                     }

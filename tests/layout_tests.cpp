@@ -8216,6 +8216,144 @@ void testTableLayout() {
               "the caption adds to the table's height");
     }
 
+    // `<col>` and `<colgroup>` widths size the columns before the cells are
+    // measured, even when every cell is empty.
+    {
+        auto document = parseOrNull(
+            "<sui><body><table id=\"t\">"
+            "<colgroup><col id=\"c1\"/><col id=\"c2\"/></colgroup>"
+            "<tr><td id=\"a\"></td><td id=\"b\"></td></tr>"
+            "</table></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{border-collapse:collapse} td{padding:0}"
+            "#c1{width:40px} #c2{width:60px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* t = document->getElementById("t");
+        Element* col = document->getElementById("c1");
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        check(col != nullptr && resolver.resolve(*col).display == ComputedStyle::TableColumn,
+              "a col has the table-column display type");
+        check(t != nullptr && std::fabs(t->layoutWidth() - 100.0f) < 0.5f,
+              "col widths size the table without cell content");
+        check(a != nullptr && std::fabs(a->layoutWidth() - 40.0f) < 0.5f &&
+                  b != nullptr && std::fabs(b->layoutX() - 40.0f) < 0.5f &&
+                  std::fabs(b->layoutWidth() - 60.0f) < 0.5f,
+              "each col width reaches its column");
+    }
+
+    // A colgroup width is inherited by its cols, while a col's own width wins.
+    {
+        auto document = parseOrNull(
+            "<sui><body><table id=\"t\">"
+            "<colgroup id=\"g\"><col id=\"c1\"/><col id=\"c2\"/>"
+            "<col id=\"c3\"/></colgroup>"
+            "<tr><td id=\"a\"></td><td id=\"b\"></td><td id=\"c\"></td></tr>"
+            "</table></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{border-collapse:collapse} td{padding:0}"
+            "#g{width:40px} #c1{width:20px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* group = document->getElementById("g");
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        check(group != nullptr &&
+                  resolver.resolve(*group).display == ComputedStyle::TableColumnGroup,
+              "a colgroup has the table-column-group display type");
+        check(a != nullptr && std::fabs(a->layoutWidth() - 20.0f) < 0.5f,
+              "a col's width overrides its colgroup");
+        check(b != nullptr && std::fabs(b->layoutX() - 20.0f) < 0.5f &&
+                  std::fabs(b->layoutWidth() - 40.0f) < 0.5f &&
+                  c != nullptr && std::fabs(c->layoutX() - 60.0f) < 0.5f &&
+                  std::fabs(c->layoutWidth() - 40.0f) < 0.5f,
+              "cols without a width inherit the colgroup width");
+    }
+
+    // An empty colgroup with a span creates that many columns at the group width.
+    {
+        auto document = parseOrNull(
+            "<sui><body><table id=\"t\">"
+            "<colgroup span=\"2\" style=\"width:25px\"/>"
+            "<tr><td id=\"a\"></td><td id=\"b\"></td></tr>"
+            "</table></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{border-collapse:collapse} td{padding:0}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* t = document->getElementById("t");
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        check(t != nullptr && std::fabs(t->layoutWidth() - 50.0f) < 0.5f,
+              "a colgroup span repeats its width across the table");
+        check(a != nullptr && std::fabs(a->layoutWidth() - 25.0f) < 0.5f &&
+                  b != nullptr && std::fabs(b->layoutX() - 25.0f) < 0.5f &&
+                  std::fabs(b->layoutWidth() - 25.0f) < 0.5f,
+              "each column from a colgroup span gets the group width");
+    }
+
+    // A span repeats a column hint and trailing hints still create empty columns.
+    {
+        auto document = parseOrNull(
+            "<sui><body><table id=\"t\">"
+            "<col span=\"2\" style=\"width:30px\"/><col style=\"width:10px\"/>"
+            "<tr><td id=\"a\"></td></tr>"
+            "</table></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{border-collapse:collapse} td{padding:0}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* t = document->getElementById("t");
+        Element* a = document->getElementById("a");
+        check(a != nullptr && std::fabs(a->layoutWidth() - 30.0f) < 0.5f,
+              "a spanned col width reaches the first column");
+        check(t != nullptr && std::fabs(t->layoutWidth() - 70.0f) < 0.5f,
+              "col spans and trailing cols add empty columns to the table");
+    }
+
+    // `table-layout: fixed` takes the columns from the table width, but a col
+    // width outranks the first row's cell width.
+    {
+        auto document = parseOrNull(
+            "<sui><body><table id=\"t\">"
+            "<col id=\"c1\"/><tr><td id=\"a\"></td><td id=\"b\"></td></tr>"
+            "</table></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{table-layout:fixed;width:200px;border-collapse:collapse}"
+            "td{padding:0} #c1{width:25%} #a{width:100px;height:10px} #b{height:10px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        check(a != nullptr && std::fabs(a->layoutWidth() - 50.0f) < 0.5f,
+              "a fixed table resolves a percentage col width against the table");
+        check(b != nullptr && std::fabs(b->layoutX() - 50.0f) < 0.5f &&
+                  std::fabs(b->layoutWidth() - 150.0f) < 0.5f,
+              "a col width outranks the first row's cell width in a fixed table");
+    }
+
     // `table-layout: fixed` takes the columns from the first row and the table
     // width rather than from the content.
     {

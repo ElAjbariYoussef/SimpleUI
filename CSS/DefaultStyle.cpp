@@ -443,6 +443,16 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
         return s;
     }
 
+    if (tag == "colgroup") {
+        Style s;
+        s.display = Style::TableColumnGroup;
+        return s;
+    }
+    if (tag == "col") {
+        Style s;
+        s.display = Style::TableColumn;
+        return s;
+    }
     if (tag == "tr") {
         Style s;
         s.display = Style::TableRow;
