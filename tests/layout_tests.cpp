@@ -1226,6 +1226,201 @@ void testGridTemplateAreas() {
     }
 }
 
+void testGridTemplateShorthand() {
+    // Rows / columns form: explicit tracks on both axes.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\">"
+            "<i id=\"a\"></i><i id=\"b\"></i><i id=\"c\"></i><i id=\"d\"></i>"
+            "</div></body></sui>");
+        if (!document) return;
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;grid-template:40px 60px / 50px 100px;"
+            "width:150px;height:100px} #g i{width:100%;height:100%}"));
+        layoutRoot(*document, resolver, 300.0f);
+
+        Element* g = document->getElementById("g");
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        Element* d = document->getElementById("d");
+        check(g && a && b && c && d, "grid-template rows/columns elements found");
+        if (g && a && b && c && d) {
+            checkNear(a->layoutX(), 0.0f, 0.5f, "grid-template row/column item a x");
+            checkNear(a->layoutY(), 0.0f, 0.5f, "grid-template row/column item a y");
+            checkNear(b->layoutX(), 50.0f, 0.5f, "grid-template row/column item b x");
+            checkNear(c->layoutY(), 40.0f, 0.5f, "grid-template row/column item c y");
+            checkNear(d->layoutX(), 50.0f, 0.5f, "grid-template row/column item d x");
+            checkNear(d->layoutY(), 40.0f, 0.5f, "grid-template row/column item d y");
+        }
+
+        const ComputedStyle gs = resolver.resolve(*g);
+        check(sui::StyleResolver::propertyValue(gs, "grid-template") ==
+                  "40px 60px / 50px 100px",
+              "grid-template rows/columns roundtrips");
+        check(sui::StyleResolver::propertyValue(gs, "grid-template-rows") == "40px 60px",
+              "grid-template sets grid-template-rows");
+        check(sui::StyleResolver::propertyValue(gs, "grid-template-columns") ==
+                  "50px 100px",
+              "grid-template sets grid-template-columns");
+    }
+
+    // String form: area rows carry their own row tracks.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\">"
+            "<i id=\"h\" style=\"grid-area:head\"></i>"
+            "<i id=\"n\" style=\"grid-area:nav\"></i>"
+            "<i id=\"m\" style=\"grid-area:main\"></i>"
+            "<i id=\"f\" style=\"grid-area:foot\"></i>"
+            "</div></body></sui>");
+        if (!document) return;
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;width:300px;"
+            "grid-template:\"head head\" 50px \"nav main\" 100px "
+            "\"nav foot\" 40px / 100px 200px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* g = document->getElementById("g");
+        Element* h = document->getElementById("h");
+        Element* n = document->getElementById("n");
+        Element* m = document->getElementById("m");
+        Element* f = document->getElementById("f");
+        check(g && h && n && m && f, "grid-template area elements found");
+        if (g && h && n && m && f) {
+            checkNear(h->layoutWidth(), 300.0f, 0.5f, "grid-template head spans columns");
+            checkNear(h->layoutHeight(), 50.0f, 0.5f, "grid-template head row track");
+            checkNear(n->layoutY(), 50.0f, 0.5f, "grid-template nav starts after head");
+            checkNear(n->layoutHeight(), 140.0f, 0.5f, "grid-template nav spans two rows");
+            checkNear(m->layoutX(), 100.0f, 0.5f, "grid-template main column starts");
+            checkNear(m->layoutY(), 50.0f, 0.5f, "grid-template main row starts");
+            checkNear(f->layoutY(), 150.0f, 0.5f, "grid-template foot row starts");
+        }
+
+        const ComputedStyle gs = resolver.resolve(*g);
+        check(sui::StyleResolver::propertyValue(gs, "grid-template") ==
+                  "\"head head\" 50px \"nav main\" 100px \"nav foot\" 40px / "
+                  "100px 200px",
+              "grid-template area form roundtrips");
+        check(sui::StyleResolver::propertyValue(gs, "grid-template-areas") ==
+                  "\"head head\" \"nav main\" \"nav foot\"",
+              "grid-template sets grid-template-areas");
+        check(sui::StyleResolver::propertyValue(gs, "grid-template-rows") ==
+                  "50px 100px 40px",
+              "grid-template area rows set row tracks");
+        check(sui::StyleResolver::propertyValue(gs, "grid-template-columns") ==
+                  "100px 200px",
+              "grid-template area rows set column tracks");
+    }
+
+    // Omitted column tracks default to one auto track per area column, while row
+    // tracks still come from the strings.
+    {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "div{grid-template:\"a b\" 20px \"c d\" 30px}"));
+        auto document = parseOrNull("<sui><body><div id=\"g\"></div></body></sui>");
+        if (document) {
+            Element* g = document->getElementById("g");
+            const ComputedStyle gs = resolver.resolve(*g);
+            check(gs.gridRows.size() == 2 && gs.gridRows[0].size.value == 20.0f &&
+                      gs.gridRows[1].size.value == 30.0f,
+                  "grid-template area form keeps row tracks");
+            check(gs.gridColumns.size() == 2 && gs.gridColumns[0].isAuto &&
+                      gs.gridColumns[1].isAuto,
+                  "grid-template area form defaults omitted columns to auto");
+            check(gs.gridTemplateAreasColumns == 2 && gs.gridTemplateAreasRows == 2,
+                  "grid-template area form records the area matrix");
+            check(sui::StyleResolver::propertyValue(gs, "grid-template") ==
+                      "\"a b\" 20px \"c d\" 30px / auto auto",
+                  "grid-template omitted columns roundtrip");
+        }
+    }
+
+    // The shorthand resets all three longhands, and `none` resets them again.
+    {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "div{grid-template-areas:\"a a\" \"b b\";"
+            "grid-template-columns:77px;grid-template-rows:33px;"
+            "grid-template:10px 20px / 30px 40px}"));
+        auto document = parseOrNull("<sui><body><div id=\"g\"></div></body></sui>");
+        if (document) {
+            const ComputedStyle gs = resolver.resolve(*document->getElementById("g"));
+            check(gs.gridTemplateAreas.empty() && gs.gridTemplateAreasRaw.empty(),
+                  "grid-template resets grid-template-areas");
+            check(gs.gridRows.size() == 2 && gs.gridColumns.size() == 2,
+                  "grid-template replaces both track lists");
+            check(sui::StyleResolver::propertyValue(gs, "grid-template-areas") == "none",
+                  "grid-template reset areas read back as none");
+        }
+
+        sui::StyleResolver noneResolver;
+        noneResolver.setRules(sui::CSSParser::parse(
+            "div{grid-template:10px / 20px;grid-template:none}"));
+        auto noneDocument = parseOrNull("<sui><body><div id=\"g\"></div></body></sui>");
+        if (noneDocument) {
+            const ComputedStyle gs =
+                noneResolver.resolve(*noneDocument->getElementById("g"));
+            check(gs.gridRows.empty() && gs.gridColumns.empty(),
+                  "grid-template none clears both track lists");
+            check(sui::StyleResolver::propertyValue(gs, "grid-template") == "none",
+                  "grid-template none roundtrips");
+        }
+    }
+
+    // An invalid shorthand is dropped whole: the previous longhand value survives.
+    {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "div{grid-template-columns:33px;grid-template:\"a b\" \"b a\" / 10px 20px}"));
+        auto document = parseOrNull("<sui><body><div id=\"g\"></div></body></sui>");
+        if (document) {
+            const ComputedStyle gs = resolver.resolve(*document->getElementById("g"));
+            check(sui::StyleResolver::propertyValue(gs, "grid-template-columns") == "33px",
+                  "invalid grid-template leaves the previous columns");
+            check(gs.gridRows.empty() && gs.gridTemplateAreasRaw.empty(),
+                  "invalid grid-template leaves no partial reset");
+        }
+    }
+
+    // Line-name groups are ignored for now, and auto-fill survives the shorthand.
+    {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "div{grid-template:[row1] \"a b\" 20px [row2] / "
+            "[col1] 50px 60px [col2]}"));
+        auto document = parseOrNull("<sui><body><div id=\"g\"></div></body></sui>");
+        if (document) {
+            const ComputedStyle gs = resolver.resolve(*document->getElementById("g"));
+            check(gs.gridRows.size() == 1 && gs.gridColumns.size() == 2,
+                  "grid-template ignores line-name groups");
+            check(gs.gridTemplateAreasColumns == 2 && gs.gridTemplateAreasRows == 1,
+                  "grid-template line-name form keeps the area matrix");
+            check(sui::StyleResolver::propertyValue(gs, "grid-template") ==
+                      "\"a b\" 20px / 50px 60px",
+                  "grid-template line-name form roundtrips without names");
+        }
+
+        sui::StyleResolver fillResolver;
+        fillResolver.setRules(sui::CSSParser::parse(
+            "div{grid-template:40px / repeat(auto-fill,50px)}"));
+        auto fillDocument = parseOrNull("<sui><body><div id=\"g\"></div></body></sui>");
+        if (fillDocument) {
+            const ComputedStyle gs =
+                fillResolver.resolve(*fillDocument->getElementById("g"));
+            check(gs.gridRows.size() == 1 && gs.gridColumns.size() == 1 &&
+                      gs.gridColumnsAutoFill,
+                  "grid-template keeps auto-fill columns");
+            check(sui::StyleResolver::propertyValue(gs, "grid-template") ==
+                      "40px / repeat(auto-fill, 50px)",
+                  "grid-template auto-fill roundtrips");
+        }
+    }
+}
+
 void testInputPasswordLayout() {
     auto document = parseOrNull(
         "<sui><body>"
@@ -12460,6 +12655,7 @@ int main() {
     testGridSpans();
     testGridLinePlacement();
     testGridTemplateAreas();
+    testGridTemplateShorthand();
     testBlockStacking();
     testMarginCollapsing();
     testNestedContainer();
