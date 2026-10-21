@@ -717,6 +717,12 @@ struct ComputedStyle {
     };
     std::vector<GridTrack> gridColumns;
     std::vector<GridTrack> gridRows;
+    // Names declared on each grid line by `[name]` groups in the track lists. When
+    // non-empty the list has one more entry than the corresponding track list:
+    // line 0 is the start edge and the final entry is the end edge. Named areas
+    // also contribute `<area>-start` / `<area>-end` names during layout.
+    std::vector<std::vector<std::string>> gridColumnLines;
+    std::vector<std::vector<std::string>> gridRowLines;
     // Set when the track list is a single `repeat(auto-fill, ...)` / `repeat(auto-fit,
     // ...)`. The body is stored in gridColumns/gridRows and layout repeats it to as
     // many tracks as fit the container; `autoFit` collapses the leftovers.
@@ -736,6 +742,20 @@ struct ComputedStyle {
     int gridRowEnd      = 0;
     int gridColumnSpan = 1;
     int gridRowSpan = 1;
+    // Named-line placement. A non-empty name is resolved against the container's
+    // line names during layout, so the numeric field stays 0. Occurrences are
+    // 1-based; a negative occurrence counts from the end of the line list.
+    // `...SpanName` holds `span <name>` and is resolved from the start line.
+    std::string gridColumnStartName;
+    std::string gridColumnEndName;
+    std::string gridColumnSpanName;
+    int gridColumnStartOccurrence = 1;
+    int gridColumnEndOccurrence = 1;
+    std::string gridRowStartName;
+    std::string gridRowEndName;
+    std::string gridRowSpanName;
+    int gridRowStartOccurrence = 1;
+    int gridRowEndOccurrence = 1;
 
     // Grid auto track sizing and auto flow
     GridTrack gridAutoRows;

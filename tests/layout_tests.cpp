@@ -12,6 +12,7 @@
 #include "SUI/Markup/Parser.h"
 #include "SUI/Script/Script.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1396,12 +1397,23 @@ void testGridTemplateShorthand() {
         if (document) {
             const ComputedStyle gs = resolver.resolve(*document->getElementById("g"));
             check(gs.gridRows.size() == 1 && gs.gridColumns.size() == 2,
-                  "grid-template ignores line-name groups");
+                  "grid-template keeps line-name groups");
             check(gs.gridTemplateAreasColumns == 2 && gs.gridTemplateAreasRows == 1,
                   "grid-template line-name form keeps the area matrix");
+            check(gs.gridRowLines.size() == 2 && !gs.gridRowLines[0].empty() &&
+                      gs.gridRowLines[0][0] == "row1" &&
+                      !gs.gridRowLines[1].empty() &&
+                      gs.gridRowLines[1][0] == "row2",
+                  "grid-template stores row line names");
+            check(gs.gridColumnLines.size() == 3 &&
+                      !gs.gridColumnLines[0].empty() &&
+                      gs.gridColumnLines[0][0] == "col1" &&
+                      !gs.gridColumnLines[2].empty() &&
+                      gs.gridColumnLines[2][0] == "col2",
+                  "grid-template stores column line names");
             check(sui::StyleResolver::propertyValue(gs, "grid-template") ==
-                      "\"a b\" 20px / 50px 60px",
-                  "grid-template line-name form roundtrips without names");
+                      "[row1] \"a b\" 20px [row2] / [col1] 50px 60px [col2]",
+                  "grid-template line-name form roundtrips");
         }
 
         sui::StyleResolver fillResolver;
@@ -1417,6 +1429,324 @@ void testGridTemplateShorthand() {
             check(sui::StyleResolver::propertyValue(gs, "grid-template") ==
                       "40px / repeat(auto-fill, 50px)",
                   "grid-template auto-fill roundtrips");
+        }
+    }
+}
+
+void testGridNamedLines() {
+    // Named column lines, named spans, longhands, and canonical read-back.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\">"
+            "<i id=\"a\" style=\"grid-column:left / right\"></i>"
+            "<i id=\"b\" style=\"grid-column:mid / span right\"></i>"
+            "<i id=\"c\" style=\"grid-column:left / span mid\"></i>"
+            "<i id=\"d\" style=\"grid-column:mid 1 / right 1\"></i>"
+            "<i id=\"e\" style=\"grid-column-start:mid;grid-column-end:right\"></i>"
+            "<i id=\"f\" style=\"grid-column:left / span right\"></i>"
+            "</div></body></sui>");
+        if (!document) return;
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;"
+            "grid-template-columns:[left] 50px [mid] 100px [right];"
+            "width:150px;height:20px} #g i{height:10px;grid-row:1}"));
+        layoutRoot(*document, resolver, 300.0f);
+
+        Element* g = document->getElementById("g");
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        Element* d = document->getElementById("d");
+        Element* e = document->getElementById("e");
+        Element* f = document->getElementById("f");
+        check(g && a && b && c && d && e && f, "named grid line elements found");
+        if (g && a && b && c && d && e && f) {
+            checkNear(a->layoutX(), 0.0f, 0.5f, "named range starts at left line");
+            checkNear(a->layoutWidth(), 150.0f, 0.5f, "named range spans both tracks");
+            checkNear(b->layoutX(), 50.0f, 0.5f, "named start starts at mid line");
+            checkNear(b->layoutWidth(), 100.0f, 0.5f,
+                      "span <name> ends at the next named line");
+            checkNear(c->layoutX(), 0.0f, 0.5f, "span name from left starts at 0");
+            checkNear(c->layoutWidth(), 50.0f, 0.5f,
+                      "span <name> finds mid after left");
+            checkNear(d->layoutX(), 50.0f, 0.5f, "line occurrence 1 starts at mid");
+            checkNear(d->layoutWidth(), 100.0f, 0.5f,
+                      "line occurrence range ends at right");
+            checkNear(e->layoutX(), 50.0f, 0.5f,
+                      "named grid-column-start longhand pins the start");
+            checkNear(e->layoutWidth(), 100.0f, 0.5f,
+                      "named grid-column-end longhand pins the end");
+            checkNear(f->layoutX(), 0.0f, 0.5f,
+                      "named span starts at left");
+            checkNear(f->layoutWidth(), 150.0f, 0.5f,
+                      "span <name> can cover multiple tracks");
+        }
+
+        if (g && b && c && d && e && f) {
+            const ComputedStyle gs = resolver.resolve(*g);
+            check(sui::StyleResolver::propertyValue(gs, "grid-template-columns") ==
+                      "[left] 50px [mid] 100px [right]",
+                  "named column track list roundtrips");
+            const ComputedStyle bs = resolver.resolve(*b);
+            check(sui::StyleResolver::propertyValue(bs, "grid-column") ==
+                      "mid / span right",
+                  "named span readback keeps span <name>");
+            const ComputedStyle cs = resolver.resolve(*c);
+            check(sui::StyleResolver::propertyValue(cs, "grid-column") ==
+                      "left / span mid",
+                  "span <name> readback keeps the named range");
+            const ComputedStyle ds = resolver.resolve(*d);
+            check(sui::StyleResolver::propertyValue(ds, "grid-column-start") == "mid" &&
+                      sui::StyleResolver::propertyValue(ds, "grid-column-end") == "right",
+                  "named line longhands read back by name");
+            check(sui::StyleResolver::propertyValue(ds, "grid-column") ==
+                      "mid / right",
+                  "named line range readback omits occurrence 1");
+            const ComputedStyle es = resolver.resolve(*e);
+            check(sui::StyleResolver::propertyValue(es, "grid-column") ==
+                      "mid / right",
+                  "named longhands compose into the shorthand");
+            const ComputedStyle fs = resolver.resolve(*f);
+            check(sui::StyleResolver::propertyValue(fs, "grid-column") ==
+                      "left / span right",
+                  "multi-track named span reads back");
+        }
+    }
+
+    // Fixed repeat() names, occurrence counts, and the flattened line list.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\">"
+            "<i id=\"e\" style=\"grid-column:c 2 / c 3\"></i>"
+            "<i id=\"f\" style=\"grid-column:d 1 / d 2\"></i>"
+            "</div></body></sui>");
+        if (!document) return;
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;"
+            "grid-template-columns:repeat(3,[c] 50px [d]);"
+            "width:150px;height:20px} #g i{height:10px;grid-row:1}"));
+        layoutRoot(*document, resolver, 300.0f);
+
+        Element* g = document->getElementById("g");
+        Element* e = document->getElementById("e");
+        Element* f = document->getElementById("f");
+        check(g && e && f, "repeat named line elements found");
+        if (e && f) {
+            checkNear(e->layoutX(), 50.0f, 0.5f,
+                      "second c line starts the occurrence range");
+            checkNear(e->layoutWidth(), 50.0f, 0.5f,
+                      "third c line ends the occurrence range");
+            checkNear(f->layoutX(), 50.0f, 0.5f,
+                      "first d line is shared with the repeated c line");
+            checkNear(f->layoutWidth(), 50.0f, 0.5f,
+                      "second d line closes the repeated block");
+        }
+        if (g && e) {
+            const ComputedStyle gs = resolver.resolve(*g);
+            check(gs.gridColumns.size() == 3 && gs.gridColumnLines.size() == 4,
+                  "fixed repeat expands names with every track");
+            check(gs.gridColumnLines[1].size() == 2 &&
+                      std::find(gs.gridColumnLines[1].begin(),
+                                gs.gridColumnLines[1].end(), "c") !=
+                          gs.gridColumnLines[1].end() &&
+                      std::find(gs.gridColumnLines[1].begin(),
+                                gs.gridColumnLines[1].end(), "d") !=
+                          gs.gridColumnLines[1].end(),
+                  "repeat boundary carries both line names");
+            const std::string columns =
+                sui::StyleResolver::propertyValue(gs, "grid-template-columns");
+            check(columns.find("[d c]") != std::string::npos,
+                  "flattened repeat serializes a shared line-name list");
+            const ComputedStyle es = resolver.resolve(*e);
+            check(sui::StyleResolver::propertyValue(es, "grid-column") ==
+                      "c 2 / c 3",
+                  "named line occurrence readback keeps the counts");
+        }
+    }
+
+    // Named rows and per-axis read-back.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\">"
+            "<i id=\"a\" style=\"grid-row:top / mid\"></i>"
+            "<i id=\"b\" style=\"grid-row:mid / bottom\"></i>"
+            "<i id=\"c\" style=\"grid-row:top / span bottom\"></i>"
+            "</div></body></sui>");
+        if (!document) return;
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;grid-template-columns:100px;"
+            "grid-template-rows:[top] 20px [mid] 30px [bottom];"
+            "width:100px;height:50px} #g i{width:100%}"));
+        layoutRoot(*document, resolver, 300.0f);
+
+        Element* g = document->getElementById("g");
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        check(g && a && b && c, "named row line elements found");
+        if (a && b && c) {
+            checkNear(a->layoutY(), 0.0f, 0.5f, "top line starts the first row");
+            checkNear(a->layoutHeight(), 20.0f, 0.5f,
+                      "top-to-mid range uses the first row track");
+            checkNear(b->layoutY(), 20.0f, 0.5f, "mid line starts the second row");
+            checkNear(b->layoutHeight(), 30.0f, 0.5f,
+                      "mid-to-bottom range uses the second row track");
+            checkNear(c->layoutY(), 0.0f, 0.5f,
+                      "named row span starts at top");
+            checkNear(c->layoutHeight(), 50.0f, 0.5f,
+                      "row span <name> covers both tracks");
+        }
+        if (g) {
+            const ComputedStyle gs = resolver.resolve(*g);
+            check(sui::StyleResolver::propertyValue(gs, "grid-template-rows") ==
+                      "[top] 20px [mid] 30px [bottom]",
+                  "named row track list roundtrips");
+        }
+        if (a && c) {
+            const ComputedStyle as = resolver.resolve(*a);
+            check(sui::StyleResolver::propertyValue(as, "grid-row") ==
+                      "top / mid",
+                  "named row range reads back");
+            const ComputedStyle cs = resolver.resolve(*c);
+            check(sui::StyleResolver::propertyValue(cs, "grid-row") ==
+                      "top / span bottom",
+                  "named row span reads back");
+        }
+    }
+
+    // Named areas also create <area>-start / <area>-end lines on both axes.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\">"
+            "<i id=\"h\" style=\"grid-column:head-start / head-end;"
+            "grid-row:head-start / head-end\"></i>"
+            "<i id=\"n\" style=\"grid-column:nav-start / nav-end;"
+            "grid-row:nav-start / nav-end\"></i>"
+            "<i id=\"m\" style=\"grid-column:main-start / main-end;"
+            "grid-row:main-start / main-end\"></i>"
+            "</div></body></sui>");
+        if (!document) return;
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;"
+            "grid-template-areas:\"head head\" \"nav main\";"
+            "grid-template-columns:50px 100px;grid-template-rows:20px 40px;"
+            "width:150px;height:60px}"));
+        layoutRoot(*document, resolver, 300.0f);
+
+        Element* h = document->getElementById("h");
+        Element* n = document->getElementById("n");
+        Element* m = document->getElementById("m");
+        check(h && n && m, "area generated line elements found");
+        if (h && n && m) {
+            checkNear(h->layoutX(), 0.0f, 0.5f, "head-start column line");
+            checkNear(h->layoutWidth(), 150.0f, 0.5f, "head-end column line");
+            checkNear(h->layoutY(), 0.0f, 0.5f, "head-start row line");
+            checkNear(h->layoutHeight(), 20.0f, 0.5f, "head-end row line");
+            checkNear(n->layoutX(), 0.0f, 0.5f, "nav-start column line");
+            checkNear(n->layoutWidth(), 50.0f, 0.5f, "nav-end column line");
+            checkNear(n->layoutY(), 20.0f, 0.5f, "nav-start row line");
+            checkNear(n->layoutHeight(), 40.0f, 0.5f, "nav-end row line");
+            checkNear(m->layoutX(), 50.0f, 0.5f, "main-start column line");
+            checkNear(m->layoutWidth(), 100.0f, 0.5f, "main-end column line");
+            checkNear(m->layoutY(), 20.0f, 0.5f, "main-start row line");
+            checkNear(m->layoutHeight(), 40.0f, 0.5f, "main-end row line");
+        }
+        if (h) {
+            const ComputedStyle hs = resolver.resolve(*h);
+            check(sui::StyleResolver::propertyValue(hs, "grid-column") ==
+                      "head-start / head-end",
+                  "generated area line readback");
+        }
+    }
+
+    // `grid-area` accepts named lines in all four slots.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\">"
+            "<i id=\"a\" style=\"grid-area:top / left / bottom / right\"></i>"
+            "</div></body></sui>");
+        if (!document) return;
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;"
+            "grid-template-columns:[left] 50px [right];"
+            "grid-template-rows:[top] 20px [bottom];"
+            "width:50px;height:20px}"));
+        layoutRoot(*document, resolver, 300.0f);
+        Element* a = document->getElementById("a");
+        if (a) {
+            checkNear(a->layoutX(), 0.0f, 0.5f, "named grid-area column start");
+            checkNear(a->layoutWidth(), 50.0f, 0.5f, "named grid-area column span");
+            checkNear(a->layoutY(), 0.0f, 0.5f, "named grid-area row start");
+            checkNear(a->layoutHeight(), 20.0f, 0.5f, "named grid-area row span");
+            const ComputedStyle as = resolver.resolve(*a);
+            check(sui::StyleResolver::propertyValue(as, "grid-area") ==
+                      "top / left / bottom / right",
+                  "named grid-area readback");
+        }
+    }
+
+    // The track-list form of the shorthand keeps names on both axes.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\">"
+            "<i id=\"a\" style=\"grid-column:left / right;"
+            "grid-row:top / bottom\"></i>"
+            "</div></body></sui>");
+        if (!document) return;
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;"
+            "grid-template:[top] 20px [bottom] / [left] 50px [right];"
+            "width:50px;height:20px}"));
+        layoutRoot(*document, resolver, 300.0f);
+        Element* g = document->getElementById("g");
+        Element* a = document->getElementById("a");
+        check(g && a, "grid-template named track elements found");
+        if (a) {
+            checkNear(a->layoutX(), 0.0f, 0.5f, "grid-template column line starts");
+            checkNear(a->layoutWidth(), 50.0f, 0.5f, "grid-template column line spans");
+            checkNear(a->layoutY(), 0.0f, 0.5f, "grid-template row line starts");
+            checkNear(a->layoutHeight(), 20.0f, 0.5f, "grid-template row line spans");
+        }
+        if (g) {
+            const ComputedStyle gs = resolver.resolve(*g);
+            check(sui::StyleResolver::propertyValue(gs, "grid-template") ==
+                      "[top] 20px [bottom] / [left] 50px [right]",
+                  "grid-template named track lists roundtrip");
+        }
+    }
+
+    // An auto-fill body repeats its line names with its tracks.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\">"
+            "<i id=\"a\" style=\"grid-column:col 2 / end 2;grid-row:1\"></i>"
+            "</div></body></sui>");
+        if (!document) return;
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #g{display:grid;"
+            "grid-template-columns:repeat(auto-fill,[col] 50px [end]);"
+            "width:150px;height:20px} #g i{height:10px}"));
+        layoutRoot(*document, resolver, 300.0f);
+        Element* g = document->getElementById("g");
+        Element* a = document->getElementById("a");
+        if (a) {
+            checkNear(a->layoutX(), 50.0f, 0.5f,
+                      "auto-fill repeats the named column line");
+            checkNear(a->layoutWidth(), 50.0f, 0.5f,
+                      "auto-fill named range covers one repeated track");
+        }
+        if (g) {
+            const ComputedStyle gs = resolver.resolve(*g);
+            check(sui::StyleResolver::propertyValue(gs, "grid-template-columns") ==
+                      "repeat(auto-fill, [col] 50px [end])",
+                  "auto-fill named body roundtrips");
         }
     }
 }
@@ -12656,6 +12986,7 @@ int main() {
     testGridLinePlacement();
     testGridTemplateAreas();
     testGridTemplateShorthand();
+    testGridNamedLines();
     testBlockStacking();
     testMarginCollapsing();
     testNestedContainer();

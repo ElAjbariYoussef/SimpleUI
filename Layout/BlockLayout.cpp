@@ -2289,6 +2289,8 @@ private:
                              : std::max(0.0f, availableWidth - box.horizontalChrome());
 
         std::vector<ComputedStyle::GridTrack> columns = s.gridColumns;
+        std::vector<std::vector<std::string>> columnLines;
+        const bool columnsAutoFill = s.gridColumnsAutoFill && !columns.empty();
         if (columns.empty()) {
             if (s.gridTemplateAreasColumns > 0) {
                 for (std::size_t c = 0; c < s.gridTemplateAreasColumns; ++c) {
@@ -2301,13 +2303,29 @@ private:
                 only.isAuto = true;
                 columns.push_back(only);
             }
+            columnLines.assign(columns.size() + 1, {});
+        } else {
+            columnLines = s.gridColumnLines;
+            if (columnLines.size() != columns.size() + 1) {
+                columnLines.assign(columns.size() + 1, {});
+            }
+            // Named areas can define more columns than the explicit track list.
+            // Keep the explicit tracks first and add content-sized ones.
+            if (!columnsAutoFill) {
+                while (columns.size() < s.gridTemplateAreasColumns) {
+                    ComputedStyle::GridTrack track;
+                    track.isAuto = true;
+                    columns.push_back(track);
+                    columnLines.emplace_back();
+                }
+            }
         }
         // `repeat(auto-fill/auto-fit, <body>)`: the stored list is one repetition of
         // the body, so repeat it to as many tracks as the container fits, each at
         // least as wide as the body's own minimum. `auto-fit` drops the tracks no
         // item lands in, which for this row-major placement is the same as capping
         // the count at the number of items.
-        if (s.gridColumnsAutoFill && !columns.empty()) {
+        if (columnsAutoFill) {
             const float em = s.fontSize;
             const float rem = resolver_.rootFontSize();
             const float autoGap = std::max(0.0f, s.columnGap);
@@ -2332,16 +2350,235 @@ private:
             if (s.gridColumnsAutoFit && !children.empty()) {
                 repeatCount = std::min(repeatCount, children.size());
             }
+            const std::size_t bodyTracks = columns.size();
+            const std::vector<std::vector<std::string>> bodyLines = columnLines;
             std::vector<ComputedStyle::GridTrack> expanded;
-            expanded.reserve(repeatCount * columns.size());
+            expanded.reserve(repeatCount * bodyTracks);
             for (std::size_t n = 0; n < repeatCount; ++n) {
                 for (const ComputedStyle::GridTrack& track : columns) {
                     expanded.push_back(track);
                 }
             }
             columns = std::move(expanded);
+
+            // Repeat the body's line names the same way as its tracks. The final
+            // line of one repetition and the first line of the next share a line.
+            columnLines.assign(1, {});
+            for (std::size_t n = 0; n < repeatCount; ++n) {
+                for (const std::string& name : bodyLines.front()) {
+                    if (std::find(columnLines.back().begin(), columnLines.back().end(),
+                                  name) == columnLines.back().end()) {
+                        columnLines.back().push_back(name);
+                    }
+                }
+                for (std::size_t line = 1; line < bodyLines.size(); ++line) {
+                    columnLines.push_back(bodyLines[line]);
+                }
+            }
         }
         std::size_t columnCount = columns.size();
+        if (columnLines.size() < columnCount + 1) {
+            columnLines.resize(columnCount + 1);
+        }
+
+        std::vector<std::vector<std::string>> rowLines = s.gridRowLines;
+        const std::size_t rowLineCount =
+            std::max(s.gridRows.size(), s.gridTemplateAreasRows);
+        if (rowLines.size() < rowLineCount + 1) {
+            rowLines.resize(rowLineCount + 1);
+        }
+        // Named areas generate `<area>-start` / `<area>-end` line names on both
+        // axes, so `grid-column: head-start / head-end` works alongside
+        // `grid-area: head`.
+        auto addLineName = [](std::vector<std::vector<std::string>>& lines,
+                              std::size_t line, const std::string& name) {
+            if (lines.size() <= line) {
+                lines.resize(line + 1);
+            }
+            if (std::find(lines[line].begin(), lines[line].end(), name) ==
+                lines[line].end()) {
+                lines[line].push_back(name);
+            }
+        };
+        for (const auto& [areaName, rect] : s.gridTemplateAreas) {
+            if (rect.colStart > 0) {
+                addLineName(columnLines,
+                            static_cast<std::size_t>(rect.colStart - 1),
+                            areaName + "-start");
+            }
+            if (rect.colEnd > 0) {
+                addLineName(columnLines,
+                            static_cast<std::size_t>(rect.colEnd - 1),
+                            areaName + "-end");
+            }
+            if (rect.rowStart > 0) {
+                addLineName(rowLines,
+                            static_cast<std::size_t>(rect.rowStart - 1),
+                            areaName + "-start");
+            }
+            if (rect.rowEnd > 0) {
+                addLineName(rowLines,
+                            static_cast<std::size_t>(rect.rowEnd - 1),
+                            areaName + "-end");
+            }
+        }
+
+        // Named grid lines. A line list has one entry per grid line; line 0 is
+        // the leading edge. Occurrences are 1-based and a negative occurrence
+        // counts from the end, matching `<name> <integer>`.
+        auto resolveNamedLine = [](const std::vector<std::vector<std::string>>& lines,
+                                   int line, const std::string& name,
+                                   int occurrence) -> int {
+            if (line > 0) {
+                return line;
+            }
+            if (name.empty()) {
+                return 0;
+            }
+            std::vector<int> matches;
+            for (std::size_t i = 0; i < lines.size(); ++i) {
+                if (std::find(lines[i].begin(), lines[i].end(), name) != lines[i].end()) {
+                    matches.push_back(static_cast<int>(i) + 1);
+                }
+            }
+            if (matches.empty()) {
+                return 0;
+            }
+            int index = occurrence > 0
+                            ? occurrence - 1
+                            : static_cast<int>(matches.size()) + occurrence;
+            if (index < 0 || index >= static_cast<int>(matches.size())) {
+                return 0;
+            }
+            return matches[static_cast<std::size_t>(index)];
+        };
+        auto resolveNextNamedLine = [](const std::vector<std::vector<std::string>>& lines,
+                                       int startLine, const std::string& name) -> int {
+            if (startLine <= 0 || name.empty()) {
+                return 0;
+            }
+            for (std::size_t i = static_cast<std::size_t>(startLine);
+                 i < lines.size(); ++i) {
+                if (std::find(lines[i].begin(), lines[i].end(), name) != lines[i].end()) {
+                    return static_cast<int>(i) + 1;
+                }
+            }
+            return 0;
+        };
+        auto resolvePreviousNamedLine =
+            [](const std::vector<std::vector<std::string>>& lines,
+               int endLine, const std::string& name) -> int {
+            if (endLine <= 1 || name.empty()) {
+                return 0;
+            }
+            for (int i = endLine - 2; i >= 0; --i) {
+                const auto& names = lines[static_cast<std::size_t>(i)];
+                if (std::find(names.begin(), names.end(), name) != names.end()) {
+                    return i + 1;
+                }
+            }
+            return 0;
+        };
+
+        struct GridPlacement {
+            int colStart = 0;
+            int rowStart = 0;
+            int colSpan = 1;
+            int rowSpan = 1;
+        };
+        auto placementFor = [&](const ComputedStyle& cs) {
+            GridPlacement placement;
+            placement.colSpan = std::max(1, cs.gridColumnSpan);
+            placement.rowSpan = std::max(1, cs.gridRowSpan);
+            if (!cs.gridAreaName.empty()) {
+                const auto it = s.gridTemplateAreas.find(cs.gridAreaName);
+                if (it != s.gridTemplateAreas.end()) {
+                    placement.colStart = it->second.colStart;
+                    placement.rowStart = it->second.rowStart;
+                    placement.colSpan =
+                        std::max(1, it->second.colEnd - it->second.colStart);
+                    placement.rowSpan =
+                        std::max(1, it->second.rowEnd - it->second.rowStart);
+                }
+                return placement;
+            }
+
+            int colStart = resolveNamedLine(columnLines, cs.gridColumnStart,
+                                            cs.gridColumnStartName,
+                                            cs.gridColumnStartOccurrence);
+            int colEnd = resolveNamedLine(columnLines, cs.gridColumnEnd,
+                                          cs.gridColumnEndName,
+                                          cs.gridColumnEndOccurrence);
+            int rowStart = resolveNamedLine(rowLines, cs.gridRowStart,
+                                            cs.gridRowStartName,
+                                            cs.gridRowStartOccurrence);
+            int rowEnd = resolveNamedLine(rowLines, cs.gridRowEnd,
+                                          cs.gridRowEndName,
+                                          cs.gridRowEndOccurrence);
+
+            if (!cs.gridColumnSpanName.empty()) {
+                if (colStart > 0 && colEnd == 0) {
+                    const int next = resolveNextNamedLine(columnLines, colStart,
+                                                          cs.gridColumnSpanName);
+                    if (next > colStart) {
+                        colEnd = next;
+                    }
+                } else if (colStart == 0 && colEnd > 0) {
+                    const int previous = resolvePreviousNamedLine(
+                        columnLines, colEnd, cs.gridColumnSpanName);
+                    if (previous > 0) {
+                        colStart = previous;
+                    }
+                } else if (colStart == 0 && colEnd == 0) {
+                    const int first = resolveNamedLine(columnLines, 0,
+                                                       cs.gridColumnSpanName, 1);
+                    if (first > 0) {
+                        colEnd = first;
+                        colStart = std::max(1, first - placement.colSpan);
+                    }
+                }
+            }
+            if (!cs.gridRowSpanName.empty()) {
+                if (rowStart > 0 && rowEnd == 0) {
+                    const int next = resolveNextNamedLine(rowLines, rowStart,
+                                                          cs.gridRowSpanName);
+                    if (next > rowStart) {
+                        rowEnd = next;
+                    }
+                } else if (rowStart == 0 && rowEnd > 0) {
+                    const int previous = resolvePreviousNamedLine(
+                        rowLines, rowEnd, cs.gridRowSpanName);
+                    if (previous > 0) {
+                        rowStart = previous;
+                    }
+                } else if (rowStart == 0 && rowEnd == 0) {
+                    const int first = resolveNamedLine(rowLines, 0,
+                                                       cs.gridRowSpanName, 1);
+                    if (first > 0) {
+                        rowEnd = first;
+                        rowStart = std::max(1, first - placement.rowSpan);
+                    }
+                }
+            }
+
+            // An end line alone pins the item so it finishes on that line. Since
+            // placement is start-based, derive the start from the span.
+            if (colStart == 0 && colEnd > 0) {
+                colStart = std::max(1, colEnd - std::max(1, placement.colSpan));
+            }
+            if (rowStart == 0 && rowEnd > 0) {
+                rowStart = std::max(1, rowEnd - std::max(1, placement.rowSpan));
+            }
+            if (colStart > 0 && colEnd > colStart) {
+                placement.colSpan = colEnd - colStart;
+            }
+            if (rowStart > 0 && rowEnd > rowStart) {
+                placement.rowSpan = rowEnd - rowStart;
+            }
+            placement.colStart = colStart;
+            placement.rowStart = rowStart;
+            return placement;
+        };
 
         // Placement. Items with explicit `grid-column` / `grid-row` start lines are
         // pinned first; the remaining items are auto-placed in row-major order,
@@ -2349,6 +2586,8 @@ private:
         // number n maps to 0-based column/row index n-1.
         std::vector<int> cSpan(children.size(), 1);
         std::vector<int> rSpan(children.size(), 1);
+        std::vector<int> cStart(children.size(), 0);
+        std::vector<int> rStart(children.size(), 0);
         std::vector<std::size_t> itemCol(children.size(), 0);
         std::vector<std::size_t> itemRow(children.size(), 0);
         std::vector<float> naturalWidth(children.size(), 0.0f);
@@ -2358,32 +2597,23 @@ private:
 
         for (std::size_t i = 0; i < children.size(); ++i) {
             const ComputedStyle cs = resolver_.resolve(*children[i]);
-            int colStart = cs.gridColumnStart;
-            int colEnd   = cs.gridColumnEnd;
-            int rowStart = cs.gridRowStart;
-            int rowEnd   = cs.gridRowEnd;
-            int colSpan  = cs.gridColumnSpan;
-            int rowSpan  = cs.gridRowSpan;
-
-            if (!cs.gridAreaName.empty()) {
-                const auto it = s.gridTemplateAreas.find(cs.gridAreaName);
-                if (it != s.gridTemplateAreas.end()) {
-                    colStart = it->second.colStart;
-                    colEnd   = it->second.colEnd;
-                    rowStart = it->second.rowStart;
-                    rowEnd   = it->second.rowEnd;
-                }
+            const GridPlacement placement = placementFor(cs);
+            cSpan[i] = std::min<int>(static_cast<int>(columnCount),
+                                     std::max(1, placement.colSpan));
+            rSpan[i] = std::max(1, placement.rowSpan);
+            cStart[i] = placement.colStart;
+            rStart[i] = placement.rowStart;
+            if (cStart[i] > 0) {
+                // Keep the span inside the explicit grid even when a named end
+                // line sits past the last track; the start itself is clamped by
+                // pass 1 when it is outside the grid.
+                const int startIndex = std::min<int>(
+                    static_cast<int>(columnCount) - 1, cStart[i] - 1);
+                cSpan[i] = std::min(cSpan[i],
+                                    static_cast<int>(columnCount) - startIndex);
             }
-
-            if (colStart > 0 && colEnd > colStart) {
-                colSpan = colEnd - colStart;
-            }
-            cSpan[i] = std::min<int>(columnCount, std::max(1, colSpan));
-
-            if (rowStart > 0 && rowEnd > rowStart) {
-                rowSpan = rowEnd - rowStart;
-            }
-            rSpan[i] = std::max(1, rowSpan);
+            hasExplicitCol[i] = cStart[i] > 0;
+            hasExplicitRow[i] = rStart[i] > 0;
             naturalWidth[i] = measureNatural(*children[i], cs, true);
         }
 
@@ -2404,42 +2634,27 @@ private:
 
         // Pass 1 – pin items that have an explicit column start and/or row start.
         for (std::size_t i = 0; i < children.size(); ++i) {
-            const ComputedStyle cs = resolver_.resolve(*children[i]);
-            int colStart = cs.gridColumnStart;
-            int rowStart = cs.gridRowStart;
-            if (!cs.gridAreaName.empty()) {
-                const auto it = s.gridTemplateAreas.find(cs.gridAreaName);
-                if (it != s.gridTemplateAreas.end()) {
-                    colStart = it->second.colStart;
-                    rowStart = it->second.rowStart;
-                }
-            }
-            const bool hasCol = colStart > 0;
-            const bool hasRow = rowStart > 0;
-            if (!hasCol && !hasRow) {
+            if (!hasExplicitCol[i] && !hasExplicitRow[i]) {
                 continue;
             }
             // 1-based CSS line → 0-based index, clamped to [0, columnCount-1].
             const std::size_t c =
-                hasCol
+                hasExplicitCol[i]
                     ? std::min(columnCount - 1,
-                               static_cast<std::size_t>(
-                                   std::max(1, colStart) - 1))
+                               static_cast<std::size_t>(std::max(1, cStart[i]) - 1))
                     : 0;  // will be resolved in pass 2 for column-auto / row-pinned
             const std::size_t r =
-                hasRow
-                    ? static_cast<std::size_t>(std::max(1, rowStart) - 1)
+                hasExplicitRow[i]
+                    ? static_cast<std::size_t>(std::max(1, rStart[i]) - 1)
                     : 0;  // row-auto: deferred to pass 2
-            if (hasCol) {
+            if (hasExplicitCol[i]) {
                 itemCol[i] = c;
-                hasExplicitCol[i] = true;
             }
-            if (hasRow) {
+            if (hasExplicitRow[i]) {
                 itemRow[i] = r;
-                hasExplicitRow[i] = true;
             }
             // If both axes are explicit, mark the cells occupied now.
-            if (hasCol && hasRow) {
+            if (hasExplicitCol[i] && hasExplicitRow[i]) {
                 const std::size_t csz = static_cast<std::size_t>(cSpan[i]);
                 const std::size_t rsz = static_cast<std::size_t>(rSpan[i]);
                 claimRows(r + rsz - 1, columnCount);
@@ -2497,8 +2712,7 @@ private:
         const bool isDense = (s.gridAutoFlow == ComputedStyle::AutoFlowRowDense ||
                               s.gridAutoFlow == ComputedStyle::AutoFlowColumnDense);
         const std::size_t maxRows = std::max<std::size_t>(
-            1, !s.gridRows.empty() ? s.gridRows.size()
-                                   : (s.gridTemplateAreasRows > 0 ? s.gridTemplateAreasRows : 1));
+            1, std::max(s.gridRows.size(), s.gridTemplateAreasRows));
 
         std::size_t nextRow = 0;
         std::size_t nextCol = 0;

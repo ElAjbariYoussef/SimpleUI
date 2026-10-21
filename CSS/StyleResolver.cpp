@@ -1459,9 +1459,129 @@ ComputedStyle::FlexAlign parseAlign(std::string_view v) {
     return ComputedStyle::AlignStretch;
 }
 
+// One token of a grid track list. Brackets stay whole even when they contain
+// several line names; a function token keeps its own spaces.
+struct GridListToken {
+    enum class Kind : std::uint8_t { Word, Bracket, String };
+    Kind kind = Kind::Word;
+    std::string text;
+};
+
+bool tokenizeGridList(std::string_view value, std::vector<GridListToken>& out) {
+    out.clear();
+    std::size_t i = 0;
+    while (i < value.size()) {
+        while (i < value.size() &&
+               std::isspace(static_cast<unsigned char>(value[i]))) {
+            ++i;
+        }
+        if (i >= value.size()) {
+            break;
+        }
+        const char c = value[i];
+        if (c == '"' || c == '\'') {
+            const char quote = c;
+            ++i;
+            std::string text;
+            while (i < value.size() && value[i] != quote) {
+                if (value[i] == '\\' && i + 1 < value.size()) {
+                    text.push_back(value[i]);
+                    text.push_back(value[i + 1]);
+                    i += 2;
+                } else {
+                    text.push_back(value[i++]);
+                }
+            }
+            if (i >= value.size()) {
+                return false;
+            }
+            ++i;
+            out.push_back({GridListToken::Kind::String, std::move(text)});
+        } else if (c == '[') {
+            const std::size_t start = i;
+            ++i;
+            while (i < value.size() && value[i] != ']') {
+                ++i;
+            }
+            if (i >= value.size()) {
+                return false;
+            }
+            ++i;
+            out.push_back({GridListToken::Kind::Bracket,
+                           std::string(value.substr(start, i - start))});
+        } else {
+            const std::size_t start = i;
+            int depth = 0;
+            while (i < value.size()) {
+                const char d = value[i];
+                if (d == '(') {
+                    ++depth;
+                } else if (d == ')') {
+                    if (depth > 0) {
+                        --depth;
+                    }
+                }
+                if (depth == 0 &&
+                    (std::isspace(static_cast<unsigned char>(d)) || d == '[' ||
+                     d == '"' || d == '\'')) {
+                    break;
+                }
+                ++i;
+            }
+            if (i == start) {
+                return false;
+            }
+            out.push_back({GridListToken::Kind::Word,
+                           std::string(value.substr(start, i - start))});
+        }
+    }
+    return true;
+}
+
+bool isGridLineName(std::string_view name) {
+    if (name.empty() || name == "auto" || name == "span") {
+        return false;
+    }
+    std::size_t i = 0;
+    if (name[0] == '-') {
+        ++i;
+        if (i >= name.size()) {
+            return false;
+        }
+    }
+    if (!std::isalpha(static_cast<unsigned char>(name[i])) && name[i] != '_') {
+        return false;
+    }
+    for (; i < name.size(); ++i) {
+        const char c = name[i];
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-') {
+            return false;
+        }
+    }
+    return true;
+}
+
+void appendGridLineNames(std::string_view bracket, std::vector<std::string>& line) {
+    if (bracket.size() < 2 || bracket.front() != '[' || bracket.back() != ']') {
+        return;
+    }
+    const std::string_view body = bracket.substr(1, bracket.size() - 2);
+    for (const std::string_view piece : splitTopLevelSpaces(body)) {
+        const std::string_view name = trim(piece);
+        if (!isGridLineName(name)) {
+            continue;
+        }
+        const std::string text(name);
+        if (std::find(line.begin(), line.end(), text) == line.end()) {
+            line.push_back(text);
+        }
+    }
+}
+
 // `grid-template-columns` / `grid-template-rows`: a whitespace-separated track
 // list, where a track is a length, a `<number>fr` share, `auto`, or a
-// `repeat(<count>, <tracks>)` group. `minmax()` and named lines are not read.
+// `repeat(<count>, <tracks>)` group. Bracket groups name the lines around the
+// tracks; `minmax()` is understood but nested repeats are not meaningful.
 bool parseGridTrack(std::string_view token, ComputedStyle::GridTrack& out) {
     token = trim(token);
     if (token.empty()) {
@@ -1514,166 +1634,205 @@ bool parseGridTrack(std::string_view token, ComputedStyle::GridTrack& out) {
     return true;
 }
 
-std::vector<ComputedStyle::GridTrack> parseGridTrackList(std::string_view value,
-                                                        bool* autoFill = nullptr,
-                                                        bool* autoFit = nullptr) {
-    std::vector<ComputedStyle::GridTrack> out;
-    const std::string_view text = trim(value);
-    const std::vector<std::string_view> tokens = splitTopLevelSpaces(text);
-    for (std::size_t i = 0; i < tokens.size(); ++i) {
-        const std::string_view token = trim(tokens[i]);
-        if (token.substr(0, 7) == "repeat(") {
-            // A repeat group can contain spaces, so join tokens until the parens
-            // balance before reading it.
-            std::string group(token);
-            int depth = 1;
-            for (char c : group) {
-                if (c == '(') ++depth;
-                else if (c == ')') --depth;
-            }
-            while (depth > 0 && i + 1 < tokens.size()) {
-                group += " ";
-                group += std::string(tokens[++i]);
-                for (char c : tokens[i]) {
-                    if (c == '(') ++depth;
-                    else if (c == ')') --depth;
-                }
-            }
-            const std::size_t open = group.find('(');
-            const std::size_t comma = group.find(',', open);
-            const std::size_t close = group.rfind(')');
+struct ParsedGridTracks {
+    std::vector<ComputedStyle::GridTrack> tracks;
+    std::vector<std::vector<std::string>> lines{{}};
+    bool autoFill = false;
+    bool autoFit = false;
+};
+
+void appendGridTrackBlock(ParsedGridTracks& out, const ParsedGridTracks& block) {
+    if (block.tracks.empty() || block.lines.empty()) {
+        return;
+    }
+    for (const std::string& name : block.lines.front()) {
+        if (std::find(out.lines.back().begin(), out.lines.back().end(), name) ==
+            out.lines.back().end()) {
+            out.lines.back().push_back(name);
+        }
+    }
+    out.tracks.insert(out.tracks.end(), block.tracks.begin(), block.tracks.end());
+    for (std::size_t i = 1; i < block.lines.size(); ++i) {
+        out.lines.push_back(block.lines[i]);
+    }
+}
+
+bool parseGridTrackBlock(std::string_view value, bool allowAutoFill,
+                         ParsedGridTracks& out) {
+    std::vector<GridListToken> tokens;
+    if (!tokenizeGridList(value, tokens) || tokens.empty()) {
+        return false;
+    }
+    out = ParsedGridTracks{};
+    for (const GridListToken& token : tokens) {
+        if (token.kind == GridListToken::Kind::Bracket) {
+            appendGridLineNames(token.text, out.lines.back());
+            continue;
+        }
+        if (token.kind != GridListToken::Kind::Word) {
+            return false;
+        }
+        if (token.text == "none") {
+            return false;
+        }
+        if (token.text.size() > 7 && token.text.substr(0, 7) == "repeat(") {
+            const std::size_t open = token.text.find('(');
+            const std::size_t comma = token.text.find(',', open);
+            const std::size_t close = token.text.rfind(')');
             if (open == std::string::npos || comma == std::string::npos ||
-                close == std::string::npos) {
-                continue;
+                close == std::string::npos || close < comma) {
+                return false;
             }
             const std::string_view countText =
-                trim(std::string_view(group).substr(open + 1, comma - open - 1));
+                trim(std::string_view(token.text).substr(open + 1, comma - open - 1));
             const std::string_view body =
-                std::string_view(group).substr(comma + 1, close - comma - 1);
+                std::string_view(token.text).substr(comma + 1, close - comma - 1);
 
             // `auto-fill` / `auto-fit` have no fixed count: the body is stored and
             // the layout repeats it to fill the container. Only the all-in-one
-            // `repeat(...)` form is handled; a mix with explicit tracks falls back
-            // to ignoring the repeat.
+            // `repeat(...)` form is handled.
             if (countText == "auto-fill" || countText == "auto-fit") {
-                if (tokens.size() != 1) {
-                    continue;
+                if (!allowAutoFill || tokens.size() != 1) {
+                    return false;
                 }
-                for (const std::string_view piece : splitTopLevelSpaces(trim(body))) {
-                    ComputedStyle::GridTrack track;
-                    if (parseGridTrack(piece, track)) {
-                        out.push_back(track);
-                    }
+                ParsedGridTracks block;
+                if (!parseGridTrackBlock(body, false, block) || block.tracks.empty()) {
+                    return false;
                 }
-                if (autoFill) {
-                    *autoFill = true;
-                }
-                if (autoFit) {
-                    *autoFit = countText == "auto-fit";
-                }
-                return out;
+                out.tracks = std::move(block.tracks);
+                out.lines = std::move(block.lines);
+                out.autoFill = true;
+                out.autoFit = countText == "auto-fit";
+                return true;
             }
 
             const int count = std::atoi(std::string(countText).c_str());
             if (count <= 0) {
-                continue;
+                return false;
             }
-            const std::vector<std::string_view> inner = splitTopLevelSpaces(trim(body));
+            ParsedGridTracks block;
+            if (!parseGridTrackBlock(body, false, block) || block.tracks.empty()) {
+                return false;
+            }
             for (int n = 0; n < count; ++n) {
-                for (const std::string_view piece : inner) {
-                    ComputedStyle::GridTrack track;
-                    if (parseGridTrack(piece, track)) {
-                        out.push_back(track);
-                    }
-                }
+                appendGridTrackBlock(out, block);
             }
             continue;
         }
         ComputedStyle::GridTrack track;
-        if (parseGridTrack(token, track)) {
-            out.push_back(track);
+        if (!parseGridTrack(token.text, track)) {
+            return false;
         }
+        out.tracks.push_back(track);
+        out.lines.emplace_back();
     }
-    return out;
+    return !out.tracks.empty() && out.lines.size() == out.tracks.size() + 1;
 }
 
-// How many cells a `grid-column` / `grid-row` / `grid-area` value spans. Only the
-// `span <n>` keyword and numeric `a / b` line ranges are read; a lone line number
-// spans one cell (that is what auto-placement fills), and anything unreadable
-// falls back to 1.
-int parseGridSpan(std::string_view value) {
-    // Reads one slash-separated part: `span n` contributes its count, a plain
-    // number records the line so the two ends can be subtracted.
-    int explicitSpan = 0;
-    int lineA = 0;
-    int lineB = 0;
-    bool hasA = false;
-    bool hasB = false;
-    bool first = true;
-    std::size_t start = 0;
-    while (start <= value.size()) {
-        const std::size_t slash = value.find('/', start);
-        const std::string_view part =
-            trim(value.substr(start, slash == std::string_view::npos ? slash : slash - start));
-        int num = 0;
-        const bool spanWord = part.size() > 4 && part.substr(0, 4) == "span";
-        const std::string_view numText = spanWord ? trim(part.substr(4)) : part;
-        if (!numText.empty()) {
-            const std::string text(numText);
-            char* stop = nullptr;
-            num = static_cast<int>(std::strtol(text.c_str(), &stop, 10));
-            if (stop != text.c_str()) {
-                if (spanWord) {
-                    if (num > 1) {
-                        explicitSpan = std::max(explicitSpan, num);
-                    }
-                } else if (first) {
-                    lineA = num;
-                    hasA = true;
-                } else {
-                    lineB = num;
-                    hasB = true;
-                }
-            }
-        }
-        first = false;
-        if (slash == std::string_view::npos) {
-            break;
-        }
-        start = slash + 1;
+std::vector<ComputedStyle::GridTrack> parseGridTrackList(
+    std::string_view value, bool* autoFill = nullptr, bool* autoFit = nullptr,
+    std::vector<std::vector<std::string>>* linesOut = nullptr) {
+    if (autoFill) {
+        *autoFill = false;
     }
-    if (explicitSpan > 1) {
-        return explicitSpan;
+    if (autoFit) {
+        *autoFit = false;
     }
-    if (hasA && hasB && lineA != lineB) {
-        return std::max(1, std::abs(lineB - lineA));
+    if (linesOut) {
+        linesOut->clear();
     }
-    return 1;
+    const std::string_view text = trim(value);
+    if (text.empty() || text == "none") {
+        return {};
+    }
+    ParsedGridTracks parsed;
+    if (!parseGridTrackBlock(text, true, parsed)) {
+        return {};
+    }
+    if (autoFill) {
+        *autoFill = parsed.autoFill;
+    }
+    if (autoFit) {
+        *autoFit = parsed.autoFit;
+    }
+    if (linesOut) {
+        *linesOut = std::move(parsed.lines);
+    }
+    return std::move(parsed.tracks);
 }
 
-// Parses one half of a `grid-column` / `grid-row` shorthand (or a longhand value)
-// into a line number and a span count. A `span <n>` keyword sets only the span
-// (leaves lineOut = 0). A bare integer sets only the line (leaves spanOut at its
-// default of 1). `auto` leaves both at their defaults.
-void parseGridLinePart(std::string_view part, int& lineOut, int& spanOut) {
+bool parseGridInteger(std::string_view text, int& out) {
+    text = trim(text);
+    if (text.empty()) {
+        return false;
+    }
+    const std::string value(text);
+    char* stop = nullptr;
+    const long number = std::strtol(value.c_str(), &stop, 10);
+    if (stop == value.c_str()) {
+        return false;
+    }
+    while (*stop != '\0' && std::isspace(static_cast<unsigned char>(*stop))) {
+        ++stop;
+    }
+    if (*stop != '\0') {
+        return false;
+    }
+    out = static_cast<int>(number);
+    return true;
+}
+
+// One half of `grid-column` / `grid-row` / `grid-area`: a numeric line, a named
+// line with an optional occurrence, or a span (numeric or named). The numeric
+// line and the name are mutually exclusive; layout resolves whichever is set.
+struct GridLineValue {
+    int line = 0;
+    std::string name;
+    int occurrence = 1;
+    int span = 0;
+    std::string spanName;
+};
+
+GridLineValue parseGridLine(std::string_view part) {
+    GridLineValue value;
     part = trim(part);
     if (part == "auto" || part.empty()) {
-        return;
+        return value;
     }
-    const bool spanWord = part.size() > 4 && part.substr(0, 4) == "span";
-    const std::string_view numText = spanWord ? trim(part.substr(4)) : part;
-    if (!numText.empty()) {
-        const std::string text(numText);
-        char* stop = nullptr;
-        const int num = static_cast<int>(std::strtol(text.c_str(), &stop, 10));
-        if (stop != text.c_str() && num != 0) {
-            if (spanWord) {
-                spanOut = std::max(1, num);
-            } else {
-                lineOut = num;
-            }
+    const std::vector<std::string_view> tokens = splitTopLevelSpaces(part);
+    if (tokens.empty()) {
+        return value;
+    }
+    const std::string_view first = trim(tokens[0]);
+    if (first == "span") {
+        if (tokens.size() < 2) {
+            return value;
+        }
+        const std::string_view spanText = trim(tokens[1]);
+        int span = 0;
+        if (parseGridInteger(spanText, span)) {
+            value.span = std::max(1, span);
+        } else if (isGridLineName(spanText)) {
+            value.spanName = std::string(spanText);
+        }
+        return value;
+    }
+    int line = 0;
+    if (parseGridInteger(first, line)) {
+        value.line = line;
+        return value;
+    }
+    if (!isGridLineName(first)) {
+        return value;
+    }
+    value.name = std::string(first);
+    if (tokens.size() > 1) {
+        int occurrence = 0;
+        if (parseGridInteger(tokens[1], occurrence) && occurrence != 0) {
+            value.occurrence = occurrence;
         }
     }
+    return value;
 }
 
 // Parses `grid-template-areas: "<row1>" "<row2>" ...` into named area bounding boxes.
@@ -1821,104 +1980,10 @@ std::vector<std::string_view> splitGridTemplateSlashes(std::string_view value) {
     return parts;
 }
 
-// Named grid lines are still unsupported. Strip `[...]` groups from a track list
-// so they are ignored instead of being read as extra, zero-sized tracks.
-std::string stripGridTemplateLineNames(std::string_view value) {
-    std::string out;
-    bool inside = false;
-    for (const char c : value) {
-        if (c == '[') {
-            inside = true;
-        } else if (c == ']') {
-            inside = false;
-            out.push_back(' ');
-        } else if (!inside) {
-            out.push_back(c);
-        }
-    }
-    return out;
-}
-
 // The row side of the string form alternates quoted area rows and optional
-// track sizes. Strings keep their content; brackets stay as one ignored token,
-// even though a line-name list may contain spaces.
-struct GridTemplateToken {
-    enum class Kind : std::uint8_t { String, Word, Bracket };
-    Kind kind = Kind::Word;
-    std::string text;
-};
+// track sizes. `tokenizeGridList` keeps strings and `[...]` groups whole, so a
+// line-name list may contain several names without being split.
 
-bool tokenizeGridTemplateRows(std::string_view value,
-                              std::vector<GridTemplateToken>& out) {
-    out.clear();
-    std::size_t i = 0;
-    while (i < value.size()) {
-        while (i < value.size() &&
-               std::isspace(static_cast<unsigned char>(value[i]))) {
-            ++i;
-        }
-        if (i >= value.size()) {
-            break;
-        }
-        const char c = value[i];
-        if (c == '"' || c == '\'') {
-            const char quote = c;
-            ++i;
-            std::string text;
-            while (i < value.size() && value[i] != quote) {
-                if (value[i] == '\\' && i + 1 < value.size()) {
-                    text.push_back(value[i]);
-                    text.push_back(value[i + 1]);
-                    i += 2;
-                } else {
-                    text.push_back(value[i++]);
-                }
-            }
-            if (i >= value.size()) {
-                return false;
-            }
-            ++i;
-            out.push_back({GridTemplateToken::Kind::String, std::move(text)});
-        } else if (c == '[') {
-            const std::size_t start = i;
-            ++i;
-            while (i < value.size() && value[i] != ']') {
-                ++i;
-            }
-            if (i >= value.size()) {
-                return false;
-            }
-            ++i;
-            out.push_back({GridTemplateToken::Kind::Bracket,
-                           std::string(value.substr(start, i - start))});
-        } else {
-            const std::size_t start = i;
-            int depth = 0;
-            while (i < value.size()) {
-                const char d = value[i];
-                if (d == '(') {
-                    ++depth;
-                } else if (d == ')') {
-                    if (depth > 0) {
-                        --depth;
-                    }
-                }
-                if (depth == 0 &&
-                    (std::isspace(static_cast<unsigned char>(d)) || d == '[' ||
-                     d == '"' || d == '\'')) {
-                    break;
-                }
-                ++i;
-            }
-            if (i == start) {
-                return false;
-            }
-            out.push_back({GridTemplateToken::Kind::Word,
-                           std::string(value.substr(start, i - start))});
-        }
-    }
-    return true;
-}
 
 // Apply the `grid-template` shorthand. It resets all three longhands, so a
 // malformed value must not touch the style at all; every piece is parsed into
@@ -1930,9 +1995,11 @@ bool applyGridTemplateShorthand(ComputedStyle& s, std::string_view value) {
     }
     if (text == "none") {
         s.gridRows.clear();
+        s.gridRowLines.clear();
         s.gridRowsAutoFill = false;
         s.gridRowsAutoFit = false;
         s.gridColumns.clear();
+        s.gridColumnLines.clear();
         s.gridColumnsAutoFill = false;
         s.gridColumnsAutoFit = false;
         s.gridTemplateAreas.clear();
@@ -1959,23 +2026,25 @@ bool applyGridTemplateShorthand(ComputedStyle& s, std::string_view value) {
             rowsText == "none" || columnsText == "none") {
             return false;
         }
-        const std::string rowsClean = stripGridTemplateLineNames(rowsText);
-        const std::string columnsClean = stripGridTemplateLineNames(columnsText);
         bool rowsFill = false;
         bool rowsFit = false;
         bool columnsFill = false;
         bool columnsFit = false;
+        std::vector<std::vector<std::string>> rowLines;
+        std::vector<std::vector<std::string>> columnLines;
         std::vector<ComputedStyle::GridTrack> rows =
-            parseGridTrackList(rowsClean, &rowsFill, &rowsFit);
+            parseGridTrackList(rowsText, &rowsFill, &rowsFit, &rowLines);
         std::vector<ComputedStyle::GridTrack> columns =
-            parseGridTrackList(columnsClean, &columnsFill, &columnsFit);
+            parseGridTrackList(columnsText, &columnsFill, &columnsFit, &columnLines);
         if (rows.empty() || columns.empty()) {
             return false;
         }
         s.gridRows = std::move(rows);
+        s.gridRowLines = std::move(rowLines);
         s.gridRowsAutoFill = rowsFill;
         s.gridRowsAutoFit = rowsFit;
         s.gridColumns = std::move(columns);
+        s.gridColumnLines = std::move(columnLines);
         s.gridColumnsAutoFill = columnsFill;
         s.gridColumnsAutoFit = columnsFit;
         s.gridTemplateAreas.clear();
@@ -1990,40 +2059,38 @@ bool applyGridTemplateShorthand(ComputedStyle& s, std::string_view value) {
         return false;
     }
 
-    std::vector<GridTemplateToken> tokens;
-    if (!tokenizeGridTemplateRows(rowsText, tokens)) {
+    std::vector<GridListToken> tokens;
+    if (!tokenizeGridList(rowsText, tokens)) {
         return false;
     }
     std::vector<std::string> areaRows;
     std::vector<ComputedStyle::GridTrack> rows;
+    std::vector<std::vector<std::string>> rowLines{{}};
     for (std::size_t i = 0; i < tokens.size(); ++i) {
-        const GridTemplateToken& token = tokens[i];
-        if (token.kind == GridTemplateToken::Kind::Bracket) {
+        const GridListToken& token = tokens[i];
+        if (token.kind == GridListToken::Kind::Bracket) {
+            appendGridLineNames(token.text, rowLines.back());
             continue;
         }
-        if (token.kind != GridTemplateToken::Kind::String || token.text.empty()) {
+        if (token.kind != GridListToken::Kind::String || token.text.empty()) {
             return false;
         }
         areaRows.push_back(token.text);
         ComputedStyle::GridTrack row;
         row.isAuto = true;
         rows.push_back(row);
+        rowLines.emplace_back();
 
-        // The optional track size follows the string. Leading/trailing line-name
-        // groups are ignored; a word after one is still the row's size.
-        std::size_t next = i + 1;
-        while (next < tokens.size() &&
-               tokens[next].kind == GridTemplateToken::Kind::Bracket) {
-            ++next;
-        }
-        if (next < tokens.size() &&
-            tokens[next].kind == GridTemplateToken::Kind::Word) {
+        // The optional track size follows the string immediately. Bracket groups
+        // only name the line after the row, matching the grammar.
+        if (i + 1 < tokens.size() &&
+            tokens[i + 1].kind == GridListToken::Kind::Word) {
             ComputedStyle::GridTrack track;
-            if (!parseGridTrack(tokens[next].text, track)) {
+            if (!parseGridTrack(tokens[i + 1].text, track)) {
                 return false;
             }
             rows.back() = track;
-            i = next;
+            ++i;
         }
     }
     if (areaRows.empty()) {
@@ -2050,30 +2117,46 @@ bool applyGridTemplateShorthand(ComputedStyle& s, std::string_view value) {
     }
 
     std::vector<ComputedStyle::GridTrack> columns;
+    std::vector<std::vector<std::string>> columnLines;
     bool columnsFill = false;
     bool columnsFit = false;
     if (halves.size() == 2) {
         if (columnsText.empty() || columnsText == "none") {
             return false;
         }
-        const std::string columnsClean = stripGridTemplateLineNames(columnsText);
-        columns = parseGridTrackList(columnsClean, &columnsFill, &columnsFit);
+        columns = parseGridTrackList(columnsText, &columnsFill, &columnsFit,
+                                     &columnLines);
         if (columns.empty()) {
             return false;
         }
     }
     // Area strings determine the explicit column count even when the author did
     // not spell out a track list; missing tracks are content-sized.
-    while (columns.size() < areaColumns) {
-        ComputedStyle::GridTrack track;
-        track.isAuto = true;
-        columns.push_back(track);
+    if (columns.empty()) {
+        while (columns.size() < areaColumns) {
+            ComputedStyle::GridTrack track;
+            track.isAuto = true;
+            columns.push_back(track);
+        }
+        columnLines.assign(columns.size() + 1, {});
+    } else {
+        if (columnLines.size() != columns.size() + 1) {
+            columnLines.assign(columns.size() + 1, {});
+        }
+        while (columns.size() < areaColumns) {
+            ComputedStyle::GridTrack track;
+            track.isAuto = true;
+            columns.push_back(track);
+            columnLines.emplace_back();
+        }
     }
 
     s.gridRows = std::move(rows);
+    s.gridRowLines = std::move(rowLines);
     s.gridRowsAutoFill = false;
     s.gridRowsAutoFit = false;
     s.gridColumns = std::move(columns);
+    s.gridColumnLines = std::move(columnLines);
     s.gridColumnsAutoFill = columnsFill;
     s.gridColumnsAutoFit = columnsFit;
     s.gridTemplateAreas = std::move(areas);
@@ -4600,12 +4683,21 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
     } else if (property == "grid-template-columns") {
         s.gridColumnsAutoFill = false;
         s.gridColumnsAutoFit = false;
+        s.gridColumnLines.clear();
         s.gridColumns = parseGridTrackList(value, &s.gridColumnsAutoFill,
-                                          &s.gridColumnsAutoFit);
+                                          &s.gridColumnsAutoFit, &s.gridColumnLines);
+        if (s.gridColumns.empty()) {
+            s.gridColumnLines.clear();
+        }
     } else if (property == "grid-template-rows") {
         s.gridRowsAutoFill = false;
         s.gridRowsAutoFit = false;
-        s.gridRows = parseGridTrackList(value, &s.gridRowsAutoFill, &s.gridRowsAutoFit);
+        s.gridRowLines.clear();
+        s.gridRows = parseGridTrackList(value, &s.gridRowsAutoFill, &s.gridRowsAutoFit,
+                                        &s.gridRowLines);
+        if (s.gridRows.empty()) {
+            s.gridRowLines.clear();
+        }
     } else if (property == "grid-auto-rows") {
         ComputedStyle::GridTrack t;
         if (parseGridTrack(trim(value), t)) {
@@ -4637,133 +4729,265 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         parseGridTemplateAreas(value, s.gridTemplateAreas,
                                s.gridTemplateAreasColumns, s.gridTemplateAreasRows);
     } else if (property == "grid-column") {
-        // `grid-column: <start> / <end>` or `grid-column: span <n>`.
-        // Parse both halves so an explicit start line is captured.
+        // `grid-column: <start> / <end>` or `grid-column: span <line>`.
         s.gridColumnStart = 0;
-        s.gridColumnEnd   = 0;
-        s.gridColumnSpan  = 1;
+        s.gridColumnEnd = 0;
+        s.gridColumnSpan = 1;
+        s.gridColumnStartName.clear();
+        s.gridColumnEndName.clear();
+        s.gridColumnSpanName.clear();
+        s.gridColumnStartOccurrence = 1;
+        s.gridColumnEndOccurrence = 1;
         const std::size_t slash = value.find('/');
         if (slash != std::string_view::npos) {
-            const std::string_view startPart = value.substr(0, slash);
-            const std::string_view endPart   = value.substr(slash + 1);
-            int spanFromStart = 1;
-            parseGridLinePart(startPart, s.gridColumnStart, spanFromStart);
-            int spanFromEnd = 1;
-            parseGridLinePart(endPart,   s.gridColumnEnd,   spanFromEnd);
-            // Derive the canonical span.
-            if (s.gridColumnStart > 0 && s.gridColumnEnd > 0 &&
-                s.gridColumnEnd > s.gridColumnStart) {
+            const GridLineValue start = parseGridLine(value.substr(0, slash));
+            const GridLineValue end = parseGridLine(value.substr(slash + 1));
+            s.gridColumnStart = start.line;
+            s.gridColumnStartName = start.name;
+            s.gridColumnStartOccurrence = start.occurrence;
+            s.gridColumnEnd = end.line;
+            s.gridColumnEndName = end.name;
+            s.gridColumnEndOccurrence = end.occurrence;
+            if (start.span > 0) {
+                s.gridColumnSpan = start.span;
+            }
+            if (end.span > 0) {
+                s.gridColumnSpan = end.span;
+            }
+            if (!start.spanName.empty()) {
+                s.gridColumnSpanName = start.spanName;
+            }
+            if (!end.spanName.empty()) {
+                s.gridColumnSpanName = end.spanName;
+            }
+            if (s.gridColumnStart > 0 && s.gridColumnEnd > s.gridColumnStart) {
                 s.gridColumnSpan = s.gridColumnEnd - s.gridColumnStart;
-            } else if (s.gridColumnStart > 0 && s.gridColumnEnd == 0) {
-                s.gridColumnSpan = spanFromEnd;  // `2 / span 3` -> span 3 from line 2
-            } else if (s.gridColumnStart == 0 && s.gridColumnEnd > 0) {
-                s.gridColumnSpan = spanFromStart; // `span 2 / 4` -> span 2 ending at 4
-            } else {
-                s.gridColumnSpan = parseGridSpan(value);
             }
         } else {
-            // Single value: may be a bare line number or `span n`.
-            parseGridLinePart(value, s.gridColumnStart, s.gridColumnSpan);
+            const GridLineValue single = parseGridLine(value);
+            s.gridColumnStart = single.line;
+            s.gridColumnStartName = single.name;
+            s.gridColumnStartOccurrence = single.occurrence;
+            if (single.span > 0) {
+                s.gridColumnSpan = single.span;
+            }
+            if (!single.spanName.empty()) {
+                s.gridColumnSpanName = single.spanName;
+            }
         }
     } else if (property == "grid-column-start") {
-        int span = 1;
-        parseGridLinePart(value, s.gridColumnStart, span);
-        if (s.gridColumnStart == 0) {
-            s.gridColumnSpan = span;  // `span n` form: store in span, clear start
-        } else if (s.gridColumnEnd > s.gridColumnStart) {
+        s.gridColumnStart = 0;
+        s.gridColumnStartName.clear();
+        s.gridColumnStartOccurrence = 1;
+        const GridLineValue valueLine = parseGridLine(value);
+        s.gridColumnStart = valueLine.line;
+        s.gridColumnStartName = valueLine.name;
+        s.gridColumnStartOccurrence = valueLine.occurrence;
+        if (valueLine.span > 0) {
+            s.gridColumnSpan = valueLine.span;
+            s.gridColumnSpanName.clear();
+        }
+        if (!valueLine.spanName.empty()) {
+            s.gridColumnSpanName = valueLine.spanName;
+        }
+        if (s.gridColumnStart > 0 && s.gridColumnEnd > s.gridColumnStart) {
             s.gridColumnSpan = s.gridColumnEnd - s.gridColumnStart;
         }
     } else if (property == "grid-column-end") {
-        int span = 1;
-        parseGridLinePart(value, s.gridColumnEnd, span);
-        if (s.gridColumnEnd > 0 && s.gridColumnStart > 0 && s.gridColumnEnd > s.gridColumnStart) {
+        s.gridColumnEnd = 0;
+        s.gridColumnEndName.clear();
+        s.gridColumnEndOccurrence = 1;
+        const GridLineValue valueLine = parseGridLine(value);
+        s.gridColumnEnd = valueLine.line;
+        s.gridColumnEndName = valueLine.name;
+        s.gridColumnEndOccurrence = valueLine.occurrence;
+        if (valueLine.span > 0) {
+            s.gridColumnSpan = valueLine.span;
+            s.gridColumnSpanName.clear();
+        }
+        if (!valueLine.spanName.empty()) {
+            s.gridColumnSpanName = valueLine.spanName;
+        }
+        if (s.gridColumnStart > 0 && s.gridColumnEnd > s.gridColumnStart) {
             s.gridColumnSpan = s.gridColumnEnd - s.gridColumnStart;
         }
     } else if (property == "grid-row") {
         // Same logic as grid-column, mirrored for rows.
         s.gridRowStart = 0;
-        s.gridRowEnd   = 0;
-        s.gridRowSpan  = 1;
+        s.gridRowEnd = 0;
+        s.gridRowSpan = 1;
+        s.gridRowStartName.clear();
+        s.gridRowEndName.clear();
+        s.gridRowSpanName.clear();
+        s.gridRowStartOccurrence = 1;
+        s.gridRowEndOccurrence = 1;
         const std::size_t slash = value.find('/');
         if (slash != std::string_view::npos) {
-            const std::string_view startPart = value.substr(0, slash);
-            const std::string_view endPart   = value.substr(slash + 1);
-            int spanFromStart = 1;
-            parseGridLinePart(startPart, s.gridRowStart, spanFromStart);
-            int spanFromEnd = 1;
-            parseGridLinePart(endPart,   s.gridRowEnd,   spanFromEnd);
-            if (s.gridRowStart > 0 && s.gridRowEnd > 0 &&
-                s.gridRowEnd > s.gridRowStart) {
+            const GridLineValue start = parseGridLine(value.substr(0, slash));
+            const GridLineValue end = parseGridLine(value.substr(slash + 1));
+            s.gridRowStart = start.line;
+            s.gridRowStartName = start.name;
+            s.gridRowStartOccurrence = start.occurrence;
+            s.gridRowEnd = end.line;
+            s.gridRowEndName = end.name;
+            s.gridRowEndOccurrence = end.occurrence;
+            if (start.span > 0) {
+                s.gridRowSpan = start.span;
+            }
+            if (end.span > 0) {
+                s.gridRowSpan = end.span;
+            }
+            if (!start.spanName.empty()) {
+                s.gridRowSpanName = start.spanName;
+            }
+            if (!end.spanName.empty()) {
+                s.gridRowSpanName = end.spanName;
+            }
+            if (s.gridRowStart > 0 && s.gridRowEnd > s.gridRowStart) {
                 s.gridRowSpan = s.gridRowEnd - s.gridRowStart;
-            } else if (s.gridRowStart > 0 && s.gridRowEnd == 0) {
-                s.gridRowSpan = spanFromEnd;
-            } else if (s.gridRowStart == 0 && s.gridRowEnd > 0) {
-                s.gridRowSpan = spanFromStart;
-            } else {
-                s.gridRowSpan = parseGridSpan(value);
             }
         } else {
-            parseGridLinePart(value, s.gridRowStart, s.gridRowSpan);
+            const GridLineValue single = parseGridLine(value);
+            s.gridRowStart = single.line;
+            s.gridRowStartName = single.name;
+            s.gridRowStartOccurrence = single.occurrence;
+            if (single.span > 0) {
+                s.gridRowSpan = single.span;
+            }
+            if (!single.spanName.empty()) {
+                s.gridRowSpanName = single.spanName;
+            }
         }
     } else if (property == "grid-row-start") {
-        int span = 1;
-        parseGridLinePart(value, s.gridRowStart, span);
-        if (s.gridRowStart == 0) {
-            s.gridRowSpan = span;
-        } else if (s.gridRowEnd > s.gridRowStart) {
+        s.gridRowStart = 0;
+        s.gridRowStartName.clear();
+        s.gridRowStartOccurrence = 1;
+        const GridLineValue valueLine = parseGridLine(value);
+        s.gridRowStart = valueLine.line;
+        s.gridRowStartName = valueLine.name;
+        s.gridRowStartOccurrence = valueLine.occurrence;
+        if (valueLine.span > 0) {
+            s.gridRowSpan = valueLine.span;
+            s.gridRowSpanName.clear();
+        }
+        if (!valueLine.spanName.empty()) {
+            s.gridRowSpanName = valueLine.spanName;
+        }
+        if (s.gridRowStart > 0 && s.gridRowEnd > s.gridRowStart) {
             s.gridRowSpan = s.gridRowEnd - s.gridRowStart;
         }
     } else if (property == "grid-row-end") {
-        int span = 1;
-        parseGridLinePart(value, s.gridRowEnd, span);
-        if (s.gridRowEnd > 0 && s.gridRowStart > 0 && s.gridRowEnd > s.gridRowStart) {
+        s.gridRowEnd = 0;
+        s.gridRowEndName.clear();
+        s.gridRowEndOccurrence = 1;
+        const GridLineValue valueLine = parseGridLine(value);
+        s.gridRowEnd = valueLine.line;
+        s.gridRowEndName = valueLine.name;
+        s.gridRowEndOccurrence = valueLine.occurrence;
+        if (valueLine.span > 0) {
+            s.gridRowSpan = valueLine.span;
+            s.gridRowSpanName.clear();
+        }
+        if (!valueLine.spanName.empty()) {
+            s.gridRowSpanName = valueLine.spanName;
+        }
+        if (s.gridRowStart > 0 && s.gridRowEnd > s.gridRowStart) {
             s.gridRowSpan = s.gridRowEnd - s.gridRowStart;
         }
     } else if (property == "grid-area") {
-        // row-start / col-start / row-end / col-end; each part may be `span <n>` or a
-        // line number.
+        // row-start / col-start / row-end / col-end; each part may be a line
+        // number, a named line with an occurrence, or `span <n|name>`.
         s.gridColumnStart = 0; s.gridColumnEnd = 0; s.gridColumnSpan = 1;
-        s.gridRowStart    = 0; s.gridRowEnd    = 0; s.gridRowSpan    = 1;
+        s.gridRowStart = 0; s.gridRowEnd = 0; s.gridRowSpan = 1;
+        s.gridColumnStartName.clear(); s.gridColumnEndName.clear();
+        s.gridColumnSpanName.clear();
+        s.gridRowStartName.clear(); s.gridRowEndName.clear();
+        s.gridRowSpanName.clear();
+        s.gridColumnStartOccurrence = 1; s.gridColumnEndOccurrence = 1;
+        s.gridRowStartOccurrence = 1; s.gridRowEndOccurrence = 1;
+        s.gridAreaName.clear();
         const std::vector<std::string_view> parts = splitOnSlashes(value);
         if (parts.size() >= 4) {
-            // row-start
-            int rsSpan = 1;
-            parseGridLinePart(parts[0], s.gridRowStart, rsSpan);
-            // col-start
-            int csSpan = 1;
-            parseGridLinePart(parts[1], s.gridColumnStart, csSpan);
-            // row-end
-            int reSpan = 1;
-            parseGridLinePart(parts[2], s.gridRowEnd, reSpan);
-            // col-end
-            int ceSpan = 1;
-            parseGridLinePart(parts[3], s.gridColumnEnd, ceSpan);
-            // Derive spans from lines when both are explicit.
+            const GridLineValue rowStartValue = parseGridLine(parts[0]);
+            const GridLineValue colStartValue = parseGridLine(parts[1]);
+            const GridLineValue rowEndValue = parseGridLine(parts[2]);
+            const GridLineValue colEndValue = parseGridLine(parts[3]);
+            s.gridRowStart = rowStartValue.line;
+            s.gridRowStartName = rowStartValue.name;
+            s.gridRowStartOccurrence = rowStartValue.occurrence;
+            s.gridColumnStart = colStartValue.line;
+            s.gridColumnStartName = colStartValue.name;
+            s.gridColumnStartOccurrence = colStartValue.occurrence;
+            s.gridRowEnd = rowEndValue.line;
+            s.gridRowEndName = rowEndValue.name;
+            s.gridRowEndOccurrence = rowEndValue.occurrence;
+            s.gridColumnEnd = colEndValue.line;
+            s.gridColumnEndName = colEndValue.name;
+            s.gridColumnEndOccurrence = colEndValue.occurrence;
+            if (rowStartValue.span > 0) s.gridRowSpan = rowStartValue.span;
+            if (rowEndValue.span > 0) s.gridRowSpan = rowEndValue.span;
+            if (colStartValue.span > 0) s.gridColumnSpan = colStartValue.span;
+            if (colEndValue.span > 0) s.gridColumnSpan = colEndValue.span;
+            if (!rowStartValue.spanName.empty()) s.gridRowSpanName = rowStartValue.spanName;
+            if (!rowEndValue.spanName.empty()) s.gridRowSpanName = rowEndValue.spanName;
+            if (!colStartValue.spanName.empty()) s.gridColumnSpanName = colStartValue.spanName;
+            if (!colEndValue.spanName.empty()) s.gridColumnSpanName = colEndValue.spanName;
             if (s.gridRowStart > 0 && s.gridRowEnd > s.gridRowStart) {
                 s.gridRowSpan = s.gridRowEnd - s.gridRowStart;
-            } else {
-                s.gridRowSpan = (s.gridRowStart > 0) ? reSpan : rsSpan;
             }
             if (s.gridColumnStart > 0 && s.gridColumnEnd > s.gridColumnStart) {
                 s.gridColumnSpan = s.gridColumnEnd - s.gridColumnStart;
-            } else {
-                s.gridColumnSpan = (s.gridColumnStart > 0) ? ceSpan : csSpan;
+            }
+        } else if (parts.size() == 2 || parts.size() == 3) {
+            const GridLineValue rowStartValue = parseGridLine(parts[0]);
+            const GridLineValue colStartValue = parseGridLine(parts[1]);
+            s.gridRowStart = rowStartValue.line;
+            s.gridRowStartName = rowStartValue.name;
+            s.gridRowStartOccurrence = rowStartValue.occurrence;
+            s.gridColumnStart = colStartValue.line;
+            s.gridColumnStartName = colStartValue.name;
+            s.gridColumnStartOccurrence = colStartValue.occurrence;
+            if (rowStartValue.span > 0) s.gridRowSpan = rowStartValue.span;
+            if (colStartValue.span > 0) s.gridColumnSpan = colStartValue.span;
+            if (!rowStartValue.spanName.empty()) s.gridRowSpanName = rowStartValue.spanName;
+            if (!colStartValue.spanName.empty()) s.gridColumnSpanName = colStartValue.spanName;
+            if (parts.size() == 3) {
+                const GridLineValue rowEndValue = parseGridLine(parts[2]);
+                s.gridRowEnd = rowEndValue.line;
+                s.gridRowEndName = rowEndValue.name;
+                s.gridRowEndOccurrence = rowEndValue.occurrence;
+                if (rowEndValue.span > 0) s.gridRowSpan = rowEndValue.span;
+                if (!rowEndValue.spanName.empty()) s.gridRowSpanName = rowEndValue.spanName;
+                if (s.gridRowStart > 0 && s.gridRowEnd > s.gridRowStart) {
+                    s.gridRowSpan = s.gridRowEnd - s.gridRowStart;
+                }
             }
         } else if (parts.size() == 1) {
             const std::string_view trimmed = trim(value);
-            if (!trimmed.empty() && (std::isalpha(static_cast<unsigned char>(trimmed[0])) ||
-                                     trimmed[0] == '_' || trimmed[0] == '-')) {
-                if (trimmed.size() > 4 && trimmed.substr(0, 4) == "span") {
-                    parseGridLinePart(trimmed, s.gridRowStart, s.gridRowSpan);
-                    s.gridColumnStart = s.gridRowStart;
-                    s.gridColumnSpan  = s.gridRowSpan;
-                } else {
-                    s.gridAreaName = std::string(trimmed);
-                }
+            const bool spanForm = trimmed.size() > 4 &&
+                                  trimmed.substr(0, 4) == "span" &&
+                                  (trimmed.size() == 4 ||
+                                   std::isspace(static_cast<unsigned char>(trimmed[4])));
+            if (!trimmed.empty() && !spanForm && trimmed != "auto" &&
+                (std::isalpha(static_cast<unsigned char>(trimmed[0])) ||
+                 trimmed[0] == '_' || trimmed[0] == '-')) {
+                s.gridAreaName = std::string(trimmed);
             } else {
-                parseGridLinePart(trimmed, s.gridRowStart, s.gridRowSpan);
-                s.gridColumnStart = s.gridRowStart;
-                s.gridColumnSpan  = s.gridRowSpan;
+                const GridLineValue single = parseGridLine(trimmed);
+                s.gridRowStart = single.line;
+                s.gridRowStartName = single.name;
+                s.gridRowStartOccurrence = single.occurrence;
+                s.gridColumnStart = single.line;
+                s.gridColumnStartName = single.name;
+                s.gridColumnStartOccurrence = single.occurrence;
+                if (single.span > 0) {
+                    s.gridRowSpan = single.span;
+                    s.gridColumnSpan = single.span;
+                }
+                if (!single.spanName.empty()) {
+                    s.gridRowSpanName = single.spanName;
+                    s.gridColumnSpanName = single.spanName;
+                }
             }
         }
     } else if (property == "width") {
@@ -6964,19 +7188,48 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         return max;
     };
     auto gridTracks = [&](const std::vector<ComputedStyle::GridTrack>& tracks,
-                          bool autoFill, bool autoFit) {
+                          bool autoFill, bool autoFit,
+                          const std::vector<std::vector<std::string>>& lineNames) {
         std::string out;
-        for (const ComputedStyle::GridTrack& track : tracks) {
+        auto addLine = [&](std::size_t line) {
+            if (line >= lineNames.size() || lineNames[line].empty()) {
+                return;
+            }
             if (!out.empty()) {
                 out.push_back(' ');
             }
-            out += gridTrack(track);
+            out.push_back('[');
+            for (std::size_t i = 0; i < lineNames[line].size(); ++i) {
+                if (i > 0) {
+                    out.push_back(' ');
+                }
+                out += lineNames[line][i];
+            }
+            out.push_back(']');
+        };
+        for (std::size_t i = 0; i < tracks.size(); ++i) {
+            addLine(i);
+            if (!out.empty()) {
+                out.push_back(' ');
+            }
+            out += gridTrack(tracks[i]);
         }
+        addLine(tracks.size());
         if (autoFill) {
             out = "repeat(" + std::string(autoFit ? "auto-fit" : "auto-fill") + ", " +
                   out + ")";
         }
         return out;
+    };
+    auto gridLine = [](int line, const std::string& name, int occurrence) {
+        if (!name.empty()) {
+            std::string out = name;
+            if (occurrence != 1) {
+                out += " " + std::to_string(occurrence);
+            }
+            return out;
+        }
+        return line > 0 ? std::to_string(line) : std::string("auto");
     };
     // The quoted rows of `grid-template-areas` in authored order. The shorthand
     // read-back pairs each one with its row size.
@@ -7040,7 +7293,25 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
                 quotedGridRows(style.gridTemplateAreasRaw);
             if (!areaRows.empty()) {
                 std::string out;
+                auto addAreaLine = [&](std::size_t line) {
+                    if (line >= style.gridRowLines.size() ||
+                        style.gridRowLines[line].empty()) {
+                        return;
+                    }
+                    if (!out.empty()) {
+                        out.push_back(' ');
+                    }
+                    out.push_back('[');
+                    for (std::size_t i = 0; i < style.gridRowLines[line].size(); ++i) {
+                        if (i > 0) {
+                            out.push_back(' ');
+                        }
+                        out += style.gridRowLines[line][i];
+                    }
+                    out.push_back(']');
+                };
                 for (std::size_t i = 0; i < areaRows.size(); ++i) {
+                    addAreaLine(i);
                     if (!out.empty()) {
                         out.push_back(' ');
                     }
@@ -7051,9 +7322,10 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
                     out += i < style.gridRows.size() ? gridTrack(style.gridRows[i])
                                                     : "auto";
                 }
+                addAreaLine(areaRows.size());
                 std::string columns =
                     gridTracks(style.gridColumns, style.gridColumnsAutoFill,
-                               style.gridColumnsAutoFit);
+                               style.gridColumnsAutoFit, style.gridColumnLines);
                 if (columns.empty()) {
                     for (std::size_t i = 0; i < style.gridTemplateAreasColumns; ++i) {
                         if (!columns.empty()) {
@@ -7066,26 +7338,44 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
                 return out;
             }
         }
-        return gridTracks(style.gridRows, style.gridRowsAutoFill, style.gridRowsAutoFit) +
+        return gridTracks(style.gridRows, style.gridRowsAutoFill, style.gridRowsAutoFit,
+                          style.gridRowLines) +
                " / " +
                gridTracks(style.gridColumns, style.gridColumnsAutoFill,
-                          style.gridColumnsAutoFit);
+                          style.gridColumnsAutoFit, style.gridColumnLines);
     }
     if (property == "grid-template-columns" || property == "grid-template-rows") {
         const bool columns = property == "grid-template-columns";
         return columns ? gridTracks(style.gridColumns, style.gridColumnsAutoFill,
-                                    style.gridColumnsAutoFit)
+                                    style.gridColumnsAutoFit, style.gridColumnLines)
                        : gridTracks(style.gridRows, style.gridRowsAutoFill,
-                                    style.gridRowsAutoFit);
+                                    style.gridRowsAutoFit, style.gridRowLines);
     }
     if (property == "grid-column") {
-        if (style.gridColumnStart > 0 && style.gridColumnEnd > 0) {
-            return std::to_string(style.gridColumnStart) + " / " +
-                   std::to_string(style.gridColumnEnd);
+        const std::string start =
+            gridLine(style.gridColumnStart, style.gridColumnStartName,
+                     style.gridColumnStartOccurrence);
+        const std::string end =
+            gridLine(style.gridColumnEnd, style.gridColumnEndName,
+                     style.gridColumnEndOccurrence);
+        const bool hasStart =
+            style.gridColumnStart > 0 || !style.gridColumnStartName.empty();
+        const bool hasEnd =
+            style.gridColumnEnd > 0 || !style.gridColumnEndName.empty();
+        if (hasStart && hasEnd) {
+            return start + " / " + end;
         }
-        if (style.gridColumnStart > 0) {
-            return std::to_string(style.gridColumnStart) + " / span " +
-                   std::to_string(style.gridColumnSpan);
+        if (hasStart) {
+            return start + " / span " +
+                   (!style.gridColumnSpanName.empty()
+                        ? style.gridColumnSpanName
+                        : std::to_string(style.gridColumnSpan));
+        }
+        if (!style.gridColumnSpanName.empty()) {
+            return "span " + style.gridColumnSpanName;
+        }
+        if (hasEnd) {
+            return "auto / " + end;
         }
         if (style.gridColumnSpan > 1) {
             return "span " + std::to_string(style.gridColumnSpan);
@@ -7093,19 +7383,59 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         return "auto";
     }
     if (property == "grid-column-start") {
-        return style.gridColumnStart > 0 ? std::to_string(style.gridColumnStart) : "auto";
+        if (!style.gridColumnStartName.empty()) {
+            return gridLine(style.gridColumnStart, style.gridColumnStartName,
+                            style.gridColumnStartOccurrence);
+        }
+        if (style.gridColumnStart > 0) {
+            return std::to_string(style.gridColumnStart);
+        }
+        if (!style.gridColumnSpanName.empty()) {
+            return "span " + style.gridColumnSpanName;
+        }
+        if (style.gridColumnSpan > 1) {
+            return "span " + std::to_string(style.gridColumnSpan);
+        }
+        return "auto";
     }
     if (property == "grid-column-end") {
-        return style.gridColumnEnd > 0 ? std::to_string(style.gridColumnEnd) : "auto";
+        if (!style.gridColumnEndName.empty()) {
+            return gridLine(style.gridColumnEnd, style.gridColumnEndName,
+                            style.gridColumnEndOccurrence);
+        }
+        if (style.gridColumnEnd > 0) {
+            return std::to_string(style.gridColumnEnd);
+        }
+        if (!style.gridColumnSpanName.empty()) {
+            return "span " + style.gridColumnSpanName;
+        }
+        if (style.gridColumnSpan > 1) {
+            return "span " + std::to_string(style.gridColumnSpan);
+        }
+        return "auto";
     }
     if (property == "grid-row") {
-        if (style.gridRowStart > 0 && style.gridRowEnd > 0) {
-            return std::to_string(style.gridRowStart) + " / " +
-                   std::to_string(style.gridRowEnd);
+        const std::string start =
+            gridLine(style.gridRowStart, style.gridRowStartName,
+                     style.gridRowStartOccurrence);
+        const std::string end =
+            gridLine(style.gridRowEnd, style.gridRowEndName,
+                     style.gridRowEndOccurrence);
+        const bool hasStart = style.gridRowStart > 0 || !style.gridRowStartName.empty();
+        const bool hasEnd = style.gridRowEnd > 0 || !style.gridRowEndName.empty();
+        if (hasStart && hasEnd) {
+            return start + " / " + end;
         }
-        if (style.gridRowStart > 0) {
-            return std::to_string(style.gridRowStart) + " / span " +
-                   std::to_string(style.gridRowSpan);
+        if (hasStart) {
+            return start + " / span " +
+                   (!style.gridRowSpanName.empty() ? style.gridRowSpanName
+                                                  : std::to_string(style.gridRowSpan));
+        }
+        if (!style.gridRowSpanName.empty()) {
+            return "span " + style.gridRowSpanName;
+        }
+        if (hasEnd) {
+            return "auto / " + end;
         }
         if (style.gridRowSpan > 1) {
             return "span " + std::to_string(style.gridRowSpan);
@@ -7113,10 +7443,36 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         return "auto";
     }
     if (property == "grid-row-start") {
-        return style.gridRowStart > 0 ? std::to_string(style.gridRowStart) : "auto";
+        if (!style.gridRowStartName.empty()) {
+            return gridLine(style.gridRowStart, style.gridRowStartName,
+                            style.gridRowStartOccurrence);
+        }
+        if (style.gridRowStart > 0) {
+            return std::to_string(style.gridRowStart);
+        }
+        if (!style.gridRowSpanName.empty()) {
+            return "span " + style.gridRowSpanName;
+        }
+        if (style.gridRowSpan > 1) {
+            return "span " + std::to_string(style.gridRowSpan);
+        }
+        return "auto";
     }
     if (property == "grid-row-end") {
-        return style.gridRowEnd > 0 ? std::to_string(style.gridRowEnd) : "auto";
+        if (!style.gridRowEndName.empty()) {
+            return gridLine(style.gridRowEnd, style.gridRowEndName,
+                            style.gridRowEndOccurrence);
+        }
+        if (style.gridRowEnd > 0) {
+            return std::to_string(style.gridRowEnd);
+        }
+        if (!style.gridRowSpanName.empty()) {
+            return "span " + style.gridRowSpanName;
+        }
+        if (style.gridRowSpan > 1) {
+            return "span " + std::to_string(style.gridRowSpan);
+        }
+        return "auto";
     }
     if (property == "grid-template-areas") {
         if (!style.gridTemplateAreasRaw.empty()) {
@@ -7128,14 +7484,32 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         if (!style.gridAreaName.empty()) {
             return style.gridAreaName;
         }
-        if (style.gridRowStart > 0 || style.gridColumnStart > 0 ||
-            style.gridRowEnd > 0 || style.gridColumnEnd > 0) {
-            return std::to_string(std::max(1, style.gridRowStart)) + " / " +
-                   std::to_string(std::max(1, style.gridColumnStart)) + " / " +
-                   std::to_string(std::max(1, style.gridRowEnd)) + " / " +
-                   std::to_string(std::max(1, style.gridColumnEnd));
+        const bool hasStart =
+            style.gridRowStart > 0 || style.gridColumnStart > 0 ||
+            !style.gridRowStartName.empty() || !style.gridColumnStartName.empty();
+        const bool hasEnd =
+            style.gridRowEnd > 0 || style.gridColumnEnd > 0 ||
+            !style.gridRowEndName.empty() || !style.gridColumnEndName.empty();
+        if (!hasStart && !hasEnd) {
+            if (!style.gridRowSpanName.empty()) {
+                return "span " + style.gridRowSpanName;
+            }
+            if (style.gridRowSpan > 1) {
+                return "span " + std::to_string(style.gridRowSpan);
+            }
+            return "auto";
         }
-        return "auto";
+        return gridLine(style.gridRowStart, style.gridRowStartName,
+                        style.gridRowStartOccurrence) +
+               " / " +
+               gridLine(style.gridColumnStart, style.gridColumnStartName,
+                        style.gridColumnStartOccurrence) +
+               " / " +
+               gridLine(style.gridRowEnd, style.gridRowEndName,
+                        style.gridRowEndOccurrence) +
+               " / " +
+               gridLine(style.gridColumnEnd, style.gridColumnEndName,
+                        style.gridColumnEndOccurrence);
     }
     if (property == "grid-auto-rows") {
         if (!style.hasGridAutoRows) return "auto";
