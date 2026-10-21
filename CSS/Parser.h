@@ -94,16 +94,59 @@ struct Rule {
     std::vector<Declaration> declarations;
     std::size_t order = 0;  // source position, used as the final tiebreak
     std::vector<MediaQuery> media;
-    // A `@container` size query the rule was nested under. Inactive means none:
-    // only `min-width`/`max-width` in px (joined by `and`, with an optional
-    // name list) become rules; anything else is dropped at parse time.
+    // One `@container` condition the rule was nested under. The parser keeps a
+    // boolean tree so `and`, `or`, `not`, nested parentheses, size features,
+    // and `style()` features can all compose. `hasCondition` is false for a
+    // name-only query such as `@container sidebar { ... }`.
     struct ContainerQuery {
+        // Length units accepted in size features. `Cq*` values resolve against
+        // the queried container itself; the rest use its font, the root font,
+        // or the viewport.
+        enum class Unit : std::uint8_t {
+            Px,
+            Em,
+            Rem,
+            Vw,
+            Vh,
+            Cqw,
+            Cqh,
+            Cqi,
+            Cqb,
+            Cqmin,
+            Cqmax
+        };
+        enum class Comparison : std::uint8_t {
+            Less,
+            LessEqual,
+            Equal,
+            Greater,
+            GreaterEqual
+        };
+        struct Feature {
+            bool style = false;  // false: a width/height size feature
+            bool height = false;
+            Comparison comparison = Comparison::Equal;
+            Unit unit = Unit::Px;
+            float amount = 0.0f;
+            std::string property;  // style feature property
+            std::string value;     // style feature value; empty for boolean form
+        };
+        struct Node {
+            enum class Kind : std::uint8_t { Feature, And, Or, Not };
+            Kind kind = Kind::Feature;
+            Feature feature;
+            std::vector<Node> children;
+        };
+
         std::vector<std::string> names;
-        float minWidth = -1.0f;  // px, negative when absent
-        float maxWidth = -1.0f;  // px, negative when absent
+        Node condition;
+        bool hasCondition = false;
         bool active = false;
     };
-    ContainerQuery container;
+    // Outermost first. Nested `@container` at-rules each select their own
+    // nearest query container, so they are kept as separate conditions rather
+    // than merged into one.
+    std::vector<ContainerQuery> containers;
     // True once any declaration is a custom property (`--name`) or references one
     // (`var(...)`). Computed by the resolver when the rule is registered, so a
     // rule built by hand does not silently miss the custom-property path.

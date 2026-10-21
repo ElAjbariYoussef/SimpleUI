@@ -223,9 +223,15 @@ private:
     int layerRank(const std::string& layer, bool important) const;
     void sortRulesNormal();
     void rebuildImportantOrder();
-    // Whether a rule under `@container` reads the nearest query container
-    // ancestor's laid-out content width. Const because `resolve()` is.
+    // Whether all `@container` conditions on a rule hold for the nearest
+    // eligible ancestor of `element`. Const because `resolve()` is.
+    bool containersMatch(const Rule& rule, Element& element) const;
     bool containerMatches(const Rule::ContainerQuery& query, Element& element) const;
+    bool containerConditionMatches(const Rule::ContainerQuery::Node& node,
+                                   Element& container,
+                                   const ComputedStyle& style) const;
+    bool styleFeatureMatches(const Rule::ContainerQuery::Feature& feature,
+                             const ComputedStyle& style) const;
 
     // Runs every transition and keyframe animation for `element` into `style`,
     // which must still hold the raw computed values. Called at the end of

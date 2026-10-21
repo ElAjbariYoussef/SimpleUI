@@ -2540,6 +2540,7 @@ void testContainerQueries() {
     // Queries read laid-out widths, so each case lays out before resolving.
     const auto colorOf = [&](Element& el, const char* css) {
         sui::StyleResolver resolver;
+        resolver.setViewportSize(400.0f, 600.0f);
         resolver.setRules(sui::CSSParser::parse(css));
         layoutRoot(*document, resolver, 400.0f);
         return resolver.resolve(el).color;
@@ -2611,20 +2612,215 @@ void testContainerQueries() {
                                    " (max-width:200px){ #box{color:#00ff00} }")),
           "an and-chain misses outside either bound");
 
-    // Only px lengths query: anything else drops the block, as do style
-    // queries and garbage.
+    // Length units other than px resolve against the right context: the
+    // container's font (`em`), the root font (`rem`), the viewport (`vw`/`vh`),
+    // or the queried container itself (`cq*`).
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;font-size:20px;"
+                                      "container-type:inline-size} #box{color:#ff0000}"
+                                      " @container (min-width:14em){ #box{color:#00ff00} }")),
+          "an em query uses the container font size");
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;font-size:20px;"
+                               "container-type:inline-size} #box{color:#ff0000}"
+                               " @container (min-width:16em){ #box{color:#00ff00} }")),
+          "an em query misses past its resolved bound");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+                                      " #box{color:#ff0000}"
+                                      " @container (min-width:18rem){ #box{color:#00ff00} }")),
+          "a rem query uses the root font size");
     check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
-                                   " #box{color:#ff0000}"
-                                   " @container (min-width:10em){ #box{color:#00ff00} }")),
-          "a non-px query drops its block");
+                               " #box{color:#ff0000}"
+                               " @container (min-width:19rem){ #box{color:#00ff00} }")),
+          "a rem query misses past its resolved bound");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+                                      " #box{color:#ff0000}"
+                                      " @container (min-width:50vw){ #box{color:#00ff00} }")),
+          "a viewport-width query uses the viewport");
     check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
-                                   " #box{color:#ff0000}"
-                                   " @container style(color:#ff0000){ #box{color:#00ff00} }")),
-          "a style query drops its block");
+                               " #box{color:#ff0000}"
+                               " @container (min-width:100vw){ #box{color:#00ff00} }")),
+          "a viewport-width query misses past the viewport");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;height:100px;"
+                                      "container-type:size} #box{color:#ff0000}"
+                                      " @container (min-height:10vh){ #box{color:#00ff00} }")),
+          "a viewport-height query uses the viewport");
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;height:100px;"
+                               "container-type:size} #box{color:#ff0000}"
+                               " @container (min-height:20vh){ #box{color:#00ff00} }")),
+          "a viewport-height query misses past the viewport");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+                                      " #box{color:#ff0000}"
+                                      " @container (min-width:50cqw){ #box{color:#00ff00} }")),
+          "a cqw query uses the container width");
     check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
-                                   " #box{color:#ff0000}"
-                                   " @container (color:#ff0000){ #box{color:#00ff00} }")),
-          "a non-width feature drops its block");
+                               " #box{color:#ff0000}"
+                               " @container (min-width:101cqw){ #box{color:#00ff00} }")),
+          "a cqw query misses past the container width");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;height:200px;"
+                                      "container-type:size} #box{color:#ff0000}"
+                                      " @container (min-height:75cqh){ #box{color:#00ff00} }")),
+          "a cqh query uses the container height");
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;height:200px;"
+                               "container-type:size} #box{color:#ff0000}"
+                               " @container (min-height:150cqh){ #box{color:#00ff00} }")),
+          "a cqh query misses past the container height");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;height:200px;"
+                                      "container-type:size} #box{color:#ff0000}"
+                                      " @container (min-width:150cqmin){ #box{color:#00ff00} }")),
+          "a cqmin query uses the smaller container axis");
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;height:200px;"
+                               "container-type:size} #box{color:#ff0000}"
+                               " @container (min-width:200cqmin){ #box{color:#00ff00} }")),
+          "a cqmin query misses past the smaller axis");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;height:200px;"
+                                      "container-type:size} #box{color:#ff0000}"
+                                      " @container (min-width:100cqmax){ #box{color:#00ff00} }")),
+          "a cqmax query uses the larger container axis");
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;height:200px;"
+                               "container-type:size} #box{color:#ff0000}"
+                               " @container (min-width:120cqmax){ #box{color:#00ff00} }")),
+          "a cqmax query misses past the larger axis");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;height:200px;"
+                                      "container-type:size} #box{color:#ff0000}"
+                                      " @container (min-width:50cqi){ #box{color:#00ff00} }")),
+          "a cqi query uses the inline container size");
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;height:200px;"
+                               "container-type:size} #box{color:#ff0000}"
+                               " @container (min-width:150cqi){ #box{color:#00ff00} }")),
+          "a cqi query misses past the inline size");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;height:200px;"
+                                      "container-type:size} #box{color:#ff0000}"
+                                      " @container (min-height:50cqb){ #box{color:#00ff00} }")),
+          "a cqb query uses the block container size");
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;height:200px;"
+                               "container-type:size} #box{color:#ff0000}"
+                               " @container (min-height:150cqb){ #box{color:#00ff00} }")),
+          "a cqb query misses past the block size");
+
+    // Range syntax, boolean operators, and nested parentheses.
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+                                      " #box{color:#ff0000}"
+                                      " @container (200px < width < 400px){ #box{color:#00ff00} }")),
+          "a two-sided range matches between its bounds");
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+                               " #box{color:#ff0000}"
+                               " @container (300px < width < 400px){ #box{color:#00ff00} }")),
+          "a strict range excludes its open bound");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+                                      " #box{color:#ff0000}"
+                                      " @container (min-width:1000px) or (max-width:400px){"
+                                      " #box{color:#00ff00} }")),
+          "or matches either branch");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+                                      " #box{color:#ff0000}"
+                                      " @container not (min-width:400px){ #box{color:#00ff00} }")),
+          "not negates a feature");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+                                      " #box{color:#ff0000}"
+                                      " @container ((min-width:100px) and (max-width:400px)){"
+                                      " #box{color:#00ff00} }")),
+          "nested parentheses keep an and branch");
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+                               " #box{color:#ff0000}"
+                               " @container ((min-width:100px) and (max-width:200px)){"
+                               " #box{color:#00ff00} }")),
+          "a false nested branch does not match");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;container-type:inline-size}"
+                                      " #box{color:#ff0000}"
+                                      " @container (min-width:1000px) and (max-width:200px)"
+                                      " or (min-width:200px){ #box{color:#00ff00} }")),
+          "and binds tighter than or");
+
+    // Heights need `container-type: size`; inline-size only exposes the width.
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;height:100px;"
+                                      "container-type:size} #box{color:#ff0000}"
+                                      " @container (min-height:80px){ #box{color:#00ff00} }")),
+          "a size container answers height queries");
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;height:100px;"
+                               "container-type:size} #box{color:#ff0000}"
+                               " @container (min-height:120px){ #box{color:#00ff00} }")),
+          "a size container rejects an unmet height bound");
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{width:300px;height:100px;"
+                               "container-type:inline-size} #box{color:#ff0000}"
+                               " @container (min-height:10px){ #box{color:#00ff00} }")),
+          "an inline-size container cannot answer height queries");
+
+    // Style queries read the nearest ancestor's computed style; every element
+    // is a style container, so no container-type is required.
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{--theme:dark;color:#ff0000}"
+                                      " #box{color:#ff0000}"
+                                      " @container style(--theme:dark){ #box{color:#00ff00} }")),
+          "a style query matches a custom property");
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{--theme:light;color:#ff0000}"
+                               " #box{color:#ff0000}"
+                               " @container style(--theme:dark){ #box{color:#00ff00} }")),
+          "a style query rejects a different custom value");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{color:#ff0000}"
+                                      " #box{color:#ff0000}"
+                                      " @container style(color:red){ #box{color:#00ff00} }")),
+          "a style query canonicalises a named colour");
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{color:#ff0000}"
+                               " #box{color:#ff0000}"
+                               " @container style(color:not-a-colour){ #box{color:#00ff00} }")),
+          "a style query rejects an invalid declaration value");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{color:#ff0000}"
+                                      " #box{color:#ff0000}"
+                                      " @container style(color:#ff0000){ #box{color:#00ff00} }")),
+          "a style query compares a computed declaration");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{--theme:dark;color:#ff0000}"
+                                      " #box{color:#ff0000}"
+                                      " @container style(--theme){ #box{color:#00ff00} }")),
+          "a boolean style query tests custom-property presence");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{color:#ff0000}"
+                                      " #box{color:#ff0000}"
+                                      " @container not style(--theme:dark){ #box{color:#00ff00} }")),
+          "not negates a style feature");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{width:300px;--theme:dark;"
+                                      "container-type:inline-size} #box{color:#ff0000}"
+                                      " @container (min-width:200px) and style(--theme:dark){"
+                                      " #box{color:#00ff00} }")),
+          "size and style features compose");
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{color:#ff0000}"
+                                      " #box{color:#ff0000}"
+                                      " @container style((color:#ff0000) or (color:#00ff00)){"
+                                      " #box{color:#00ff00} }")),
+          "style() accepts its own boolean condition");
+
+    // A name-only query selects named descendants without a size feature.
+    check(isGreen(colorOf(*box, "body{margin:0} #wrap{container-name:card}"
+                                      " #box{color:#ff0000}"
+                                      " @container card { #box{color:#00ff00} }")),
+          "a name-only query matches a named container");
+    check(isRed(colorOf(*box, "body{margin:0} #wrap{container-name:card}"
+                               " #box{color:#ff0000}"
+                               " @container other { #box{color:#00ff00} }")),
+          "a name-only query misses another name");
+
+    // Nested `@container` blocks may target different containers; each
+    // condition selects its own nearest ancestor rather than merging names.
+    check(isGreen(colorOf(*deep, "body{margin:0} #outer{width:500px;height:200px;"
+                                       "container-type:inline-size;container-name:outer}"
+                                       " #inner{width:200px;container-type:inline-size;"
+                                       "container-name:inner} #deep{color:#ff0000}"
+                                       " @container outer (min-width:400px){"
+                                       " @container inner (min-width:100px){"
+                                       " #deep{color:#00ff00} } }")),
+          "nested queries read their own containers");
+    check(isRed(colorOf(*deep, "body{margin:0} #outer{width:500px;height:200px;"
+                               "container-type:inline-size;container-name:outer}"
+                               " #inner{width:200px;container-type:inline-size;"
+                               "container-name:inner} #deep{color:#ff0000}"
+                               " @container outer (min-width:400px){"
+                               " @container inner (min-width:300px){"
+                               " #deep{color:#00ff00} } }")),
+          "a false inner nested query keeps the deeper rule off");
+    check(isRed(colorOf(*deep, "body{margin:0} #outer{width:500px;height:200px;"
+                               "container-type:inline-size;container-name:outer}"
+                               " #inner{width:200px;container-type:inline-size;"
+                               "container-name:inner} #deep{color:#ff0000}"
+                               " @container outer (min-width:600px){"
+                               " @container inner (min-width:100px){"
+                               " #deep{color:#00ff00} } }")),
+          "a false outer nested query keeps the deeper rule off");
 
     // A query inside `@media` needs both to hold.
     {
@@ -2653,17 +2849,122 @@ void testContainerQueries() {
               "the shorthand sets the name");
     }
 
-    // The rule carries its query for the resolver to evaluate.
+    // The rule carries its query tree for the resolver to evaluate.
     const auto rules = sui::CSSParser::parse(
         "@container sidebar (min-width:100px){ div{color:#00ff00} }");
-    check(rules.size() == 1 && rules[0].container.active,
+    check(rules.size() == 1 && !rules[0].containers.empty(),
           "a query block produces an active query rule");
-    if (rules.size() == 1) {
-        check(rules[0].container.names.size() == 1 &&
-                  rules[0].container.names[0] == "sidebar",
+    if (rules.size() == 1 && !rules[0].containers.empty()) {
+        const auto& query = rules[0].containers.front();
+        check(query.names.size() == 1 && query.names[0] == "sidebar",
               "the query keeps its name");
-        check(rules[0].container.minWidth == 100.0f,
-              "the query keeps its bound");
+        check(query.hasCondition &&
+                  query.condition.kind ==
+                      sui::Rule::ContainerQuery::Node::Kind::Feature,
+              "the query keeps one size feature");
+        const auto& feature = query.condition.feature;
+        check(!feature.style && !feature.height &&
+                  feature.comparison ==
+                      sui::Rule::ContainerQuery::Comparison::GreaterEqual &&
+                  feature.unit == sui::Rule::ContainerQuery::Unit::Px &&
+                  feature.amount == 100.0f,
+              "the query keeps its axis, comparison, unit, and bound");
+    }
+
+    // Boolean nesting, style features, and non-px units all survive parsing.
+    const auto complex = sui::CSSParser::parse(
+        "@container card ((width >= 10em) or style(--theme: dark))"
+        " and (height > 20vh){ div{color:#00ff00} }");
+    check(complex.size() == 1 && !complex[0].containers.empty(),
+          "a complex query produces a rule");
+    if (complex.size() == 1 && !complex[0].containers.empty()) {
+        const auto& query = complex[0].containers.front();
+        check(query.names.size() == 1 && query.names[0] == "card",
+              "a complex query keeps its name");
+        check(query.condition.kind ==
+                  sui::Rule::ContainerQuery::Node::Kind::And &&
+                  query.condition.children.size() == 2,
+              "and binds the two halves of a complex query");
+        const auto& either = query.condition.children[0];
+        check(either.kind == sui::Rule::ContainerQuery::Node::Kind::Or &&
+                  either.children.size() == 2,
+              "parentheses keep an or branch");
+        const auto& width = either.children[0].feature;
+        check(!width.style && !width.height &&
+                  width.unit == sui::Rule::ContainerQuery::Unit::Em &&
+                  width.amount == 10.0f &&
+                  width.comparison ==
+                      sui::Rule::ContainerQuery::Comparison::GreaterEqual,
+              "a range feature keeps its em bound");
+        const auto& theme = either.children[1].feature;
+        check(theme.style && theme.property == "--theme" &&
+                  theme.value == "dark",
+              "a style feature keeps its property and value");
+        const auto& height = query.condition.children[1].feature;
+        check(!height.style && height.height &&
+                  height.unit == sui::Rule::ContainerQuery::Unit::Vh &&
+                  height.amount == 20.0f &&
+                  height.comparison ==
+                      sui::Rule::ContainerQuery::Comparison::Greater,
+              "a height feature keeps its vh bound");
+    }
+
+    // A name alone is a valid query and needs no feature.
+    const auto nameOnly = sui::CSSParser::parse(
+        "@container sidebar { div{color:#00ff00} }");
+    check(nameOnly.size() == 1 && !nameOnly[0].containers.empty() &&
+              !nameOnly[0].containers.front().hasCondition &&
+              nameOnly[0].containers.front().names.size() == 1,
+          "a name-only query keeps its name and no condition");
+
+    // A fresh tree has no prior height to read: the multipass layout has to
+    // finish a pass, then re-evaluate the height query with that geometry.
+    {
+        auto fresh = parseOrNull(
+            "<sui><body><div id=\"wrap\"><div id=\"box\">hi</div></div>"
+            "</body></sui>");
+        if (!fresh) {
+            return;
+        }
+        Element* freshBox = fresh->getElementById("box");
+        check(freshBox != nullptr, "fresh height box found");
+        if (!freshBox) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #wrap{height:100px;container-type:size}"
+            " #box{color:#ff0000}"
+            " @container (min-height:80px){ #box{color:#00ff00} }"));
+        layoutRoot(*fresh, resolver, 400.0f);
+        check(isGreen(resolver.resolve(*freshBox).color),
+              "a fresh tree settles a height query");
+    }
+
+    // Height queries can feed another pass: the first query grows the only
+    // child, which changes the container height enough to satisfy the second
+    // query. A width-only settled check would stop before the second pass.
+    {
+        auto fresh = parseOrNull(
+            "<sui><body><div id=\"wrap\"><div id=\"a\">hi</div></div>"
+            "</body></sui>");
+        if (!fresh) {
+            return;
+        }
+        Element* a = fresh->getElementById("a");
+        check(a != nullptr, "fresh reflow box found");
+        if (!a) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #wrap{container-type:size}"
+            " #a{height:200px}"
+            " @container (min-height:150px){ #a{height:300px} }"
+            " @container (min-height:250px){ #a{height:400px} }"));
+        layoutRoot(*fresh, resolver, 400.0f);
+        check(std::fabs(a->layoutHeight() - 400.0f) < 0.5f,
+              "height changes feed another container-query pass");
     }
 
     // Layout and paint agree: a matched display rule hides the box it laid

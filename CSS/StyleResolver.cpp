@@ -7070,20 +7070,40 @@ int StyleResolver::specificityOf(const SimpleSelector& selector) {
     return selectorRank(selector);
 }
 
+bool StyleResolver::containersMatch(const Rule& rule, Element& element) const {
+    for (const Rule::ContainerQuery& query : rule.containers) {
+        if (!containerMatches(query, element)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool StyleResolver::containerMatches(const Rule::ContainerQuery& query,
                                      Element& element) const {
-    // The nearest ancestor that establishes a query container — named when the
-    // query names names — read at its laid-out content width. Only widths are
-    // queried: heights settle bottom-up, so they are never final while a pass
-    // is still resolving. An ancestor without a box (`display:none`) is not a
-    // container; with no container at all the query never matches.
+    // Size features need an ancestor with `container-type: inline-size` or
+    // `size`; height features additionally need `size`. Style-only and
+    // name-only queries can use every element, because normal containers still
+    // expose computed styles. Names filter the candidate set before the
+    // nearest one is chosen.
+    const auto needsSize = [&](const auto& self,
+                               const Rule::ContainerQuery::Node& node) -> bool {
+        if (node.kind == Rule::ContainerQuery::Node::Kind::Feature) {
+            return !node.feature.style;
+        }
+        for (const auto& child : node.children) {
+            if (self(self, child)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const bool sizeQuery = query.hasCondition && needsSize(needsSize, query.condition);
+
     for (Element* ancestor = element.parent(); ancestor;
          ancestor = ancestor->parent()) {
         const ComputedStyle cs = resolve(*ancestor);
         if (cs.display == ComputedStyle::None) {
-            continue;
-        }
-        if (cs.containerType == ComputedStyle::ContainerNormal) {
             continue;
         }
         if (!query.names.empty()) {
@@ -7099,16 +7119,159 @@ bool StyleResolver::containerMatches(const Rule::ContainerQuery& query,
                 continue;
             }
         }
-        const float width = ancestor->contentWidth();
-        if (query.minWidth >= 0.0f && width < query.minWidth) {
+        if (sizeQuery && cs.containerType == ComputedStyle::ContainerNormal) {
+            continue;
+        }
+        if (!query.hasCondition) {
+            return true;
+        }
+        return containerConditionMatches(query.condition, *ancestor, cs);
+    }
+    return false;
+}
+
+bool StyleResolver::containerConditionMatches(
+    const Rule::ContainerQuery::Node& node, Element& container,
+    const ComputedStyle& style) const {
+    using Node = Rule::ContainerQuery::Node;
+    if (node.kind == Node::Kind::Feature) {
+        const Rule::ContainerQuery::Feature& feature = node.feature;
+        if (feature.style) {
+            return styleFeatureMatches(feature, style);
+        }
+        // `container-type: inline-size` only exposes the inline axis. A block
+        // size feature is unsupported there, not silently compared to zero.
+        if (feature.height && style.containerType != ComputedStyle::ContainerSize) {
             return false;
         }
-        if (query.maxWidth >= 0.0f && width > query.maxWidth) {
-            return false;
+        float value = feature.amount;
+        const float width = container.contentWidth();
+        const float height = container.contentHeight();
+        switch (feature.unit) {
+            case Rule::ContainerQuery::Unit::Px: break;
+            case Rule::ContainerQuery::Unit::Em:
+                value = feature.amount * style.fontSize;
+                break;
+            case Rule::ContainerQuery::Unit::Rem:
+                value = feature.amount * rootFontSize();
+                break;
+            case Rule::ContainerQuery::Unit::Vw:
+                value = feature.amount * viewportWidth_ / 100.0f;
+                break;
+            case Rule::ContainerQuery::Unit::Vh:
+                value = feature.amount * viewportHeight_ / 100.0f;
+                break;
+            case Rule::ContainerQuery::Unit::Cqw:
+            case Rule::ContainerQuery::Unit::Cqi:
+                value = feature.amount * width / 100.0f;
+                break;
+            case Rule::ContainerQuery::Unit::Cqh:
+            case Rule::ContainerQuery::Unit::Cqb:
+                value = feature.amount * height / 100.0f;
+                break;
+            case Rule::ContainerQuery::Unit::Cqmin:
+                value = feature.amount * std::min(width, height) / 100.0f;
+                break;
+            case Rule::ContainerQuery::Unit::Cqmax:
+                value = feature.amount * std::max(width, height) / 100.0f;
+                break;
+        }
+        // Read the container's laid-out box after resolving the unit: `cq*`
+        // units use the same width/height as the comparison.
+        const float actual = feature.height ? height : width;
+        switch (feature.comparison) {
+            case Rule::ContainerQuery::Comparison::Less:
+                return actual < value;
+            case Rule::ContainerQuery::Comparison::LessEqual:
+                return actual <= value;
+            case Rule::ContainerQuery::Comparison::Equal:
+                return std::fabs(actual - value) < 0.001f;
+            case Rule::ContainerQuery::Comparison::Greater:
+                return actual > value;
+            case Rule::ContainerQuery::Comparison::GreaterEqual:
+                return actual >= value;
+        }
+        return false;
+    }
+    if (node.kind == Node::Kind::Not) {
+        return node.children.empty() ||
+               !containerConditionMatches(node.children.front(), container, style);
+    }
+    if (node.kind == Node::Kind::And) {
+        for (const auto& child : node.children) {
+            if (!containerConditionMatches(child, container, style)) {
+                return false;
+            }
         }
         return true;
     }
+    for (const auto& child : node.children) {
+        if (containerConditionMatches(child, container, style)) {
+            return true;
+        }
+    }
     return false;
+}
+
+bool StyleResolver::styleFeatureMatches(
+    const Rule::ContainerQuery::Feature& feature,
+    const ComputedStyle& style) const {
+    const std::string property(feature.property);
+    // Style queries ignore `!important`; the cascade has already settled the
+    // container's value, so only the value tokens matter.
+    std::string queryValue = feature.value;
+    std::string_view value = trim(queryValue);
+    constexpr std::string_view kImportant = "!important";
+    if (value.size() >= kImportant.size() &&
+        value.substr(value.size() - kImportant.size()) == kImportant) {
+        value = trim(value.substr(0, value.size() - kImportant.size()));
+    }
+
+    if (isCustomProperty(property)) {
+        const auto found = style.custom.find(property);
+        if (found == style.custom.end()) {
+            return false;
+        }
+        const std::string_view actual = trim(found->second);
+        if (value.empty()) {
+            return !actual.empty() && actual != "initial";
+        }
+        return actual == value;
+    }
+
+    const std::string actual = propertyValue(style, property);
+    if (actual.empty()) {
+        return false;
+    }
+    if (value.empty()) {
+        // Boolean feature: true when the computed value differs from the
+        // property's initial value.
+        return actual != propertyValue(ComputedStyle{}, property);
+    }
+
+    // Reject properties or values the engine does not understand before
+    // canonicalising. Without this an invalid value would leave the probe
+    // untouched and compare equal to the container's current value.
+    if (!supportsDeclaration(property, value)) {
+        return false;
+    }
+    // Canonicalise the query value the same way declarations are parsed, then
+    // compare serially. Starting from the container's style keeps its other
+    // computed fields available while the one property is overwritten.
+    ComputedStyle probe = style;
+    Declaration declaration{property, std::string(value), false};
+    probingDeclarationSupport = true;
+    probedUnknownProperty = false;
+    applyDeclaration(probe, declaration, 16.0f);
+    probingDeclarationSupport = false;
+    if (probedUnknownProperty) {
+        return false;
+    }
+    const std::string wanted = propertyValue(probe, property);
+    if (wanted.empty()) {
+        return false;
+    }
+    return actual == wanted;
 }
 
 void StyleResolver::noteLayer(const std::string& name) {
@@ -7185,7 +7348,7 @@ void StyleResolver::setRules(std::vector<Rule> rules) {
     hasFirstLetterRules_ = false;
     for (const Rule& rule : rules_) {
         noteLayer(rule.layer);
-        if (rule.container.active) {
+        if (!rule.containers.empty()) {
             anyContainerRules_ = true;
         }
         for (const Selector& part : rule.selector.parts) {
@@ -7206,7 +7369,7 @@ void StyleResolver::setRules(std::vector<Rule> rules) {
 void StyleResolver::addRule(Rule rule) {
     noteCustomUsage(rule);
     noteLayer(rule.layer);
-    if (rule.container.active) {
+    if (!rule.containers.empty()) {
         anyContainerRules_ = true;
     }
     rules_.push_back(std::move(rule));
@@ -7222,7 +7385,7 @@ void StyleResolver::eraseRule(std::size_t index) {
     rules_.erase(rules_.begin() + static_cast<std::ptrdiff_t>(index));
     anyContainerRules_ = false;
     for (const Rule& rule : rules_) {
-        if (rule.container.active) {
+        if (!rule.containers.empty()) {
             anyContainerRules_ = true;
             break;
         }
@@ -9936,7 +10099,7 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
                 !mediaMatches(rule.media, viewportWidth_, viewportHeight_, systemDark_)) {
                 return;
             }
-            if (rule.container.active && !containerMatches(rule.container, element)) {
+            if (!containersMatch(rule, element)) {
                 return;
             }
             if (!selectorMatches(rule.selector, element, &state_)) {
@@ -10001,7 +10164,7 @@ ComputedStyle StyleResolver::resolveWithParent(Element& element,
                 !mediaMatches(rule.media, viewportWidth_, viewportHeight_, systemDark_)) {
                 return;
             }
-            if (rule.container.active && !containerMatches(rule.container, element)) {
+            if (!containersMatch(rule, element)) {
                 return;
             }
             if (!selectorMatches(rule.selector, element, &state_)) {
@@ -10575,7 +10738,7 @@ PseudoFont StyleResolver::pseudoFont(Element& element, std::string_view pseudo,
             !mediaMatches(rule.media, viewportWidth_, viewportHeight_, systemDark_)) {
             continue;
         }
-        if (rule.container.active && !containerMatches(rule.container, element)) {
+        if (!containersMatch(rule, element)) {
             continue;
         }
         // The prefix selects the box; the pseudo part only names the pseudo.
@@ -10757,7 +10920,7 @@ SelectionColors StyleResolver::pseudoColors(Element& element,
             !mediaMatches(rule.media, viewportWidth_, viewportHeight_, systemDark_)) {
             continue;
         }
-        if (rule.container.active && !containerMatches(rule.container, element)) {
+        if (!containersMatch(rule, element)) {
             continue;
         }
         // The prefix selects the highlight's owner; the pseudo-element part

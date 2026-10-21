@@ -4856,14 +4856,16 @@ ScrollExtent measureScrollExtents(Element& el, const StyleResolver& resolver) {
     return {right, bottom};
 }
 
-// Every laid-out width in one number, so a multipass layout can tell a settled
-// tree apart from one whose container queries are still moving boxes. The walk
-// is deterministic, so equal trees sum equal.
-double layoutWidthChecksum(const Element& el) {
-    double sum = static_cast<double>(el.layoutWidth());
+// Every laid-out width and height in one number, so a multipass layout can
+// tell a settled tree apart from one whose container queries are still moving
+// boxes. Widths settle top-down; heights settle after a pass, which is why
+// height queries need one extra confirmation pass. The walk is deterministic,
+// so equal trees sum equal.
+double layoutGeometryChecksum(const Element& el) {
+    double sum = static_cast<double>(el.layoutWidth() + el.layoutHeight());
     for (const auto& child : el.children()) {
         if (child && !child->isTextNode()) {
-            sum += layoutWidthChecksum(*child);
+            sum += layoutGeometryChecksum(*child);
         }
     }
     return sum;
@@ -4944,12 +4946,12 @@ void BlockLayout::layout(Element* root, const LayoutInput& input) {
     if (!root || !input.resolver) {
         return;
     }
-    // Container queries read laid-out widths, which only exist after a pass:
-    // with container rules in play, repeat until widths settle (at most three
-    // passes; definite widths settle on the second). Anything else lays out
-    // exactly once, as before.
+    // Container queries read laid-out boxes, which only exist after a pass:
+    // with container rules in play, repeat until geometry settles (at most four
+    // passes; definite widths settle on the second, heights on the third).
+    // Anything else lays out exactly once, as before.
     double settled = -1.0;
-    for (int pass = 0; pass < 3; ++pass) {
+    for (int pass = 0; pass < 4; ++pass) {
         Layout layout(*input.resolver, input.font, input.viewportWidth,
                       input.viewportHeight);
         layout.run(*root, input.viewportWidth, 0.0f, 0.0f);
@@ -4957,11 +4959,11 @@ void BlockLayout::layout(Element* root, const LayoutInput& input) {
         if (!input.resolver->anyContainerRules()) {
             break;
         }
-        const double widths = layoutWidthChecksum(*root);
-        if (widths == settled) {
+        const double geometry = layoutGeometryChecksum(*root);
+        if (geometry == settled) {
             break;
         }
-        settled = widths;
+        settled = geometry;
     }
     if (input.resolver->anyContainerRules()) {
         clearHiddenBoxes(*root, *input.resolver);

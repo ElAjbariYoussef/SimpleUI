@@ -468,86 +468,555 @@ bool parseImportPrelude(std::string_view prelude, ImportSpec& spec) {
     return true;
 }
 
-// Parses an `@container` prelude: an optional name list followed by one
-// `(min-width: Npx)` / `(max-width: Npx)` feature, optionally `and`-chained.
-// Anything else (style queries, other units, garbage) fails, and the block is
-// dropped, the way an unparsable `@media` is.
-bool parseContainerPrelude(std::string_view prelude, Rule::ContainerQuery& query) {
-    std::size_t i = 0;
-    const auto skipSpaces = [&] {
-        while (i < prelude.size() && isSpace(prelude[i])) {
-            ++i;
-        }
-    };
-    skipSpaces();
-    // Leading idents name the container; the first '(' starts the features.
-    while (i < prelude.size() && prelude[i] != '(') {
-        const std::size_t start = i;
-        while (i < prelude.size() && (isIdentChar(prelude[i]) || prelude[i] == '.')) {
-            ++i;
-        }
-        const std::string_view name = trim(prelude.substr(start, i - start));
-        if (!name.empty() && name != "and" && name != "not" && name != "or") {
-            query.names.emplace_back(name);
-        }
-        skipSpaces();
-        if (i < prelude.size() && prelude[i] != '(' && !isIdentChar(prelude[i]) &&
-            !isSpace(prelude[i])) {
+// True when `source` starts with the `style(` function at `at`.
+bool styleFunctionAt(std::string_view source, std::size_t at) {
+    return conditionWordAt(source, at, "style") && at + 5 < source.size() &&
+           source[at + 5] == '(';
+}
+
+// A small recursive-descent parser for one boolean `@container` condition.
+// Size features keep their comparison, unit, and axis; `style()` features keep
+// the property and value for the resolver to compare against a container.
+// `and` binds tighter than `or`; `not` wraps the next parenthesised group.
+class ContainerConditionParser {
+public:
+    using Query = Rule::ContainerQuery;
+    using Node = Query::Node;
+
+    ContainerConditionParser(std::string_view source, bool styleContext)
+        : source_(source), style_(styleContext) {}
+
+    bool parse(Node& out) {
+        skip();
+        if (pos_ >= source_.size()) {
             return false;
         }
+        out = parseOr();
+        skip();
+        return ok_ && pos_ == source_.size();
     }
-    bool anyFeature = false;
-    while (true) {
-        skipSpaces();
-        if (i >= prelude.size() || prelude[i] != '(') {
+
+private:
+    Node parseOr() {
+        Node left = parseAnd();
+        while (ok_) {
+            skip();
+            if (!consumeWord("or")) {
+                break;
+            }
+            Node right = parseAnd();
+            if (!ok_) {
+                break;
+            }
+            left = combine(Node::Kind::Or, std::move(left), std::move(right));
+        }
+        return left;
+    }
+
+    Node parseAnd() {
+        Node left = parseNot();
+        while (ok_) {
+            skip();
+            if (!consumeWord("and")) {
+                break;
+            }
+            Node right = parseNot();
+            if (!ok_) {
+                break;
+            }
+            left = combine(Node::Kind::And, std::move(left), std::move(right));
+        }
+        return left;
+    }
+
+    Node parseNot() {
+        skip();
+        if (conditionWordAt(source_, pos_, "not")) {
+            pos_ += 3;
+            Node node;
+            node.kind = Node::Kind::Not;
+            node.children.push_back(parsePrimary());
+            return node;
+        }
+        return parsePrimary();
+    }
+
+    Node parsePrimary() {
+        skip();
+        if (pos_ >= source_.size()) {
+            ok_ = false;
+            return {};
+        }
+        if (source_[pos_] == '(') {
+            const std::size_t close = findClosingParen(source_, pos_);
+            if (close == std::string_view::npos) {
+                ok_ = false;
+                return {};
+            }
+            const std::string_view inner =
+                trim(source_.substr(pos_ + 1, close - pos_ - 1));
+            pos_ = close + 1;
+            if (startsCondition(inner)) {
+                return nested(inner, style_);
+            }
+            return feature(inner);
+        }
+        if (styleFunctionAt(source_, pos_)) {
+            const std::size_t open = pos_ + 5;
+            const std::size_t close = findClosingParen(source_, open);
+            if (close == std::string_view::npos) {
+                ok_ = false;
+                return {};
+            }
+            const std::string_view inner =
+                trim(source_.substr(open + 1, close - open - 1));
+            pos_ = close + 1;
+            if (startsCondition(inner)) {
+                return nested(inner, true);
+            }
+            return styleFeature(inner);
+        }
+        ok_ = false;
+        return {};
+    }
+
+    static bool startsCondition(std::string_view source) {
+        source = trim(source);
+        if (source.empty()) {
             return false;
         }
-        ++i;
-        const std::size_t close = prelude.find(')', i);
-        if (close == std::string_view::npos) {
+        return source.front() == '(' || conditionWordAt(source, 0, "not") ||
+               styleFunctionAt(source, 0);
+    }
+
+    Node nested(std::string_view source, bool styleContext) {
+        Node node;
+        ContainerConditionParser parser(source, styleContext);
+        if (!parser.parse(node)) {
+            ok_ = false;
+            return {};
+        }
+        return node;
+    }
+
+    Node feature(std::string_view source) {
+        if (style_) {
+            return styleFeature(source);
+        }
+        Node node;
+        if (!parseSizeExpression(source, node)) {
+            ok_ = false;
+            return {};
+        }
+        return node;
+    }
+
+    Node styleFeature(std::string_view source) {
+        Query::Feature parsed;
+        if (!parseStyleFeature(source, parsed)) {
+            ok_ = false;
+            return {};
+        }
+        Node node;
+        node.feature = std::move(parsed);
+        return node;
+    }
+
+    static Node combine(Node::Kind kind, Node left, Node right) {
+        if (left.kind == kind) {
+            left.children.push_back(std::move(right));
+            return left;
+        }
+        Node node;
+        node.kind = kind;
+        node.children.push_back(std::move(left));
+        node.children.push_back(std::move(right));
+        return node;
+    }
+
+    static Query::Comparison reverse(Query::Comparison comparison) {
+        switch (comparison) {
+            case Query::Comparison::Less: return Query::Comparison::Greater;
+            case Query::Comparison::LessEqual: return Query::Comparison::GreaterEqual;
+            case Query::Comparison::Greater: return Query::Comparison::Less;
+            case Query::Comparison::GreaterEqual: return Query::Comparison::LessEqual;
+            case Query::Comparison::Equal: return Query::Comparison::Equal;
+        }
+        return Query::Comparison::Equal;
+    }
+
+    static bool lessComparison(Query::Comparison comparison) {
+        return comparison == Query::Comparison::Less ||
+               comparison == Query::Comparison::LessEqual;
+    }
+
+    static bool greaterComparison(Query::Comparison comparison) {
+        return comparison == Query::Comparison::Greater ||
+               comparison == Query::Comparison::GreaterEqual;
+    }
+
+    // Finds the first top-level `:`, ignoring quoted strings and nested groups.
+    static std::size_t findTopLevelColon(std::string_view source) {
+        int depth = 0;
+        char quote = 0;
+        for (std::size_t i = 0; i < source.size(); ++i) {
+            const char c = source[i];
+            if (quote != 0) {
+                if (c == '\\' && i + 1 < source.size()) {
+                    ++i;
+                } else if (c == quote) {
+                    quote = 0;
+                }
+                continue;
+            }
+            if (c == '"' || c == '\'') {
+                quote = c;
+            } else if (c == '(') {
+                ++depth;
+            } else if (c == ')') {
+                --depth;
+            } else if (c == ':' && depth == 0) {
+                return i;
+            }
+        }
+        return std::string_view::npos;
+    }
+
+    // Finds the first top-level comparison operator, returning its index and
+    // length (`1` for `<`, `>`, `=` and `2` for `<=`, `>=`).
+    static std::size_t findTopLevelComparison(std::string_view source,
+                                              std::size_t from,
+                                              std::size_t& length) {
+        int depth = 0;
+        char quote = 0;
+        for (std::size_t i = from; i < source.size(); ++i) {
+            const char c = source[i];
+            if (quote != 0) {
+                if (c == '\\' && i + 1 < source.size()) {
+                    ++i;
+                } else if (c == quote) {
+                    quote = 0;
+                }
+                continue;
+            }
+            if (c == '"' || c == '\'') {
+                quote = c;
+            } else if (c == '(') {
+                ++depth;
+            } else if (c == ')') {
+                --depth;
+            } else if (depth == 0 && (c == '<' || c == '>' || c == '=')) {
+                length = (i + 1 < source.size() && source[i + 1] == '=') ? 2 : 1;
+                return i;
+            }
+        }
+        return std::string_view::npos;
+    }
+
+    static bool comparisonAt(std::string_view source, std::size_t at,
+                             std::size_t length, Query::Comparison& out) {
+        if (at + length > source.size()) {
             return false;
         }
-        const std::string_view feature = prelude.substr(i, close - i);
-        i = close + 1;
-        const std::size_t colon = feature.find(':');
-        if (colon == std::string_view::npos) {
-            return false;
+        const char c = source[at];
+        const bool equal = length == 2 && source[at + 1] == '=';
+        if (c == '<') {
+            out = equal ? Query::Comparison::LessEqual : Query::Comparison::Less;
+            return true;
         }
-        const std::string_view property = trim(feature.substr(0, colon));
-        const std::string_view amount = trim(feature.substr(colon + 1));
-        if (amount.size() < 3 || amount.substr(amount.size() - 2) != "px") {
-            return false;
+        if (c == '>') {
+            out = equal ? Query::Comparison::GreaterEqual
+                        : Query::Comparison::Greater;
+            return true;
         }
-        const float value =
-            std::strtof(std::string(amount.substr(0, amount.size() - 2)).c_str(), nullptr);
-        if (!std::isfinite(value) || value < 0.0f) {
-            return false;
-        }
-        if (property == "min-width") {
-            query.minWidth = anyFeature && query.minWidth >= 0.0f
-                                 ? std::max(query.minWidth, value)
-                                 : value;
-        } else if (property == "max-width") {
-            query.maxWidth = anyFeature && query.maxWidth >= 0.0f
-                                 ? std::min(query.maxWidth, value)
-                                 : value;
-        } else {
-            return false;
-        }
-        anyFeature = true;
-        skipSpaces();
-        if (i >= prelude.size()) {
-            break;
-        }
-        // Only `and` chains; `or`/`not` stay unsupported and drop the block.
-        if ((prelude.substr(i, 3) == "and" &&
-             (i + 3 >= prelude.size() || !isIdentChar(prelude[i + 3])))) {
-            i += 3;
-            continue;
+        if (c == '=' && length == 1) {
+            out = Query::Comparison::Equal;
+            return true;
         }
         return false;
     }
-    if (!anyFeature) {
+
+    static bool parseBaseSizeProperty(std::string_view source, bool& height) {
+        if (source == "width" || source == "inline-size") {
+            height = false;
+            return true;
+        }
+        if (source == "height" || source == "block-size") {
+            height = true;
+            return true;
+        }
+        return false;
+    }
+
+    static bool parseColonSizeProperty(std::string_view source, bool& height,
+                                       Query::Comparison& comparison) {
+        if (source == "min-width") {
+            height = false;
+            comparison = Query::Comparison::GreaterEqual;
+            return true;
+        }
+        if (source == "max-width") {
+            height = false;
+            comparison = Query::Comparison::LessEqual;
+            return true;
+        }
+        if (source == "min-height") {
+            height = true;
+            comparison = Query::Comparison::GreaterEqual;
+            return true;
+        }
+        if (source == "max-height") {
+            height = true;
+            comparison = Query::Comparison::LessEqual;
+            return true;
+        }
+        if (parseBaseSizeProperty(source, height)) {
+            comparison = Query::Comparison::Equal;
+            return true;
+        }
+        return false;
+    }
+
+    static bool parseLength(std::string_view source, Query::Unit& unit,
+                            float& amount) {
+        source = trim(source);
+        if (source.empty()) {
+            return false;
+        }
+        const std::string storage(source);
+        char* end = nullptr;
+        const float value = std::strtof(storage.c_str(), &end);
+        if (end == storage.c_str() || !std::isfinite(value) || value < 0.0f) {
+            return false;
+        }
+        std::string suffix(end);
+        for (char& c : suffix) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        const std::string_view unitName = trim(suffix);
+        if (unitName.empty()) {
+            if (value != 0.0f) {
+                return false;
+            }
+            unit = Query::Unit::Px;
+            amount = 0.0f;
+            return true;
+        }
+        if (unitName == "px") unit = Query::Unit::Px;
+        else if (unitName == "em") unit = Query::Unit::Em;
+        else if (unitName == "rem") unit = Query::Unit::Rem;
+        else if (unitName == "vw") unit = Query::Unit::Vw;
+        else if (unitName == "vh") unit = Query::Unit::Vh;
+        else if (unitName == "cqw") unit = Query::Unit::Cqw;
+        else if (unitName == "cqh") unit = Query::Unit::Cqh;
+        else if (unitName == "cqi") unit = Query::Unit::Cqi;
+        else if (unitName == "cqb") unit = Query::Unit::Cqb;
+        else if (unitName == "cqmin") unit = Query::Unit::Cqmin;
+        else if (unitName == "cqmax") unit = Query::Unit::Cqmax;
+        else return false;
+        amount = value;
+        return true;
+    }
+
+    static Node sizeFeature(bool height, Query::Comparison comparison,
+                            Query::Unit unit, float amount) {
+        Node node;
+        node.feature.height = height;
+        node.feature.comparison = comparison;
+        node.feature.unit = unit;
+        node.feature.amount = amount;
+        return node;
+    }
+
+    bool parseSizeExpression(std::string_view source, Node& out) {
+        source = trim(source);
+        if (source.empty()) {
+            return false;
+        }
+        const std::size_t colon = findTopLevelColon(source);
+        if (colon != std::string_view::npos) {
+            std::size_t ignored = 0;
+            if (findTopLevelComparison(source, 0, ignored) !=
+                std::string_view::npos) {
+                return false;
+            }
+            const std::string_view property = trim(source.substr(0, colon));
+            const std::string_view value = trim(source.substr(colon + 1));
+            bool height = false;
+            Query::Comparison comparison = Query::Comparison::Equal;
+            Query::Unit unit = Query::Unit::Px;
+            float amount = 0.0f;
+            if (!parseColonSizeProperty(property, height, comparison) ||
+                !parseLength(value, unit, amount)) {
+                return false;
+            }
+            out = sizeFeature(height, comparison, unit, amount);
+            return true;
+        }
+
+        std::size_t firstLength = 0;
+        const std::size_t first = findTopLevelComparison(source, 0, firstLength);
+        if (first == std::string_view::npos) {
+            return false;
+        }
+        const std::string_view left = trim(source.substr(0, first));
+        const std::string_view right = trim(source.substr(first + firstLength));
+        if (left.empty() || right.empty()) {
+            return false;
+        }
+        std::size_t secondLength = 0;
+        const std::size_t second =
+            findTopLevelComparison(right, 0, secondLength);
+        if (second != std::string_view::npos) {
+            const std::string_view middle = trim(right.substr(0, second));
+            const std::string_view last = trim(right.substr(second + secondLength));
+            bool height = false;
+            if (!parseBaseSizeProperty(middle, height) || last.empty()) {
+                return false;
+            }
+            Query::Comparison firstComparison = Query::Comparison::Equal;
+            Query::Comparison secondComparison = Query::Comparison::Equal;
+            if (!comparisonAt(source, first, firstLength, firstComparison) ||
+                !comparisonAt(right, second, secondLength, secondComparison) ||
+                firstComparison == Query::Comparison::Equal ||
+                secondComparison == Query::Comparison::Equal ||
+                (lessComparison(firstComparison) !=
+                 lessComparison(secondComparison)) ||
+                (greaterComparison(firstComparison) !=
+                 greaterComparison(secondComparison))) {
+                return false;
+            }
+            Query::Unit leftUnit = Query::Unit::Px;
+            Query::Unit rightUnit = Query::Unit::Px;
+            float leftAmount = 0.0f;
+            float rightAmount = 0.0f;
+            if (!parseLength(left, leftUnit, leftAmount) ||
+                !parseLength(last, rightUnit, rightAmount)) {
+                return false;
+            }
+            Node low = sizeFeature(height, reverse(firstComparison), leftUnit,
+                                   leftAmount);
+            Node high = sizeFeature(height, secondComparison, rightUnit,
+                                    rightAmount);
+            out.kind = Node::Kind::And;
+            out.children.push_back(std::move(low));
+            out.children.push_back(std::move(high));
+            return true;
+        }
+
+        bool height = false;
+        Query::Comparison comparison = Query::Comparison::Equal;
+        Query::Unit unit = Query::Unit::Px;
+        float amount = 0.0f;
+        if (parseBaseSizeProperty(left, height)) {
+            if (!comparisonAt(source, first, firstLength, comparison) ||
+                !parseLength(right, unit, amount)) {
+                return false;
+            }
+            out = sizeFeature(height, comparison, unit, amount);
+            return true;
+        }
+        if (parseBaseSizeProperty(right, height)) {
+            if (!comparisonAt(source, first, firstLength, comparison) ||
+                !parseLength(left, unit, amount)) {
+                return false;
+            }
+            out = sizeFeature(height, reverse(comparison), unit, amount);
+            return true;
+        }
+        return false;
+    }
+
+    static bool validStyleProperty(std::string_view property) {
+        if (property.empty()) {
+            return false;
+        }
+        const char first = property.front();
+        if (!(std::isalpha(static_cast<unsigned char>(first)) != 0 ||
+              first == '_' || first == '-')) {
+            return false;
+        }
+        for (const char c : property) {
+            if (!isIdentChar(c)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static bool parseStyleFeature(std::string_view source,
+                                  Query::Feature& feature) {
+        source = trim(source);
+        if (source.empty()) {
+            return false;
+        }
+        feature = {};
+        feature.style = true;
+        const std::size_t colon = findTopLevelColon(source);
+        if (colon == std::string_view::npos) {
+            feature.property = std::string(trim(source));
+            return validStyleProperty(feature.property);
+        }
+        feature.property = std::string(trim(source.substr(0, colon)));
+        feature.value = std::string(trim(source.substr(colon + 1)));
+        return validStyleProperty(feature.property) && !feature.value.empty();
+    }
+
+    void skip() { skipConditionSpace(source_, pos_); }
+
+    bool consumeWord(std::string_view word) {
+        skip();
+        if (!conditionWordAt(source_, pos_, word)) {
+            return false;
+        }
+        pos_ += word.size();
+        return true;
+    }
+
+    std::string_view source_;
+    std::size_t pos_ = 0;
+    bool style_ = false;
+    bool ok_ = true;
+};
+
+// Parses an `@container` prelude: an optional name list followed by an
+// optional boolean condition. Size features accept width/height, inline-size/
+// block-size, min/max aliases, range comparisons, and px/em/rem/viewport/
+// container units. `style()` features compare computed declarations, and
+// `and`, `or`, `not`, and nested parentheses compose features. Anything the
+// grammar cannot express drops the block, the way an unparsable `@media` does.
+bool parseContainerPrelude(std::string_view prelude, Rule::ContainerQuery& query) {
+    query = {};
+    std::size_t i = 0;
+    skipConditionSpace(prelude, i);
+    while (i < prelude.size()) {
+        if (prelude[i] == '(' || styleFunctionAt(prelude, i) ||
+            conditionWordAt(prelude, i, "not")) {
+            break;
+        }
+        if (conditionWordAt(prelude, i, "and") ||
+            conditionWordAt(prelude, i, "or")) {
+            return false;
+        }
+        const std::size_t start = i;
+        while (i < prelude.size() &&
+               (isIdentChar(prelude[i]) || prelude[i] == '.')) {
+            ++i;
+        }
+        const std::string_view name = trim(prelude.substr(start, i - start));
+        if (name.empty()) {
+            return false;
+        }
+        query.names.emplace_back(name);
+        skipConditionSpace(prelude, i);
+    }
+    if (i < prelude.size()) {
+        ContainerConditionParser parser(prelude.substr(i), false);
+        if (!parser.parse(query.condition)) {
+            return false;
+        }
+        query.hasCondition = true;
+    } else if (query.names.empty()) {
         return false;
     }
     query.active = true;
@@ -1413,7 +1882,8 @@ void parseKeyframesBody(std::string_view source,
 void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                 std::size_t& order, std::vector<Rule>& out,
                 std::vector<KeyframeBlock>& keyframes, const std::string& layer,
-                Rule::ContainerQuery container, const ImportContext& imports) {
+                const std::vector<Rule::ContainerQuery>& containers,
+                const ImportContext& imports) {
     std::size_t i = 0;
     // An `@import` only counts before any other rule in its block (layer
     // statements excepted); anything later is invalid and ignored.
@@ -1481,7 +1951,7 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                     }
                 }
                 parseRules(source.substr(bodyStart, bodyEnd - bodyStart), combined, order, out,
-                           keyframes, layer, container, imports);
+                           keyframes, layer, containers, imports);
                 importAllowed = false;
                 continue;
             }
@@ -1506,7 +1976,7 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                 // supports blocks are evaluated independently as they parse.
                 if (supportsConditionMatches(prelude)) {
                     parseRules(source.substr(bodyStart, bodyEnd - bodyStart), media, order,
-                               out, keyframes, layer, container, imports);
+                               out, keyframes, layer, containers, imports);
                 }
                 importAllowed = false;
                 continue;
@@ -1535,7 +2005,7 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                                         : layer;
                                 const ImportContext nested{imports.fetch, href, imports.seen};
                                 parseRules(*text, outerMedia, order, out, keyframes, layerName,
-                                           container, nested);
+                                           containers, nested);
                             }
                         }
                     }
@@ -1560,26 +2030,14 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                 const std::size_t bodyEnd =
                     (i > bodyStart && source[i - 1] == '}') ? i - 1 : i;
                 // Anything the query grammar cannot express drops the block,
-                // the way an unparsable `@media` does. A nested query
-                // intersects the outer one: bounds tighten, names union.
+                // the way an unparsable `@media` does. Nested queries stay
+                // separate: each resolves its own nearest query container.
                 Rule::ContainerQuery inner;
                 if (parseContainerPrelude(prelude, inner)) {
-                    Rule::ContainerQuery merged = container;
-                    merged.names.insert(merged.names.end(), inner.names.begin(),
-                                        inner.names.end());
-                    if (inner.minWidth >= 0.0f) {
-                        merged.minWidth = merged.minWidth >= 0.0f
-                                              ? std::max(merged.minWidth, inner.minWidth)
-                                              : inner.minWidth;
-                    }
-                    if (inner.maxWidth >= 0.0f) {
-                        merged.maxWidth = merged.maxWidth >= 0.0f
-                                              ? std::min(merged.maxWidth, inner.maxWidth)
-                                              : inner.maxWidth;
-                    }
-                    merged.active = true;
+                    std::vector<Rule::ContainerQuery> nested = containers;
+                    nested.push_back(std::move(inner));
                     parseRules(source.substr(bodyStart, bodyEnd - bodyStart), media, order,
-                               out, keyframes, layer, merged, imports);
+                               out, keyframes, layer, nested, imports);
                     importAllowed = false;
                 }
                 continue;
@@ -1628,7 +2086,7 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                                    out, keyframes,
                                    singleName ? composeLayerName(layer, prelude)
                                               : anonymousLayerName(),
-                                   container, imports);
+                                   containers, imports);
                     }
                     continue;
                 }
@@ -1733,7 +2191,7 @@ void parseRules(std::string_view source, const std::vector<MediaQuery>& media,
                 rule.order = order++;
                 rule.media = media;
                 rule.layer = layer;
-                rule.container = container;
+                rule.containers = containers;
                 if (!rule.selector.parts.empty()) {
                     out.push_back(std::move(rule));
                     importAllowed = false;
@@ -1751,8 +2209,7 @@ void CSSParser::parseWithKeyframes(std::string_view source, std::vector<Rule>& r
     std::size_t order = 0;
     std::set<std::string> seen;
     const ImportContext imports{std::move(fetch), std::string(baseHref), &seen};
-    parseRules(source, {}, order, rules, keyframes, std::string(), Rule::ContainerQuery(),
-               imports);
+    parseRules(source, {}, order, rules, keyframes, std::string(), {}, imports);
 }
 
 std::vector<Rule> CSSParser::parse(std::string_view source) {
