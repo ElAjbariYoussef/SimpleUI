@@ -193,8 +193,7 @@ void testEveryTagIsClassified() {
     };
     for (const Row& row : rows) {
         auto document =
-            document_for(std::string("<sui><body><") + row.tag + "></" + row.tag +
-                         "></body></sui>");
+            document_for(std::string("<sui><body><") + row.tag + " /></body></sui>");
         Element* el = document ? document->querySelector(row.tag) : nullptr;
         if (!el) {
             // A non-visual wrapper keeps its children, so querySelector finds it.
@@ -209,6 +208,41 @@ void testEveryTagIsClassified() {
     }
 }
 
+void testAcceptsVoidElements() {
+    // Every HTML void element ends at its opening tag, with or without the XML
+    // slash, and text after it remains in the parent.
+    const char* tags[] = {
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    };
+    for (const char* tag : tags) {
+        auto document = document_for(std::string("<sui><body><") + tag +
+                                     " id=\"void\"></body></sui>");
+        check(document != nullptr, tag);
+        check(document && document->getElementById("void") != nullptr, tag);
+    }
+
+    auto document = document_for(
+        "<sui><body><p id=\"p\">before<br>after<img id=\"i\"></p></body></sui>");
+    check(document != nullptr, "void tags parse without slashes");
+    Element* paragraph = document ? document->getElementById("p") : nullptr;
+    check(paragraph && paragraph->textContent() == "beforeafter",
+          "text around a void tag stays in its parent");
+    check(document && document->querySelector("br") != nullptr,
+          "br is a child even without a slash");
+    check(document && document->getElementById("i") != nullptr,
+          "img is a child even without a slash");
+
+    auto closed = document_for(
+        "<sui><body><input id=\"i\" value=\"hi\"></input>"
+        "<div id=\"d\">x</div></body></sui>");
+    check(closed != nullptr, "a void end tag does not break parsing");
+    Element* input = closed ? closed->getElementById("i") : nullptr;
+    check(input && input->value() == "hi", "the void control keeps its value");
+    check(closed && closed->getElementById("d") != nullptr,
+          "parsing continues after a void end tag");
+}
+
 }  // namespace
 
 int main() {
@@ -218,6 +252,7 @@ int main() {
     testIgnoresComments();
     testMixedContentOrder();
     testEveryTagIsClassified();
+    testAcceptsVoidElements();
 
     if (failures) {
         std::printf("\n%d check(s) failed\n", failures);

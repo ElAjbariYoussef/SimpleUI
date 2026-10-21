@@ -916,7 +916,7 @@ void testGridAlignment() {
 
 void testInputValue() {
     auto document =
-        parseOrNull("<sui><body><input id=\"i\" value=\"hi\"></input></body></sui>");
+        parseOrNull("<sui><body><input id=\"i\" value=\"hi\"/></body></sui>");
     if (!document) {
         return;
     }

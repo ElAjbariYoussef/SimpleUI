@@ -104,6 +104,22 @@ std::string_view readName(Scanner& sc) {
     return std::string_view{sc.rest().data() - (sc.pos() - start), len};
 }
 
+// HTML void elements have no end tag. `.sui` markup also accepts the XML-style
+// slash, but authors should not have to write it for <br>, <img>, <input>, or
+// <col>.
+bool isHtmlVoidElement(std::string_view tag) {
+    static constexpr std::string_view kVoid[] = {
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    };
+    for (const std::string_view candidate : kVoid) {
+        if (tag == candidate) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::string readQuotedValue(Scanner& sc) {
     const char quote = sc.take();
     std::string value;
@@ -201,7 +217,7 @@ bool parseElement(Scanner& sc, Element& parent, ParseError& error) {
     Element& ref = *element;
     parent.appendChild(std::move(element));
 
-    if (!selfClosing) {
+    if (!selfClosing && !isHtmlVoidElement(tagName)) {
         if (!parseChildren(sc, ref, error)) {
             return false;
         }
@@ -231,6 +247,12 @@ bool parseChildren(Scanner& sc, Element& parent, ParseError& error) {
             sc.skipInsignificant();
             if (sc.peek() == '>') {
                 sc.take();
+            }
+            // A stray void end tag (for example `<br></br>`) is ignored, the
+            // way an HTML parser drops it, rather than becoming a mismatch.
+            if (isHtmlVoidElement(closing)) {
+                flushText();
+                continue;
             }
             if (closing != parent.tag()) {
                 error = {sc.line(), "closing tag </" + std::string(closing) +
