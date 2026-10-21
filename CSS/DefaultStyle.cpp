@@ -111,6 +111,81 @@ ComputedStyle defaultStyleFor(std::string_view tag) {
         return s;
     }
 
+    if (tag == "blockquote" || tag == "figure") {
+        // The browser's 1em/40px block: a quoted or illustrated passage is
+        // inset from both sides and separated vertically.
+        Style s = block();
+        s.margin = {16.0f, 40.0f, 16.0f, 40.0f};
+        return s;
+    }
+
+    if (tag == "figcaption") {
+        // A caption is an ordinary block immediately after its figure.
+        return block();
+    }
+
+    if (tag == "dl") {
+        Style s = block();
+        s.margin = {16.0f, 0.0f, 16.0f, 0.0f};
+        return s;
+    }
+
+    if (tag == "dt") {
+        return block();
+    }
+
+    if (tag == "dd") {
+        // Browsers indent the description by 40px, so the term and definition
+        // read as a pair rather than two flush-left paragraphs.
+        Style s = block();
+        s.margin = {0.0f, 0.0f, 0.0f, 40.0f};
+        return s;
+    }
+
+    if (tag == "hr") {
+        // A horizontal rule is a two-pixel inset line at browser defaults: the
+        // 1px top and bottom borders make the visible rule, and the block has
+        // no content height of its own. Author `border: none; height: ...`
+        // rules still take over cleanly.
+        Style s = block();
+        s.margin = {8.0f, Length(), 8.0f, Length()};
+        s.borderWidth = {1.0f, 1.0f, 1.0f, 1.0f};
+        s.borderStyles = {Style::BorderInset, Style::BorderInset,
+                          Style::BorderInset, Style::BorderInset};
+        return s;
+    }
+
+    if (tag == "fieldset") {
+        // Form grouping chrome: the browser's 2px border and roomy padding.
+        // The legend does not notch the border yet, so it lays out as the first
+        // block inside the fieldset.
+        Style s = block();
+        s.margin = {0.0f, 2.0f, 0.0f, 2.0f};
+        s.padding = {6.0f, 12.0f, 10.0f, 12.0f};
+        s.borderWidth = {2.0f, 2.0f, 2.0f, 2.0f};
+        s.borderStyles = {Style::BorderGroove, Style::BorderGroove,
+                          Style::BorderGroove, Style::BorderGroove};
+        return s;
+    }
+
+    if (tag == "legend") {
+        Style s = block();
+        s.padding = {0.0f, 2.0f, 0.0f, 2.0f};
+        return s;
+    }
+
+    if (tag == "center") {
+        Style s = block(Style::SpecifiedTextAlign);
+        s.textAlign = Style::Center;
+        return s;
+    }
+
+    if (tag == "address") {
+        Style s = block(Style::SpecifiedFontStyle);
+        s.fontStyle = Style::FontItalic;
+        return s;
+    }
+
     if (tag == "pre") {
         // A code block: whitespace and newlines survive, tabs stop at
         // `tab-size`, and the face is the generic monospace family (the app

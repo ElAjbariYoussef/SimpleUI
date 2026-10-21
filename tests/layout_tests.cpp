@@ -3034,6 +3034,110 @@ void testDefaultStyles() {
 
 // A checkbox/radio is a control, not a text field: the UA style gives it a fixed
 // square instead of the input padding, and `:checked` reads the attribute.
+// Structural HTML elements carry browser-ish UA chrome: horizontal rules,
+// quoted/illustrated passages, description lists, form groups, centered text,
+// and addresses. These checks cover both the style record and the layout it
+// produces for the elements whose margins or borders are visible.
+void testStructuralUaDefaults() {
+    using Style = sui::ComputedStyle;
+    const Style hr = sui::defaultStyleFor("hr");
+    check(hr.display == Style::Block, "hr defaults to block");
+    check(hr.margin.top.value == 8.0f && hr.margin.bottom.value == 8.0f,
+          "hr has the browser's half-line margins");
+    check(hr.margin.left.unit == sui::Length::Auto &&
+              hr.margin.right.unit == sui::Length::Auto,
+          "hr auto-centres horizontally");
+    check(hr.borderWidth.top.value == 1.0f &&
+              hr.borderWidth.bottom.value == 1.0f &&
+              hr.borderStyles.top == Style::BorderInset,
+          "hr's inset top and bottom borders make its rule");
+
+    for (const char* tag : {"blockquote", "figure"}) {
+        const Style s = sui::defaultStyleFor(tag);
+        const std::string name(tag);
+        check(s.display == Style::Block, (name + " defaults to block").c_str());
+        check(s.margin.top.value == 16.0f && s.margin.bottom.value == 16.0f &&
+                  s.margin.left.value == 40.0f && s.margin.right.value == 40.0f,
+              (name + " has the browser's 1em/40px margins").c_str());
+    }
+    check(sui::defaultStyleFor("figcaption").display == Style::Block,
+          "figcaption defaults to block");
+
+    const Style dl = sui::defaultStyleFor("dl");
+    check(dl.margin.top.value == 16.0f && dl.margin.bottom.value == 16.0f,
+          "dl has one-line vertical margins");
+    check(sui::defaultStyleFor("dt").display == Style::Block,
+          "dt defaults to block");
+    const Style dd = sui::defaultStyleFor("dd");
+    check(dd.display == Style::Block && dd.margin.left.value == 40.0f,
+          "dd indents its description");
+
+    const Style fieldset = sui::defaultStyleFor("fieldset");
+    check(fieldset.display == Style::Block &&
+              fieldset.borderWidth.top.value == 2.0f &&
+              fieldset.borderStyles.top == Style::BorderGroove,
+          "fieldset has a two-pixel groove border");
+    check(fieldset.padding.top.value == 6.0f &&
+              fieldset.padding.left.value == 12.0f &&
+              fieldset.margin.left.value == 2.0f,
+          "fieldset has browser-like padding and inset margins");
+    const Style legend = sui::defaultStyleFor("legend");
+    check(legend.display == Style::Block && legend.padding.left.value == 2.0f,
+          "legend pads its label");
+
+    const Style center = sui::defaultStyleFor("center");
+    check(center.display == Style::Block && center.textAlign == Style::Center,
+          "center aligns its text");
+    check((center.specified & Style::SpecifiedTextAlign) != 0,
+          "center marks text-align as UA-specified");
+    const Style address = sui::defaultStyleFor("address");
+    check(address.display == Style::Block &&
+              address.fontStyle == Style::FontItalic,
+          "address defaults to italic");
+    check((address.specified & Style::SpecifiedFontStyle) != 0,
+          "address marks font-style as UA-specified");
+
+    auto document = parseOrNull(
+        "<sui><body><hr id=\"rule\"/>"
+        "<dl><dt id=\"term\">Term</dt><dd id=\"desc\">Definition</dd></dl>"
+        "<blockquote id=\"quote\">Quote</blockquote>"
+        "<center id=\"centre\">Middle</center>"
+        "<address id=\"addr\">Somewhere</address></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* rule = document->getElementById("rule");
+    Element* term = document->getElementById("term");
+    Element* desc = document->getElementById("desc");
+    Element* quote = document->getElementById("quote");
+    Element* centre = document->getElementById("centre");
+    Element* addr = document->getElementById("addr");
+    check(rule && term && desc && quote && centre && addr,
+          "structural-default elements found");
+    if (!rule || !term || !desc || !quote || !centre || !addr) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse("body { margin: 0; font-size: 16px }"));
+    layoutRoot(*document, resolver, 400.0f);
+    checkNear(rule->layoutHeight(), 2.0f, 0.01f,
+              "hr lays out as a two-pixel rule");
+    checkNear(rule->layoutWidth(), 400.0f, 0.01f,
+              "hr spans the content width");
+    checkNear(term->layoutX(), 0.0f, 0.01f, "dt stays flush left");
+    checkNear(desc->layoutX(), 40.0f, 0.01f, "dd is indented in layout");
+    checkNear(desc->layoutWidth(), 360.0f, 0.01f,
+              "dd narrows by its indentation");
+    checkNear(quote->layoutX(), 40.0f, 0.01f,
+              "blockquote is inset in layout");
+    checkNear(quote->layoutWidth(), 320.0f, 0.01f,
+              "blockquote narrows by both margins");
+    check(resolver.resolve(*centre).textAlign == Style::Center,
+          "center's alignment survives resolution");
+    check(resolver.resolve(*addr).fontStyle == Style::FontItalic,
+          "address's italics survive resolution");
+}
+
 void testFormControlDefaults() {
     const auto checked = sui::CSSParser::parseSelector("input:checked");
     check(!checked.unsupported, ":checked parses as a supported selector");
@@ -13140,6 +13244,7 @@ int main() {
     testCssImports();
     testClipPath();
     testDefaultStyles();
+    testStructuralUaDefaults();
     testFormControlDefaults();
     testRangeDefaults();
     testSelectDefaults();
