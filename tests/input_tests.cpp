@@ -1262,19 +1262,40 @@ int main() {
     // A file input's Browse button asks the OS picker; the pick lands through
     // applyPickedFile, which drops paths for dropped trees and non-controls.
     {
+        const std::vector<sui::FileDialogFilter> filters =
+            sui::fileDialogFilters(".png, image/jpeg, application/pdf, .png");
+        check(filters.size() == 1, "accept becomes one OS dialog filter");
+        if (filters.size() == 1) {
+            check(filters[0].name == "Supported files",
+                  "the accept filter has a readable name");
+            check(filters[0].pattern == "*.png;*.jpeg;*.pdf",
+                  "extensions and MIME types expand and dedupe");
+        }
+        const std::vector<sui::FileDialogFilter> images = sui::fileDialogFilters("image/*");
+        check(images.size() == 1 &&
+                  images[0].pattern.find("*.png") != std::string::npos &&
+                  images[0].pattern.find("*.svg") != std::string::npos,
+              "an image wildcard covers image extensions");
+        check(sui::fileDialogFilters("*/*").empty(),
+              "accepting every file needs no dialog filter");
+        check(sui::fileDialogFilters("").empty(),
+              "an empty accept attribute needs no dialog filter");
+
         sui::Application app;
         sui::ParseError err;
         auto doc = sui::MarkupParser::parse(
             "<sui><body>"
             "<input id=\"f\" type=\"file\"/>"
+            "<input id=\"m\" type=\"file\" multiple accept=\".png,application/pdf\"/>"
             "<div id=\"d\">x</div>"
             "</body></sui>", err);
         check(doc != nullptr, "file test document parsed");
         if (doc) {
             sui::Element* f = doc->getElementById("f");
+            sui::Element* m = doc->getElementById("m");
             sui::Element* d = doc->getElementById("d");
-            check(f && d, "file elements found");
-            if (f && d) {
+            check(f && m && d, "file elements found");
+            if (f && m && d) {
                 app.setDocument(std::move(doc));
 
                 sui::StyleResolver layoutResolver;
@@ -1296,18 +1317,32 @@ int main() {
                 check(f->value() == "/tmp/photo.png", "a picked path fills the value");
                 check(f->fileName() == "photo.png", "the control shows the file name");
 
+                app.applyPickedFiles(f, {"/tmp/one.png", "/tmp/two.png"});
+                check(f->value() == "/tmp/one.png",
+                      "a single file control keeps only the first pick");
+
+                app.applyPickedFiles(m, {"/tmp/a.png", "/tmp/b.pdf"});
+                check(m->value() == "/tmp/a.png\n/tmp/b.pdf",
+                      "a multiple file control keeps every picked path");
+                check(m->fileName() == "2 files",
+                      "a multiple file control shows the pick count");
+                app.applyPickedFiles(m, {"/tmp/lone.pdf"});
+                check(m->value() == "/tmp/lone.pdf" && m->fileName() == "lone.pdf",
+                      "a new pick replaces the previous multiple selection");
+
                 app.applyPickedFile(d, "/tmp/other.png");
                 check(d->value().empty(), "a pick for a div lands nowhere");
                 app.applyPickedFile(nullptr, "/tmp/null.png");
 
                 // A pick for an element of a replaced document is dropped.
                 sui::Element* stale = f;
+                const std::string retained = f->value();
                 auto doc2 = sui::MarkupParser::parse("<sui><body></body></sui>", err);
                 check(doc2 != nullptr, "second document parsed");
                 if (doc2) {
                     app.setDocument(std::move(doc2));
                     app.applyPickedFile(stale, "/tmp/stale.png");
-                    check(stale->value() == "/tmp/photo.png",
+                    check(stale->value() == retained,
                           "a pick for a dropped tree lands nowhere");
                 }
             }

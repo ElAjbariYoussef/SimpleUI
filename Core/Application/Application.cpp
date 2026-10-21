@@ -33,6 +33,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_dialog.h>
 
+#include <cctype>
 #include <charconv>
 #include <cstring>
 #include <cstdio>
@@ -3493,10 +3494,6 @@ std::vector<std::string> splitOnSemicolons(std::string_view text) {
 
 }  // namespace
 
-// A file dialog resolves off-thread, so its callback only queues the first
-// pick for the main loop; a null list means error or cancel, and an empty
-// first path means nothing chosen. The pending input is read under the same
-// lock that the opener writes it with.
 // Settles a scroller on its snap points after a gesture moved it: mandatory
 // always takes the nearest point on each enabled axis, proximity only within
 // half a viewport. Points come from descendants' own `scroll-snap-align`,
@@ -3636,22 +3633,172 @@ std::pair<float, float> Application::snapOffsets(Element& scroller,
     return {left, top};
 }
 
+namespace {
+
+std::string dialogFilterLower(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    for (const char c : text) {
+        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    return out;
+}
+
+std::string_view dialogFilterTrim(std::string_view text) {
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) {
+        text.remove_prefix(1);
+    }
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) {
+        text.remove_suffix(1);
+    }
+    return text;
+}
+
+}  // namespace
+
+// Maps an input's comma-separated `accept` attribute to one OS dialog filter.
+// Extensions become globs; common MIME wildcards expand to their usual
+// extensions, and an explicit `*` / `*/*` means no filter at all.
+std::vector<FileDialogFilter> fileDialogFilters(std::string_view accept) {
+    std::vector<std::string> patterns;
+    auto add = [&](std::string pattern) {
+        if (std::find(patterns.begin(), patterns.end(), pattern) == patterns.end()) {
+            patterns.push_back(std::move(pattern));
+        }
+    };
+    auto addMime = [&](std::string_view mime) {
+        if (mime == "image/*") {
+            for (const char* ext : {"png", "jpg", "jpeg", "gif", "bmp", "webp", "svg",
+                                    "tif", "tiff", "ico", "avif"}) {
+                add(std::string("*.") + ext);
+            }
+        } else if (mime == "audio/*") {
+            for (const char* ext : {"mp3", "wav", "ogg", "flac", "aac", "m4a", "opus"}) {
+                add(std::string("*.") + ext);
+            }
+        } else if (mime == "video/*") {
+            for (const char* ext : {"mp4", "webm", "mkv", "mov", "avi", "ogv", "m4v"}) {
+                add(std::string("*.") + ext);
+            }
+        } else if (mime == "text/*") {
+            for (const char* ext : {"txt", "csv", "md", "log", "html", "htm", "css",
+                                    "js", "json", "xml"}) {
+                add(std::string("*.") + ext);
+            }
+        } else if (mime == "font/*") {
+            for (const char* ext : {"ttf", "otf", "woff", "woff2"}) {
+                add(std::string("*.") + ext);
+            }
+        } else if (mime == "image/svg+xml") {
+            add("*.svg");
+        } else if (mime == "application/pdf") {
+            add("*.pdf");
+        } else if (mime == "application/json") {
+            add("*.json");
+        } else if (mime == "application/xml") {
+            add("*.xml");
+        } else if (mime == "application/zip") {
+            add("*.zip");
+        } else if (mime == "application/gzip") {
+            add("*.gz");
+        } else if (mime == "application/x-tar") {
+            add("*.tar");
+        } else {
+            const std::size_t slash = mime.find('/');
+            if (slash == std::string_view::npos || slash + 1 >= mime.size()) {
+                return;
+            }
+            const std::string_view subtype = mime.substr(slash + 1);
+            if (subtype == "*" || subtype.find('.') != std::string_view::npos ||
+                subtype.find('+') != std::string_view::npos) {
+                return;
+            }
+            add("*." + std::string(subtype));
+        }
+    };
+
+    std::size_t start = 0;
+    while (start <= accept.size()) {
+        const std::size_t comma = accept.find(',', start);
+        const std::size_t end = comma == std::string_view::npos ? accept.size() : comma;
+        const std::string_view token = dialogFilterTrim(accept.substr(start, end - start));
+        if (!token.empty()) {
+            const std::string lower = dialogFilterLower(token);
+            if (lower == "*" || lower == "*/*") {
+                return {};
+            }
+            if (lower.rfind("*.", 0) == 0) {
+                add(lower);
+            } else if (lower.front() == '.') {
+                add("*" + lower);
+            } else if (lower.find('/') != std::string::npos) {
+                addMime(lower);
+            } else {
+                add("*." + lower);
+            }
+        }
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+
+    if (patterns.empty()) {
+        return {};
+    }
+    std::string pattern;
+    for (const std::string& p : patterns) {
+        if (!pattern.empty()) {
+            pattern += ';';
+        }
+        pattern += p;
+    }
+    return {FileDialogFilter{"Supported files", std::move(pattern)}};
+}
+
+struct Application::FileDialogState {
+    // Strings first: the filter array points into them and must stay valid
+    // until SDL invokes the asynchronous callback.
+    std::vector<std::string> names;
+    std::vector<std::string> patterns;
+    std::vector<SDL_DialogFileFilter> filters;
+};
+
+// A file dialog resolves off-thread, so its callback only queues the picks for
+// the main loop; a null list means error or cancel. The pending input is read
+// under the same lock that the opener writes it with.
 void Application::fileDialogCallback(void* userdata,
                                        const char* const* filelist,
                                        int filter) {    (void)filter;
     auto* app = static_cast<Application*>(userdata);
-    if (!app || !filelist || !filelist[0] || !filelist[0][0]) {
+    if (!app || !filelist) {
+        return;
+    }
+    std::vector<std::string> paths;
+    for (const char* const* path = filelist; *path; ++path) {
+        if ((*path)[0]) {
+            paths.emplace_back(*path);
+        }
+    }
+    if (paths.empty()) {
         return;
     }
     std::lock_guard<std::mutex> lock(app->fileMutex_);
     if (!app->pendingFileInput_) {
         return;
     }
-    app->pendingFiles_.emplace_back(app->pendingFileInput_, std::string(filelist[0]));
+    app->pendingFiles_.emplace_back(app->pendingFileInput_, std::move(paths));
 }
 
 void Application::applyPickedFile(Element* el, const char* path) {
-    if (!el || !path || !path[0] || !document_ || !document_->root()) {
+    if (!path) {
+        return;
+    }
+    applyPickedFiles(el, std::vector<std::string>{path});
+}
+
+void Application::applyPickedFiles(Element* el, const std::vector<std::string>& paths) {
+    if (!el || !document_ || !document_->root()) {
         return;
     }
     // A pick for a dropped tree, or for something no longer a file control,
@@ -3660,22 +3807,59 @@ void Application::applyPickedFile(Element* el, const char* path) {
         el->attribute("type") != "file") {
         return;
     }
-    el->setValue(path);
+    const bool multi = el->hasAttribute("multiple");
+    std::string joined;
+    for (const std::string& path : paths) {
+        if (path.empty()) {
+            continue;
+        }
+        if (!joined.empty()) {
+            if (!multi) {
+                break;
+            }
+            joined += '\n';
+        }
+        joined += path;
+        if (!multi) {
+            break;
+        }
+    }
+    if (!joined.empty()) {
+        el->setValue(std::move(joined));
+    }
 }
 
 // Opens the OS file picker for a file input's Browse button. Headless or
-// windowless runs log and move on; the callback queues the pick for the loop.
+// windowless runs log and move on; the callback queues the picks for the loop.
 void Application::openFileDialog(Element& input) {
     if (!platform_ || !platform_->window()) {
         SDL_Log("file picker needs a window; ignoring the Browse press");
         return;
     }
+    auto state = std::make_unique<FileDialogState>();
+    for (const FileDialogFilter& filter : fileDialogFilters(input.attribute("accept"))) {
+        state->names.push_back(filter.name);
+        state->patterns.push_back(filter.pattern);
+    }
+    state->filters.reserve(state->names.size());
+    for (std::size_t i = 0; i < state->names.size(); ++i) {
+        state->filters.push_back(
+            SDL_DialogFileFilter{state->names[i].c_str(), state->patterns[i].c_str()});
+    }
     {
         std::lock_guard<std::mutex> lock(fileMutex_);
+        if (pendingFileInput_) {
+            SDL_Log("a file picker is already open; ignoring the Browse press");
+            return;
+        }
         pendingFileInput_ = &input;
+        fileDialogState_ = std::move(state);
     }
-    SDL_ShowOpenFileDialog(fileDialogCallback, this, platform_->window(), nullptr, 0,
-                           nullptr, input.hasAttribute("multiple"));
+    const SDL_DialogFileFilter* filters =
+        fileDialogState_->filters.empty() ? nullptr : fileDialogState_->filters.data();
+    SDL_ShowOpenFileDialog(fileDialogCallback, this, platform_->window(), filters,
+                           static_cast<int>(fileDialogState_->filters.size()), nullptr,
+                           input.hasAttribute("multiple"));
 }
 
 // Applies queued file picks where their inputs still live. Runs on the main
@@ -3770,14 +3954,15 @@ std::uint64_t Application::frameGeneration() const {
 }
 
 void Application::applyPendingFiles() {
-    std::vector<std::pair<Element*, std::string>> picks;
+    std::vector<std::pair<Element*, std::vector<std::string>>> picks;
     {
         std::lock_guard<std::mutex> lock(fileMutex_);
         picks.swap(pendingFiles_);
         pendingFileInput_ = nullptr;
+        fileDialogState_.reset();
     }
-    for (const auto& [el, path] : picks) {
-        applyPickedFile(el, path.c_str());
+    for (const auto& [el, paths] : picks) {
+        applyPickedFiles(el, paths);
     }
 }
 

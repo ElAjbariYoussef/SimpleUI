@@ -35,6 +35,17 @@ struct SmoothScroll {
     float top = 0.0f;
 };
 
+// One filter for the OS open dialog, built from a file input's `accept`
+// attribute. Patterns are SDL globs separated by semicolons when there is more
+// than one extension; the free helper is public so tests can check the mapping
+// without opening a dialog.
+struct FileDialogFilter {
+    std::string name;
+    std::string pattern;
+};
+
+std::vector<FileDialogFilter> fileDialogFilters(std::string_view accept);
+
 // One `<iframe>`'s loaded document and the styles that belong to it. A frame
 // is a page of its own: a fresh resolver (UA defaults included) and stylesheets
 // loaded through the same resources. `src` names the load, so a rewritten
@@ -332,8 +343,15 @@ public:
     // off-thread, so it only queues; this applies on the main thread and is
     // what tests drive directly.
     void applyPickedFile(Element* el, const char* path);
+    // The multiple-file form: a control without `multiple` keeps only the first
+    // path, while a multiple control stores the paths joined by newlines.
+    void applyPickedFiles(Element* el, const std::vector<std::string>& paths);
 
 private:
+    // Keeps the SDL filter array and its strings alive until the asynchronous
+    // dialog callback runs; SDL requires the filter storage to outlive the call.
+    struct FileDialogState;
+
     static WindowConfig windowConfigFrom(Document& document);
     // A page's title bar text, empty when it declares none.
     static std::string windowTitleFrom(Document& document);
@@ -382,7 +400,7 @@ private:
     // smooth scroll snaps its target rather than the offset it is easing from.
     std::pair<float, float> snapOffsets(Element& scroller, const ComputedStyle& scrolled,
                                         bool movedX, bool movedY, float atX, float atY);
-    // The SDL dialog callback: queues the first pick, never touches the tree.
+    // The SDL dialog callback: queues every pick, never touches the tree.
     static void fileDialogCallback(void* userdata, const char* const* filelist,
                                    int filter);
 
@@ -527,7 +545,8 @@ private:
     // the callback may run on another thread.
     std::mutex fileMutex_;
     Element* pendingFileInput_ = nullptr;
-    std::vector<std::pair<Element*, std::string>> pendingFiles_;
+    std::vector<std::pair<Element*, std::vector<std::string>>> pendingFiles_;
+    std::unique_ptr<FileDialogState> fileDialogState_;
     // Where a Shift+click or Shift+arrow range starts in an open list.
     std::size_t selectAnchor_ = 0;
     // Where the range currently ends: clicks and arrows move it, Shift+click

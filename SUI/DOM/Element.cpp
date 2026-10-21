@@ -499,8 +499,31 @@ bool Element::dialogModal() const {
 
 std::string Element::fileName() const {
     const std::string value(attribute("value"));
-    const std::size_t slash = value.find_last_of("/\\");
-    return slash == std::string::npos ? value : value.substr(slash + 1);
+    // A multiple file control stores its picks newline-separated because the
+    // engine has no FileList object. Show how many were chosen rather than the
+    // path of whichever happened to be last.
+    std::size_t count = 0;
+    std::string single;
+    for (std::size_t start = 0; start <= value.size();) {
+        const std::size_t end = value.find('\n', start);
+        const std::size_t stop = end == std::string::npos ? value.size() : end;
+        if (stop > start) {
+            ++count;
+            if (count == 1) {
+                single = value.substr(start, stop - start);
+            }
+        }
+        if (stop == value.size()) {
+            break;
+        }
+        start = stop + 1;
+    }
+    if (count > 1) {
+        return std::to_string(count) + " files";
+    }
+    const std::string& path = count == 1 ? single : value;
+    const std::size_t slash = path.find_last_of("/\\");
+    return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
 // A decimal attribute or a fallback when it is missing or unparsable, so
