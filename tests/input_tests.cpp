@@ -2011,6 +2011,318 @@ int main() {
         }
     }
 
+    // A date input's calendar indicator opens a built-in Monday-first calendar.
+    // It starts on the current value (or today when empty/malformed), steps by
+    // day/week/month, picks a cell with the pointer or Enter/Space, and writes
+    // a canonical YYYY-MM-DD. Escape and outside presses only close it; Space
+    // opens it without submitting, while Enter while closed keeps its implicit
+    // form submission. Disabled controls and `appearance: none` have no picker.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<form data-preventdefault=\"true\" onsubmit=\"recordFormSubmit()\">"
+            "<input id=\"d\" type=\"date\" value=\"2026-10-12\"/></form>"
+            "<input id=\"none\" type=\"date\" value=\"2026-10-12\" "
+            "style=\"appearance:none\"/>"
+            "<input id=\"off\" type=\"date\" value=\"2026-10-12\" disabled/>"
+            "<input id=\"empty\" type=\"date\"/>"
+            "</body></sui>", err);
+        check(doc != nullptr, "date picker document parsed");
+        sui::script::registerHandler("recordFormSubmit", recordFormSubmit);
+        g_formSubmits = 0;
+        if (doc) {
+            sui::Element* d = doc->getElementById("d");
+            sui::Element* none = doc->getElementById("none");
+            sui::Element* off = doc->getElementById("off");
+            sui::Element* empty = doc->getElementById("empty");
+            check(d && none && off && empty, "date picker elements found");
+            if (d && none && off && empty) {
+                app.setDocument(std::move(doc));
+                sui::Document& appDoc = app.document();
+                sui::StyleResolver layoutResolver;
+                layoutResolver.setRules(
+                    sui::CSSParser::parse("input{display:block;width:120px;height:24px}"));
+                sui::LayoutInput input;
+                input.resolver = &layoutResolver;
+                input.viewportWidth = 400.0f;
+                input.viewportHeight = 300.0f;
+                sui::BlockLayout().layout(app.document().root(), input);
+
+                constexpr float kPad = 8.0f;
+                constexpr float kCellW = 32.0f;
+                constexpr float kCellH = 28.0f;
+                constexpr float kHeaderH = 24.0f;
+                constexpr float kWeekdayH = 18.0f;
+                constexpr int kCols = 7;
+                constexpr int kRows = 6;
+                constexpr float kPopupW = 2.0f * kPad + kCols * kCellW;
+                constexpr float kPopupH =
+                    2.0f * kPad + kHeaderH + kWeekdayH + kRows * kCellH;
+                const auto popupX = [&](sui::Element* el) {
+                    float x = el->layoutX();
+                    if (x + kPopupW > 400.0f) {
+                        x = 400.0f - kPopupW;
+                    }
+                    return std::max(0.0f, x);
+                };
+                const auto popupY = [&](sui::Element* el) {
+                    float y = el->layoutY() + el->layoutHeight() + 2.0f;
+                    if (y + kPopupH > 300.0f) {
+                        y = el->layoutY() - kPopupH - 2.0f;
+                    }
+                    return std::max(0.0f, y);
+                };
+                const auto swatch = [](sui::Element* el) {
+                    return sui::InputEvent(
+                        sui::InputKind::PointerDown,
+                        el->contentX() + el->contentWidth() - 10.0f,
+                        el->contentY() + el->contentHeight() * 0.5f, 1);
+                };
+                const auto dayEvent = [&](sui::Element* el, int index,
+                                          sui::InputKind kind) {
+                    const int col = index % kCols;
+                    const int row = index / kCols;
+                    return sui::InputEvent(
+                        kind, popupX(el) + kPad + static_cast<float>(col) * kCellW +
+                                  kCellW * 0.5f,
+                        popupY(el) + kPad + kHeaderH + kWeekdayH +
+                            static_cast<float>(row) * kCellH + kCellH * 0.5f,
+                        kind == sui::InputKind::PointerDown ? 1 : 0);
+                };
+                const auto header = [&](sui::Element* el, bool next) {
+                    const float x = next ? popupX(el) + kPopupW - kPad - 12.0f
+                                         : popupX(el) + kPad + 12.0f;
+                    return sui::InputEvent(sui::InputKind::PointerDown, x,
+                                           popupY(el) + kPad + kHeaderH * 0.5f, 1);
+                };
+                const auto key = [](int code) {
+                    return sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0, 0,
+                                           code);
+                };
+                constexpr int kReturn = 0x0D;
+                constexpr int kSpace = 0x20;
+                constexpr int kEscape = 0x1B;
+                constexpr int kHome = 0x4000004A;
+                constexpr int kPageUp = 0x4000004B;
+                constexpr int kEnd = 0x4000004D;
+                constexpr int kPageDown = 0x4000004E;
+                constexpr int kRight = 0x4000004F;
+                constexpr int kLeft = 0x40000050;
+                constexpr int kDown = 0x40000051;
+
+                check(app.openDatePicker() == nullptr, "no calendar starts open");
+                app.dispatch(sui::InputEvent(
+                    sui::InputKind::PointerDown, d->contentX() + 4.0f,
+                    d->contentY() + d->contentHeight() * 0.5f, 1));
+                check(app.openDatePicker() == nullptr,
+                      "clicking the date text does not open the calendar");
+
+                app.dispatch(swatch(d));
+                check(app.openDatePicker() == d, "clicking the calendar opens it");
+                check(app.datePickerYear() == 2026 && app.datePickerMonth() == 10 &&
+                          app.datePickerDay() == 12,
+                      "the calendar opens on the current date");
+                app.dispatch(sui::InputEvent(
+                    sui::InputKind::PointerDown, popupX(d) + kPopupW * 0.5f,
+                    popupY(d) + kPad + kHeaderH * 0.5f, 1));
+                check(app.openDatePicker() == d,
+                      "clicking inert calendar space keeps it open");
+                check(app.document().focused() == d,
+                      "an inert calendar click keeps focus on the date input");
+                check(d->value() == "2026-10-12",
+                      "clicking inert calendar space does not change the value");
+                app.dispatch(key(kReturn));
+                check(d->value() == "2026-10-12",
+                      "Enter picks the date the calendar opened on");
+                check(app.openDatePicker() == nullptr,
+                      "Enter picking closes the calendar");
+                check(g_formSubmits == 0,
+                      "Enter picking a date does not submit its form");
+
+                app.dispatch(swatch(d));
+                app.dispatch(key(kRight));
+                app.dispatch(key(kReturn));
+                check(d->value() == "2026-10-13", "Right moves to the next day");
+                app.dispatch(swatch(d));
+                app.dispatch(key(kDown));
+                app.dispatch(key(kReturn));
+                check(d->value() == "2026-10-20", "Down moves a week");
+                app.dispatch(swatch(d));
+                app.dispatch(key(kPageDown));
+                check(app.datePickerMonth() == 11 && app.datePickerDay() == 20,
+                      "Page Down moves to the next month");
+                app.dispatch(key(kPageUp));
+                check(app.datePickerMonth() == 10,
+                      "Page Up moves back a month");
+                app.dispatch(key(kPageDown));
+                app.dispatch(key(kReturn));
+                check(d->value() == "2026-11-20",
+                      "month navigation keeps the day");
+
+                // Month steps clamp an impossible day, and February follows
+                // the leap-year rule. January 1 steps back across the year.
+                d->setValue("2024-01-31");
+                app.dispatch(swatch(d));
+                app.dispatch(key(kPageDown));
+                check(app.datePickerMonth() == 2 && app.datePickerDay() == 29,
+                      "a leap February clamps January 31 to the 29th");
+                app.dispatch(key(kReturn));
+                check(d->value() == "2024-02-29",
+                      "the leap-day clamp picks as a real date");
+                d->setValue("2023-01-31");
+                app.dispatch(swatch(d));
+                app.dispatch(key(kPageDown));
+                app.dispatch(key(kReturn));
+                check(d->value() == "2023-02-28",
+                      "a common February clamps January 31 to the 28th");
+                d->setValue("2026-01-01");
+                app.dispatch(swatch(d));
+                app.dispatch(key(kLeft));
+                app.dispatch(key(kReturn));
+                check(d->value() == "2025-12-31",
+                      "a day step crosses into the previous year");
+
+                d->setValue("2026-11-20");
+                app.dispatch(swatch(d));
+                app.dispatch(key(kHome));
+                check(app.datePickerMonth() == 11 && app.datePickerDay() == 16,
+                      "Home moves to Monday of the current week");
+                app.dispatch(key(kEnd));
+                check(app.datePickerDay() == 22,
+                      "End moves to Sunday of the current week");
+                app.dispatch(key(kReturn));
+                check(d->value() == "2026-11-22",
+                      "the week boundaries pick as dates");
+
+                d->setValue("2026-10-12");
+                app.dispatch(swatch(d));
+                app.dispatch(header(d, true));
+                check(app.openDatePicker() == d,
+                      "the next-month chevron keeps the calendar open");
+                check(app.datePickerYear() == 2026 && app.datePickerMonth() == 11 &&
+                          app.datePickerDay() == 12,
+                      "the next-month chevron steps the highlighted date");
+                app.dispatch(key(kReturn));
+                check(d->value() == "2026-11-12",
+                      "picking after the chevron uses the new month");
+                app.dispatch(swatch(d));
+                app.dispatch(header(d, false));
+                app.dispatch(key(kReturn));
+                check(d->value() == "2026-10-12",
+                      "the previous-month chevron steps back");
+
+                d->setValue("2026-10-12");
+                app.dispatch(swatch(d));
+                app.dispatch(dayEvent(d, 0, sui::InputKind::PointerDown));
+                check(d->value() == "2026-09-28",
+                      "a leading grid cell picks the previous month");
+                check(app.openDatePicker() == nullptr,
+                      "a day-cell click closes the calendar");
+
+                d->setValue("2026-10-12");
+                app.dispatch(swatch(d));
+                app.dispatch(dayEvent(d, 0, sui::InputKind::PointerMove));
+                check(app.datePickerYear() == 2026 &&
+                          app.datePickerMonth() == 10 && app.datePickerDay() == 12,
+                      "hovering a neighbouring month keeps the visible month");
+                app.dispatch(dayEvent(d, 20, sui::InputKind::PointerMove));
+                check(app.datePickerDay() == 18,
+                      "hovering a day moves the calendar highlight");
+                app.dispatch(dayEvent(d, 21, sui::InputKind::PointerUp));
+                check(d->value() == "2026-10-19",
+                      "releasing over a day picks the release cell");
+                check(app.openDatePicker() == nullptr,
+                      "the releasing pick closes the calendar");
+
+                d->setValue("2026-10-12");
+                app.dispatch(swatch(d));
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerDown, 350.0f,
+                                             250.0f, 1));
+                check(app.openDatePicker() == nullptr,
+                      "clicking outside closes the calendar");
+                check(d->value() == "2026-10-12",
+                      "an outside click keeps the value");
+                app.dispatch(swatch(d));
+                app.dispatch(swatch(d));
+                check(app.openDatePicker() == nullptr,
+                      "clicking the open indicator toggles the calendar shut");
+                app.dispatch(swatch(d));
+                app.dispatch(key(kEscape));
+                check(app.openDatePicker() == nullptr,
+                      "Escape closes the calendar");
+                check(d->value() == "2026-10-12", "Escape keeps the value");
+                check(g_formSubmits == 0, "Escape does not submit the form");
+
+                // Space opens without submitting, Enter then picks. Once
+                // closed, Enter keeps its normal implicit-submit behaviour.
+                appDoc.setFocused(d);
+                app.dispatch(key(kSpace));
+                check(app.openDatePicker() == d, "Space opens a closed calendar");
+                check(g_formSubmits == 0,
+                      "Space opening a calendar does not submit its form");
+                app.dispatch(key(kReturn));
+                check(app.openDatePicker() == nullptr &&
+                          g_formSubmits == 0,
+                      "Enter picks without submitting the form");
+                g_formSubmits = 0;
+                appDoc.setFocused(d);
+                app.dispatch(key(kReturn));
+                check(g_formSubmits == 1,
+                      "Enter on a closed date input still submits its form");
+                check(app.document().getElementById("d") != nullptr,
+                      "the cancelled submit leaves the document in place");
+
+                // A malformed value falls back to today and a pick rewrites a
+                // canonical value. A syntactically shaped but impossible date
+                // is malformed too.
+                empty->setValue("2026-02-30");
+                appDoc.setFocused(empty);
+                app.dispatch(key(kSpace));
+                check(app.openDatePicker() == empty,
+                      "an impossible date still opens the calendar");
+                check(!(app.datePickerYear() == 2026 && app.datePickerMonth() == 2 &&
+                        app.datePickerDay() == 30),
+                      "an impossible date does not become the highlight");
+                app.dispatch(key(kEscape));
+                empty->setValue("not-a-date");
+                appDoc.setFocused(empty);
+                app.dispatch(key(kSpace));
+                check(app.openDatePicker() == empty,
+                      "a malformed value still opens the calendar");
+                const int todayYear = app.datePickerYear();
+                const int todayMonth = app.datePickerMonth();
+                const int todayDay = app.datePickerDay();
+                check(todayYear >= 1970 && todayMonth >= 1 && todayMonth <= 12 &&
+                          todayDay >= 1 && todayDay <= 31,
+                      "the fallback highlight is a real date");
+                app.dispatch(key(kReturn));
+                char canonical[16] = {};
+                std::snprintf(canonical, sizeof(canonical), "%04d-%02d-%02d",
+                              todayYear, todayMonth, todayDay);
+                check(empty->value() == canonical,
+                      "a fallback pick writes canonical YYYY-MM-DD");
+
+                app.dispatch(swatch(none));
+                check(app.openDatePicker() == nullptr,
+                      "appearance:none removes the date picker affordance");
+                appDoc.setFocused(none);
+                app.dispatch(key(kSpace));
+                check(app.openDatePicker() == nullptr &&
+                          none->value() == "2026-10-12",
+                      "appearance:none suppresses the keyboard calendar too");
+                app.dispatch(swatch(off));
+                check(app.openDatePicker() == nullptr,
+                      "a disabled date input opens no calendar");
+                appDoc.setFocused(off);
+                app.dispatch(key(kSpace));
+                check(app.openDatePicker() == nullptr,
+                      "keys on a disabled date input open nothing");
+            }
+        }
+    }
+
     // A `<textarea>` edits its text content as a multiline value: typing works at
     // any caret position, Return starts a new line, Home/End bound the caret to
     // the line instead of the value, and Up/Down keep the column while changing
@@ -2252,11 +2564,13 @@ int main() {
         {
             std::ofstream out(root / "index.sui", std::ios::binary);
             out << "<sui><body><p id=\"where\">frame</p>"
-                      "<input id=\"a\" value=\"\"/></body></sui>";
+                      "<input id=\"a\" value=\"\"/>"
+                      "<input id=\"d\" type=\"date\" value=\"2026-10-12\"/></body></sui>";
         }
         {
             std::ofstream out(root / "other.sui", std::ios::binary);
-            out << "<sui><body><p id=\"where\">other</p></body></sui>";
+            out << "<sui><body><p id=\"where\">other</p>"
+                      "<input id=\"d\" type=\"date\" value=\"2026-10-12\"/></body></sui>";
         }
         const fs::path previous = fs::current_path();
         fs::current_path(root);
@@ -2317,6 +2631,33 @@ int main() {
                       "typing lands in the typed window's field only");
             }
 
+            // Overlay pickers are page state: each window can hold its own open
+            // calendar, and switching back restores the one it left open.
+            sui::Element* dateA = app.pageDocument(primary)->getElementById("d");
+            sui::Element* dateB = app.pageDocument(other)->getElementById("d");
+            check(dateA && dateB && dateA != dateB,
+                  "each window owns its date input");
+            if (dateA && dateB) {
+                const auto pressSwatch = [&](sui::Element* date, sui::WindowId window) {
+                    app.dispatch(sui::InputEvent(
+                        sui::InputKind::PointerDown,
+                        date->contentX() + date->contentWidth() - 10.0f,
+                        date->contentY() + date->contentHeight() * 0.5f, 1, 0.0f,
+                        0.0f, 0, {}, 0, 0, window));
+                };
+                pressSwatch(dateA, primary);
+                check(app.openDatePicker() == dateA,
+                      "a calendar opens on the primary window's date");
+                pressSwatch(dateB, other);
+                check(app.openDatePicker() == dateB,
+                      "the other window opens its own calendar");
+                app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0.0f, 0.0f, 0,
+                                             0.0f, 0.0f, 0x400000E1, {}, 0, 0,
+                                             primary));
+                check(app.openDatePicker() == dateA,
+                      "each window keeps its own open calendar");
+            }
+
             // A mutation repaints the window it is shown in.
             sui::Element* where = app.document().getElementById("where");
             check(where != nullptr, "the framed page is on screen");
@@ -2334,6 +2675,8 @@ int main() {
             // document and resolver never moved, so its next frame skips.
             check(app.navigate("other.sui"), "the primary window navigates away");
             check(app.currentPage() == "other.sui", "the primary page is the new one");
+            check(app.openDatePicker() == nullptr,
+                  "navigating closes the open calendar");
             check(app.renderFrame(primary), "the navigated window repaints");
             check(!app.renderFrame(other), "the untouched window stays quiet");
 
@@ -2717,6 +3060,7 @@ int main() {
             "<dialog id=\"m\" oncancel=\"flagCancel()\" onclose=\"flagShut()\">"
             "<button id=\"ok\">ok</button><button id=\"away\">away</button>"
             "<input id=\"mc\" type=\"color\" value=\"#ff0000\"/>"
+            "<input id=\"md\" type=\"date\" value=\"2026-10-12\"/>"
             "</dialog>"
             "</body></sui>",
             err);
@@ -2737,8 +3081,9 @@ int main() {
             sui::Element* before = app.document().getElementById("before");
             sui::Element* ok = app.document().getElementById("ok");
             sui::Element* mc = app.document().getElementById("mc");
-            check(m && before && ok && mc, "modal elements found");
-            if (m && before && ok && mc) {
+            sui::Element* md = app.document().getElementById("md");
+            check(m && before && ok && mc && md, "modal elements found");
+            if (m && before && ok && mc && md) {
                 layout();
                 // Focusing the field first gives the modal a place to return to.
                 app.dispatch(sui::InputEvent(sui::InputKind::PointerDown,
@@ -2780,7 +3125,22 @@ int main() {
                       "Escape closes the palette first");
                 check(m->dialogOpen() && !g_modalCancel && !g_modalShut,
                       "closing the palette leaves the dialog open");
-                // A second Escape fires cancel then close, and hands focus back.
+                // An open calendar consumes Escape the same way.
+                app.dispatch(sui::InputEvent(
+                    sui::InputKind::PointerDown,
+                    md->contentX() + md->contentWidth() - 10.0f,
+                    md->contentY() + md->contentHeight() * 0.5f, 1));
+                check(app.openDatePicker() == md,
+                      "a date calendar opens inside the dialog");
+                g_modalCancel = false;
+                g_modalShut = false;
+                app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0,
+                                             0, 0x1B));
+                check(app.openDatePicker() == nullptr,
+                      "Escape closes the calendar first");
+                check(m->dialogOpen() && !g_modalCancel && !g_modalShut,
+                      "closing the calendar leaves the dialog open");
+                // A further Escape fires cancel then close, and hands focus back.
                 g_modalCancel = false;
                 g_modalShut = false;
                 app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0,
@@ -2826,6 +3186,7 @@ int main() {
             out << "<sui><head><link rel=\"stylesheet\" href=\"/frame.css\"/></head>"
                    "<body><div id=\"box\">frame</div><div id=\"wide\"></div>"
                    "<input id=\"name\"/><button id=\"btn\">ok</button>"
+                   "<input id=\"fdate\" type=\"date\" value=\"2026-10-12\"/>"
                    "<div id=\"scroll\"><div id=\"tall\"></div></div>"
                    "<a id=\"flink\" href=\"other.sui\">go</a>"
                    "<div id=\"smooth\"><div id=\"stall\"></div></div></body></sui>";
@@ -2838,6 +3199,7 @@ int main() {
                    "background: #0000ff; } "
                    "#name { display: block; width: 80px; height: 18px; } "
                    "#btn { display: block; width: 40px; height: 14px; } "
+                   "#fdate { display: block; width: 80px; height: 18px; } "
                    "#scroll { overflow: auto; height: 30px; width: 60px; } "
                    "#tall { height: 200px; width: 60px; background: #0000ff; } "
                    "#flink { display: block; width: 60px; height: 12px; background: #00ffff; } "
@@ -2948,16 +3310,31 @@ int main() {
                     // never navigates the host page.
                     sui::Element* hostInput = app.document().getElementById("host-input");
                     sui::Element* frameInput = frame->getElementById("name");
+                    sui::Element* frameDate = frame->getElementById("fdate");
                     sui::Element* frameScroll = frame->getElementById("scroll");
                     sui::Element* frameLink = frame->getElementById("flink");
                     check(hostInput != nullptr && frameInput != nullptr &&
-                              frameScroll != nullptr && frameLink != nullptr,
+                              frameDate != nullptr && frameScroll != nullptr &&
+                              frameLink != nullptr,
                           "the interactive elements exist on both sides");
-                    if (hostInput && frameInput && frameScroll && frameLink) {
+                    if (hostInput && frameInput && frameDate && frameScroll && frameLink) {
                         const auto pressAt = [&](float x, float y) {
                             app.dispatch(sui::InputEvent(sui::InputKind::PointerDown, x, y, 1));
                             app.dispatch(sui::InputEvent(sui::InputKind::PointerUp, x, y, 1));
                         };
+                        // Overlay pickers are page-only. A frame date input
+                        // never opens the host page's calendar, whether the
+                        // indicator is clicked or the field gets Space.
+                        pressAt(frameDate->contentX() + frameDate->contentWidth() - 10.0f,
+                                frameDate->contentY() + 9.0f);
+                        check(frame->focused() == frameDate,
+                              "a frame date input takes the press");
+                        check(app.openDatePicker() == nullptr,
+                              "a frame date input opens no pointer calendar");
+                        app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0,
+                                                     0, 0, 0x20));
+                        check(app.openDatePicker() == nullptr,
+                              "a frame date input opens no keyboard calendar");
                         // A click inside the frame hands the keyboard to the
                         // frame's document...
                         pressAt(frameInput->layoutX() + 4.0f, frameInput->layoutY() + 8.0f);
@@ -3620,10 +3997,12 @@ int main() {
                    "<select style=\"" << box
                 << "left:70px;top:310px;appearance:none\">"
                    "<option selected>x</option></select>"
-                   "<input type=\"date\" style=\"" << box
-                << "left:10px;top:360px\"/>"
+                   "<input id=\"date\" type=\"date\" value=\"2026-10-12\" style=\""
+                << box << "left:10px;top:360px;accent-color:#ff0000\"/>"
                    "<input type=\"date\" style=\"" << box
                 << "left:70px;top:360px;appearance:none\"/>"
+                   "<input id=\"plain-date\" type=\"date\" value=\"2026-10-12\" style=\""
+                << box << "left:130px;top:360px\"/>"
                    "<input type=\"file\" style=\"position:absolute;left:10px;top:420px;"
                    "width:300px;height:40px;border:0;margin:0;background:#ffffff;"
                    "box-sizing:border-box;appearance:none\"/>"
@@ -3732,6 +4111,78 @@ int main() {
             }
             app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x1B));
             check(app.openColorPicker() == nullptr, "Escape closes the painted palette");
+
+            // The calendar paints after the page too. The input's value is
+            // Monday 12 October 2026, the third row's first cell (index 14);
+            // the selected cell carries the red `accent-color`, so a sampled
+            // interior pixel is red against the raised panel. Accept the
+            // above/below placements for the same viewport reason.
+            app.dispatch(sui::InputEvent(sui::InputKind::PointerDown, 40.0f, 380.0f, 1));
+            check(app.openDatePicker() != nullptr,
+                  "clicking the date swatch opens the calendar");
+            check(app.renderFrame(primary), "the open calendar repaints the frame");
+            sui::Element* date = app.document().getElementById("date");
+            check(date != nullptr, "the appearance date input is reachable");
+            if (date) {
+                constexpr float kCalendarH = 226.0f;
+                const float below = date->layoutY() + date->layoutHeight() + 2.0f +
+                                    8.0f + 24.0f + 18.0f + 2.0f * 28.0f + 4.0f;
+                const float above = date->layoutY() - kCalendarH - 2.0f + 8.0f +
+                                    24.0f + 18.0f + 2.0f * 28.0f + 4.0f;
+                const bool painted =
+                    (readPixel(22.0f, below, r, g, b) && r > 200 && g < 80 &&
+                     b < 80) ||
+                    (readPixel(22.0f, above, r, g, b) && r > 200 && g < 80 &&
+                     b < 80);
+                check(painted, "the open calendar paints its selected day");
+            }
+            app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x1B));
+            check(app.openDatePicker() == nullptr,
+                  "Escape closes the painted calendar");
+
+            // With no authored accent the accent falls back to the field's
+            // light text colour. The selected day must switch to dark ink
+            // instead of painting white digits on a near-white fill.
+            sui::Element* plain = app.document().getElementById("plain-date");
+            app.dispatch(sui::InputEvent(sui::InputKind::PointerDown, 160.0f, 380.0f, 1));
+            check(plain && app.openDatePicker() == plain,
+                  "a default-accent calendar opens");
+            check(app.renderFrame(primary), "the default-accent calendar repaints");
+            if (plain) {
+                int windowW = 0, windowH = 0;
+                app.platform()->windowSize(primary, windowW, windowH);
+                constexpr float kCalendarW = 240.0f;
+                constexpr float kCalendarH = 226.0f;
+                float popupX = plain->layoutX();
+                float popupY = plain->layoutY() + plain->layoutHeight() + 2.0f;
+                if (windowW > 0 && popupX + kCalendarW > static_cast<float>(windowW)) {
+                    popupX = static_cast<float>(windowW) - kCalendarW;
+                }
+                if (windowH > 0 && popupY + kCalendarH > static_cast<float>(windowH)) {
+                    popupY = plain->layoutY() - kCalendarH - 2.0f;
+                }
+                popupX = std::max(0.0f, popupX);
+                popupY = std::max(0.0f, popupY);
+                // 12 October 2026 is index 14: row 2, column 0.
+                const float cellX = popupX + 8.0f;
+                const float cellY = popupY + 8.0f + 24.0f + 18.0f + 2.0f * 28.0f;
+                bool darkInk = false;
+                for (int yy = 0; yy < 28 && !darkInk; ++yy) {
+                    for (int xx = 0; xx < 32; ++xx) {
+                        if (readPixel(cellX + static_cast<float>(xx),
+                                      cellY + static_cast<float>(yy), r, g, b) &&
+                            r < 100 && g < 100 && b < 100) {
+                            darkInk = true;
+                            break;
+                        }
+                    }
+                }
+                check(darkInk,
+                      "the selected day uses dark ink on a light accent");
+            }
+            app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x1B));
+            check(app.openDatePicker() == nullptr,
+                  "Escape closes the default-accent calendar");
         }
     }
 

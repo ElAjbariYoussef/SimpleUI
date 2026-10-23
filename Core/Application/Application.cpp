@@ -37,6 +37,7 @@
 #include <charconv>
 #include <cstring>
 #include <cstdio>
+#include <ctime>
 #include <limits>
 #include <optional>
 #include <utility>
@@ -578,6 +579,16 @@ bool isEditableField(const Element* el) {
 // text color, which is what tick, dot, and thumb chrome painted before.
 sui::Color controlAccent(const ComputedStyle& s) {
     return toColor(s.hasAccentColor ? s.accentColor : s.color);
+}
+
+// Text over a filled accent. The default accent is the field's own text colour,
+// which is light in the dark control chrome, so white-on-accent would vanish.
+SDL_Color legibleOn(const sui::Color& fill) {
+    const float luma = 0.2126f * static_cast<float>(fill.r) +
+                       0.7152f * static_cast<float>(fill.g) +
+                       0.0722f * static_cast<float>(fill.b);
+    return luma > 140.0f ? SDL_Color{24, 24, 27, 255}
+                         : SDL_Color{255, 255, 255, 255};
 }
 
 // Whether focusing `el` with the pointer still wants visible focus UI: text
@@ -1528,6 +1539,386 @@ void paintColorPopup(Element& input, Renderer& renderer, const ComputedStyle& st
             renderer.strokeRect(cell, multiplyAlpha(controlAccent(style), opacity),
                                 2.0f);
         }
+    }
+    renderer.strokeRect(SDL_FRect{geom.x, geom.y, geom.w, geom.h},
+                        multiplyAlpha(toColor(widgets.border), opacity), 1.0f);
+}
+
+// A date's civil fields. The calendar deliberately stays on the proleptic
+// Gregorian calendar: `YYYY-MM-DD` is the only value form a date input accepts,
+// so there is no time zone, leap second, or locale-dependent parsing here.
+struct CivilDate {
+    int year = 1970;
+    int month = 1;
+    int day = 1;
+};
+
+constexpr std::array<std::string_view, 12> kMonthNames = {
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+};
+
+constexpr std::array<std::string_view, 7> kShortWeekdays = {
+    "Mo", "Tu", "We", "Th", "Fr", "Sa", "Su",
+};
+
+bool isLeapYear(int year) {
+    return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+}
+
+int daysInMonth(int year, int month) {
+    constexpr std::array<int, 12> kDays = {
+        31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+    };
+    if (month < 1 || month > 12) {
+        return 0;
+    }
+    if (month == 2 && isLeapYear(year)) {
+        return 29;
+    }
+    return kDays[static_cast<std::size_t>(month - 1)];
+}
+
+// Strict `YYYY-MM-DD`: four digits, a real month, and a day that exists in that
+// month. A malformed or out-of-range value opens the calendar on today instead,
+// but is otherwise left alone (date inputs do not validate their value yet).
+bool parseDateValue(std::string_view text, CivilDate& out) {
+    if (text.size() != 10 || text[4] != '-' || text[7] != '-') {
+        return false;
+    }
+    int parts[3] = {0, 0, 0};
+    std::size_t digits[3][2] = {{0, 4}, {5, 7}, {8, 10}};
+    for (int part = 0; part < 3; ++part) {
+        const std::size_t begin = digits[static_cast<std::size_t>(part)][0];
+        const std::size_t end = digits[static_cast<std::size_t>(part)][1];
+        for (std::size_t i = begin; i < end; ++i) {
+            if (text[i] < '0' || text[i] > '9') {
+                return false;
+            }
+            parts[part] = parts[part] * 10 + (text[i] - '0');
+        }
+    }
+    const int year = parts[0];
+    const int month = parts[1];
+    const int day = parts[2];
+    if (year < 1 || year > 9999 || month < 1 || month > 12 || day < 1 ||
+        day > daysInMonth(year, month)) {
+        return false;
+    }
+    out = {year, month, day};
+    return true;
+}
+
+std::string formatDateValue(const CivilDate& date) {
+    char buffer[16] = {};
+    std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d", date.year, date.month,
+                  date.day);
+    return buffer;
+}
+
+// Monday is column zero. Zeller's congruence keeps the calendar independent of
+// the host's locale and of C++20 time-zone database availability.
+int weekdayIndex(const CivilDate& date) {
+    constexpr std::array<int, 12> kMonthShift = {
+        0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4,
+    };
+    int year = date.year;
+    if (date.month < 3) {
+        --year;
+    }
+    const int sundayFirst =
+        (year + year / 4 - year / 100 + year / 400 +
+         kMonthShift[static_cast<std::size_t>(date.month - 1)] + date.day) %
+        7;
+    return (sundayFirst + 6) % 7;
+}
+
+int compareDates(const CivilDate& a, const CivilDate& b) {
+    if (a.year != b.year) {
+        return a.year < b.year ? -1 : 1;
+    }
+    if (a.month != b.month) {
+        return a.month < b.month ? -1 : 1;
+    }
+    if (a.day != b.day) {
+        return a.day < b.day ? -1 : 1;
+    }
+    return 0;
+}
+
+CivilDate addDays(CivilDate date, int delta) {
+    while (delta > 0) {
+        ++date.day;
+        if (date.day > daysInMonth(date.year, date.month)) {
+            date.day = 1;
+            if (++date.month > 12) {
+                date.month = 1;
+                ++date.year;
+            }
+        }
+        --delta;
+    }
+    while (delta < 0) {
+        --date.day;
+        if (date.day < 1) {
+            if (--date.month < 1) {
+                date.month = 12;
+                --date.year;
+            }
+            date.day = daysInMonth(date.year, date.month);
+        }
+        ++delta;
+    }
+    return date;
+}
+
+// Month navigation keeps the day when it exists (Jan 31 -> Feb 28) and clamps
+// otherwise. The highlighted date is the source of truth, so the visible month
+// follows it without a second state field that could disagree.
+CivilDate addMonths(CivilDate date, int delta) {
+    long long months =
+        static_cast<long long>(date.year) * 12 + (date.month - 1) + delta;
+    months = std::clamp(months, 12LL, 9999LL * 12 + 11);
+    const int year = static_cast<int>(months / 12);
+    const int month = static_cast<int>(months % 12) + 1;
+    date.year = year;
+    date.month = month;
+    date.day = std::min(date.day, daysInMonth(year, month));
+    return date;
+}
+
+CivilDate currentDate() {
+    const std::time_t now = std::time(nullptr);
+    std::tm local{};
+#if defined(_WIN32)
+    if (localtime_s(&local, &now) != 0) {
+        return {};
+    }
+#else
+    if (!localtime_r(&now, &local)) {
+        return {};
+    }
+#endif
+    if (local.tm_year < 0 || local.tm_mon < 0 || local.tm_mon > 11 ||
+        local.tm_mday < 1) {
+        return {};
+    }
+    return {local.tm_year + 1900, local.tm_mon + 1, local.tm_mday};
+}
+
+constexpr int kDatePickerColumns = 7;
+constexpr int kDatePickerRows = 6;
+constexpr float kDatePickerCellW = 32.0f;
+constexpr float kDatePickerCellH = 28.0f;
+constexpr float kDatePickerPadding = 8.0f;
+constexpr float kDatePickerHeaderH = 24.0f;
+constexpr float kDatePickerWeekdayH = 18.0f;
+constexpr float kDatePickerNav = 24.0f;
+constexpr float kDatePickerWidth =
+    2.0f * kDatePickerPadding +
+    static_cast<float>(kDatePickerColumns) * kDatePickerCellW;
+constexpr float kDatePickerHeight =
+    2.0f * kDatePickerPadding + kDatePickerHeaderH + kDatePickerWeekdayH +
+    static_cast<float>(kDatePickerRows) * kDatePickerCellH;
+
+struct DatePopupGeom {
+    float x = 0.0f;
+    float y = 0.0f;
+    float w = kDatePickerWidth;
+    float h = kDatePickerHeight;
+};
+
+// The calendar hangs below the input and flips above when the viewport bottom
+// is too close, mirroring the colour palette. It is never wider than the grid
+// needs, so the viewport only has to keep it on screen.
+DatePopupGeom datePopupGeom(const Element& input, float offX, float offY,
+                            float viewportW, float viewportH) {
+    float x = input.layoutX() - offX;
+    if (viewportW > 0.0f && x + kDatePickerWidth > viewportW) {
+        x = std::max(0.0f, viewportW - kDatePickerWidth);
+    }
+    float y = input.layoutY() - offY + input.layoutHeight() + 2.0f;
+    if (viewportH > 0.0f && y + kDatePickerHeight > viewportH) {
+        y = input.layoutY() - offY - kDatePickerHeight - 2.0f;
+    }
+    if (x < 0.0f) {
+        x = 0.0f;
+    }
+    if (y < 0.0f) {
+        y = 0.0f;
+    }
+    return {x, y, kDatePickerWidth, kDatePickerHeight};
+}
+
+float dateGridLeft(const DatePopupGeom& geom) {
+    return geom.x + kDatePickerPadding;
+}
+
+float dateGridTop(const DatePopupGeom& geom) {
+    return geom.y + kDatePickerPadding + kDatePickerHeaderH + kDatePickerWeekdayH;
+}
+
+// The day cell under (x, y), in row-major order, or -1 outside the 7x6 grid.
+int datePopupDayAt(const DatePopupGeom& geom, float x, float y) {
+    const float left = dateGridLeft(geom);
+    const float top = dateGridTop(geom);
+    const float spanW = static_cast<float>(kDatePickerColumns) * kDatePickerCellW;
+    const float spanH = static_cast<float>(kDatePickerRows) * kDatePickerCellH;
+    if (x < left || y < top || x >= left + spanW || y >= top + spanH) {
+        return -1;
+    }
+    const int col = static_cast<int>((x - left) / kDatePickerCellW);
+    const int row = static_cast<int>((y - top) / kDatePickerCellH);
+    return row * kDatePickerColumns + col;
+}
+
+SDL_FRect datePopupDayRect(const DatePopupGeom& geom, int index) {
+    const int col = index % kDatePickerColumns;
+    const int row = index / kDatePickerColumns;
+    return SDL_FRect{dateGridLeft(geom) + static_cast<float>(col) * kDatePickerCellW,
+                     dateGridTop(geom) + static_cast<float>(row) * kDatePickerCellH,
+                     kDatePickerCellW, kDatePickerCellH};
+}
+
+bool datePopupPrevHit(const DatePopupGeom& geom, float x, float y) {
+    return inRect(x, y,
+                  SDL_FRect{geom.x + kDatePickerPadding, geom.y + kDatePickerPadding,
+                            kDatePickerNav, kDatePickerHeaderH});
+}
+
+bool datePopupNextHit(const DatePopupGeom& geom, float x, float y) {
+    return inRect(x, y,
+                  SDL_FRect{geom.x + geom.w - kDatePickerPadding - kDatePickerNav,
+                            geom.y + kDatePickerPadding, kDatePickerNav,
+                            kDatePickerHeaderH});
+}
+
+bool datePopupContains(const DatePopupGeom& geom, float x, float y) {
+    return x >= geom.x && x < geom.x + geom.w && y >= geom.y && y < geom.y + geom.h;
+}
+
+// The date a grid cell names. The grid starts on the Monday on or before the
+// first of the visible month, so leading and trailing cells belong to the
+// neighbouring months and remain pickable.
+CivilDate dateForCell(const CivilDate& focus, int index) {
+    const CivilDate first{focus.year, focus.month, 1};
+    return addDays(first, index - weekdayIndex(first));
+}
+
+// Whether (x, y) is over the calendar indicator. The hit target is the
+// rightmost 24px of the content box, matching the date/colour glyph paint.
+bool dateCalendarHit(const Element& input, float offX, float offY, float x,
+                     float y) {
+    const float cw = input.contentWidth();
+    const float ch = input.contentHeight();
+    if (cw <= 0.0f || ch <= 0.0f) {
+        return false;
+    }
+    const float right = input.contentX() - offX + cw;
+    const float left = right - std::min(24.0f, cw);
+    const float top = input.contentY() - offY;
+    return x >= left && x < right && y >= top && y < top + ch;
+}
+
+void paintPopupLabel(SDL_Renderer* sdlRenderer, TextFont& font,
+                     const ComputedStyle& style, std::string_view text, float size,
+                     SDL_Color color, float opacity, float centerX, float centerY) {
+    if (!font.hasFont() || text.empty() || size <= 0.0f) {
+        return;
+    }
+    const sui::FontQuery query{style.fontFamily, style.fontWeight,
+                               style.fontStyle != ComputedStyle::FontNormal};
+    const Uint8 alpha = static_cast<Uint8>(std::clamp(
+        std::lround(static_cast<float>(color.a) * opacity), 0L, 255L));
+    SDL_Texture* texture = font.renderText(
+        sdlRenderer, query, text, size,
+        SDL_Color{color.r, color.g, color.b, alpha}, false, false,
+        style.fontKerning, style.fontStretch,
+        style.fontVariant == ComputedStyle::FontVariant::SmallCaps);
+    if (!texture) {
+        return;
+    }
+    float texW = 0.0f, texH = 0.0f;
+    SDL_GetTextureSize(texture, &texW, &texH);
+    const SDL_FRect dst{std::floor(centerX - texW * 0.5f),
+                        std::floor(centerY - texH * 0.5f), texW, texH};
+    SDL_RenderTexture(sdlRenderer, texture, nullptr, &dst);
+    SDL_DestroyTexture(texture);
+}
+
+// The calendar overlay: a raised panel with a month title, previous/next
+// chevrons, a Monday-first weekday row, and a 7x6 date grid. The current value
+// is filled with the control accent; the pointer or keyboard highlight gets a
+// lighter shade, and days outside the visible month are muted. It paints after
+// the frame with no ancestor clip, like the other popups.
+void paintDatePopup(Element& input, Renderer& renderer, SDL_Renderer* sdlRenderer,
+                    const ComputedStyle& style, TextFont& font, float offX,
+                    float offY, float viewportW, float viewportH, int year,
+                    int month, int day, float opacity, bool systemDark) {
+    const DatePopupGeom geom =
+        datePopupGeom(input, offX, offY, viewportW, viewportH);
+    const sui::UaWidgets& widgets =
+        sui::uaWidgets(sui::colorSchemeUsesDark(style, systemDark));
+    renderer.fillRect(SDL_FRect{geom.x, geom.y, geom.w, geom.h},
+                      multiplyAlpha(toColor(widgets.raised), opacity));
+
+    const CivilDate focus{year, month, day};
+    const float titleSize = std::clamp(style.fontSize, 10.0f, 16.0f);
+    const float weekdaySize = std::clamp(style.fontSize * 0.68f, 8.0f, 11.0f);
+    const float daySize = std::clamp(style.fontSize * 0.82f, 9.0f, 14.0f);
+    const sui::Color accent = controlAccent(style);
+    const sui::Color ink = multiplyAlpha(toColor(widgets.icon), opacity);
+
+    const std::string title =
+        std::string(kMonthNames[static_cast<std::size_t>(month - 1)]) + " " +
+        std::to_string(year);
+    paintPopupLabel(sdlRenderer, font, style, title, titleSize, widgets.text, opacity,
+                    geom.x + geom.w * 0.5f,
+                    geom.y + kDatePickerPadding + kDatePickerHeaderH * 0.5f);
+
+    const float leftCX = geom.x + kDatePickerPadding + kDatePickerNav * 0.5f;
+    const float rightCX =
+        geom.x + geom.w - kDatePickerPadding - kDatePickerNav * 0.5f;
+    const float navCY = geom.y + kDatePickerPadding + kDatePickerHeaderH * 0.5f;
+    renderer.line(leftCX + 2.0f, navCY - 4.0f, leftCX - 2.0f, navCY, ink, 1.5f);
+    renderer.line(leftCX - 2.0f, navCY, leftCX + 2.0f, navCY + 4.0f, ink, 1.5f);
+    renderer.line(rightCX - 2.0f, navCY - 4.0f, rightCX + 2.0f, navCY, ink, 1.5f);
+    renderer.line(rightCX + 2.0f, navCY, rightCX - 2.0f, navCY + 4.0f, ink, 1.5f);
+
+    const float weekdayCY =
+        geom.y + kDatePickerPadding + kDatePickerHeaderH + kDatePickerWeekdayH * 0.5f;
+    for (int col = 0; col < kDatePickerColumns; ++col) {
+        paintPopupLabel(sdlRenderer, font, style, kShortWeekdays[static_cast<std::size_t>(col)],
+                        weekdaySize, widgets.text, opacity * 0.75f,
+                        dateGridLeft(geom) + (static_cast<float>(col) + 0.5f) *
+                                                  kDatePickerCellW,
+                        weekdayCY);
+    }
+    renderer.line(dateGridLeft(geom), dateGridTop(geom) - 1.0f,
+                  dateGridLeft(geom) + static_cast<float>(kDatePickerColumns) *
+                                           kDatePickerCellW,
+                  dateGridTop(geom) - 1.0f,
+                  multiplyAlpha(toColor(widgets.border), opacity * 0.7f), 1.0f);
+
+    CivilDate selected{};
+    const bool hasSelected = parseDateValue(input.value(), selected);
+    for (int i = 0; i < kDatePickerColumns * kDatePickerRows; ++i) {
+        const CivilDate cellDate = dateForCell(focus, i);
+        const bool isSelected =
+            hasSelected && compareDates(cellDate, selected) == 0;
+        const bool isHighlighted = compareDates(cellDate, focus) == 0;
+        const SDL_FRect cell = datePopupDayRect(geom, i);
+        if (isSelected) {
+            renderer.fillRect(cell, multiplyAlpha(accent, opacity));
+        } else if (isHighlighted) {
+            renderer.fillRect(cell, multiplyAlpha(toColor(widgets.selected), opacity));
+        }
+        const SDL_Color color = isSelected ? legibleOn(accent) : widgets.text;
+        const float alpha =
+            opacity * (cellDate.month == focus.month || isSelected ? 1.0f : 0.55f);
+        const std::string label = std::to_string(cellDate.day);
+        paintPopupLabel(sdlRenderer, font, style, label, daySize, color, alpha,
+                        cell.x + cell.w * 0.5f, cell.y + cell.h * 0.5f);
     }
     renderer.strokeRect(SDL_FRect{geom.x, geom.y, geom.w, geom.h},
                         multiplyAlpha(toColor(widgets.border), opacity), 1.0f);
@@ -4474,6 +4865,10 @@ void Application::bindPage(std::size_t index) {
     datalistHighlight_ = page.datalistHighlight_;
     openColorPicker_ = page.openColorPicker_;
     colorPickerHighlight_ = page.colorPickerHighlight_;
+    openDatePicker_ = page.openDatePicker_;
+    datePickerYear_ = page.datePickerYear_;
+    datePickerMonth_ = page.datePickerMonth_;
+    datePickerDay_ = page.datePickerDay_;
     scrollDrag_ = page.scrollDrag_;
     scrollDragX_ = page.scrollDragX_;
     resizeDrag_ = page.resizeDrag_;
@@ -4530,6 +4925,10 @@ void Application::flushBound() {
     page.datalistHighlight_ = datalistHighlight_;
     page.openColorPicker_ = openColorPicker_;
     page.colorPickerHighlight_ = colorPickerHighlight_;
+    page.openDatePicker_ = openDatePicker_;
+    page.datePickerYear_ = datePickerYear_;
+    page.datePickerMonth_ = datePickerMonth_;
+    page.datePickerDay_ = datePickerDay_;
     page.scrollDrag_ = scrollDrag_;
     page.scrollDragX_ = scrollDragX_;
     page.resizeDrag_ = resizeDrag_;
@@ -4580,10 +4979,14 @@ void Application::bindFrame(Element* frameEl) {
     const int owner = boundPage_;
     flushBound();
     if (owner >= 0 && static_cast<std::size_t>(owner) < pages_.size()) {
-        // A frame has no overlay palette; close the page's before its state is
-        // swapped out so returning to the page does not revive it.
+        // A frame has no overlay palette or calendar; close the page's before
+        // its state is swapped out so returning to the page does not revive it.
         pages_[static_cast<std::size_t>(owner)]->openColorPicker_ = nullptr;
         pages_[static_cast<std::size_t>(owner)]->colorPickerHighlight_ = 0;
+        pages_[static_cast<std::size_t>(owner)]->openDatePicker_ = nullptr;
+        pages_[static_cast<std::size_t>(owner)]->datePickerYear_ = 0;
+        pages_[static_cast<std::size_t>(owner)]->datePickerMonth_ = 0;
+        pages_[static_cast<std::size_t>(owner)]->datePickerDay_ = 0;
     }
     FrameState& frame = *state;
     document_ = std::move(frame.document);
@@ -4601,6 +5004,10 @@ void Application::bindFrame(Element* frameEl) {
     datalistHighlight_ = frame.datalistHighlight;
     openColorPicker_ = nullptr;
     colorPickerHighlight_ = 0;
+    openDatePicker_ = nullptr;
+    datePickerYear_ = 0;
+    datePickerMonth_ = 0;
+    datePickerDay_ = 0;
     scrollDrag_ = frame.scrollDrag;
     scrollDragX_ = frame.scrollDragX;
     scrollGrab_ = frame.scrollGrab;
@@ -4922,6 +5329,10 @@ void Application::setDocument(std::unique_ptr<Document> document) {
     page.datalistHighlight_ = 0;
     page.openColorPicker_ = nullptr;
     page.colorPickerHighlight_ = 0;
+    page.openDatePicker_ = nullptr;
+    page.datePickerYear_ = 0;
+    page.datePickerMonth_ = 0;
+    page.datePickerDay_ = 0;
     page.scrollDrag_ = nullptr;
     page.resizeDrag_ = nullptr;
     page.modalDialog_ = nullptr;
@@ -5042,6 +5453,10 @@ void Application::installPageAt(std::size_t index, std::unique_ptr<Document> doc
     page.datalistHighlight_ = 0;
     page.openColorPicker_ = nullptr;
     page.colorPickerHighlight_ = 0;
+    page.openDatePicker_ = nullptr;
+    page.datePickerYear_ = 0;
+    page.datePickerMonth_ = 0;
+    page.datePickerDay_ = 0;
     page.scrollDrag_ = nullptr;
     page.resizeDrag_ = nullptr;
     page.modalDialog_ = nullptr;
@@ -5443,6 +5858,10 @@ void Application::syncModalDialog() {
         openSelect_ = nullptr;
         openDatalist_ = nullptr;
         openColorPicker_ = nullptr;
+        openDatePicker_ = nullptr;
+        datePickerYear_ = 0;
+        datePickerMonth_ = 0;
+        datePickerDay_ = 0;
         Element* focused = document_->focused();
         if (focused != modalDialog_ && !withinSubtree(focused, modalDialog_)) {
             modalReturnFocus_ = focused;
@@ -5558,6 +5977,8 @@ void Application::dispatchEvent(const InputEvent& event) {
     bool suppressDatalistOpen = false;
     // A palette pick or swatch toggle must not immediately reopen the palette.
     bool suppressColorOpen = false;
+    // The same for a calendar day pick, header step, or indicator toggle.
+    bool suppressDateOpen = false;
     // A submit control (or Enter in a field) queues its form here. The
     // submission runs after the click/key handlers, as it does on the web, so
     // those handlers can fill a field before validation and the onsubmit sees
@@ -5593,6 +6014,11 @@ void Application::dispatchEvent(const InputEvent& event) {
         if (openColorPicker_ &&
             !isReachable(*document_->root(), openColorPicker_)) {
             openColorPicker_ = nullptr;
+        }
+        if (openDatePicker_ &&
+            (!isReachable(*document_->root(), openDatePicker_) ||
+             openDatePicker_->hasAttribute("disabled"))) {
+            openDatePicker_ = nullptr;
         }
         if (openSelect_ && event.kind == InputKind::PointerDown) {
             // The popup is an overlay, not an element, so it never wins the hit
@@ -5684,6 +6110,59 @@ void Application::dispatchEvent(const InputEvent& event) {
                     suppressColorOpen = true;
                 } else {
                     openColorPicker_ = nullptr;
+                }
+            }
+        }
+        if (openDatePicker_ && event.kind == InputKind::PointerDown) {
+            // The calendar is an overlay like the palette. A header chevron
+            // steps the highlighted month, a day cell picks and closes, the
+            // calendar indicator toggles it shut, and anywhere else closes it
+            // while normal handling continues. Clicks on inert panel space are
+            // consumed so they cannot activate the page underneath.
+            float offX = 0.0f, offY = 0.0f;
+            if (!selectBoxOffset(ops, openDatePicker_, offX, offY)) {
+                openDatePicker_ = nullptr;
+            } else {
+                const DatePopupGeom geom = datePopupGeom(
+                    *openDatePicker_, offX, offY, resolver_.viewportWidth(),
+                    resolver_.viewportHeight());
+                CivilDate focus{datePickerYear_, datePickerMonth_, datePickerDay_};
+                const int cell = datePopupDayAt(geom, event.x, event.y);
+                if (datePopupPrevHit(geom, event.x, event.y)) {
+                    focus = addMonths(focus, -1);
+                    datePickerYear_ = focus.year;
+                    datePickerMonth_ = focus.month;
+                    datePickerDay_ = focus.day;
+                    target = openDatePicker_;
+                    suppressDateOpen = true;
+                } else if (datePopupNextHit(geom, event.x, event.y)) {
+                    focus = addMonths(focus, 1);
+                    datePickerYear_ = focus.year;
+                    datePickerMonth_ = focus.month;
+                    datePickerDay_ = focus.day;
+                    target = openDatePicker_;
+                    suppressDateOpen = true;
+                } else if (cell >= 0) {
+                    if (!openDatePicker_->hasAttribute("disabled")) {
+                        Element* picked = openDatePicker_;
+                        picked->setValue(formatDateValue(dateForCell(focus, cell)));
+                        openDatePicker_ = nullptr;
+                        target = picked;
+                        suppressDateOpen = true;
+                    } else {
+                        target = openDatePicker_;
+                        suppressDateOpen = true;
+                    }
+                } else if (target == openDatePicker_ &&
+                           dateCalendarHit(*openDatePicker_, offX, offY, event.x,
+                                           event.y)) {
+                    openDatePicker_ = nullptr;
+                    suppressDateOpen = true;
+                } else if (datePopupContains(geom, event.x, event.y)) {
+                    target = openDatePicker_;
+                    suppressDateOpen = true;
+                } else {
+                    openDatePicker_ = nullptr;
                 }
             }
         }
@@ -5904,6 +6383,31 @@ void Application::dispatchEvent(const InputEvent& event) {
                     }
                 }
             }
+            if (openDatePicker_ && document_->root() &&
+                isReachable(*document_->root(), openDatePicker_)) {
+                const auto hoverOps = computePaintOps(*document_->root(), resolver_);
+                float offX = 0.0f, offY = 0.0f;
+                if (selectBoxOffset(hoverOps, openDatePicker_, offX, offY)) {
+                    const DatePopupGeom geom = datePopupGeom(
+                        *openDatePicker_, offX, offY, resolver_.viewportWidth(),
+                        resolver_.viewportHeight());
+                    const int cell = datePopupDayAt(geom, event.x, event.y);
+                    if (cell >= 0) {
+                        const CivilDate focus{datePickerYear_, datePickerMonth_,
+                                              datePickerDay_};
+                        const CivilDate hovered = dateForCell(focus, cell);
+                        // Hovering a leading/trailing cell must not flip the
+                        // visible month under the pointer. The release still
+                        // maps the physical cell back to that date.
+                        if (hovered.year == focus.year &&
+                            hovered.month == focus.month) {
+                            datePickerYear_ = hovered.year;
+                            datePickerMonth_ = hovered.month;
+                            datePickerDay_ = hovered.day;
+                        }
+                    }
+                }
+            }
             return;
         case InputKind::PointerDown:
             resolver_.setActive(target);
@@ -5928,6 +6432,7 @@ void Application::dispatchEvent(const InputEvent& event) {
                         datalistHighlight_ = 0;
                         openSelect_ = nullptr;
                         openColorPicker_ = nullptr;
+                        openDatePicker_ = nullptr;
                     }
                 } else if (openDatalist_ && openDatalist_ != target) {
                     openDatalist_ = nullptr;
@@ -6027,6 +6532,7 @@ void Application::dispatchEvent(const InputEvent& event) {
                     selectHighlight_ = selectSelectedIndex(*target);
                     openDatalist_ = nullptr;
                     openColorPicker_ = nullptr;
+                    openDatePicker_ = nullptr;
                 }
             }
             // A file input's Browse button opens the OS picker on click, before
@@ -6071,6 +6577,40 @@ void Application::dispatchEvent(const InputEvent& event) {
                                 at >= 0 ? static_cast<std::size_t>(at) : 0;
                             openSelect_ = nullptr;
                             openDatalist_ = nullptr;
+                            openDatePicker_ = nullptr;
+                        }
+                    }
+                }
+            }
+            // A date input's calendar indicator opens the built-in calendar,
+            // or closes an open one, before any `onclick` handler. As with the
+            // palette, `appearance: none` removes the indicator and therefore
+            // the picker affordance. The calendar starts on the current value,
+            // or on today when the value is empty or malformed.
+            if (!boundFrame_ && target && target->tag() == "input" &&
+                target->attribute("type") == "date" &&
+                !target->hasAttribute("disabled") && !suppressDateOpen) {
+                const ComputedStyle style = resolver_.resolve(*target);
+                if (style.appearance != ComputedStyle::AppearanceNone) {
+                    const auto boxOps =
+                        computePaintOps(*document_->root(), resolver_);
+                    float offX = 0.0f, offY = 0.0f;
+                    if (selectBoxOffset(boxOps, target, offX, offY) &&
+                        dateCalendarHit(*target, offX, offY, event.x, event.y)) {
+                        if (openDatePicker_ == target) {
+                            openDatePicker_ = nullptr;
+                        } else {
+                            CivilDate focus{};
+                            if (!parseDateValue(target->value(), focus)) {
+                                focus = currentDate();
+                            }
+                            openDatePicker_ = target;
+                            datePickerYear_ = focus.year;
+                            datePickerMonth_ = focus.month;
+                            datePickerDay_ = focus.day;
+                            openSelect_ = nullptr;
+                            openDatalist_ = nullptr;
+                            openColorPicker_ = nullptr;
                         }
                     }
                 }
@@ -6185,6 +6725,27 @@ void Application::dispatchEvent(const InputEvent& event) {
                     }
                 }
             }
+            // A release over a calendar day picks it too, so press-drag-release
+            // works alongside click-click. Header buttons only step on press.
+            if (openDatePicker_ && document_->root() &&
+                isReachable(*document_->root(), openDatePicker_)) {
+                const auto upOps = computePaintOps(*document_->root(), resolver_);
+                float offX = 0.0f, offY = 0.0f;
+                if (selectBoxOffset(upOps, openDatePicker_, offX, offY)) {
+                    const DatePopupGeom geom = datePopupGeom(
+                        *openDatePicker_, offX, offY, resolver_.viewportWidth(),
+                        resolver_.viewportHeight());
+                    const int cell = datePopupDayAt(geom, event.x, event.y);
+                    if (cell >= 0 &&
+                        !openDatePicker_->hasAttribute("disabled")) {
+                        const CivilDate focus{datePickerYear_, datePickerMonth_,
+                                              datePickerDay_};
+                        openDatePicker_->setValue(
+                            formatDateValue(dateForCell(focus, cell)));
+                        openDatePicker_ = nullptr;
+                    }
+                }
+            }
             break;
         case InputKind::Wheel: {
             if (!target) {
@@ -6268,11 +6829,15 @@ void Application::dispatchEvent(const InputEvent& event) {
                         datalistHighlight_ = 0;
                         openSelect_ = nullptr;
                         openColorPicker_ = nullptr;
+                        openDatePicker_ = nullptr;
                     } else if (openDatalist_ && openDatalist_ != next) {
                         openDatalist_ = nullptr;
                     }
                     if (openColorPicker_ && openColorPicker_ != next) {
                         openColorPicker_ = nullptr;
+                    }
+                    if (openDatePicker_ && openDatePicker_ != next) {
+                        openDatePicker_ = nullptr;
                     }
                     if (isEditableField(next)) {
                         resetCaretBlink();
@@ -6336,6 +6901,7 @@ void Application::dispatchEvent(const InputEvent& event) {
             colorPickerHighlight_ = at >= 0 ? static_cast<std::size_t>(at) : 0;
             openSelect_ = nullptr;
             openDatalist_ = nullptr;
+            openDatePicker_ = nullptr;
             colorKeyHandled = true;
         } else if (open && event.key == kEscape) {
             openColorPicker_ = nullptr;
@@ -6380,11 +6946,92 @@ void Application::dispatchEvent(const InputEvent& event) {
         }
     }
 
+    // A focused date input opens its calendar on Space and, while open, uses
+    // arrows for days and weeks, Page Up/Down for months, Home/End for the
+    // current week, and Enter/Space to pick. Escape only closes. Enter while
+    // closed is deliberately left alone: it keeps its implicit form submission.
+    // Handling these keys before text editing also keeps them from moving the
+    // caret or inserting a space.
+    bool dateKeyHandled = false;
+    if (!boundFrame_ && target && event.kind == InputKind::KeyDown &&
+        target->tag() == "input" && target->attribute("type") == "date" &&
+        !target->hasAttribute("disabled")) {
+        constexpr int kReturn = 0x0D;
+        constexpr int kKPEnter = 0x40000058;
+        constexpr int kSpace = 0x20;
+        constexpr int kEscape = 0x1B;
+        constexpr int kHome = 0x4000004A;
+        constexpr int kEnd = 0x4000004D;
+        constexpr int kPageUp = 0x4000004B;
+        constexpr int kPageDown = 0x4000004E;
+        constexpr int kRight = 0x4000004F;
+        constexpr int kLeft = 0x40000050;
+        constexpr int kUp = 0x40000052;
+        constexpr int kDown = 0x40000051;
+        const bool open = openDatePicker_ == target;
+        const bool pick = event.key == kReturn || event.key == kKPEnter ||
+                          event.key == kSpace;
+        if (!open && event.key == kSpace) {
+            // `appearance: none` removes the native picker affordance for the
+            // pointer, so Space consumes without opening one either.
+            if (resolver_.resolve(*target).appearance !=
+                ComputedStyle::AppearanceNone) {
+                CivilDate focus{};
+                if (!parseDateValue(target->value(), focus)) {
+                    focus = currentDate();
+                }
+                openDatePicker_ = target;
+                datePickerYear_ = focus.year;
+                datePickerMonth_ = focus.month;
+                datePickerDay_ = focus.day;
+                openSelect_ = nullptr;
+                openDatalist_ = nullptr;
+                openColorPicker_ = nullptr;
+            }
+            dateKeyHandled = true;
+        } else if (open && event.key == kEscape) {
+            openDatePicker_ = nullptr;
+            dateKeyHandled = true;
+        } else if (open && (event.key == kLeft || event.key == kRight ||
+                            event.key == kUp || event.key == kDown ||
+                            event.key == kPageUp || event.key == kPageDown ||
+                            event.key == kHome || event.key == kEnd)) {
+            CivilDate focus{datePickerYear_, datePickerMonth_, datePickerDay_};
+            int delta = 0;
+            if (event.key == kLeft) {
+                delta = -1;
+            } else if (event.key == kRight) {
+                delta = 1;
+            } else if (event.key == kUp) {
+                delta = -7;
+            } else if (event.key == kDown) {
+                delta = 7;
+            }
+            if (delta != 0) {
+                focus = addDays(focus, delta);
+            } else if (event.key == kPageUp || event.key == kPageDown) {
+                focus = addMonths(focus, event.key == kPageUp ? -1 : 1);
+            } else {
+                const int weekDay = weekdayIndex(focus);
+                focus = addDays(focus, event.key == kHome ? -weekDay : 6 - weekDay);
+            }
+            datePickerYear_ = focus.year;
+            datePickerMonth_ = focus.month;
+            datePickerDay_ = focus.day;
+            dateKeyHandled = true;
+        } else if (open && pick) {
+            const CivilDate focus{datePickerYear_, datePickerMonth_, datePickerDay_};
+            target->setValue(formatDateValue(focus));
+            openDatePicker_ = nullptr;
+            dateKeyHandled = true;
+        }
+    }
+
     // A focused text field edits its `value` before any handler sees the event, so
     // an `oninput` handler reads the text the field now holds.
     // Readonly and disabled fields reject edits. Non-textual types (e.g. button, submit)
     // do not edit their value on text input.
-    if (target && isEditableField(target) && !colorKeyHandled) {
+    if (target && isEditableField(target) && !colorKeyHandled && !dateKeyHandled) {
         constexpr int kBackspace = 0x08;
         constexpr int kDelete = 0x7F;
         constexpr int kHome = 0x4000004A;
@@ -6686,6 +7333,7 @@ void Application::dispatchEvent(const InputEvent& event) {
                        !boundFrame_) {
                 openSelect_ = target;
                 selectHighlight_ = selectSelectedIndex(*target);
+                openDatePicker_ = nullptr;
             }
         }
     }
@@ -6697,7 +7345,8 @@ void Application::dispatchEvent(const InputEvent& event) {
     syncModalDialog();
     if (modalDialog_ && isReachable(*document_->root(), modalDialog_) &&
         event.kind == InputKind::KeyDown && event.key == 0x1B && !openSelect_ &&
-        !openColorPicker_ && !colorKeyHandled &&
+        !openColorPicker_ && !colorKeyHandled && !openDatePicker_ &&
+        !dateKeyHandled &&
         openDatalist_ != document_->focused()) {
         closeModalDialog();
         return;
@@ -7547,6 +8196,12 @@ bool Application::renderFrame(WindowId id) {
                         popupOpacity = groupOpacity;
                         popupFound = true;
                     }
+                    if (openDatePicker_ && item.el == openDatePicker_) {
+                        popupOffX = item.dx + ox;
+                        popupOffY = item.dy + oy;
+                        popupOpacity = groupOpacity;
+                        popupFound = true;
+                    }
                     if (item.clip.w > 0.0f && item.clip.h > 0.0f) {
                         const SDL_Rect rect{static_cast<int>(std::floor(item.clip.x - ox)),
                                             static_cast<int>(std::floor(item.clip.y - oy)),
@@ -7613,6 +8268,11 @@ bool Application::renderFrame(WindowId id) {
                     !isReachable(*document_->root(), openColorPicker_)) {
                     openColorPicker_ = nullptr;
                 }
+                if (openDatePicker_ && document_->root() &&
+                    (!isReachable(*document_->root(), openDatePicker_) ||
+                     openDatePicker_->hasAttribute("disabled"))) {
+                    openDatePicker_ = nullptr;
+                }
                 if (openSelect_ && popupFound) {
                     SDL_SetRenderClipRect(sdlRenderer, nullptr);
                     paintSelectPopup(*openSelect_, renderer, sdlRenderer,
@@ -7648,6 +8308,20 @@ bool Application::renderFrame(WindowId id) {
                                     popupOpacity, resolver_.systemColorSchemeDark());
                 } else if (openColorPicker_) {
                     openColorPicker_ = nullptr;
+                }
+                // The calendar floats above the page the same way. An input
+                // that painted no box was hidden while open, so close it
+                // rather than leave a stale overlay.
+                if (openDatePicker_ && popupFound) {
+                    SDL_SetRenderClipRect(sdlRenderer, nullptr);
+                    paintDatePopup(*openDatePicker_, renderer, sdlRenderer,
+                                   resolver_.resolve(*openDatePicker_), *font_,
+                                   popupOffX, popupOffY, resolver_.viewportWidth(),
+                                   resolver_.viewportHeight(), datePickerYear_,
+                                   datePickerMonth_, datePickerDay_, popupOpacity,
+                                   resolver_.systemColorSchemeDark());
+                } else if (openDatePicker_) {
+                    openDatePicker_ = nullptr;
                 }
             } else {
                 SDL_FRect panel{40.0f, 40.0f, static_cast<float>(width) - 80.0f,
@@ -7731,6 +8405,10 @@ void Application::shutdown() {
     selectHighlight_ = 0;
     openColorPicker_ = nullptr;
     colorPickerHighlight_ = 0;
+    openDatePicker_ = nullptr;
+    datePickerYear_ = 0;
+    datePickerMonth_ = 0;
+    datePickerDay_ = 0;
     selectAnchor_ = 0;
     selectEdge_ = 0;
     caretBytePos_ = 0;

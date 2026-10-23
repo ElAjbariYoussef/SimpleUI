@@ -128,6 +128,13 @@ struct Page {
     // Like the other popups this is an overlay and never lays out.
     Element* openColorPicker_ = nullptr;
     std::size_t colorPickerHighlight_ = 0;
+    // The date input whose calendar is open, and the highlighted civil date
+    // (year, month, day). The calendar always shows the highlighted date's
+    // month; arrows and header buttons move that date, never the tree.
+    Element* openDatePicker_ = nullptr;
+    int datePickerYear_ = 0;
+    int datePickerMonth_ = 0;
+    int datePickerDay_ = 0;
     Element* scrollDrag_ = nullptr;
     bool scrollDragX_ = false;
     float scrollGrab_ = 0.0f;
@@ -345,6 +352,12 @@ public:
     // swatch. Picking writes the input's `value` as `#rrggbb`.
     Element* openColorPicker() const noexcept { return openColorPicker_; }
     std::size_t colorPickerHighlight() const noexcept { return colorPickerHighlight_; }
+    // The date input whose calendar is open, if any, and the date its highlight
+    // currently names. Picking writes the input's canonical `YYYY-MM-DD` value.
+    Element* openDatePicker() const noexcept { return openDatePicker_; }
+    int datePickerYear() const noexcept { return datePickerYear_; }
+    int datePickerMonth() const noexcept { return datePickerMonth_; }
+    int datePickerDay() const noexcept { return datePickerDay_; }
 
     // Writes a picked file path into a file input, dropping it when the
     // element is gone, replaced, or no file control. The dialog callback runs
@@ -542,6 +555,13 @@ private:
     // Picking writes `#rrggbb`; Escape or an outside press closes it.
     Element* openColorPicker_ = nullptr;
     std::size_t colorPickerHighlight_ = 0;
+    // The date input whose calendar is open, and the highlighted civil date.
+    // Picking writes a canonical `YYYY-MM-DD`; Escape or an outside press
+    // closes the overlay without touching the input.
+    Element* openDatePicker_ = nullptr;
+    int datePickerYear_ = 0;
+    int datePickerMonth_ = 0;
+    int datePickerDay_ = 0;
     // A scrollbar thumb drag: the scroller, the axis, the grab offset into
     // the thumb, and the track span the thumb travels. Moves retarget the
     // scroll offset; release drops the drag.
