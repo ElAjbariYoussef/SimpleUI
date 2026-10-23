@@ -124,6 +124,10 @@ struct Page {
     std::size_t selectHighlight_ = 0;
     Element* openDatalist_ = nullptr;
     std::size_t datalistHighlight_ = 0;
+    // The colour input whose palette is open, and the highlighted swatch.
+    // Like the other popups this is an overlay and never lays out.
+    Element* openColorPicker_ = nullptr;
+    std::size_t colorPickerHighlight_ = 0;
     Element* scrollDrag_ = nullptr;
     bool scrollDragX_ = false;
     float scrollGrab_ = 0.0f;
@@ -337,6 +341,10 @@ public:
     // suggestion row. Picking writes the input's `value`.
     Element* openDatalist() const noexcept { return openDatalist_; }
     std::size_t datalistHighlight() const noexcept { return datalistHighlight_; }
+    // The colour input whose palette is open, if any, with its highlighted
+    // swatch. Picking writes the input's `value` as `#rrggbb`.
+    Element* openColorPicker() const noexcept { return openColorPicker_; }
+    std::size_t colorPickerHighlight() const noexcept { return colorPickerHighlight_; }
 
     // Writes a picked file path into a file input, dropping it when the
     // element is gone, replaced, or no file control. The dialog callback runs
@@ -520,6 +528,10 @@ private:
     // out; picking writes the input's `value`.
     Element* openDatalist_ = nullptr;
     std::size_t datalistHighlight_ = 0;
+    // The colour input whose palette is open, and the highlighted swatch.
+    // Picking writes `#rrggbb`; Escape or an outside press closes it.
+    Element* openColorPicker_ = nullptr;
+    std::size_t colorPickerHighlight_ = 0;
     // A scrollbar thumb drag: the scroller, the axis, the grab offset into
     // the thumb, and the track span the thumb travels. Moves retarget the
     // scroll offset; release drops the drag.

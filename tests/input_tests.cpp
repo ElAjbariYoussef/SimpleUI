@@ -12,6 +12,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -1831,6 +1832,178 @@ int main() {
         }
     }
 
+    // A colour input's swatch opens a built-in palette. A cell picks a
+    // canonical #rrggbb value and closes it; arrows/Home/End move the highlight;
+    // Enter/Space opens or picks; Escape and an outside press close it; release
+    // over a cell picks too. Disabled controls and `appearance: none` have no
+    // picker affordance.
+    {
+        sui::Application app;
+        sui::ParseError err;
+        auto doc = sui::MarkupParser::parse(
+            "<sui><body>"
+            "<form onsubmit=\"recordFormSubmit()\">"
+            "<input id=\"c\" type=\"color\" value=\"#ff0000\"/></form>"
+            "<input id=\"none\" type=\"color\" value=\"#00ff00\" "
+            "style=\"appearance:none\"/>"
+            "<input id=\"off\" type=\"color\" value=\"#0000ff\" disabled/>"
+            "</body></sui>", err);
+        check(doc != nullptr, "colour picker document parsed");
+        sui::script::registerHandler("recordFormSubmit", recordFormSubmit);
+        g_formSubmits = 0;
+        if (doc) {
+            sui::Element* c = doc->getElementById("c");
+            sui::Element* none = doc->getElementById("none");
+            sui::Element* off = doc->getElementById("off");
+            check(c && none && off, "colour picker elements found");
+            if (c && none && off) {
+                app.setDocument(std::move(doc));
+                sui::Document& appDoc = app.document();
+                sui::StyleResolver layoutResolver;
+                layoutResolver.setRules(
+                    sui::CSSParser::parse("input{display:block;width:120px;height:24px}"));
+                sui::LayoutInput input;
+                input.resolver = &layoutResolver;
+                input.viewportWidth = 400.0f;
+                input.viewportHeight = 300.0f;
+                sui::BlockLayout().layout(app.document().root(), input);
+
+                constexpr float kPad = 6.0f;
+                constexpr float kCell = 22.0f;
+                constexpr float kGap = 2.0f;
+                constexpr int kCols = 6;
+                constexpr int kRows = 6;
+                const float popupW = 2.0f * kPad + kCols * kCell + (kCols - 1) * kGap;
+                const float popupH = 2.0f * kPad + kRows * kCell + (kRows - 1) * kGap;
+                const auto swatch = [](sui::Element* el) {
+                    return sui::InputEvent(
+                        sui::InputKind::PointerDown,
+                        el->contentX() + el->contentWidth() - 10.0f,
+                        el->contentY() + el->contentHeight() * 0.5f, 1);
+                };
+                const auto cell = [&](sui::Element* el, int index) {
+                    float x = el->layoutX();
+                    float y = el->layoutY() + el->layoutHeight() + 2.0f;
+                    if (y + popupH > 300.0f) {
+                        y = el->layoutY() - popupH - 2.0f;
+                    }
+                    if (x + popupW > 400.0f) {
+                        x = 400.0f - popupW;
+                    }
+                    x = std::max(0.0f, x);
+                    y = std::max(0.0f, y);
+                    const float col = static_cast<float>(index % kCols);
+                    const float row = static_cast<float>(index / kCols);
+                    return sui::InputEvent(
+                        sui::InputKind::PointerDown,
+                        x + kPad + col * (kCell + kGap) + kCell * 0.5f,
+                        y + kPad + row * (kCell + kGap) + kCell * 0.5f, 1);
+                };
+                const auto hover = [&](sui::Element* el, int index) {
+                    sui::InputEvent ev = cell(el, index);
+                    ev.kind = sui::InputKind::PointerMove;
+                    ev.button = 0;
+                    return ev;
+                };
+
+                check(app.openColorPicker() == nullptr, "no colour palette starts open");
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerDown,
+                                             c->contentX() + 4.0f,
+                                             c->contentY() + c->contentHeight() * 0.5f,
+                                             1));
+                check(app.openColorPicker() == nullptr,
+                      "clicking the text area does not open the palette");
+
+                app.dispatch(swatch(c));
+                check(app.openColorPicker() == c, "clicking the swatch opens the palette");
+                check(app.colorPickerHighlight() == 6,
+                      "the palette opens on the current colour");
+                app.dispatch(hover(c, 0));
+                check(app.colorPickerHighlight() == 0,
+                      "hovering a swatch moves the highlight");
+                app.dispatch(cell(c, 0));
+                check(c->value() == "#000000", "clicking a swatch picks its colour");
+                check(app.openColorPicker() == nullptr, "a colour pick closes the palette");
+
+                // Keyboard: arrows move within the grid, Enter picks, Escape
+                // only closes. Home/End jump to the row ends.
+                app.dispatch(swatch(c));
+                sui::InputEvent rightEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0,
+                                        0x4000004F);
+                sui::InputEvent downEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0,
+                                       0x40000051);
+                sui::InputEvent homeEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0,
+                                       0x4000004A);
+                sui::InputEvent endEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0,
+                                      0x4000004D);
+                sui::InputEvent enterEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x0D);
+                sui::InputEvent escEv(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x1B);
+                app.dispatch(rightEv);
+                check(app.colorPickerHighlight() == 1, "Right moves to the next swatch");
+                app.dispatch(downEv);
+                check(app.colorPickerHighlight() == 7, "Down moves to the next row");
+                app.dispatch(endEv);
+                check(app.colorPickerHighlight() == 11, "End moves to the row end");
+                app.dispatch(homeEv);
+                check(app.colorPickerHighlight() == 6, "Home moves to the row start");
+                app.dispatch(enterEv);
+                check(c->value() == "#ff0000", "Enter picks the highlighted colour");
+                check(app.openColorPicker() == nullptr, "Enter picking closes the palette");
+
+                appDoc.setFocused(c);
+                app.dispatch(enterEv);
+                check(app.openColorPicker() == c, "Enter opens a closed palette");
+                check(g_formSubmits == 0,
+                      "Enter opening a palette does not submit its form");
+                app.dispatch(downEv);
+                app.dispatch(enterEv);
+                check(c->value() == "#ff00ff", "the keyboard can pick another row");
+                check(g_formSubmits == 0,
+                      "Enter picking a colour does not submit its form");
+                app.dispatch(escEv);
+                check(app.openColorPicker() == nullptr, "Escape is harmless when closed");
+
+                app.dispatch(swatch(c));
+                check(app.openColorPicker() == c, "the palette reopens");
+                app.dispatch(escEv);
+                check(app.openColorPicker() == nullptr, "Escape closes the palette");
+                check(c->value() == "#ff00ff", "Escape keeps the value");
+
+                // Clicking outside closes; pressing the swatch toggles it shut.
+                app.dispatch(swatch(c));
+                app.dispatch(sui::InputEvent(sui::InputKind::PointerDown, 350.0f,
+                                             250.0f, 1));
+                check(app.openColorPicker() == nullptr,
+                      "clicking outside closes the palette");
+                app.dispatch(swatch(c));
+                app.dispatch(swatch(c));
+                check(app.openColorPicker() == nullptr,
+                      "clicking the open swatch toggles the palette shut");
+
+                // Press-drag-release picks the release cell.
+                app.dispatch(swatch(c));
+                app.dispatch(hover(c, 2));
+                sui::InputEvent release = cell(c, 2);
+                release.kind = sui::InputKind::PointerUp;
+                app.dispatch(release);
+                check(c->value() == "#888888", "releasing over a swatch picks it");
+                check(app.openColorPicker() == nullptr,
+                      "the releasing pick closes the palette");
+
+                app.dispatch(swatch(none));
+                check(app.openColorPicker() == nullptr,
+                      "appearance:none removes the colour picker affordance");
+                app.dispatch(swatch(off));
+                check(app.openColorPicker() == nullptr,
+                      "a disabled colour input opens no palette");
+                appDoc.setFocused(off);
+                app.dispatch(enterEv);
+                check(app.openColorPicker() == nullptr,
+                      "keys on a disabled colour input open nothing");
+            }
+        }
+    }
+
     // A `<textarea>` edits its text content as a multiline value: typing works at
     // any caret position, Return starts a new line, Home/End bound the caret to
     // the line instead of the value, and Up/Down keep the column while changing
@@ -2536,6 +2709,7 @@ int main() {
             "<input id=\"before\" value=\"\"/>"
             "<dialog id=\"m\" oncancel=\"flagCancel()\" onclose=\"flagShut()\">"
             "<button id=\"ok\">ok</button><button id=\"away\">away</button>"
+            "<input id=\"mc\" type=\"color\" value=\"#ff0000\"/>"
             "</dialog>"
             "</body></sui>",
             err);
@@ -2555,8 +2729,9 @@ int main() {
             sui::Element* m = app.document().getElementById("m");
             sui::Element* before = app.document().getElementById("before");
             sui::Element* ok = app.document().getElementById("ok");
-            check(m && before && ok, "modal elements found");
-            if (m && before && ok) {
+            sui::Element* mc = app.document().getElementById("mc");
+            check(m && before && ok && mc, "modal elements found");
+            if (m && before && ok && mc) {
                 layout();
                 // Focusing the field first gives the modal a place to return to.
                 app.dispatch(sui::InputEvent(sui::InputKind::PointerDown,
@@ -2582,7 +2757,23 @@ int main() {
                 app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0,
                                              0, 0x09));
                 check(app.document().focused() != before, "tab never leaves");
-                // Escape fires cancel then close, and hands focus back.
+                // An open colour palette consumes Escape: it closes the
+                // overlay without cancelling or closing the dialog beneath.
+                app.dispatch(sui::InputEvent(
+                    sui::InputKind::PointerDown,
+                    mc->contentX() + mc->contentWidth() - 10.0f,
+                    mc->contentY() + mc->contentHeight() * 0.5f, 1));
+                check(app.openColorPicker() == mc,
+                      "a colour palette opens inside the dialog");
+                g_modalCancel = false;
+                g_modalShut = false;
+                app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0,
+                                             0, 0x1B));
+                check(app.openColorPicker() == nullptr,
+                      "Escape closes the palette first");
+                check(m->dialogOpen() && !g_modalCancel && !g_modalShut,
+                      "closing the palette leaves the dialog open");
+                // A second Escape fires cancel then close, and hands focus back.
                 g_modalCancel = false;
                 g_modalShut = false;
                 app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0,
@@ -3191,7 +3382,7 @@ int main() {
                 << "left:10px;top:210px\"></progress>"
                    "<progress value=\"0.75\" style=\"" << box
                 << "left:70px;top:210px;appearance:none\"></progress>"
-                   "<input type=\"color\" style=\"" << box
+                   "<input id=\"col\" type=\"color\" style=\"" << box
                 << "left:10px;top:260px\"/>"
                    "<input type=\"color\" style=\"" << box
                 << "left:70px;top:260px;appearance:none\"/>"
@@ -3275,6 +3466,7 @@ int main() {
                   "a color input paints its swatch");
             check(readPixel(90.0f, 280.0f, r, g, b) && white(r, g, b),
                   "appearance:none hides the color swatch");
+
             check(readPixel(43.0f, 330.0f, r, g, b) && r < 245 && g < 245 && b < 245,
                   "a closed select paints its arrow");
             check(readPixel(103.0f, 330.0f, r, g, b) && white(r, g, b),
@@ -3285,6 +3477,32 @@ int main() {
                   "appearance:none hides the calendar");
             check(readPixel(14.0f, 425.0f, r, g, b) && r == 39 && g == 39 && b == 42,
                   "appearance:none keeps the file Browse button");
+
+            // The palette is painted after the page. This runs last because the
+            // overlay legitimately covers the controls above it until Escape
+            // closes it.
+            app.dispatch(sui::InputEvent(sui::InputKind::PointerDown, 30.0f, 280.0f, 1));
+            check(app.openColorPicker() != nullptr,
+                  "clicking the colour swatch opens the palette");
+            check(app.renderFrame(primary), "the open palette repaints the frame");
+            sui::Element* col = app.document().getElementById("col");
+            check(col != nullptr, "the appearance colour input is reachable");
+            if (col) {
+                // The second row's first cell is red. The palette sits below
+                // the input unless the viewport forces it above, so accept
+                // either reachable placement rather than pinning window size.
+                constexpr float kPaletteH = 154.0f;
+                const float below =
+                    col->layoutY() + col->layoutHeight() + 2.0f + 6.0f + 24.0f + 11.0f;
+                const float above =
+                    col->layoutY() - kPaletteH - 2.0f + 6.0f + 24.0f + 11.0f;
+                const bool painted =
+                    (readPixel(27.0f, below, r, g, b) && r == 255 && g == 0 && b == 0) ||
+                    (readPixel(27.0f, above, r, g, b) && r == 255 && g == 0 && b == 0);
+                check(painted, "the open palette paints its swatch grid");
+            }
+            app.dispatch(sui::InputEvent(sui::InputKind::KeyDown, 0, 0, 0, 0, 0, 0x1B));
+            check(app.openColorPicker() == nullptr, "Escape closes the painted palette");
         }
     }
 

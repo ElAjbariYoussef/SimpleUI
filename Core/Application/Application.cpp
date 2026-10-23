@@ -1211,6 +1211,154 @@ void paintDatalistPopup(Element& input, const std::vector<Element*>& suggestions
         multiplyAlpha(toColor(style.borderColor), opacity), 1.0f);
 }
 
+// A built-in colour palette, six columns by six rows: a greyscale row followed
+// by saturated, dark, pastel, and mid-tone hues. Picking writes the canonical
+// `#rrggbb` spelling, as a native colour input would, rather than preserving
+// the author's CSS name.
+constexpr int kColorPickerColumns = 6;
+constexpr int kColorPickerRows = 6;
+constexpr float kColorPickerCell = 22.0f;
+constexpr float kColorPickerGap = 2.0f;
+constexpr float kColorPickerPadding = 6.0f;
+constexpr std::array<std::string_view, 36> kColorPickerPalette = {
+    "#000000", "#444444", "#888888", "#bbbbbb", "#dddddd", "#ffffff",
+    "#ff0000", "#ff8000", "#ffff00", "#00ff00", "#00ffff", "#0000ff",
+    "#ff00ff", "#800000", "#804000", "#808000", "#008000", "#008080",
+    "#000080", "#800080", "#ff9999", "#ffcc99", "#ffff99", "#99ff99",
+    "#99ffff", "#9999ff", "#ff99ff", "#cc0000", "#cc6600", "#cccc00",
+    "#00cc00", "#00cccc", "#0000cc", "#660000", "#663300", "#666600",
+};
+
+struct ColorPopupGeom {
+    float x = 0.0f;
+    float y = 0.0f;
+    float w = 0.0f;
+    float h = 0.0f;
+};
+
+// The palette hangs below the input, starting at its left edge, and flips
+// above when the viewport bottom is too close, so the popup stays reachable
+// without scrolling the page.
+ColorPopupGeom colorPopupGeom(const Element& input, float offX, float offY,
+                              float viewportW, float viewportH) {
+    const float w = 2.0f * kColorPickerPadding +
+                    static_cast<float>(kColorPickerColumns) * kColorPickerCell +
+                    static_cast<float>(kColorPickerColumns - 1) * kColorPickerGap;
+    const float h = 2.0f * kColorPickerPadding +
+                    static_cast<float>(kColorPickerRows) * kColorPickerCell +
+                    static_cast<float>(kColorPickerRows - 1) * kColorPickerGap;
+    float x = input.layoutX() - offX;
+    if (viewportW > 0.0f && x + w > viewportW) {
+        x = std::max(0.0f, viewportW - w);
+    }
+    float y = input.layoutY() - offY + input.layoutHeight() + 2.0f;
+    if (viewportH > 0.0f && y + h > viewportH) {
+        y = input.layoutY() - offY - h - 2.0f;
+    }
+    if (x < 0.0f) {
+        x = 0.0f;
+    }
+    if (y < 0.0f) {
+        y = 0.0f;
+    }
+    return {x, y, w, h};
+}
+
+// The swatch under (x, y), or -1 outside the grid. Gaps between cells pick
+// nothing, so a press there is an outside press like the select popup's rows.
+int colorPopupCellAt(const ColorPopupGeom& geom, float x, float y) {
+    constexpr float step = kColorPickerCell + kColorPickerGap;
+    const float rx = x - geom.x - kColorPickerPadding;
+    const float ry = y - geom.y - kColorPickerPadding;
+    const float spanW = static_cast<float>(kColorPickerColumns) * step -
+                        kColorPickerGap;
+    const float spanH = static_cast<float>(kColorPickerRows) * step -
+                        kColorPickerGap;
+    if (rx < 0.0f || ry < 0.0f || rx >= spanW || ry >= spanH) {
+        return -1;
+    }
+    const int col = static_cast<int>(rx / step);
+    const int row = static_cast<int>(ry / step);
+    if (rx - static_cast<float>(col) * step >= kColorPickerCell ||
+        ry - static_cast<float>(row) * step >= kColorPickerCell) {
+        return -1;
+    }
+    return row * kColorPickerColumns + col;
+}
+
+// Palette index whose RGB matches `value`, or -1 when the value is not a
+// parseable colour or has no exact swatch. Alpha is ignored: the palette is
+// opaque, and a colour input has no alpha channel.
+int colorPaletteIndexFor(std::string_view value) {
+    SDL_Color wanted{};
+    if (!parseColor(value, wanted)) {
+        return -1;
+    }
+    for (std::size_t i = 0; i < kColorPickerPalette.size(); ++i) {
+        SDL_Color candidate{};
+        if (parseColor(kColorPickerPalette[i], candidate) &&
+            candidate.r == wanted.r && candidate.g == wanted.g &&
+            candidate.b == wanted.b) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+// Whether (x, y) is over the colour indicator. The hit target is the rightmost
+// 24px of the content box, matching the swatch paint and its padding room.
+bool colorSwatchHit(const Element& input, float offX, float offY, float x,
+                    float y) {
+    const float cw = input.contentWidth();
+    const float ch = input.contentHeight();
+    if (cw <= 0.0f || ch <= 0.0f) {
+        return false;
+    }
+    const float right = input.contentX() - offX + cw;
+    const float left = right - std::min(24.0f, cw);
+    const float top = input.contentY() - offY;
+    return x >= left && x < right && y >= top && y < top + ch;
+}
+
+// The palette overlay: a raised panel with one filled cell per colour, the
+// current value outlined and the keyboard/hover swatch accented. It paints
+// after the frame with no ancestor clip, like the select and datalist popups.
+void paintColorPopup(Element& input, Renderer& renderer, const ComputedStyle& style,
+                     float offX, float offY, float viewportW, float viewportH,
+                     std::size_t highlight, float opacity, bool systemDark) {
+    const ColorPopupGeom geom = colorPopupGeom(input, offX, offY, viewportW, viewportH);
+    const sui::UaWidgets& widgets =
+        sui::uaWidgets(sui::colorSchemeUsesDark(style, systemDark));
+    renderer.fillRect(SDL_FRect{geom.x, geom.y, geom.w, geom.h},
+                      multiplyAlpha(toColor(widgets.raised), opacity));
+    const int selected = colorPaletteIndexFor(input.value());
+    for (int i = 0; i < kColorPickerColumns * kColorPickerRows; ++i) {
+        const int col = i % kColorPickerColumns;
+        const int row = i / kColorPickerColumns;
+        const SDL_FRect cell{
+            geom.x + kColorPickerPadding +
+                static_cast<float>(col) * (kColorPickerCell + kColorPickerGap),
+            geom.y + kColorPickerPadding +
+                static_cast<float>(row) * (kColorPickerCell + kColorPickerGap),
+            kColorPickerCell, kColorPickerCell};
+        SDL_Color color{};
+        parseColor(kColorPickerPalette[static_cast<std::size_t>(i)], color);
+        renderer.fillRect(cell, multiplyAlpha(toColor(color), opacity));
+        renderer.strokeRect(cell, multiplyAlpha(toColor(widgets.border), opacity),
+                            1.0f);
+        if (i == selected) {
+            renderer.strokeRect(cell, multiplyAlpha(toColor(widgets.text), opacity),
+                                2.0f);
+        }
+        if (static_cast<std::size_t>(i) == highlight) {
+            renderer.strokeRect(cell, multiplyAlpha(controlAccent(style), opacity),
+                                2.0f);
+        }
+    }
+    renderer.strokeRect(SDL_FRect{geom.x, geom.y, geom.w, geom.h},
+                        multiplyAlpha(toColor(widgets.border), opacity), 1.0f);
+}
+
 // SDL modifier keycodes (LCTRL..RGUI and MODE). A modifier never moves the
 // caret or changes a field's value, so it must not restart the caret blink.
 // The OS repeats a held modifier (Shift in particular); restarting the blink on
@@ -4054,6 +4202,8 @@ void Application::bindPage(std::size_t index) {
     selectHighlight_ = page.selectHighlight_;
     openDatalist_ = page.openDatalist_;
     datalistHighlight_ = page.datalistHighlight_;
+    openColorPicker_ = page.openColorPicker_;
+    colorPickerHighlight_ = page.colorPickerHighlight_;
     scrollDrag_ = page.scrollDrag_;
     scrollDragX_ = page.scrollDragX_;
     resizeDrag_ = page.resizeDrag_;
@@ -4108,6 +4258,8 @@ void Application::flushBound() {
     page.selectHighlight_ = selectHighlight_;
     page.openDatalist_ = openDatalist_;
     page.datalistHighlight_ = datalistHighlight_;
+    page.openColorPicker_ = openColorPicker_;
+    page.colorPickerHighlight_ = colorPickerHighlight_;
     page.scrollDrag_ = scrollDrag_;
     page.scrollDragX_ = scrollDragX_;
     page.resizeDrag_ = resizeDrag_;
@@ -4157,6 +4309,12 @@ void Application::bindFrame(Element* frameEl) {
     FrameState* state = it->second.get();
     const int owner = boundPage_;
     flushBound();
+    if (owner >= 0 && static_cast<std::size_t>(owner) < pages_.size()) {
+        // A frame has no overlay palette; close the page's before its state is
+        // swapped out so returning to the page does not revive it.
+        pages_[static_cast<std::size_t>(owner)]->openColorPicker_ = nullptr;
+        pages_[static_cast<std::size_t>(owner)]->colorPickerHighlight_ = 0;
+    }
     FrameState& frame = *state;
     document_ = std::move(frame.document);
     resolver_ = std::move(frame.resolver);
@@ -4171,6 +4329,8 @@ void Application::bindFrame(Element* frameEl) {
     selectHighlight_ = frame.selectHighlight;
     openDatalist_ = frame.openDatalist;
     datalistHighlight_ = frame.datalistHighlight;
+    openColorPicker_ = nullptr;
+    colorPickerHighlight_ = 0;
     scrollDrag_ = frame.scrollDrag;
     scrollDragX_ = frame.scrollDragX;
     scrollGrab_ = frame.scrollGrab;
@@ -4490,6 +4650,8 @@ void Application::setDocument(std::unique_ptr<Document> document) {
     page.selectEdge_ = 0;
     page.openDatalist_ = nullptr;
     page.datalistHighlight_ = 0;
+    page.openColorPicker_ = nullptr;
+    page.colorPickerHighlight_ = 0;
     page.scrollDrag_ = nullptr;
     page.resizeDrag_ = nullptr;
     page.modalDialog_ = nullptr;
@@ -4608,6 +4770,8 @@ void Application::installPageAt(std::size_t index, std::unique_ptr<Document> doc
     page.selectHighlight_ = 0;
     page.openDatalist_ = nullptr;
     page.datalistHighlight_ = 0;
+    page.openColorPicker_ = nullptr;
+    page.colorPickerHighlight_ = 0;
     page.scrollDrag_ = nullptr;
     page.resizeDrag_ = nullptr;
     page.modalDialog_ = nullptr;
@@ -5004,6 +5168,7 @@ void Application::syncModalDialog() {
         // Popups belong to the page below; a modal rise closes them.
         openSelect_ = nullptr;
         openDatalist_ = nullptr;
+        openColorPicker_ = nullptr;
         Element* focused = document_->focused();
         if (focused != modalDialog_ && !withinSubtree(focused, modalDialog_)) {
             modalReturnFocus_ = focused;
@@ -5117,6 +5282,8 @@ void Application::dispatchEvent(const InputEvent& event) {
     // A datalist pick refocuses its input, which must not reopen suggestions
     // on the same press.
     bool suppressDatalistOpen = false;
+    // A palette pick or swatch toggle must not immediately reopen the palette.
+    bool suppressColorOpen = false;
     // A submit control (or Enter in a field) queues its form here. The
     // submission runs after the click/key handlers, as it does on the web, so
     // those handlers can fill a field before validation and the onsubmit sees
@@ -5147,6 +5314,10 @@ void Application::dispatchEvent(const InputEvent& event) {
         }
         if (openDatalist_ && !isReachable(*document_->root(), openDatalist_)) {
             openDatalist_ = nullptr;
+        }
+        if (openColorPicker_ &&
+            !isReachable(*document_->root(), openColorPicker_)) {
+            openColorPicker_ = nullptr;
         }
         if (openSelect_ && event.kind == InputKind::PointerDown) {
             // The popup is an overlay, not an element, so it never wins the hit
@@ -5208,6 +5379,36 @@ void Application::dispatchEvent(const InputEvent& event) {
                     target = picked;
                 } else if (target != openDatalist_) {
                     openDatalist_ = nullptr;
+                }
+            }
+        }
+        if (openColorPicker_ && event.kind == InputKind::PointerDown) {
+            // The palette is an overlay: a cell picks first, a press on the
+            // swatch toggles it shut, and anywhere else closes with normal
+            // handling continuing. A pick lands before any `onclick` handler.
+            float offX = 0.0f, offY = 0.0f;
+            if (!selectBoxOffset(ops, openColorPicker_, offX, offY)) {
+                openColorPicker_ = nullptr;
+            } else {
+                const ColorPopupGeom geom = colorPopupGeom(
+                    *openColorPicker_, offX, offY, resolver_.viewportWidth(),
+                    resolver_.viewportHeight());
+                const int cell = colorPopupCellAt(geom, event.x, event.y);
+                if (cell >= 0 &&
+                    !openColorPicker_->hasAttribute("disabled")) {
+                    Element* picked = openColorPicker_;
+                    picked->setValue(
+                        std::string(kColorPickerPalette[static_cast<std::size_t>(cell)]));
+                    openColorPicker_ = nullptr;
+                    target = picked;
+                    suppressColorOpen = true;
+                } else if (target == openColorPicker_ &&
+                           colorSwatchHit(*openColorPicker_, offX, offY,
+                                          event.x, event.y)) {
+                    openColorPicker_ = nullptr;
+                    suppressColorOpen = true;
+                } else {
+                    openColorPicker_ = nullptr;
                 }
             }
         }
@@ -5414,6 +5615,20 @@ void Application::dispatchEvent(const InputEvent& event) {
                     }
                 }
             }
+            if (openColorPicker_ && document_->root() &&
+                isReachable(*document_->root(), openColorPicker_)) {
+                const auto hoverOps = computePaintOps(*document_->root(), resolver_);
+                float offX = 0.0f, offY = 0.0f;
+                if (selectBoxOffset(hoverOps, openColorPicker_, offX, offY)) {
+                    const ColorPopupGeom geom = colorPopupGeom(
+                        *openColorPicker_, offX, offY, resolver_.viewportWidth(),
+                        resolver_.viewportHeight());
+                    const int cell = colorPopupCellAt(geom, event.x, event.y);
+                    if (cell >= 0) {
+                        colorPickerHighlight_ = static_cast<std::size_t>(cell);
+                    }
+                }
+            }
             return;
         case InputKind::PointerDown:
             resolver_.setActive(target);
@@ -5437,6 +5652,7 @@ void Application::dispatchEvent(const InputEvent& event) {
                         openDatalist_ = target;
                         datalistHighlight_ = 0;
                         openSelect_ = nullptr;
+                        openColorPicker_ = nullptr;
                     }
                 } else if (openDatalist_ && openDatalist_ != target) {
                     openDatalist_ = nullptr;
@@ -5534,6 +5750,7 @@ void Application::dispatchEvent(const InputEvent& event) {
                     openSelect_ = target;
                     selectHighlight_ = selectSelectedIndex(*target);
                     openDatalist_ = nullptr;
+                    openColorPicker_ = nullptr;
                 }
             }
             // A file input's Browse button opens the OS picker on click, before
@@ -5553,6 +5770,33 @@ void Application::dispatchEvent(const InputEvent& event) {
                     event.y >= cy - 4.0f && event.y < cy + ch + 4.0f && cw > 0.0f &&
                     ch > 0.0f) {
                     openFileDialog(*target);
+                }
+            }
+            // A colour input's swatch opens the built-in palette, or closes an
+            // open one, before any `onclick` handler. The press point is tested
+            // against the same swatch rect the box paints; `appearance: none`
+            // removes the indicator and therefore the picker affordance.
+            if (!boundFrame_ && target && target->tag() == "input" &&
+                target->attribute("type") == "color" &&
+                !target->hasAttribute("disabled") && !suppressColorOpen) {
+                const ComputedStyle style = resolver_.resolve(*target);
+                if (style.appearance != ComputedStyle::AppearanceNone) {
+                    const auto boxOps =
+                        computePaintOps(*document_->root(), resolver_);
+                    float offX = 0.0f, offY = 0.0f;
+                    if (selectBoxOffset(boxOps, target, offX, offY) &&
+                        colorSwatchHit(*target, offX, offY, event.x, event.y)) {
+                        if (openColorPicker_ == target) {
+                            openColorPicker_ = nullptr;
+                        } else {
+                            openColorPicker_ = target;
+                            const int at = colorPaletteIndexFor(target->value());
+                            colorPickerHighlight_ =
+                                at >= 0 ? static_cast<std::size_t>(at) : 0;
+                            openSelect_ = nullptr;
+                            openDatalist_ = nullptr;
+                        }
+                    }
                 }
             }
             // An open list picks its clicked row: a plain click selects,
@@ -5646,6 +5890,25 @@ void Application::dispatchEvent(const InputEvent& event) {
                     }
                 }
             }
+            // A release over a palette swatch picks it too, so press-drag-release
+            // works alongside click-click.
+            if (openColorPicker_ && document_->root() &&
+                isReachable(*document_->root(), openColorPicker_)) {
+                const auto upOps = computePaintOps(*document_->root(), resolver_);
+                float offX = 0.0f, offY = 0.0f;
+                if (selectBoxOffset(upOps, openColorPicker_, offX, offY)) {
+                    const ColorPopupGeom geom = colorPopupGeom(
+                        *openColorPicker_, offX, offY, resolver_.viewportWidth(),
+                        resolver_.viewportHeight());
+                    const int cell = colorPopupCellAt(geom, event.x, event.y);
+                    if (cell >= 0 &&
+                        !openColorPicker_->hasAttribute("disabled")) {
+                        openColorPicker_->setValue(std::string(
+                            kColorPickerPalette[static_cast<std::size_t>(cell)]));
+                        openColorPicker_ = nullptr;
+                    }
+                }
+            }
             break;
         case InputKind::Wheel: {
             if (!target) {
@@ -5728,8 +5991,12 @@ void Application::dispatchEvent(const InputEvent& event) {
                         openDatalist_ = next;
                         datalistHighlight_ = 0;
                         openSelect_ = nullptr;
+                        openColorPicker_ = nullptr;
                     } else if (openDatalist_ && openDatalist_ != next) {
                         openDatalist_ = nullptr;
+                    }
+                    if (openColorPicker_ && openColorPicker_ != next) {
+                        openColorPicker_ = nullptr;
                     }
                     if (isEditableField(next)) {
                         resetCaretBlink();
@@ -5766,11 +6033,82 @@ void Application::dispatchEvent(const InputEvent& event) {
             break;
     }
 
+    // A focused colour input opens its palette on Enter/Space and, while open,
+    // uses arrows/Home/End to move the highlighted swatch and Enter/Space to
+    // pick it. Handling the key before text editing keeps Enter from also
+    // submitting a surrounding form and keeps arrows from moving the caret.
+    bool colorKeyHandled = false;
+    if (target && event.kind == InputKind::KeyDown && target->tag() == "input" &&
+        target->attribute("type") == "color" &&
+        !target->hasAttribute("disabled")) {
+        constexpr int kReturn = 0x0D;
+        constexpr int kKPEnter = 0x40000058;
+        constexpr int kSpace = 0x20;
+        constexpr int kEscape = 0x1B;
+        constexpr int kHome = 0x4000004A;
+        constexpr int kEnd = 0x4000004D;
+        constexpr int kRight = 0x4000004F;
+        constexpr int kLeft = 0x40000050;
+        constexpr int kUp = 0x40000052;
+        constexpr int kDown = 0x40000051;
+        const bool open = openColorPicker_ == target;
+        const bool pick = event.key == kReturn || event.key == kKPEnter ||
+                          event.key == kSpace;
+        if (!open && pick) {
+            openColorPicker_ = target;
+            const int at = colorPaletteIndexFor(target->value());
+            colorPickerHighlight_ = at >= 0 ? static_cast<std::size_t>(at) : 0;
+            openSelect_ = nullptr;
+            openDatalist_ = nullptr;
+            colorKeyHandled = true;
+        } else if (open && event.key == kEscape) {
+            openColorPicker_ = nullptr;
+            colorKeyHandled = true;
+        } else if (open && (event.key == kLeft || event.key == kRight ||
+                            event.key == kUp || event.key == kDown)) {
+            std::size_t at =
+                std::min(colorPickerHighlight_,
+                         static_cast<std::size_t>(kColorPickerColumns *
+                                                  kColorPickerRows - 1));
+            int col = static_cast<int>(at) % kColorPickerColumns;
+            int row = static_cast<int>(at) / kColorPickerColumns;
+            if (event.key == kLeft) {
+                col = std::max(0, col - 1);
+            } else if (event.key == kRight) {
+                col = std::min(kColorPickerColumns - 1, col + 1);
+            } else if (event.key == kUp) {
+                row = std::max(0, row - 1);
+            } else {
+                row = std::min(kColorPickerRows - 1, row + 1);
+            }
+            colorPickerHighlight_ = static_cast<std::size_t>(
+                row * kColorPickerColumns + col);
+            colorKeyHandled = true;
+        } else if (open && (event.key == kHome || event.key == kEnd)) {
+            const int row = static_cast<int>(
+                                std::min(colorPickerHighlight_,
+                                         static_cast<std::size_t>(
+                                             kColorPickerColumns * kColorPickerRows - 1))) /
+                            kColorPickerColumns;
+            const int col = event.key == kHome ? 0 : kColorPickerColumns - 1;
+            colorPickerHighlight_ = static_cast<std::size_t>(
+                row * kColorPickerColumns + col);
+            colorKeyHandled = true;
+        } else if (open && pick) {
+            const std::size_t at = std::min(
+                colorPickerHighlight_,
+                static_cast<std::size_t>(kColorPickerColumns * kColorPickerRows - 1));
+            target->setValue(std::string(kColorPickerPalette[at]));
+            openColorPicker_ = nullptr;
+            colorKeyHandled = true;
+        }
+    }
+
     // A focused text field edits its `value` before any handler sees the event, so
     // an `oninput` handler reads the text the field now holds.
     // Readonly and disabled fields reject edits. Non-textual types (e.g. button, submit)
     // do not edit their value on text input.
-    if (target && isEditableField(target)) {
+    if (target && isEditableField(target) && !colorKeyHandled) {
         constexpr int kBackspace = 0x08;
         constexpr int kDelete = 0x7F;
         constexpr int kHome = 0x4000004A;
@@ -6082,6 +6420,7 @@ void Application::dispatchEvent(const InputEvent& event) {
     syncModalDialog();
     if (modalDialog_ && isReachable(*document_->root(), modalDialog_) &&
         event.kind == InputKind::KeyDown && event.key == 0x1B && !openSelect_ &&
+        !openColorPicker_ && !colorKeyHandled &&
         openDatalist_ != document_->focused()) {
         closeModalDialog();
         return;
@@ -6924,6 +7263,12 @@ bool Application::renderFrame(WindowId id) {
                         popupOpacity = groupOpacity;
                         popupFound = true;
                     }
+                    if (openColorPicker_ && item.el == openColorPicker_) {
+                        popupOffX = item.dx + ox;
+                        popupOffY = item.dy + oy;
+                        popupOpacity = groupOpacity;
+                        popupFound = true;
+                    }
                     if (item.clip.w > 0.0f && item.clip.h > 0.0f) {
                         const SDL_Rect rect{static_cast<int>(std::floor(item.clip.x - ox)),
                                             static_cast<int>(std::floor(item.clip.y - oy)),
@@ -6986,6 +7331,10 @@ bool Application::renderFrame(WindowId id) {
                     !isReachable(*document_->root(), openDatalist_)) {
                     openDatalist_ = nullptr;
                 }
+                if (openColorPicker_ && document_->root() &&
+                    !isReachable(*document_->root(), openColorPicker_)) {
+                    openColorPicker_ = nullptr;
+                }
                 if (openSelect_ && popupFound) {
                     SDL_SetRenderClipRect(sdlRenderer, nullptr);
                     paintSelectPopup(*openSelect_, renderer, sdlRenderer,
@@ -7008,6 +7357,19 @@ bool Application::renderFrame(WindowId id) {
                                            popupOffX, popupOffY, datalistHighlight_,
                                            popupOpacity);
                     }
+                }
+                // The colour palette floats above the page the same way. An
+                // input that painted no box was hidden while open, so close it
+                // rather than leave a stale overlay.
+                if (openColorPicker_ && popupFound) {
+                    SDL_SetRenderClipRect(sdlRenderer, nullptr);
+                    paintColorPopup(*openColorPicker_, renderer,
+                                    resolver_.resolve(*openColorPicker_), popupOffX,
+                                    popupOffY, resolver_.viewportWidth(),
+                                    resolver_.viewportHeight(), colorPickerHighlight_,
+                                    popupOpacity, resolver_.systemColorSchemeDark());
+                } else if (openColorPicker_) {
+                    openColorPicker_ = nullptr;
                 }
             } else {
                 SDL_FRect panel{40.0f, 40.0f, static_cast<float>(width) - 80.0f,
@@ -7089,6 +7451,8 @@ void Application::shutdown() {
     lastFocused_ = nullptr;
     openSelect_ = nullptr;
     selectHighlight_ = 0;
+    openColorPicker_ = nullptr;
+    colorPickerHighlight_ = 0;
     selectAnchor_ = 0;
     selectEdge_ = 0;
     caretBytePos_ = 0;
