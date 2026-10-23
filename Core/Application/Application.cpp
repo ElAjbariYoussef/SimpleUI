@@ -769,23 +769,197 @@ void collectInvalidControl(Element& form, Element*& first) {
     });
 }
 
-bool submitForm(Element& form, bool skipValidation) {
-    if (!skipValidation) {
-        Element* invalid = nullptr;
-        collectInvalidControl(form, invalid);
-        if (invalid) {
-            invalid->reportValidity();
-            return false;
+std::string formLower(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    for (const char c : text) {
+        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    return out;
+}
+
+std::string_view formTrim(std::string_view text) {
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) {
+        text.remove_prefix(1);
+    }
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) {
+        text.remove_suffix(1);
+    }
+    return text;
+}
+
+std::string formNormalizeNewlines(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '\r') {
+            out.push_back('\n');
+            if (i + 1 < text.size() && text[i + 1] == '\n') {
+                ++i;
+            }
+        } else {
+            out.push_back(text[i]);
         }
     }
-    // The engine has no action/method navigation: a valid submit only fires
-    // the form's handler. The handler must not steal focus from the control
-    // that submitted, the way clicking a button focuses it.
-    const std::string_view handler = form.attribute("onsubmit");
-    if (!handler.empty()) {
-        script::invokeInlineHandler(handler, &form, false);
+    return out;
+}
+
+// application/x-www-form-urlencoded: alphanumerics plus `*-._` are literal,
+// spaces become `+`, and everything else is a UTF-8 percent escape.
+std::string formEncode(std::string_view text) {
+    static constexpr char hex[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(text.size());
+    for (const unsigned char c : text) {
+        const bool alpha = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                           (c >= '0' && c <= '9');
+        if (alpha || c == '-' || c == '_' || c == '.' || c == '*') {
+            out.push_back(static_cast<char>(c));
+        } else if (c == ' ') {
+            out.push_back('+');
+        } else {
+            out.push_back('%');
+            out.push_back(hex[c >> 4]);
+            out.push_back(hex[c & 0x0F]);
+        }
     }
-    return true;
+    return out;
+}
+
+void appendFormPair(std::string& out, std::string_view name, std::string_view value) {
+    if (!out.empty()) {
+        out.push_back('&');
+    }
+    out += formEncode(name);
+    out.push_back('=');
+    out += formEncode(formNormalizeNewlines(value));
+}
+
+std::string formBaseName(std::string_view path) {
+    const std::size_t slash = path.find_last_of("/\\");
+    return std::string(path.substr(slash == std::string_view::npos ? 0 : slash + 1));
+}
+
+std::string formOptionValue(const Element& option) {
+    if (option.hasAttribute("value")) {
+        return std::string(option.attribute("value"));
+    }
+    return option.optionLabel();
+}
+
+// One successful control's entries. Submit buttons only contribute when they
+// are the control that submitted; unchecked boxes, disabled controls, unnamed
+// controls, and buttons of other types contribute nothing. A multiple file
+// input repeats its name once per picked file, using the base name because the
+// engine stores local paths rather than File objects.
+void appendFormControl(Element& control, Element* submitter, std::string& out) {
+    if (control.isTextNode() || control.tag() == "form") {
+        return;
+    }
+    const std::string_view name = control.attribute("name");
+    if (name.empty() || control.hasAttribute("disabled")) {
+        return;
+    }
+    const std::string_view tag = control.tag();
+    if (tag == "input") {
+        const std::string type = formLower(formTrim(control.attribute("type")));
+        if (type == "submit" || type == "image") {
+            if (&control == submitter) {
+                appendFormPair(out, name, control.attribute("value"));
+            }
+            return;
+        }
+        if (type == "reset" || type == "button") {
+            return;
+        }
+        if (type == "checkbox" || type == "radio") {
+            if (!control.hasAttribute("checked")) {
+                return;
+            }
+            appendFormPair(out, name,
+                           control.hasAttribute("value")
+                               ? control.attribute("value")
+                               : std::string_view("on"));
+            return;
+        }
+        if (type == "file") {
+            const std::string value = control.value();
+            for (std::size_t start = 0; start <= value.size();) {
+                const std::size_t end = value.find('\n', start);
+                const std::size_t stop =
+                    end == std::string::npos ? value.size() : end;
+                if (stop > start) {
+                    appendFormPair(
+                        out, name,
+                        formBaseName(std::string_view(value).substr(start, stop - start)));
+                }
+                if (end == std::string::npos) {
+                    break;
+                }
+                start = end + 1;
+            }
+            return;
+        }
+        appendFormPair(out, name, control.value());
+    } else if (tag == "textarea") {
+        appendFormPair(out, name, control.value());
+    } else if (tag == "select") {
+        if (!control.hasAttribute("multiple")) {
+            Element* option = control.selectedOption();
+            if (option && !option->hasAttribute("disabled")) {
+                appendFormPair(out, name, formOptionValue(*option));
+            }
+            return;
+        }
+        for (Element* option : control.selectOptions()) {
+            if (option && option->hasAttribute("selected") &&
+                !option->hasAttribute("disabled")) {
+                appendFormPair(out, name, formOptionValue(*option));
+            }
+        }
+    } else if (tag == "button") {
+        if (&control == submitter) {
+            appendFormPair(out, name, control.attribute("value"));
+        }
+    }
+}
+
+std::string formData(Element& form, Element* submitter) {
+    std::string out;
+    form.visit([&](Element& element) {
+        if (&element != &form) {
+            appendFormControl(element, submitter, out);
+        }
+    });
+    return out;
+}
+
+std::string formMethodFor(const Element& form, const Element* submitter) {
+    std::string_view raw = form.attribute("method");
+    if (submitter && submitter->hasAttribute("formmethod")) {
+        raw = submitter->attribute("formmethod");
+    }
+    std::string method = formLower(formTrim(raw));
+    if (method != "get" && method != "post" && method != "dialog") {
+        method = "get";
+    }
+    return method;
+}
+
+std::string formActionFor(const Element& form, const Element* submitter) {
+    std::string_view raw = form.attribute("action");
+    if (submitter && submitter->hasAttribute("formaction")) {
+        raw = submitter->attribute("formaction");
+    }
+    return std::string(formTrim(raw));
+}
+
+std::string stripFormQuery(std::string href) {
+    const std::size_t cut = href.find_first_of("?#");
+    if (cut != std::string::npos) {
+        href.resize(cut);
+    }
+    return href;
 }
 
 // A decimal HTML attribute (a range's `min`/`max`/`step`/`value`): surrounding
@@ -3804,6 +3978,102 @@ std::string_view dialogFilterTrim(std::string_view text) {
 
 }  // namespace
 
+bool Application::dispatchSubmitEvent(Element& form) {
+    bool canceled = false;
+    for (Element* current = &form; current; current = current->parent()) {
+        const std::string_view handler = current->attribute("onsubmit");
+        if (!handler.empty()) {
+            // A submit event does not move focus onto the form or an ancestor,
+            // the way a synthetic click would.
+            script::invokeInlineHandler(handler, current, false);
+        }
+        if (current->attribute("data-preventdefault") == "true") {
+            canceled = true;
+        }
+        if (current->attribute("data-stoppropagation") == "true") {
+            break;
+        }
+    }
+    return !canceled;
+}
+
+bool Application::submitForm(Element& form, Element* submitter, bool skipValidation,
+                             WindowId window) {
+    if (!skipValidation) {
+        Element* invalid = nullptr;
+        collectInvalidControl(form, invalid);
+        if (invalid) {
+            invalid->reportValidity();
+            return false;
+        }
+    }
+    if (!document_ || !document_->root() ||
+        !isReachable(*document_->root(), &form)) {
+        return false;
+    }
+    if (!dispatchSubmitEvent(form)) {
+        return false;
+    }
+    // A handler may have navigated away or removed the form. The old tree
+    // outlives the handler, but it is no longer the live one to navigate.
+    if (!document_ || !document_->root() ||
+        !isReachable(*document_->root(), &form)) {
+        return true;
+    }
+    if (submitter) {
+        bool insideForm = false;
+        for (Element* at = submitter; at; at = at->parent()) {
+            if (at == &form) {
+                insideForm = true;
+                break;
+            }
+        }
+        if (!insideForm || !isReachable(*document_->root(), submitter)) {
+            submitter = nullptr;
+        }
+    }
+
+    const std::string method = formMethodFor(form, submitter);
+    if (method == "dialog") {
+        for (Element* at = form.parent(); at; at = at->parent()) {
+            if (at->tag() != "dialog") {
+                continue;
+            }
+            if (at == modalDialog_) {
+                closeModalDialog();
+            } else {
+                at->close();
+            }
+            return true;
+        }
+        return false;
+    }
+
+    std::string action = formActionFor(form, submitter);
+    if (action.empty() && boundPage_ >= 0 &&
+        static_cast<std::size_t>(boundPage_) < pages_.size()) {
+        action = pages_[static_cast<std::size_t>(boundPage_)]->href;
+    }
+    if (action.empty()) {
+        action = currentPage();
+    }
+    if (action.empty()) {
+        return false;
+    }
+    if (method == "get") {
+        action = stripFormQuery(std::move(action));
+        const std::string data = formData(form, submitter);
+        if (!data.empty()) {
+            action.push_back('?');
+            action += data;
+        }
+    }
+    // A POST has no transport here: navigate to the action without a query.
+    // Scripts on the target page can still tell which page loaded, and the
+    // form event has already run against the source page.
+    return navigateInWindow(window, action, false);
+}
+
 // Maps an input's comma-separated `accept` attribute to one OS dialog filter.
 // Extensions become globs; common MIME wildcards expand to their usual
 // extensions, and an explicit `*` / `*/*` means no filter at all.
@@ -4831,9 +5101,13 @@ bool Application::loadPageAt(std::size_t index, std::string_view href, std::stri
         error = "no project to load " + std::string(href) + " from";
         return false;
     }
-    auto source = resources_->readText(href);
+    // A query is navigation state, not part of the file the project stores.
+    // GET forms append encoded fields here, and a later link back to the page
+    // must still find the same .sui file.
+    const std::string_view path = href.substr(0, href.find('?'));
+    auto source = resources_->readText(path);
     if (!source) {
-        error = "cannot read " + resources_->resolve(href);
+        error = "cannot read " + resources_->resolve(path);
         return false;
     }
     ParseError parseError;
@@ -5289,6 +5563,7 @@ void Application::dispatchEvent(const InputEvent& event) {
     // those handlers can fill a field before validation and the onsubmit sees
     // the final tree.
     Element* pendingSubmitForm = nullptr;
+    Element* pendingSubmitControl = nullptr;
     bool pendingSubmitSkipValidation = false;
     if (keyboard) {
         target = document_->focused();
@@ -5693,6 +5968,7 @@ void Application::dispatchEvent(const InputEvent& event) {
                 if (Element* form = closestForm(target)) {
                     if (Element* control = submitControlFrom(target, *form)) {
                         pendingSubmitForm = form;
+                        pendingSubmitControl = control;
                         pendingSubmitSkipValidation =
                             form->hasAttribute("novalidate") ||
                             control->hasAttribute("formnovalidate");
@@ -6266,6 +6542,7 @@ void Application::dispatchEvent(const InputEvent& event) {
                         Element* button = defaultSubmitControl(*form);
                         if (!button || !button->hasAttribute("disabled")) {
                             pendingSubmitForm = form;
+                            pendingSubmitControl = button;
                             pendingSubmitSkipValidation =
                                 form->hasAttribute("novalidate") ||
                                 (button && button->hasAttribute("formnovalidate"));
@@ -6482,7 +6759,8 @@ void Application::dispatchEvent(const InputEvent& event) {
         // one that is still in the live tree.
         if (pendingSubmitForm && document_ && document_->root() &&
             isReachable(*document_->root(), pendingSubmitForm)) {
-            submitForm(*pendingSubmitForm, pendingSubmitSkipValidation);
+            submitForm(*pendingSubmitForm, pendingSubmitControl,
+                       pendingSubmitSkipValidation, event.window);
         }
     }
 }

@@ -382,6 +382,16 @@ private:
     // Closes the modal dialog after firing `oncancel` when there is one,
     // then restores the remembered focus.
     void closeModalDialog();
+    // Fires the submit event on the form and its ancestors. `data-preventdefault`
+    // on any handler's element cancels the default navigation;
+    // `data-stoppropagation` ends the bubble. Returns false when cancelled.
+    bool dispatchSubmitEvent(Element& form);
+    // The full submit algorithm: validate, fire the submit event, then navigate
+    // through `action`/`method` (or close the enclosing dialog for
+    // `method="dialog"`). `submitter` supplies `formaction`/`formmethod` and
+    // its own name/value; it may be null for implicit submission.
+    bool submitForm(Element& form, Element* submitter, bool skipValidation,
+                    WindowId window);
     // The resize grip: a 12px square in the border box's bottom-right corner.
     static constexpr float kResizeGrip = 12.0f;
     // Whether the point lands on the element's own grip.

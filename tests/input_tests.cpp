@@ -85,12 +85,19 @@ void recordNavPage() {
 // Form submission probes: one counts valid submissions, the other records the
 // order the button click and the form submit ran in.
 int g_formSubmits = 0;
+int g_formParentSubmits = 0;
 std::string g_formOrder;
 void recordFormSubmit() {
     ++g_formSubmits;
     g_formOrder += 's';
 }
+void recordFormParentSubmit() {
+    ++g_formParentSubmits;
+    g_formOrder += 'p';
+}
 void recordFormClick() { g_formOrder += 'c'; }
+int g_dialogCloses = 0;
+void recordDialogClose() { ++g_dialogCloses; }
 
 // Pumps once and asserts the queue held exactly the one event the test pushed.
 void expectOne(sui::Platform& platform, sui::InputKind kind, float x, float y, int button,
@@ -3214,7 +3221,7 @@ int main() {
         {
             std::ofstream out(root / "index.sui", std::ios::binary);
             out << "<sui><body style=\"margin:0\">"
-                   "<form id=\"f\" onsubmit=\"recordFormSubmit()\">"
+                   "<form id=\"f\" data-preventdefault=\"true\" onsubmit=\"recordFormSubmit()\">"
                    "<div><input id=\"name\" required "
                    "style=\"display:block;width:120px;height:20px\"/></div>"
                    "<button id=\"go\" type=\"submit\" onclick=\"recordFormClick()\" "
@@ -3224,29 +3231,29 @@ int main() {
                    "<button id=\"dgo\" type=\"submit\" disabled "
                    "style=\"display:block;width:60px;height:20px\">no</button>"
                    "</form>"
-                   "<form id=\"nv\" novalidate onsubmit=\"recordFormSubmit()\">"
+                   "<form id=\"nv\" data-preventdefault=\"true\" novalidate onsubmit=\"recordFormSubmit()\">"
                    "<input id=\"nvname\" required "
                    "style=\"display:block;width:120px;height:20px\"/>"
                    "<button id=\"nvgo\" type=\"submit\" "
                    "style=\"display:block;width:60px;height:20px\">go</button>"
                    "</form>"
-                   "<form id=\"fn\" onsubmit=\"recordFormSubmit()\">"
+                   "<form id=\"fn\" data-preventdefault=\"true\" onsubmit=\"recordFormSubmit()\">"
                    "<input id=\"fnname\" required "
                    "style=\"display:block;width:120px;height:20px\"/>"
                    "<button id=\"fngo\" type=\"submit\" formnovalidate "
                    "style=\"display:block;width:60px;height:20px\">go</button>"
                    "</form>"
-                   "<form id=\"enter\" onsubmit=\"recordFormSubmit()\">"
+                   "<form id=\"enter\" data-preventdefault=\"true\" onsubmit=\"recordFormSubmit()\">"
                    "<input id=\"ename\" required "
                    "style=\"display:block;width:120px;height:20px\"/>"
                    "</form>"
-                   "<form id=\"ed\" onsubmit=\"recordFormSubmit()\">"
+                   "<form id=\"ed\" data-preventdefault=\"true\" onsubmit=\"recordFormSubmit()\">"
                    "<input id=\"edname\" required "
                    "style=\"display:block;width:120px;height:20px\"/>"
                    "<button id=\"edgo\" type=\"submit\" disabled "
                    "style=\"display:block;width:60px;height:20px\">no</button>"
                    "</form>"
-                   "<form id=\"ro\" onsubmit=\"recordFormSubmit()\">"
+                   "<form id=\"ro\" data-preventdefault=\"true\" onsubmit=\"recordFormSubmit()\">"
                    "<input id=\"roname\" required readonly "
                    "style=\"display:block;width:120px;height:20px\"/>"
                    "<button id=\"rogo\" type=\"submit\" "
@@ -3344,6 +3351,228 @@ int main() {
             enter();
             check(g_formSubmits == 0,
                   "Enter does nothing while the default submit button is disabled");
+        }
+    }
+
+    // A successful submit navigates through `action`/`method`: GET appends the
+    // successful controls as application/x-www-form-urlencoded data, POST
+    // navigates without a query, an absent action reloads the current page, a
+    // submitter's formaction/formmethod override the form, and an invalid
+    // method falls back to GET. The submit event bubbles and can be cancelled
+    // or stopped with the engine's data attributes. A form inside a dialog with
+    // method=dialog closes it instead of navigating.
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "sui-form-navigation-check";
+        fs::remove_all(root);
+        fs::create_directories(root);
+        {
+            std::ofstream out(root / "index.sui", std::ios::binary);
+            out << "<sui><body style=\"margin:0\">"
+                   "<form id=\"main\" action=\"fallback.sui\" method=\"get\" "
+                   "onsubmit=\"recordFormSubmit()\">"
+                   "<input name=\"full name\" value=\"Ada Lovelace\"/>"
+                   "<input type=\"checkbox\" name=\"tags\" value=\"a\" checked/>"
+                   "<input type=\"checkbox\" name=\"tags\" value=\"b\"/>"
+                   "<input type=\"checkbox\" name=\"agree\" checked/>"
+                   "<input type=\"radio\" name=\"pick\" value=\"one\"/>"
+                   "<input type=\"radio\" name=\"pick\" value=\"two\" checked/>"
+                   "<select name=\"color\"><option value=\"red\">Red</option>"
+                   "<option selected>Blue</option></select>"
+                   "<select name=\"multi\" multiple>"
+                   "<option value=\"a\" selected>A</option>"
+                   "<option value=\"b\">B</option>"
+                   "<option value=\"c\" selected>C</option></select>"
+                   "<textarea name=\"note\">line1\nline2 &</textarea>"
+                   "<input name=\"ro\" value=\"yes\" readonly/>"
+                   "<input id=\"upload\" type=\"file\" name=\"upload\"/>"
+                   "<input name=\"off\" value=\"no\" disabled/>"
+                   "<input value=\"unnamed\"/>"
+                   "<button id=\"go\" type=\"submit\" name=\"who\" value=\"go\" "
+                   "formaction=\"result.sui\" formmethod=\"GET\" "
+                   "style=\"display:block;width:60px;height:20px\">go</button>"
+                   "<input id=\"post\" type=\"submit\" name=\"who\" value=\"post\" "
+                   "formaction=\"post.sui\" formmethod=\"POST\" "
+                   "style=\"display:block;width:60px;height:20px\"/>"
+                   "</form>"
+                   "<form id=\"postonly\" action=\"post.sui\" method=\"post\" "
+                   "onsubmit=\"recordFormSubmit()\">"
+                   "<input name=\"q\" value=\"p\"/>"
+                   "<button id=\"pgo\" type=\"submit\" "
+                   "style=\"display:block;width:60px;height:20px\">go</button>"
+                   "</form>"
+                   "<form id=\"default\" onsubmit=\"recordFormSubmit()\">"
+                   "<input name=\"q\" value=\"x\"/>"
+                   "<button id=\"dgo\" type=\"submit\" "
+                   "style=\"display:block;width:60px;height:20px\">go</button>"
+                   "</form>"
+                   "<form id=\"replace\" action=\"result.sui?old=1\" "
+                   "method=\"bogus\" onsubmit=\"recordFormSubmit()\">"
+                   "<input name=\"q\" value=\"new\"/>"
+                   "<button id=\"rgo\" type=\"submit\" "
+                   "style=\"display:block;width:60px;height:20px\">go</button>"
+                   "</form>"
+                   "<div onsubmit=\"recordFormParentSubmit()\">"
+                   "<form id=\"cancel\" action=\"result.sui\" "
+                   "data-preventdefault=\"true\" onsubmit=\"recordFormSubmit()\">"
+                   "<input name=\"c\" value=\"1\"/>"
+                   "<button id=\"cgo\" type=\"submit\" "
+                   "style=\"display:block;width:60px;height:20px\">go</button>"
+                   "</form></div>"
+                   "<div onsubmit=\"recordFormParentSubmit()\">"
+                   "<form id=\"stop\" action=\"result.sui\" "
+                   "data-preventdefault=\"true\" data-stoppropagation=\"true\" "
+                   "onsubmit=\"recordFormSubmit()\">"
+                   "<button id=\"sgo\" type=\"submit\" "
+                   "style=\"display:block;width:60px;height:20px\">go</button>"
+                   "</form></div>"
+                   "<div onsubmit=\"recordFormParentSubmit()\">"
+                   "<form id=\"bubble\" action=\"result.sui\" "
+                   "data-preventdefault=\"true\" onsubmit=\"recordFormSubmit()\">"
+                   "<button id=\"bgo\" type=\"submit\" "
+                   "style=\"display:block;width:60px;height:20px\">go</button>"
+                   "</form></div>"
+                   "<dialog id=\"dlg\" onclose=\"recordDialogClose()\">"
+                   "<form id=\"df\" method=\"dialog\" onsubmit=\"recordFormSubmit()\">"
+                   "<button id=\"dfgo\" type=\"submit\" "
+                   "style=\"display:block;width:60px;height:20px\">close</button>"
+                   "</form></dialog>"
+                   "</body></sui>";
+        }
+        {
+            std::ofstream out(root / "result.sui", std::ios::binary);
+            out << "<sui><body><div id=\"result\">result</div></body></sui>";
+        }
+        {
+            std::ofstream out(root / "post.sui", std::ios::binary);
+            out << "<sui><body><div id=\"post-page\">post</div></body></sui>";
+        }
+        {
+            std::ofstream out(root / "fallback.sui", std::ios::binary);
+            out << "<sui><body><div id=\"fallback\">fallback</div></body></sui>";
+        }
+        const fs::path previous = fs::current_path();
+        struct RestoreFormNavigation {
+            fs::path previous;
+            ~RestoreFormNavigation() {
+                std::error_code ec;
+                fs::current_path(previous, ec);
+            }
+        } restoreFormNavigation{previous};
+        fs::current_path(root);
+
+        sui::Application app;
+        std::string error;
+        check(app.start("index.sui", error), "a form navigation project starts");
+        sui::script::registerHandler("recordFormSubmit", recordFormSubmit);
+        sui::script::registerHandler("recordFormParentSubmit", recordFormParentSubmit);
+        sui::script::registerHandler("recordDialogClose", recordDialogClose);
+        if (app.platform()) {
+            const sui::WindowId primary = app.platform()->primaryWindow();
+            const auto element = [&](const char* id) {
+                return app.document().getElementById(id);
+            };
+            if (sui::Element* upload = element("upload")) {
+                upload->setAttribute("value", "/tmp/a b.txt\n/tmp/c.txt");
+            }
+            check(app.renderFrame(primary), "the form navigation page lays out");
+            const auto press = [&](const char* id) {
+                sui::Element* el = element(id);
+                if (!el) {
+                    check(false, "form navigation target still on screen");
+                    return;
+                }
+                sui::InputEvent event(sui::InputKind::PointerDown, el->layoutX() + 2.0f,
+                                      el->layoutY() + 2.0f, 1, 0.0f, 0.0f, 0, {}, 0, 0,
+                                      primary);
+                app.dispatch(event);
+            };
+            const auto reset = [&]() {
+                g_formSubmits = 0;
+                g_formParentSubmits = 0;
+                g_formOrder.clear();
+                g_dialogCloses = 0;
+            };
+            const auto back = [&]() {
+                check(app.navigate("index.sui"), "the form navigation page reloads");
+                check(app.renderFrame(primary), "the reloaded form page lays out");
+            };
+
+            reset();
+            press("go");
+            check(app.currentPage() ==
+                      "result.sui?full+name=Ada+Lovelace&tags=a&agree=on&pick=two&"
+                      "color=Blue&multi=a&multi=c&note=line1%0Aline2+%26&ro=yes&"
+                      "upload=a+b.txt&upload=c.txt&who=go",
+                  "GET appends the successful controls to the action");
+            check(element("result") != nullptr, "the GET action page is live");
+            check(g_formSubmits == 1, "the GET form fires submit once");
+            check(g_formOrder == "s", "the submit event runs once for a form");
+
+            back();
+            reset();
+            press("post");
+            check(app.currentPage() == "post.sui",
+                  "POST navigates to formaction without a query");
+            check(element("post-page") != nullptr, "the POST action page is live");
+            check(g_formSubmits == 1, "the POST form fires submit once");
+
+            back();
+            reset();
+            press("pgo");
+            check(app.currentPage() == "post.sui",
+                  "a form's own method=post navigates without a query");
+            check(g_formSubmits == 1, "the method=post form fires submit once");
+
+            back();
+            reset();
+            press("dgo");
+            check(app.currentPage() == "index.sui?q=x",
+                  "an absent action reloads the current page with GET data");
+            check(g_formSubmits == 1, "the default-action form fires submit once");
+
+            back();
+            reset();
+            press("rgo");
+            check(app.currentPage() == "result.sui?q=new",
+                  "GET replaces an action query and an invalid method falls back to GET");
+            check(g_formSubmits == 1, "the invalid-method form still submits");
+
+            back();
+            reset();
+            press("cgo");
+            check(app.currentPage() == "index.sui",
+                  "data-preventdefault cancels the navigation");
+            check(g_formSubmits == 1 && g_formParentSubmits == 1,
+                  "the submit event bubbles to an ancestor");
+            check(g_formOrder == "sp", "the form's submit handler runs first");
+
+            reset();
+            press("sgo");
+            check(app.currentPage() == "index.sui",
+                  "a stopped submit event still cancels its own default");
+            check(g_formSubmits == 1 && g_formParentSubmits == 0,
+                  "data-stoppropagation ends the submit bubble");
+            check(g_formOrder == "s", "only the form's submit handler runs when stopped");
+
+            reset();
+            press("bgo");
+            check(g_formSubmits == 1 && g_formParentSubmits == 1,
+                  "a nested submit event reaches its parent");
+            check(app.currentPage() == "index.sui",
+                  "a cancelled nested submit leaves the page alone");
+
+            if (sui::Element* dialog = element("dlg")) {
+                dialog->showModal();
+                check(app.renderFrame(primary), "the modal form dialog lays out");
+                reset();
+                press("dfgo");
+                check(g_formSubmits == 1, "a method=dialog form fires submit");
+                check(!dialog->dialogOpen(), "method=dialog closes the enclosing dialog");
+                check(g_dialogCloses == 1, "closing through method=dialog fires onclose");
+                check(app.currentPage() == "index.sui",
+                      "method=dialog does not navigate");
+            }
         }
     }
 
