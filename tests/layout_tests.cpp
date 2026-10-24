@@ -4812,6 +4812,107 @@ void testBlockAutoMargins() {
               "inline-level auto margins still resolve to zero");
 }
 
+void testShrinkToFitAutoMargins() {
+    // A table's width is only known once its columns are measured, so its auto
+    // margins resolve after content layout. A block-level replaced element has
+    // an intrinsic width and follows the ordinary definite-width path.
+    auto document = parseOrNull(
+        "<sui><body><div id=\"outer\">"
+        "<table id=\"centre\"><col width=\"100\"><tr><td>x</td></tr></table>"
+        "<table id=\"left\"><col width=\"100\"><tr><td>x</td></tr></table>"
+        "<table id=\"right\"><col width=\"100\"><tr><td>x</td></tr></table>"
+        "<table id=\"padded\"><col width=\"100\"><tr><td id=\"cell\">x</td></tr></table>"
+        "<table id=\"over\"><col width=\"500\"><tr><td>x</td></tr></table>"
+        "<table id=\"maxed\"><col width=\"200\"><tr><td>x</td></tr></table>"
+        "<table id=\"maxnarrow\"><col width=\"100\"><tr><td>x</td></tr></table>"
+        "<table id=\"fixedright\"><col width=\"100\"><tr><td>x</td></tr></table>"
+        "<table id=\"floating\"><col width=\"100\"><tr><td>x</td></tr></table>"
+        "<div id=\"outerpad\"><table id=\"nested\">"
+        "<col width=\"100\"><tr><td>x</td></tr></table></div>"
+        "<img id=\"image\" width=\"100\" height=\"50\""
+        " style=\"display:block;margin:0 auto\"/>"
+        "<video id=\"video\" style=\"display:block;margin:0 auto\"></video>"
+        "</div></body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0 } #outer { width: 400px }"
+        "table { border-collapse: collapse; margin: 0; padding: 0 }"
+        "td { padding: 0 }"
+        "#centre, #maxed, #maxnarrow, #floating { margin: 0 auto }"
+        "#left { margin-left: auto; margin-right: 0 }"
+        "#right { margin-left: 0; margin-right: auto }"
+        "#padded { padding: 10px; border: 1px solid #000; margin: 0 auto }"
+        "#over { margin: 0 auto }"
+        "#maxed { max-width: 80px }"
+        "#maxnarrow { max-width: 120px }"
+        "#fixedright { margin-left: auto; margin-right: 20px }"
+        "#floating { float: left }"
+        "#outerpad { width: 300px; padding: 25px }"
+        "#nested { margin: 0 auto }"));
+    layoutRoot(*document, resolver, 800.0f);
+    Element* centre = document->getElementById("centre");
+    Element* left = document->getElementById("left");
+    Element* right = document->getElementById("right");
+    Element* padded = document->getElementById("padded");
+    Element* cell = document->getElementById("cell");
+    Element* over = document->getElementById("over");
+    Element* maxed = document->getElementById("maxed");
+    Element* maxnarrow = document->getElementById("maxnarrow");
+    Element* fixedright = document->getElementById("fixedright");
+    Element* floating = document->getElementById("floating");
+    Element* nested = document->getElementById("nested");
+    Element* image = document->getElementById("image");
+    Element* video = document->getElementById("video");
+    if (!centre || !left || !right || !padded || !cell || !over || !maxed ||
+        !maxnarrow || !fixedright || !floating || !nested || !image || !video) {
+        check(false, "shrink-to-fit auto-margin fixture elements found");
+        return;
+    }
+    checkNear(centre->layoutWidth(), 100.0f, 0.01f,
+              "a shrink-to-fit table keeps its content width");
+    checkNear(centre->layoutX(), 150.0f, 0.01f,
+              "a shrink-to-fit table centres after its width is measured");
+    checkNear(left->layoutX(), 300.0f, 0.01f,
+              "an auto left margin pushes a shrink-to-fit table right");
+    checkNear(right->layoutX(), 0.0f, 0.01f,
+              "an auto right margin leaves a shrink-to-fit table at the start");
+    checkNear(padded->layoutX(), 139.0f, 0.01f,
+              "table chrome joins the width the auto margins centre");
+    checkNear(padded->layoutWidth(), 122.0f, 0.01f,
+              "the table's border box includes its padding and border");
+    checkNear(cell->layoutX(), 150.0f, 0.01f,
+              "a centred table moves its cells with it");
+    checkNear(over->layoutX(), 0.0f, 0.01f,
+              "an oversized table clamps its auto margin to zero");
+    checkNear(over->layoutWidth(), 500.0f, 0.01f,
+              "an oversized table keeps its content width");
+    checkNear(maxed->layoutX(), 160.0f, 0.01f,
+              "max-width centres the table it clamps");
+    checkNear(maxed->layoutWidth(), 80.0f, 0.01f,
+              "max-width sets the table's centred width");
+    checkNear(maxnarrow->layoutX(), 150.0f, 0.01f,
+              "a table narrower than its max-width still centres on its content");
+    checkNear(maxnarrow->layoutWidth(), 100.0f, 0.01f,
+              "max-width does not widen the table");
+    checkNear(fixedright->layoutX(), 280.0f, 0.01f,
+              "a fixed trailing margin comes out of the auto leading margin");
+    checkNear(floating->layoutX(), 0.0f, 0.01f,
+              "floated tables resolve auto margins to zero");
+    checkNear(nested->layoutX(), 125.0f, 0.01f,
+              "a nested table centres inside its padded parent");
+    checkNear(image->layoutX(), 150.0f, 0.01f,
+              "a block-level replaced element centres on its intrinsic width");
+    checkNear(image->layoutWidth(), 100.0f, 0.01f,
+              "the replaced element keeps its intrinsic width");
+    checkNear(video->layoutX(), 50.0f, 0.01f,
+              "a block-level video centres on its default size");
+    checkNear(video->layoutWidth(), 300.0f, 0.01f,
+              "the video keeps its default width");
+}
+
 void testFlexAutoMargins() {
     // Auto margins take the free space before alignment sees it: both sides
     // centre, one side pushes to the far edge, several auto edges share alike,
@@ -14229,6 +14330,7 @@ int main() {
     testFlexReverseDirections();
     testFlexItemMarginsAndPadding();
     testBlockAutoMargins();
+    testShrinkToFitAutoMargins();
     testFlexAutoMargins();
     testFlexMinMaxClamp();
     testFlexInlineFlexShrinks();

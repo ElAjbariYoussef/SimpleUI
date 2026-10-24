@@ -953,6 +953,10 @@ public:
 
     float run(Element& el, float availableWidth, float originX, float originY,
               bool collapseMargins = false) {
+        // The inline probe below may narrow `availableWidth` to a shrink-to-fit
+        // width. Auto margins still resolve against the containing block, so keep
+        // the offered width for that decision.
+        const float containingWidth = availableWidth;
         ComputedStyle s = resolver_.resolve(el);
         applyTextAreaSize(el, s);
         applySelectSize(el, s);
@@ -981,7 +985,12 @@ public:
         // margins distributed just like a definite width.
         const bool clampedAuto = s.width.isAuto() && box.maxWidth > 0.0f &&
                                  box.maxWidth + chromeW < availableWidth;
-        if (isBlockLevel(s) && !isFloated(s) &&
+        // A table with an auto width is sized by its columns during content
+        // layout, so the width and margins are both settled in the second pass
+        // below. `clampedAuto` cannot stand in for it: the max-width would
+        // centre the cap, not the narrower table the columns actually need.
+        const bool autoTable = s.display == ComputedStyle::Table && box.width <= 0.0f;
+        if (!autoTable && isBlockLevel(s) && !isFloated(s) &&
             s.position != ComputedStyle::Absolute &&
             s.position != ComputedStyle::Fixed && availableWidth < kUnbounded &&
             (box.width > 0.0f || clampedAuto) &&
@@ -1064,11 +1073,32 @@ public:
         const float borderH = contentHeight + box.borderWidth.top + box.borderWidth.bottom +
                               box.padding.top + box.padding.bottom;
 
+        // The table's width is now known. Resolve its horizontal auto margins
+        // against the measured width, then move the finished subtree by the
+        // leading margin. The content was laid out from the containing block's
+        // edge because the width was still unknown, so shifting is what keeps
+        // the cells, captions, rows, and text runs under the table.
+        float autoLeft = 0.0f;
+        if (autoTable && !isFloated(s) &&
+            s.position != ComputedStyle::Absolute &&
+            s.position != ComputedStyle::Fixed && containingWidth < kUnbounded &&
+            (s.margin.left.isAuto() || s.margin.right.isAuto())) {
+            const float fixed = (s.margin.left.isAuto() ? 0.0f : box.margin.left) +
+                                (s.margin.right.isAuto() ? 0.0f : box.margin.right);
+            const float space = std::max(0.0f, containingWidth - borderW - fixed);
+            if (s.margin.left.isAuto() && s.margin.right.isAuto()) {
+                autoLeft = space * 0.5f;
+            } else if (s.margin.left.isAuto()) {
+                autoLeft = space;
+            }
+        }
+
         el.setLayoutX(originX + placed.margin.left);
         el.setLayoutY(originY + flowTop);
         el.setLayoutWidth(borderW);
         el.setLayoutHeight(borderH);
         recordBoxes(el, contentX, contentY, contentWidth, contentHeight, box);
+        shiftSubtree(el, autoLeft, 0.0f);
 
         if (s.position != ComputedStyle::Static) {
             if (s.position == ComputedStyle::Absolute ||
