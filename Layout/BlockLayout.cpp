@@ -375,7 +375,11 @@ public:
     // Exposed for Flow, which needs the same answers run() uses.
     bool isLaidOut(Element& el) const { return laidOut(el); }
     ComputedStyle resolveStyle(Element& el) const { return resolver_.resolve(el); }
+    bool hasFirstLineRules() const { return resolver_.hasFirstLineRules(); }
     bool hasFirstLetterRules() const { return resolver_.hasFirstLetterRules(); }
+    PseudoFont firstLineFont(Element& el, const ComputedStyle& base) const {
+        return resolver_.firstLineFont(el, base);
+    }
     PseudoFont firstLetterFont(Element& el, const ComputedStyle& base) const {
         return resolver_.firstLetterFont(el, base);
     }
@@ -1767,7 +1771,16 @@ private:
         // A container that declares floats owns a context for them; in-flow
         // descendants inherit it so their lines wrap beside the floats. A
         // container without floats simply passes the ancestor's context through.
-        const bool ownsFloats = hasFloatChild(el);
+        // A floated `::first-letter` is synthetic, so the rule makes the
+        // container own a context even though no child element is floated.
+        bool syntheticFirstLetterFloat = false;
+        if (resolver_.hasFirstLetterRules() && el.tag() != "input" &&
+            el.tag() != "textarea" && el.tag() != "select") {
+            const PseudoFont letter = resolver_.firstLetterFont(el, s);
+            syntheticFirstLetterFloat =
+                letter.floatSet && letter.floatType != ComputedStyle::FloatNone;
+        }
+        const bool ownsFloats = hasFloatChild(el) || syntheticFirstLetterFloat;
         FloatContext floatCtx;
         FloatContext* const savedFloats = floats_;
         if (ownsFloats) {
@@ -3897,10 +3910,52 @@ private:
             firstLetterPending_ =
                 owner_.hasFirstLetterRules() && owner_el.tag() != "input" &&
                 owner_el.tag() != "textarea" && owner_el.tag() != "select";
+            if (owner_.hasFirstLineRules()) {
+                firstLineFont_ = owner_.firstLineFont(owner_el, s);
+                firstLineHasFont_ =
+                    firstLineFont_.sizeSet || firstLineFont_.familySet ||
+                    firstLineFont_.weightSet || firstLineFont_.styleSet ||
+                    firstLineFont_.lineHeightSet;
+            }
             if (s.textIndent.unit != sui::Length::Auto) {
                 penX_ = std::max(0.0f, s.textIndent.resolve(s.fontSize, s.fontSize, 16.0f));
             }
             syncLine();
+        }
+
+        // Applies a winning `::first-line` font/line-height slot to `s`, but
+        // only where the run still inherits the block's own value. An inline
+        // child that sets its own font keeps it, as the pseudo-element's
+        // declarations would lose to a descendant's.
+        bool applyFirstLineFont(ComputedStyle& s) const {
+            if (!firstLineHasFont_) {
+                return false;
+            }
+            bool changed = false;
+            if (firstLineFont_.sizeSet && s.fontSize == style_.fontSize) {
+                s.fontSize = firstLineFont_.size;
+                changed = true;
+            }
+            if (firstLineFont_.familySet && s.fontFamily == style_.fontFamily) {
+                s.fontFamily = firstLineFont_.familyList.empty()
+                                   ? firstLineFont_.family
+                                   : firstLineFont_.familyList;
+                changed = true;
+            }
+            if (firstLineFont_.weightSet && s.fontWeight == style_.fontWeight) {
+                s.fontWeight = firstLineFont_.weight;
+                s.fontBold = firstLineFont_.weight >= 600;
+                changed = true;
+            }
+            if (firstLineFont_.styleSet && s.fontStyle == style_.fontStyle) {
+                s.fontStyle = firstLineFont_.style;
+                changed = true;
+            }
+            if (firstLineFont_.lineHeightSet && s.lineHeight == style_.lineHeight) {
+                s.lineHeight = firstLineFont_.lineHeight;
+                changed = true;
+            }
+            return changed;
         }
 
         // Sets the current line's left inset and available width from any floats
@@ -4856,6 +4911,40 @@ private:
                 clampSuppressed_ = true;
                 return;
             }
+            // The first formatted line may win a different font and line
+            // height. Recomputed after a break, when the pseudo no longer
+            // applies to the following line.
+            ComputedStyle firstLineStyle;
+            const ComputedStyle* activeStyle = &s;
+            Metrics activeMetrics = m;
+            float activeAscentDelta = ascentDelta;
+            const auto refreshActive = [&]() {
+                activeStyle = &s;
+                activeMetrics = m;
+                activeAscentDelta = ascentDelta;
+                if (linesCommitted_ != 0 || !firstLineHasFont_) {
+                    return;
+                }
+                firstLineStyle = s;
+                if (!applyFirstLineFont(firstLineStyle)) {
+                    return;
+                }
+                activeStyle = &firstLineStyle;
+                activeMetrics = metricsFor(owner_.font_, firstLineStyle);
+                activeAscentDelta =
+                    std::min(0.0f, activeMetrics.ascent - metrics_.ascent);
+                if (activeMetrics.lineHeight > lineHeight_) {
+                    lineHeight_ = activeMetrics.lineHeight;
+                    syncLine();
+                }
+            };
+            const auto baselineForActive = [&]() {
+                // A first-line font brings its own ascent; an inline child
+                // with a larger font keeps the engine's established baseline.
+                return activeStyle != &s ? activeMetrics.ascent
+                                         : metrics_.ascent + activeAscentDelta;
+            };
+            refreshActive();
             // A preserved-space run may hand the whole leading whitespace
             // along with the word. It belongs before the letter and never
             // consumes the first-letter opportunity.
@@ -4867,7 +4956,8 @@ private:
                 }
                 if (lead > 0) {
                     for (std::size_t k = 0; k < lead; ++k) {
-                        preservedSpace(s, m, ascentDelta);
+                        preservedSpace(*activeStyle, activeMetrics,
+                                       activeAscentDelta);
                     }
                     w.remove_prefix(lead);
                     if (w.empty()) {
@@ -4886,9 +4976,11 @@ private:
                 firstLetterPending_ = false;
                 firstLetterAfterSpace_ = false;
                 firstLetterAfterMarker_ = false;
-                const PseudoFont letterFont = owner_.firstLetterFont(ownerEl_, s);
+                const PseudoFont letterFont =
+                    owner_.firstLetterFont(ownerEl_, *activeStyle);
                 if (letterFont.sizeSet || letterFont.familySet ||
-                    letterFont.weightSet || letterFont.styleSet) {
+                    letterFont.weightSet || letterFont.styleSet ||
+                    letterFont.lineHeightSet || letterFont.floatSet) {
                     // One codepoint plus its UTF-8 continuations. A grapheme
                     // that joins several codepoints (a ZWJ emoji) is wider than
                     // this split, matching the engine's per-codepoint runs.
@@ -4897,7 +4989,7 @@ private:
                            (static_cast<unsigned char>(w[bytes]) & 0xC0) == 0x80) {
                         ++bytes;
                     }
-                    ComputedStyle letterStyle = s;
+                    ComputedStyle letterStyle = *activeStyle;
                     if (letterFont.sizeSet) {
                         letterStyle.fontSize = letterFont.size;
                     }
@@ -4913,25 +5005,65 @@ private:
                     if (letterFont.styleSet) {
                         letterStyle.fontStyle = letterFont.style;
                     }
+                    if (letterFont.lineHeightSet) {
+                        letterStyle.lineHeight = letterFont.lineHeight;
+                    }
                     const Metrics letterMetrics = metricsFor(owner_.font_, letterStyle);
-                    lineHeight_ = std::max(lineHeight_, letterMetrics.lineHeight);
-                    syncLine();
                     const std::string_view letter = w.substr(0, bytes);
                     const float letterWidth =
                         textWidth(owner_.font_, letterStyle, letter);
-                    ownerEl_.addTextRun(
-                        {transformText(letterStyle, letter),
-                         originX_ + lineIndent_ + penX_,
-                         originY_ + cursorY_ +
-                             verticalAlignShift(letterStyle, &metrics_, &letterMetrics),
-                         letterWidth, letterMetrics.lineHeight, letterMetrics.ascent,
-                         letterStyle.fontSize, letterStyle.color.r, letterStyle.color.g,
-                         letterStyle.color.b, letterStyle.color.a, letterStyle.fontBold,
-                         letterStyle.fontStyle != ComputedStyle::FontNormal,
-                         letterStyle.fontFamily});
-                    penX_ += letterWidth;
-                    lineHasContent_ = true;
-                    widest_ = std::max(widest_, penX_);
+                    // A floated first letter becomes a drop cap: its glyph box
+                    // joins the float context and the paragraph wraps beside
+                    // it. Only a letter starting an empty line can use the
+                    // full-height form; leading spaces or an inside marker
+                    // keep the inline split.
+                    const bool dropCap =
+                        letterFont.floatSet &&
+                        letterFont.floatType != ComputedStyle::FloatNone &&
+                        !lineHasContent_ && penX_ == 0.0f && owner_.floats_;
+                    if (dropCap) {
+                        const bool left =
+                            letterFont.floatType == ComputedStyle::FloatLeft;
+                        const float x =
+                            left ? originX_ + lineIndent_
+                                 : originX_ + lineIndent_ + lineAvail_ - letterWidth;
+                        const float y = originY_ + cursorY_;
+                        ownerEl_.addTextRun(
+                            {transformText(letterStyle, letter), x, y, letterWidth,
+                             letterMetrics.lineHeight, letterMetrics.ascent,
+                             letterStyle.fontSize, letterStyle.color.r,
+                             letterStyle.color.g, letterStyle.color.b,
+                             letterStyle.color.a, letterStyle.fontBold,
+                             letterStyle.fontStyle != ComputedStyle::FontNormal,
+                             letterStyle.fontFamily});
+                        owner_.floats_->add({y, y + letterMetrics.lineHeight, x,
+                                             x + letterWidth, left});
+                        bottom_ = std::max(bottom_, cursorY_ + letterMetrics.lineHeight);
+                        lineHasContent_ = true;
+                        widest_ = std::max(widest_, letterWidth);
+                        // The line inset now covers the drop cap, so the rest
+                        // of the word starts at the pen without a gap.
+                        syncLine();
+                    } else {
+                        lineHeight_ = std::max(lineHeight_, letterMetrics.lineHeight);
+                        syncLine();
+                        ownerEl_.addTextRun(
+                            {transformText(letterStyle, letter),
+                             originX_ + lineIndent_ + penX_,
+                             originY_ + cursorY_ +
+                                 verticalAlignShift(letterStyle, &metrics_,
+                                                    &letterMetrics),
+                             letterWidth, letterMetrics.lineHeight,
+                             letterMetrics.ascent, letterStyle.fontSize,
+                             letterStyle.color.r, letterStyle.color.g,
+                             letterStyle.color.b, letterStyle.color.a,
+                             letterStyle.fontBold,
+                             letterStyle.fontStyle != ComputedStyle::FontNormal,
+                             letterStyle.fontFamily});
+                        penX_ += letterWidth;
+                        lineHasContent_ = true;
+                        widest_ = std::max(widest_, penX_);
+                    }
                     w.remove_prefix(bytes);
                     // The rest is the same word: it must continue without an
                     // inter-word gap, even though the line now has content.
@@ -4945,15 +5077,17 @@ private:
             // wide mode, and `text-wrap: nowrap` (inherited or on an inner
             // span) turns the run's own breaks off without touching its
             // preserved whitespace.
-            const bool wraps =
-                spacing_.wraps && s.textWrapMode == ComputedStyle::TextWrapMode::Wrap;
+            const bool wraps = spacing_.wraps &&
+                               activeStyle->textWrapMode == ComputedStyle::TextWrapMode::Wrap;
             // `break-all` fills lines character by character; `break-word` only
             // breaks a word that overflows its own line. Either way the pieces
             // become their own runs. An ellipsis truncates instead, and a
             // textarea keeps one run per word so caret mapping keeps working.
-            const bool breakAll = s.wordBreak == ComputedStyle::WordBreak::BreakAll;
+            const bool breakAll =
+                activeStyle->wordBreak == ComputedStyle::WordBreak::BreakAll;
             const bool breakWord =
-                !breakAll && s.overflowWrap == ComputedStyle::OverflowWrap::BreakWord;
+                !breakAll &&
+                activeStyle->overflowWrap == ComputedStyle::OverflowWrap::BreakWord;
             // `hyphens`: a soft hyphen offers a break where the word would
             // overflow. `auto` has no dictionary to add opportunities of its
             // own, so it breaks exactly like `manual`; `none` never breaks at
@@ -4962,22 +5096,23 @@ private:
             // its own, and a textarea keeps its runs word-sized.
             const bool softHyphens =
                 wraps && !breakAll && !isEllipsisActive() && ownerEl_.tag() != "textarea" &&
-                (s.hyphens == ComputedStyle::Hyphens::Manual ||
-                 s.hyphens == ComputedStyle::Hyphens::Auto) &&
+                (activeStyle->hyphens == ComputedStyle::Hyphens::Manual ||
+                 activeStyle->hyphens == ComputedStyle::Hyphens::Auto) &&
                 w.find(kSoftHyphen) != std::string_view::npos;
             if (softHyphens) {
-                w = breakAtSoftHyphens(w, s, m, ascentDelta, suppressGap);
+                w = breakAtSoftHyphens(w, *activeStyle, activeMetrics,
+                                       activeAscentDelta, suppressGap);
                 if (w.empty()) {
                     return;  // Every piece was laid, or the line cap was reached.
                 }
             }
-            const float wWidth = textWidth(owner_.font_, s, w);
+            float wWidth = textWidth(owner_.font_, *activeStyle, w);
             if (wraps && !isEllipsisActive() && ownerEl_.tag() != "textarea" &&
                 (breakAll || (breakWord && wWidth > lineAvail_ - lineIndent_))) {
-                breakAcrossLines(w, s, m, ascentDelta);
+                breakAcrossLines(w, *activeStyle, activeMetrics, activeAscentDelta);
                 return;
             }
-            const float wrapGap = suppressGap ? 0.0f : metrics_.spaceWidth;
+            float wrapGap = suppressGap ? 0.0f : activeMetrics.spaceWidth;
             if (wraps && lineHasContent_ &&
                 lineIndent_ + penX_ + wrapGap + wWidth > lineAvail_) {
                 newLine();
@@ -4985,13 +5120,19 @@ private:
                     clampSuppressed_ = true;
                     return;
                 }
+                // The new line is no longer the first: remeasure the word in
+                // the element's own font before placing it.
+                refreshActive();
+                wWidth = textWidth(owner_.font_, *activeStyle, w);
+                wrapGap = suppressGap ? 0.0f : activeMetrics.spaceWidth;
             }
             // Gaps come from space runs in break-spaces mode, never from word().
             float space = 0.0f;
             if (lineHasContent_ && !spacing_.breakSpaces && !suppressGap) {
-                space = metrics_.spaceWidth;
-                if (s.wordSpacing.unit != sui::Length::Auto) {
-                    space += s.wordSpacing.resolve(s.fontSize, s.fontSize, 16.0f);
+                space = activeMetrics.spaceWidth;
+                if (activeStyle->wordSpacing.unit != sui::Length::Auto) {
+                    space += activeStyle->wordSpacing.resolve(
+                        activeStyle->fontSize, activeStyle->fontSize, 16.0f);
                 }
             }
             // A pending soft break matters only where ordinary wrapping is
@@ -5006,13 +5147,20 @@ private:
                         clampSuppressed_ = true;
                         return;
                     }
+                    refreshActive();
+                    wWidth = textWidth(owner_.font_, *activeStyle, w);
+                    space = activeMetrics.spaceWidth;
+                    if (activeStyle->wordSpacing.unit != sui::Length::Auto) {
+                        space += activeStyle->wordSpacing.resolve(
+                            activeStyle->fontSize, activeStyle->fontSize, 16.0f);
+                    }
                 }
             }
 
             if (isEllipsisActive() && lineIndent_ + penX_ + space + wWidth > lineAvail_) {
                 // The current word overflows the container line box and text-overflow: ellipsis is active.
                 const std::string kEllipsis = "\xE2\x80\xA6";
-                const float ellWidth = textWidth(owner_.font_, s, kEllipsis);
+                const float ellWidth = textWidth(owner_.font_, *activeStyle, kEllipsis);
                 const float usedX = lineIndent_ + penX_ + space;
                 const float availForWord = lineAvail_ - usedX - ellWidth;
 
@@ -5025,20 +5173,28 @@ private:
                             ++next;
                         }
                         std::string cand = prefix + std::string(w.substr(idx, next - idx));
-                        if (textWidth(owner_.font_, s, cand) > availForWord) {
+                        if (textWidth(owner_.font_, *activeStyle, cand) > availForWord) {
                             break;
                         }
                         prefix = std::move(cand);
                         idx = next;
                     }
                     if (!prefix.empty()) {
-                        std::string result = transformText(s, prefix) + kEllipsis;
-                        const float rWidth = textWidth(owner_.font_, s, result);
+                        std::string result = transformText(*activeStyle, prefix) + kEllipsis;
+                        const float rWidth =
+                            textWidth(owner_.font_, *activeStyle, result);
                         ownerEl_.addTextRun({result, originX_ + lineIndent_ + penX_ + space,
-                                             originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), rWidth,
-                                             lineHeight_, metrics_.ascent + ascentDelta,
-                                             s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
-                                             s.fontBold, s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
+                                             originY_ + cursorY_ +
+                                                 verticalAlignShift(*activeStyle, &metrics_,
+                                                                    &activeMetrics),
+                                             rWidth, lineHeight_,
+                                             baselineForActive(),
+                                             activeStyle->fontSize, activeStyle->color.r,
+                                             activeStyle->color.g, activeStyle->color.b,
+                                             activeStyle->color.a, activeStyle->fontBold,
+                                             activeStyle->fontStyle !=
+                                                 ComputedStyle::FontNormal,
+                                             activeStyle->fontFamily});
                         penX_ += space + rWidth;
                         lineHasContent_ = true;
                         widest_ = std::max(widest_, penX_);
@@ -5048,11 +5204,17 @@ private:
                 }
 
                 if (lineAvail_ - (lineIndent_ + penX_ + space) >= ellWidth) {
-                    ownerEl_.addTextRun({kEllipsis, originX_ + lineIndent_ + penX_ + space,
-                                         originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), ellWidth,
-                                         lineHeight_, metrics_.ascent + ascentDelta,
-                                         s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
-                                         s.fontBold, s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
+                    ownerEl_.addTextRun(
+                        {kEllipsis, originX_ + lineIndent_ + penX_ + space,
+                         originY_ + cursorY_ +
+                             verticalAlignShift(*activeStyle, &metrics_, &activeMetrics),
+                         ellWidth, lineHeight_, baselineForActive(),
+                         activeStyle->fontSize,
+                         activeStyle->color.r, activeStyle->color.g,
+                         activeStyle->color.b, activeStyle->color.a,
+                         activeStyle->fontBold,
+                         activeStyle->fontStyle != ComputedStyle::FontNormal,
+                         activeStyle->fontFamily});
                     penX_ += space + ellWidth;
                     lineHasContent_ = true;
                     widest_ = std::max(widest_, penX_);
@@ -5065,7 +5227,9 @@ private:
                     const float avail = (originX_ + lineIndent_ + lineAvail_) - runs.back().x;
                     if (avail >= ellWidth) {
                         std::string& rText = runs.back().text;
-                        while (!rText.empty() && textWidth(owner_.font_, s, rText) > avail - ellWidth) {
+                        while (!rText.empty() &&
+                               textWidth(owner_.font_, *activeStyle, rText) >
+                                   avail - ellWidth) {
                             std::size_t last = rText.size() - 1;
                             while (last > 0 && (static_cast<unsigned char>(rText[last]) & 0xC0) == 0x80) {
                                 --last;
@@ -5073,7 +5237,8 @@ private:
                             rText.erase(last);
                         }
                         rText += kEllipsis;
-                        runs.back().width = textWidth(owner_.font_, s, rText);
+                        runs.back().width =
+                            textWidth(owner_.font_, *activeStyle, rText);
                         penX_ = (runs.back().x - originX_ - lineIndent_) + runs.back().width;
                         lineHasContent_ = true;
                         widest_ = std::max(widest_, penX_);
@@ -5083,11 +5248,16 @@ private:
                     runs.pop_back();
                 }
 
-                ownerEl_.addTextRun({kEllipsis, originX_ + lineIndent_,
-                                     originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), ellWidth,
-                                     lineHeight_, metrics_.ascent + ascentDelta,
-                                     s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
-                                     s.fontBold, s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
+                ownerEl_.addTextRun(
+                    {kEllipsis, originX_ + lineIndent_,
+                     originY_ + cursorY_ +
+                         verticalAlignShift(*activeStyle, &metrics_, &activeMetrics),
+                     ellWidth, lineHeight_, baselineForActive(),
+                     activeStyle->fontSize, activeStyle->color.r,
+                     activeStyle->color.g, activeStyle->color.b,
+                     activeStyle->color.a, activeStyle->fontBold,
+                     activeStyle->fontStyle != ComputedStyle::FontNormal,
+                     activeStyle->fontFamily});
                 penX_ = ellWidth;
                 lineHasContent_ = true;
                 widest_ = std::max(widest_, penX_);
@@ -5095,12 +5265,16 @@ private:
                 return;
             }
 
-            std::string wt = transformText(s, w);
-            ownerEl_.addTextRun({wt, originX_ + lineIndent_ + penX_ + space,
-                                 originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), wWidth,
-                                 lineHeight_, metrics_.ascent + ascentDelta,
-                                 s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
-                                 s.fontBold, s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
+            std::string wt = transformText(*activeStyle, w);
+            ownerEl_.addTextRun(
+                {wt, originX_ + lineIndent_ + penX_ + space,
+                 originY_ + cursorY_ +
+                     verticalAlignShift(*activeStyle, &metrics_, &activeMetrics),
+                 wWidth, lineHeight_, baselineForActive(),
+                 activeStyle->fontSize, activeStyle->color.r, activeStyle->color.g,
+                 activeStyle->color.b, activeStyle->color.a, activeStyle->fontBold,
+                 activeStyle->fontStyle != ComputedStyle::FontNormal,
+                 activeStyle->fontFamily});
             penX_ += space + wWidth;
             lineHasContent_ = true;
             widest_ = std::max(widest_, penX_);
@@ -5131,6 +5305,10 @@ private:
         bool firstLetterPending_ = false;
         bool firstLetterAfterSpace_ = false;
         bool firstLetterAfterMarker_ = false;
+        // `::first-line` applies until the first committed break. The pseudo
+        // font is resolved once against the block's own style.
+        PseudoFont firstLineFont_;
+        bool firstLineHasFont_ = false;
         // Set when floats narrow a line, which rules `text-wrap` re-breaking out:
         // the inset changes per line, so one target width is meaningless.
         bool sawFloat_ = false;

@@ -3859,7 +3859,15 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                 }
             }
         }
-    std::vector<std::tuple<std::size_t, float, float>> selSpans;
+    struct SelectionSpan {
+        std::size_t run = 0;
+        float x0 = 0.0f;
+        float x1 = 0.0f;
+        // The selected byte range inside the run, for shadows and recolours.
+        std::size_t lo = 0;
+        std::size_t hi = 0;
+    };
+    std::vector<SelectionSpan> selSpans;
     // One rule per selected line, painted after the glyphs so a line-through
     // crosses them instead of hiding behind them.
     struct SelectionRule {
@@ -3926,38 +3934,36 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                                                           s.fontKerning, s.fontStretch,
                         s.fontVariant == ComputedStyle::FontVariant::SmallCaps);
                     }
-                    // The run-local selected span, for the foreground recolor.
-                    if (selColors.fgSet) {
-                        const std::size_t lo =
-                            std::max(coverStart, spans[k].first);
-                        const std::size_t hi =
-                            std::min(coverEnd, spans[k].second);
-                        if (hi > lo) {
-                            const float a =
-                                lo == spans[k].first
-                                    ? 0.0f
-                                    : wordPrefixWidth(&font,
-                                                      sui::FontQuery{
-                                                          r.fontFamily,
-                                                          r.bold ? 700 : 400, r.italic},
-                                                      r.text, lo - spans[k].first,
-                                                      r.fontSize, ls,
-                                                      s.fontKerning, s.fontStretch,
-                        s.fontVariant == ComputedStyle::FontVariant::SmallCaps);
-                            const float b =
-                                hi == spans[k].second
-                                    ? r.width
-                                    : wordPrefixWidth(&font,
-                                                      sui::FontQuery{
-                                                          r.fontFamily,
-                                                          r.bold ? 700 : 400, r.italic},
-                                                      r.text, hi - spans[k].first,
-                                                      r.fontSize, ls,
-                                                      s.fontKerning, s.fontStretch,
-                        s.fontVariant == ComputedStyle::FontVariant::SmallCaps);
-                            if (b > a) {
-                                selSpans.emplace_back(k, a, b);
-                            }
+                    // The run-local selected span, for foreground recolours
+                    // and `text-shadow` stamps.
+                    const std::size_t lo = std::max(coverStart, spans[k].first);
+                    const std::size_t hi = std::min(coverEnd, spans[k].second);
+                    if (hi > lo) {
+                        const float a =
+                            lo == spans[k].first
+                                ? 0.0f
+                                : wordPrefixWidth(&font,
+                                                  sui::FontQuery{
+                                                      r.fontFamily,
+                                                      r.bold ? 700 : 400, r.italic},
+                                                  r.text, lo - spans[k].first,
+                                                  r.fontSize, ls,
+                                                  s.fontKerning, s.fontStretch,
+                    s.fontVariant == ComputedStyle::FontVariant::SmallCaps);
+                        const float b =
+                            hi == spans[k].second
+                                ? r.width
+                                : wordPrefixWidth(&font,
+                                                  sui::FontQuery{
+                                                      r.fontFamily,
+                                                      r.bold ? 700 : 400, r.italic},
+                                                  r.text, hi - spans[k].first,
+                                                  r.fontSize, ls,
+                                                  s.fontKerning, s.fontStretch,
+                    s.fontVariant == ComputedStyle::FontVariant::SmallCaps);
+                        if (b > a) {
+                            selSpans.push_back({k, a, b, lo - spans[k].first,
+                                                hi - spans[k].first});
                         }
                     }
                 }
@@ -3989,6 +3995,27 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         const auto& run = el.textRuns()[runIdx];
         if (run.text.empty() || run.fontSize <= 0.0f) {
             continue;
+        }
+        // `::selection` text shadows belong to the selected substring, stamped
+        // before the base run paints over them.
+        if (selColors.shadowSet && !selColors.textShadows.empty()) {
+            for (const SelectionSpan& span : selSpans) {
+                if (span.run != runIdx || span.hi <= span.lo) {
+                    continue;
+                }
+                Element::TextRun selectedRun = run;
+                selectedRun.text =
+                    run.text.substr(span.lo, span.hi - span.lo);
+                selectedRun.x = run.x + span.x0;
+                for (auto shadow = selColors.textShadows.rbegin();
+                     shadow != selColors.textShadows.rend(); ++shadow) {
+                    paintTextShadow(*shadow, selectedRun, font, sdlRenderer, renderer,
+                                    s.fontSize, rootFontSize, opacity, s.fontKerning,
+                                    s.fontStretch,
+                                    s.fontVariant ==
+                                        ComputedStyle::FontVariant::SmallCaps);
+                }
+            }
         }
         // The list draws back to front so that the first entry lands on top, the same
         // order CSS uses. Each shadow re-renders the run, so a blur costs a render per
@@ -4061,12 +4088,12 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         // same shaping: the full run re-rendered in the highlight color,
         // clipped to the span recorded with the bar.
         if (selColors.fgSet) {
-            for (const auto& span : selSpans) {
-                if (std::get<0>(span) != runIdx) {
+            for (const SelectionSpan& span : selSpans) {
+                if (span.run != runIdx) {
                     continue;
                 }
-                const float sx0 = std::get<1>(span);
-                const float sx1 = std::get<2>(span);
+                const float sx0 = span.x0;
+                const float sx1 = span.x1;
                 if (!(sx1 > sx0) || sx0 >= texW) {
                     continue;
                 }
@@ -4119,24 +4146,30 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         SDL_DestroyTexture(texture);
     }
 
-    // A `::selection` text-decoration line follows the selected spans, using
-    // the highlight foreground when the rule set one. Each selected line gets
-    // its own rule at the baseline, above the ascender, or through the middle.
-    if (selColors.decorationSet &&
-        selColors.decoration != ComputedStyle::DecNone) {
+    // `::selection` text-decoration lines follow the selected spans, using the
+    // highlight foreground when the rule set one. Each selected line gets every
+    // declared rule at the baseline, above the ascender, or through the middle.
+    if (selColors.decorationSet && !selColors.decorations.empty()) {
         const SDL_Color dec = selColors.fgSet ? selColors.fg : s.color;
         SDL_SetRenderDrawColor(sdlRenderer, dec.r, dec.g, dec.b,
                                static_cast<Uint8>(static_cast<float>(dec.a) * opacity));
         for (const SelectionRule& rule : selRules) {
             const float thick = std::max(1.0f, rule.fontSize * 0.06f);
-            float y = rule.baseline;
-            if (selColors.decoration == ComputedStyle::DecOverline) {
-                y = rule.baseline - rule.fontSize;
-            } else if (selColors.decoration == ComputedStyle::DecLineThrough) {
-                y = rule.baseline - rule.fontSize * 0.3f;
+            for (ComputedStyle::TextDecorationLine decoration :
+                 selColors.decorations) {
+                if (decoration == ComputedStyle::DecNone) {
+                    continue;
+                }
+                float y = rule.baseline;
+                if (decoration == ComputedStyle::DecOverline) {
+                    y = rule.baseline - rule.fontSize;
+                } else if (decoration == ComputedStyle::DecLineThrough) {
+                    y = rule.baseline - rule.fontSize * 0.3f;
+                }
+                const SDL_FRect line{std::floor(rule.x), std::floor(y), rule.w,
+                                     thick};
+                SDL_RenderFillRect(sdlRenderer, &line);
             }
-            const SDL_FRect line{std::floor(rule.x), std::floor(y), rule.w, thick};
-            SDL_RenderFillRect(sdlRenderer, &line);
         }
     }
 

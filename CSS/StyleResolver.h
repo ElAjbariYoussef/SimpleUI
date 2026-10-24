@@ -28,22 +28,27 @@ struct PseudoState {
 };
 
 // A `::selection` rule's winnings for one element's text: explicit foreground,
-// background, and text-decoration line, each optional. Unset colors fall back
-// to the run color and the default highlight bar; an unset decoration leaves
-// the selected glyphs undecorated.
+// background, decorations, and text shadows, each optional. Unset colors fall
+// back to the run color and the default highlight bar; no decoration leaves the
+// selected glyphs undecorated; no shadow leaves them flat.
 struct SelectionColors {
     bool fgSet = false;
     SDL_Color fg{0, 0, 0, 255};
     bool bgSet = false;
     SDL_Color bg{0, 0, 0, 255};
     bool decorationSet = false;
+    // Every recognized line in declaration order. `decoration` mirrors the
+    // first for callers that only need one; `none` clears the list.
+    std::vector<ComputedStyle::TextDecorationLine> decorations;
     ComputedStyle::TextDecorationLine decoration = ComputedStyle::DecNone;
+    bool shadowSet = false;
+    std::vector<ComputedStyle::TextShadow> textShadows;
 };
 
 // The font properties a pseudo-element mini-cascade can win for one box
-// (`::marker`, `::first-letter`). Each slot is optional: an unset slot falls
-// back to the box's own computed font. Sizes are resolved against the base font
-// size; the rest are already absolute.
+// (`::marker`, `::first-line`, `::first-letter`). Each slot is optional: an
+// unset slot falls back to the box's own computed font. Sizes and line heights
+// are resolved against the base font size; the rest are already absolute.
 struct PseudoFont {
     bool sizeSet = false;
     float size = 0.0f;
@@ -56,6 +61,13 @@ struct PseudoFont {
     int weight = 400;
     bool styleSet = false;
     ComputedStyle::FontStyle style = ComputedStyle::FontNormal;
+    bool lineHeightSet = false;
+    // Multiplier, like ComputedStyle::lineHeight. A length was divided by the
+    // pseudo font size when it was resolved.
+    float lineHeight = 1.2f;
+    // `float` on `::first-letter` turns the split grapheme into a drop cap.
+    bool floatSet = false;
+    ComputedStyle::FloatType floatType = ComputedStyle::FloatNone;
 };
 using MarkerFont = PseudoFont;
 
@@ -202,8 +214,12 @@ public:
     SelectionColors firstLetterColors(Element& element) const;
     SelectionColors markerColors(Element& element) const;
     MarkerFont markerFont(Element& element, const ComputedStyle& base) const;
+    // `::first-line` font and line-height slots. Layout applies them to runs
+    // before the first committed line break.
+    PseudoFont firstLineFont(Element& element, const ComputedStyle& base) const;
     // `::first-letter` font slots. Layout splits the first grapheme into its
-    // own run when any slot is set; a color-only rule stays paint-only.
+    // own run when any slot is set; `float` makes it a drop cap. A color-only
+    // rule stays paint-only.
     PseudoFont firstLetterFont(Element& element, const ComputedStyle& base) const;
 
 private:

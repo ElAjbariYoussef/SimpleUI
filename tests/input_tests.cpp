@@ -4410,17 +4410,21 @@ int main() {
         {
             std::ofstream out(root / "style.css", std::ios::binary);
             out << "body { margin: 0; background: #000000 }\n"
-                   "#t { position: absolute; left: 20px; top: 20px; width: 300px;"
+                   "#t, #s { position: absolute; left: 20px; width: 300px;"
                    " height: 60px; margin: 0; padding: 0; border: 0;"
                    " background: #000000; color: #ffffff; font-size: 32px }\n"
+                   "#t { top: 20px }\n"
+                   "#s { top: 100px }\n"
                    "::selection { background: #000000; color: #00ff00 }\n"
-                   "input.rule::selection { text-decoration: underline }\n";
+                   "input.rule::selection { text-decoration: underline line-through }\n"
+                   "input.shadow::selection { text-shadow: 24px 0 0 #ff0000 }\n";
         }
         {
             std::ofstream out(root / "index.sui", std::ios::binary);
             out << "<sui><head><link rel=\"stylesheet\" href=\"style.css\"/></head>"
                    "<body><input id=\"t\" class=\"rule\" type=\"text\""
-                   " value=\"MMMM\"/></body></sui>";
+                   " value=\"MMMM\"/><input id=\"s\" class=\"shadow\" type=\"text\""
+                   " value=\"i\"/></body></sui>";
         }
         const fs::path previous = fs::current_path();
         struct RestoreSelection {
@@ -4438,7 +4442,9 @@ int main() {
         if (app.platform()) {
             const sui::WindowId primary = app.platform()->primaryWindow();
             sui::Element* t = app.document().getElementById("t");
-            check(t != nullptr, "the selection decoration input exists");
+            sui::Element* s = app.document().getElementById("s");
+            check(t != nullptr && s != nullptr,
+                  "the selection decoration inputs exist");
             if (t) {
                 app.document().setFocused(t);
                 app.selectAll();
@@ -4471,15 +4477,65 @@ int main() {
                     const sui::Element::TextRun& run = t->textRuns()[0];
                     const float x = run.x + run.width * 0.5f;
                     const float y = std::floor(run.y + run.baseline) + 0.5f;
+                    const float throughY =
+                        std::floor(run.y + run.baseline - run.fontSize * 0.3f) + 0.5f;
                     int r = 0, g = 0, b = 0;
                     check(readPixel(x, y, r, g, b) && g > 180 && r < 80 && b < 80,
                           "a selection underline paints in the highlight foreground");
+                    check(readPixel(x, throughY, r, g, b) && g > 180 && r < 80 &&
+                              b < 80,
+                          "a second selection decoration paints its own rule");
 
                     t->removeAttribute("class");
                     check(app.renderFrame(primary),
                           "the decorated selection page lays out without the rule");
                     check(readPixel(x, y, r, g, b) && r < 60 && g < 60 && b < 60,
                           "removing the selection rule removes the underline");
+                    check(readPixel(x, throughY, r, g, b) && r < 60 && g < 60 &&
+                              b < 60,
+                          "removing the selection rule removes the second rule");
+
+                    if (s && !s->textRuns().empty()) {
+                        app.document().setFocused(s);
+                        app.selectAll();
+                        check(app.hasSelection(),
+                              "the selection shadow text is selected");
+                        check(app.renderFrame(primary),
+                              "the selection shadow page lays out");
+                        const sui::Element::TextRun& shadowRun = s->textRuns()[0];
+                        const float left = shadowRun.x + 14.0f;
+                        const float right = shadowRun.x + 70.0f;
+                        const float top = shadowRun.y;
+                        const float bottom = shadowRun.y + shadowRun.height;
+                        bool redShadow = false;
+                        for (float sy = top; sy <= bottom && !redShadow; sy += 2.0f) {
+                            for (float sx = left; sx <= right; sx += 2.0f) {
+                                if (readPixel(sx, sy, r, g, b) && r > 150 && g < 90 &&
+                                    b < 90) {
+                                    redShadow = true;
+                                    break;
+                                }
+                            }
+                        }
+                        check(redShadow,
+                              "a selection text-shadow paints the selected glyph in its colour");
+
+                        s->removeAttribute("class");
+                        check(app.renderFrame(primary),
+                              "the shadowed selection page lays out without the rule");
+                        redShadow = false;
+                        for (float sy = top; sy <= bottom && !redShadow; sy += 2.0f) {
+                            for (float sx = left; sx <= right; sx += 2.0f) {
+                                if (readPixel(sx, sy, r, g, b) && r > 150 && g < 90 &&
+                                    b < 90) {
+                                    redShadow = true;
+                                    break;
+                                }
+                            }
+                        }
+                        check(!redShadow,
+                              "removing the selection shadow removes its colour");
+                    }
                 }
             }
         }

@@ -10707,6 +10707,11 @@ MarkerFont StyleResolver::markerFont(Element& element, const ComputedStyle& base
     return pseudoFont(element, "::marker", base);
 }
 
+PseudoFont StyleResolver::firstLineFont(Element& element,
+                                        const ComputedStyle& base) const {
+    return pseudoFont(element, "::first-line", base);
+}
+
 PseudoFont StyleResolver::firstLetterFont(Element& element,
                                           const ComputedStyle& base) const {
     return pseudoFont(element, "::first-letter", base);
@@ -10724,7 +10729,7 @@ PseudoFont StyleResolver::pseudoFont(Element& element, std::string_view pseudo,
         bool set = false;
         std::string value;
     };
-    Win size, family, weight, style;
+    Win size, family, weight, style, lineHeight, floatSlot;
     for (const auto& rule : rules_) {
         if (rule.layerStatement || rule.selector.parts.empty()) {
             continue;
@@ -10763,6 +10768,10 @@ PseudoFont StyleResolver::pseudoFont(Element& element, std::string_view pseudo,
                 slot = &weight;
             } else if (decl.property == "font-style") {
                 slot = &style;
+            } else if (decl.property == "line-height") {
+                slot = &lineHeight;
+            } else if (decl.property == "float") {
+                slot = &floatSlot;
             }
             if (!slot) {
                 continue;
@@ -10859,39 +10868,88 @@ PseudoFont StyleResolver::pseudoFont(Element& element, std::string_view pseudo,
             }
         }
     }
+    if (lineHeight.set) {
+        const std::string_view text = trim(lineHeight.value);
+        if (text == "initial") {
+            out.lineHeightSet = true;
+            out.lineHeight = 1.2f;
+        } else if (text != "inherit" && text != "unset") {
+            // The pseudo font size is the `em` and percentage base. A length
+            // becomes the multiplier layout already models; a bare number is
+            // already one.
+            const float pseudoSize = out.sizeSet ? out.size : base.fontSize;
+            float ratio = 0.0f;
+            if (text == "normal") {
+                ratio = 1.2f;
+            } else {
+                const Length length = parseLength(text);
+                const bool unitless =
+                    !text.empty() &&
+                    (std::isdigit(static_cast<unsigned char>(text.back())) ||
+                     text.back() == '.');
+                const float numeric =
+                    length.isAuto()
+                        ? 0.0f
+                        : length.resolve(pseudoSize, pseudoSize, rootFontSize());
+                ratio = unitless ? numeric : numeric / pseudoSize;
+            }
+            if (ratio > 0.0f) {
+                out.lineHeightSet = true;
+                out.lineHeight = ratio;
+            }
+        }
+    }
+    if (floatSlot.set) {
+        const std::string_view text = trim(floatSlot.value);
+        if (text == "initial") {
+            out.floatSet = true;
+            out.floatType = ComputedStyle::FloatNone;
+        } else if (text != "inherit" && text != "unset") {
+            out.floatSet = true;
+            if (text == "left") {
+                out.floatType = ComputedStyle::FloatLeft;
+            } else if (text == "right") {
+                out.floatType = ComputedStyle::FloatRight;
+            } else {
+                out.floatType = ComputedStyle::FloatNone;
+            }
+        }
+    }
     return out;
 }
 
 namespace {
 
-// The line a `text-decoration`/`text-decoration-line` value asks for. The
-// engine's decoration model has one line, so the first recognized token wins;
-// `none` and `initial` clear it, while an inherited keyword leaves the slot
-// unset for the caller to fall back.
-bool parseDecorationLine(std::string_view value,
-                         ComputedStyle::TextDecorationLine& out) {
+// Every line in a `text-decoration`/`text-decoration-line` value, in
+// declaration order. `none` and `initial` clear the list; an inherited keyword
+// leaves the slot unset for the caller to fall back.
+bool parseDecorationLines(std::string_view value,
+                          std::vector<ComputedStyle::TextDecorationLine>& out) {
+    bool recognized = false;
     for (std::string_view token : splitTokens(value)) {
-        if (token == "underline") {
-            out = ComputedStyle::DecUnderline;
-            return true;
-        }
-        if (token == "overline") {
-            out = ComputedStyle::DecOverline;
-            return true;
-        }
-        if (token == "line-through") {
-            out = ComputedStyle::DecLineThrough;
-            return true;
-        }
         if (token == "none" || token == "initial") {
-            out = ComputedStyle::DecNone;
+            out.clear();
             return true;
         }
         if (token == "inherit" || token == "unset") {
             return false;
         }
+        ComputedStyle::TextDecorationLine line = ComputedStyle::DecNone;
+        if (token == "underline") {
+            line = ComputedStyle::DecUnderline;
+        } else if (token == "overline") {
+            line = ComputedStyle::DecOverline;
+        } else if (token == "line-through") {
+            line = ComputedStyle::DecLineThrough;
+        } else {
+            continue;
+        }
+        recognized = true;
+        if (std::find(out.begin(), out.end(), line) == out.end()) {
+            out.push_back(line);
+        }
     }
-    return false;
+    return recognized;
 }
 
 }  // namespace
@@ -10906,7 +10964,7 @@ SelectionColors StyleResolver::pseudoColors(Element& element,
         std::size_t order = 0;
         bool set = false;
     };
-    Bid fgBid, bgBid, decBid;
+    Bid fgBid, bgBid, decBid, shadowBid;
     for (const auto& rule : rules_) {
         if (rule.layerStatement || rule.selector.parts.empty()) {
             continue;
@@ -10943,13 +11001,13 @@ SelectionColors StyleResolver::pseudoColors(Element& element,
                               decl.property == "background";
             const bool isDec = decl.property == "text-decoration" ||
                                decl.property == "text-decoration-line";
-            if (!isFg && !isBg && !isDec) {
+            const bool isShadow = decl.property == "text-shadow";
+            if (!isFg && !isBg && !isDec && !isShadow) {
                 continue;
             }
             if (isDec) {
-                ComputedStyle::TextDecorationLine line =
-                    ComputedStyle::DecNone;
-                if (!parseDecorationLine(decl.value, line)) {
+                std::vector<ComputedStyle::TextDecorationLine> lines;
+                if (!parseDecorationLines(decl.value, lines)) {
                     continue;
                 }
                 if (decBid.set &&
@@ -10962,7 +11020,30 @@ SelectionColors StyleResolver::pseudoColors(Element& element,
                 }
                 decBid = Bid{decl.important, specificity, rule.order, true};
                 out.decorationSet = true;
-                out.decoration = line;
+                out.decorations = std::move(lines);
+                out.decoration =
+                    out.decorations.empty() ? ComputedStyle::DecNone
+                                            : out.decorations.front();
+                continue;
+            }
+            if (isShadow) {
+                const std::string_view text = trim(decl.value);
+                if (text == "inherit" || text == "unset") {
+                    continue;
+                }
+                if (shadowBid.set &&
+                    (decl.important != shadowBid.important
+                         ? shadowBid.important > decl.important
+                         : (specificity != shadowBid.specificity
+                                ? specificity < shadowBid.specificity
+                                : rule.order < shadowBid.order))) {
+                    continue;
+                }
+                ComputedStyle shadowStyle;
+                applyTextShadow(shadowStyle, text);
+                shadowBid = Bid{decl.important, specificity, rule.order, true};
+                out.shadowSet = true;
+                out.textShadows = std::move(shadowStyle.textShadows);
                 continue;
             }
             Bid& bid = isFg ? fgBid : bgBid;

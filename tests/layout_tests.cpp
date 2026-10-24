@@ -9883,6 +9883,45 @@ void testSelectionColors() {
     check(importantDec.decorationSet &&
               importantDec.decoration == sui::ComputedStyle::DecUnderline,
           "!important wins the selection decoration");
+    sui::SelectionColors manyDec = colorsOf(
+        "input::selection { text-decoration: underline line-through overline }",
+        *t);
+    check(manyDec.decorationSet && manyDec.decorations.size() == 3 &&
+              manyDec.decorations[0] == sui::ComputedStyle::DecUnderline &&
+              manyDec.decorations[1] == sui::ComputedStyle::DecLineThrough &&
+              manyDec.decorations[2] == sui::ComputedStyle::DecOverline,
+          "a selection decoration list keeps every line in order");
+    sui::SelectionColors noneDecList = colorsOf(
+        "input::selection { text-decoration: underline } "
+        "input::selection { text-decoration: none }",
+        *t);
+    check(noneDecList.decorationSet && noneDecList.decorations.empty() &&
+              noneDecList.decoration == sui::ComputedStyle::DecNone,
+          "a later selection none clears the whole decoration list");
+
+    sui::SelectionColors shadow = colorsOf(
+        "input::selection { text-shadow: 2px 3px 4px #112233 }", *t);
+    check(shadow.shadowSet && shadow.textShadows.size() == 1 &&
+              shadow.textShadows[0].offsetX.value == 2.0f &&
+              shadow.textShadows[0].offsetY.value == 3.0f &&
+              shadow.textShadows[0].blurRadius.value == 4.0f &&
+              shadow.textShadows[0].color.r == 0x11 &&
+              shadow.textShadows[0].color.g == 0x22 &&
+              shadow.textShadows[0].color.b == 0x33,
+          "a selection text-shadow keeps its offsets, blur, and colour");
+    sui::SelectionColors scopedShadow = colorsOf(
+        "::selection { text-shadow: 9px 9px } "
+        "input::selection { text-shadow: 1px 1px }",
+        *t);
+    check(scopedShadow.shadowSet && scopedShadow.textShadows.size() == 1 &&
+              scopedShadow.textShadows[0].offsetX.value == 1.0f,
+          "a scoped selection shadow beats a global one");
+    sui::SelectionColors noShadow = colorsOf(
+        "input::selection { text-shadow: 2px 2px } "
+        "input::selection { text-shadow: none }",
+        *t);
+    check(noShadow.shadowSet && noShadow.textShadows.empty(),
+          "a later selection text-shadow none clears shadows");
 
     // Anything else never paints a highlight.
     sui::SelectionColors junk =
@@ -10204,6 +10243,223 @@ void testFirstLetterSizing() {
               g->textRuns()[1].text == "H" && g->textRuns()[1].fontSize == 32.0f &&
               g->textRuns()[2].text == "ello" && g->textRuns()[2].fontSize == 16.0f,
           "leading preserved space does not consume the first letter");
+}
+
+// `::first-line` wins font and line-height slots through the same mini-cascade
+// as `::marker` and `::first-letter`.
+void testFirstLineFont() {
+    auto document = parseOrNull(
+        "<sui><body><div id=\"a\" style=\"font-size:20px\">x</div>"
+        "<p id=\"p\">x</p></body></sui>");
+    if (!document) {
+        return;
+    }
+    Element* a = document->getElementById("a");
+    Element* p = document->getElementById("p");
+    check(a && p, "first-line font elements found");
+    if (!a || !p) {
+        return;
+    }
+    const auto fontOf = [&](const char* css, Element& el) {
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(css));
+        resolver.setRootFontSize(16.0f);
+        return resolver.firstLineFont(el, resolver.resolve(el));
+    };
+    sui::PseudoFont none = fontOf("body { margin: 0 }", *a);
+    check(!none.sizeSet && !none.familySet && !none.weightSet && !none.styleSet &&
+              !none.lineHeightSet,
+          "no first-line rule leaves the font unset");
+    sui::PseudoFont px =
+        fontOf("::first-line { font-size: 30px; line-height: 1.5 }", *a);
+    check(px.sizeSet && px.size == 30.0f && px.lineHeightSet &&
+              px.lineHeight == 1.5f,
+          "a first-line size and unitless line height resolve");
+    sui::PseudoFont em = fontOf("::first-line { font-size: 1.5em }", *a);
+    check(em.sizeSet && em.size == 30.0f,
+          "first-line em follows the element font size");
+    sui::PseudoFont rem = fontOf("::first-line { font-size: 2rem }", *a);
+    check(rem.sizeSet && rem.size == 32.0f,
+          "first-line rem follows the root font size");
+    sui::PseudoFont linePx =
+        fontOf("::first-line { font-size: 20px; line-height: 40px }", *a);
+    check(linePx.lineHeightSet && std::abs(linePx.lineHeight - 2.0f) < 0.01f,
+          "a first-line line-height length becomes a multiplier");
+    sui::PseudoFont normal =
+        fontOf("::first-line { line-height: normal }", *a);
+    check(normal.lineHeightSet && std::abs(normal.lineHeight - 1.2f) < 0.01f,
+          "first-line line-height normal restores the default");
+    sui::PseudoFont family =
+        fontOf("::first-line { font-family: \"Fancy\", serif }", *a);
+    check(family.familySet && family.family == "Fancy" &&
+              family.familyList == "\"Fancy\", serif",
+          "a first-line family keeps its whole fallback list");
+    sui::PseudoFont weight = fontOf("::first-line { font-weight: bold }", *a);
+    check(weight.weightSet && weight.weight == 700,
+          "a first-line weight reads keywords");
+    sui::PseudoFont italic = fontOf("::first-line { font-style: italic }", *a);
+    check(italic.styleSet && italic.style == sui::ComputedStyle::FontItalic,
+          "a first-line style reads italic");
+    sui::PseudoFont scoped =
+        fontOf("::first-line { font-size: 10px } div::first-line { font-size: 30px }",
+               *a);
+    check(scoped.sizeSet && scoped.size == 30.0f,
+          "a scoped first-line rule beats a global");
+    sui::PseudoFont important =
+        fontOf("::first-line { font-size: 10px !important } "
+               "div::first-line { font-size: 30px }",
+               *a);
+    check(important.sizeSet && important.size == 10.0f,
+          "!important wins the first-line font cascade");
+    sui::PseudoFont inherit = fontOf("::first-line { font-size: inherit }", *a);
+    check(!inherit.sizeSet,
+          "first-line font-size inherit keeps the element size");
+    sui::PseudoFont para = fontOf("p::first-line { font-size: 40px }", *a);
+    check(!para.sizeSet, "a first-line rule matches its own element only");
+    sui::PseudoFont floatRule =
+        fontOf("p::first-line { float: left }", *p);
+    check(floatRule.floatSet &&
+              floatRule.floatType == sui::ComputedStyle::FloatLeft,
+          "the pseudo font cascade carries float for first-letter drop caps");
+}
+
+// `::first-line` sizing reaches layout: runs on the first formatted line use
+// the pseudo font and line height, later lines return to the element font, and
+// an inline child with its own font keeps it.
+void testFirstLineSizing() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<p id=\"a\">Hello</p>"
+        "<p id=\"b\" style=\"width:80px\">Hello wonderful world</p>"
+        "<p id=\"c\"><span style=\"font-size:10px\">Hi</span> rest</p>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body{margin:0;font-size:16px}"
+        "#a::first-line{font-size:30px;font-weight:bold;font-style:italic;line-height:1}"
+        "#b::first-line{font-size:32px;line-height:1}"
+        "#c::first-line{font-size:30px}"));
+    layoutRoot(*document, resolver, 400.0f);
+
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    Element* c = document->getElementById("c");
+    check(a && b && c, "first-line sizing elements found");
+    if (!a || !b || !c || a->textRuns().empty() || b->textRuns().size() < 2 ||
+        c->textRuns().size() < 2) {
+        check(false, "first-line sizing produced runs");
+        return;
+    }
+
+    const auto& first = a->textRuns()[0];
+    check(first.fontSize == 30.0f && first.bold && first.italic,
+          "the first line takes the pseudo size, weight, and style");
+    check(std::abs(first.height - 30.0f) < 0.5f &&
+              std::abs(a->layoutHeight() - 30.0f) < 0.5f,
+          "the first line takes the pseudo line height");
+    check(std::abs(first.baseline - 24.0f) < 0.5f,
+          "the first-line run carries the pseudo ascent");
+
+    const auto& bFirst = b->textRuns().front();
+    check(bFirst.fontSize == 32.0f && std::abs(bFirst.height - 32.0f) < 0.5f,
+          "a wrapped paragraph's first line uses the pseudo font");
+    bool laterLine = false;
+    float secondLineY = 0.0f;
+    for (const auto& run : b->textRuns()) {
+        if (run.y > bFirst.y + 0.5f && secondLineY == 0.0f) {
+            secondLineY = run.y;
+        }
+        if (run.y > bFirst.y + 0.5f && run.fontSize == 16.0f &&
+            std::abs(run.height - 19.2f) < 0.5f) {
+            laterLine = true;
+        }
+    }
+    check(std::abs(secondLineY - bFirst.y - 32.0f) < 0.5f,
+          "the pseudo line height pushes the second line down");
+    check(laterLine,
+          "later lines return to the element font and line height");
+
+    check(c->textRuns()[0].text == "Hi" &&
+              c->textRuns()[0].fontSize == 10.0f,
+          "an inline child's own font beats the first-line pseudo");
+    bool restStyled = false;
+    for (const auto& run : c->textRuns()) {
+        if (run.text == "rest" && run.fontSize == 30.0f) {
+            restStyled = true;
+        }
+    }
+    check(restStyled,
+          "text that still inherits the block font takes the first-line size");
+}
+
+// A floated `::first-letter` becomes a drop cap: the glyph owns a float box and
+// following lines narrow beside it until the float ends.
+void testFirstLetterDropCap() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<p id=\"a\" style=\"width:80px;font-size:10px\">alpha beta gamma delta epsilon zeta eta theta</p>"
+        "<p id=\"b\" style=\"width:80px;font-size:10px\">alpha beta gamma delta epsilon zeta eta theta</p>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body{margin:0}"
+        "#a::first-letter{float:left;font-size:30px;line-height:1}"
+        "#b::first-letter{float:right;font-size:30px;line-height:1}"));
+    layoutRoot(*document, resolver, 400.0f);
+
+    Element* a = document->getElementById("a");
+    Element* b = document->getElementById("b");
+    check(a && b, "drop cap elements found");
+    if (!a || !b || a->textRuns().size() < 4 || b->textRuns().size() < 4) {
+        check(false, "drop cap layout produced runs");
+        return;
+    }
+
+    const auto& letter = a->textRuns()[0];
+    check(letter.text == "a" && std::abs(letter.x) < 0.5f &&
+              std::abs(letter.y - a->contentY()) < 0.5f &&
+              std::abs(letter.width - 15.0f) < 0.5f &&
+              std::abs(letter.height - 30.0f) < 0.5f,
+          "the left drop cap sits at the line start with its enlarged box");
+    const auto minXOnLine = [&](float offset) {
+        float x = 1.0e6f;
+        for (const auto& run : a->textRuns()) {
+            if (run.text != "a" &&
+                std::abs(run.y - (a->contentY() + offset)) < 0.5f) {
+                x = std::min(x, run.x);
+            }
+        }
+        return x;
+    };
+    check(std::abs(minXOnLine(0.0f) - 15.0f) < 0.5f &&
+              std::abs(minXOnLine(12.0f) - 15.0f) < 0.5f &&
+              std::abs(minXOnLine(24.0f) - 15.0f) < 0.5f,
+          "text starts beside the left drop cap on every covered line");
+    check(std::abs(minXOnLine(36.0f)) < 0.5f,
+          "text returns to the left edge below the drop cap");
+    check(a->layoutHeight() >= 44.0f,
+          "a floating drop cap extends the paragraph height");
+
+    const auto& rightLetter = b->textRuns()[0];
+    check(rightLetter.text == "a" &&
+              std::abs(rightLetter.x - 65.0f) < 0.5f &&
+              std::abs(rightLetter.y - b->contentY()) < 0.5f &&
+              std::abs(rightLetter.width - 15.0f) < 0.5f,
+          "a right drop cap sits on the right content edge");
+    bool textLeft = false;
+    for (const auto& run : b->textRuns()) {
+        if (run.text != "a" && std::abs(run.y - b->contentY()) < 0.5f &&
+            std::abs(run.x) < 0.5f) {
+            textLeft = true;
+        }
+    }
+    check(textLeft, "text beside a right drop cap starts at the left edge");
 }
 
 // `accent-color` tints native controls, inherits like `color`, and resets to
@@ -14012,6 +14268,9 @@ int main() {
     testMarkerFont();
     testFirstLetterFont();
     testFirstLetterSizing();
+    testFirstLineFont();
+    testFirstLineSizing();
+    testFirstLetterDropCap();
     testAccentColor();
     testListInside();
     testListStyleImage();
