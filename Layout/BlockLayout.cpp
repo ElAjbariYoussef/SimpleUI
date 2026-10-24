@@ -1658,6 +1658,43 @@ private:
         return row ? width : height;
     }
 
+    // The width below which the content cannot shrink without overflow. An
+    // inline probe at zero width wraps at every opportunity, so its widest line
+    // is the longest unbreakable run. Block children stack, so the widest one
+    // wins rather than their sum.
+    float measureMinContent(Element& el, const ComputedStyle& s) {
+        if (s.contentVisibility == ComputedStyle::ContentHidden ||
+            s.isFlexContainer() || s.isGridContainer() || s.isTableContainer()) {
+            // Their intrinsic sizing has its own min/max rules; the table
+            // algorithm uses the max-content probe as a safe floor here.
+            return measureNatural(el, s, true);
+        }
+        if (hasBlockChild(el)) {
+            float widest = 0.0f;
+            for (const auto& child : el.children()) {
+                if (!child || child->isTextNode() || !laidOut(*child)) {
+                    continue;
+                }
+                const ComputedStyle cs = resolver_.resolve(*child);
+                if (!isBlockLevel(cs) || isFloated(cs)) {
+                    continue;
+                }
+                const UsedBox box = usedBox(cs, 0.0f);
+                const float outer =
+                    box.width > 0.0f
+                        ? box.width + box.horizontalChrome()
+                        : measureMinContent(*child, cs) + box.horizontalChrome();
+                widest = std::max(widest, outer);
+            }
+            return widest;
+        }
+        ComputedStyle probe = s;
+        probe.width = decltype(probe.width){};
+        float width = 0.0f;
+        layoutContents(el, probe, usedBox(probe, 0.0f), 0.0f, 0.0f, 0.0f, width);
+        return std::max(0.0f, width);
+    }
+
     // Lays out `el` with a style the caller has already decided, rather than the
     // one the cascade produces. Flex sizing needs this: the algorithm picks the
     // item's main size, and the item has to lay out at that size.
@@ -3075,19 +3112,38 @@ private:
         const float spacingX = separate ? s.borderSpacingH : 0.0f;
         const float spacingY = separate ? s.borderSpacingV : 0.0f;
 
+        // One resolved edge of the collapsed border model. The winning edge is
+        // painted by one of the adjacent cells, so a shared grid line appears
+        // once instead of twice.
+        struct BorderEdge {
+            float width = 0.0f;
+            SDL_Color color = {0, 0, 0, 0};
+            ComputedStyle::BorderStyle style = ComputedStyle::BorderStyleNone;
+            int priority = -1;
+            bool valid = false;
+        };
         struct Cell {
             Element* el = nullptr;
             ComputedStyle style;
+            ComputedStyle layoutStyle;
             UsedBox box;
             int row = 0;
             int col = 0;
             int colspan = 1;
             int rowspan = 1;
             float width = 0.0f;
+            float minWidth = 0.0f;
+            float maxWidth = 0.0f;
+            BorderEdge top;
+            BorderEdge right;
+            BorderEdge bottom;
+            BorderEdge left;
         };
         struct Row {
             Element* el = nullptr;
+            Element* group = nullptr;
             ComputedStyle style;
+            ComputedStyle groupStyle;
             float y = 0.0f;
             float height = 0.0f;
             std::vector<Cell> cells;
@@ -3096,10 +3152,14 @@ private:
         std::vector<Row> rows;
         std::vector<Element*> captions;
 
-        auto collectRow = [&](Element* rowEl) {
+        auto collectRow = [&](Element* rowEl, Element* groupEl) {
             Row row;
             row.el = rowEl;
+            row.group = groupEl;
             row.style = resolver_.resolve(*rowEl);
+            if (groupEl) {
+                row.groupStyle = resolver_.resolve(*groupEl);
+            }
             for (const auto& child : rowEl->children()) {
                 if (!child || child->isTextNode() || !laidOut(*child)) {
                     continue;
@@ -3111,6 +3171,7 @@ private:
                 Cell cell;
                 cell.el = child.get();
                 cell.style = cs;
+                cell.layoutStyle = cs;
                 cell.box = usedBox(cs, kUnbounded);
                 cell.colspan = spanAttribute(*child, "colspan");
                 cell.rowspan = spanAttribute(*child, "rowspan");
@@ -3128,7 +3189,7 @@ private:
                 continue;
             }
             if (cs.isTableRow()) {
-                collectRow(child.get());
+                collectRow(child.get(), nullptr);
             } else if (cs.isTableRowGroup()) {
                 // Row groups are non-visual nodes, so they are traversed explicitly
                 // rather than laid out as boxes.
@@ -3137,7 +3198,7 @@ private:
                         continue;
                     }
                     if (resolver_.resolve(*gc).isTableRow()) {
-                        collectRow(gc.get());
+                        collectRow(gc.get(), child.get());
                     }
                 }
             } else if (cs.display == ComputedStyle::TableCaption) {
@@ -3174,11 +3235,13 @@ private:
         // `span` repeats the definition. These columns also count when the
         // table's cells do not reach them, so a trailing `<col span>` can make
         // an empty column.
+        const float availableContent =
+            availableWidth > 0.0f && availableWidth < kUnbounded
+                ? std::max(0.0f, availableWidth - box.horizontalChrome())
+                : kUnbounded;
         const float basis = box.width > 0.0f
                                 ? box.width
-                                : (availableWidth > 0.0f && availableWidth < kUnbounded
-                                       ? availableWidth
-                                       : 0.0f);
+                                : (availableContent < kUnbounded ? availableContent : 0.0f);
         std::vector<float> hintWidth;
         auto addHint = [&](float width, int span) {
             for (int i = 0; i < span; ++i) {
@@ -3225,20 +3288,326 @@ private:
         columns = std::max(columns, static_cast<int>(hintWidth.size()));
         columns = std::max(1, columns);
 
-        // Column widths: an authored column width is a floor, then the widest
-        // single-column cell, then any excess a spanning cell asks for is shared
-        // across the columns it covers.
-        std::vector<float> colWidth(columns, 0.0f);
-        for (int c = 0; c < static_cast<int>(hintWidth.size()) && c < columns; ++c) {
-            if (hintWidth[c] >= 0.0f) {
-                colWidth[c] = hintWidth[c];
+        // Collapsed borders: resolve one edge for every cell side. A cell owns its
+        // right and bottom edges; left and top are owned by the neighbour, so the
+        // shared line is painted once. Outer cell edges are suppressed when the
+        // table itself paints a border, and row/row-group borders compete with
+        // their cells before the winning edge is handed to the cell that paints
+        // it. Losers are zeroed so no second stroke is drawn on top.
+        auto styleEdge = [](const ComputedStyle& st, int side) {
+            BorderEdge edge;
+            const ComputedStyle::BorderStyle style =
+                side == 0   ? st.borderStyles.top
+                : side == 1 ? st.borderStyles.right
+                : side == 2 ? st.borderStyles.bottom
+                            : st.borderStyles.left;
+            const Length& length = side == 0   ? st.borderWidth.top
+                                   : side == 1 ? st.borderWidth.right
+                                   : side == 2 ? st.borderWidth.bottom
+                                               : st.borderWidth.left;
+            edge.style = style;
+            edge.width = length.resolve();
+            edge.color = st.borderColor;
+            edge.valid = style != ComputedStyle::BorderStyleNone && edge.width > 0.0f;
+            return edge;
+        };
+        auto styleRank = [](ComputedStyle::BorderStyle style) {
+            switch (style) {
+                case ComputedStyle::BorderDouble: return 8;
+                case ComputedStyle::BorderSolid: return 7;
+                case ComputedStyle::BorderDashed: return 6;
+                case ComputedStyle::BorderDotted: return 5;
+                case ComputedStyle::BorderRidge: return 4;
+                case ComputedStyle::BorderOutset: return 3;
+                case ComputedStyle::BorderGroove: return 2;
+                case ComputedStyle::BorderInset: return 1;
+                default: return 0;
+            }
+        };
+        auto considerEdge = [&](BorderEdge& best, const ComputedStyle& st, int side,
+                                int priority) {
+            BorderEdge candidate = styleEdge(st, side);
+            if (!candidate.valid) {
+                return;
+            }
+            bool wins = !best.valid;
+            if (!wins) {
+                if (candidate.width > best.width + 0.001f) {
+                    wins = true;
+                } else if (std::fabs(candidate.width - best.width) <= 0.001f) {
+                    const int rank = styleRank(candidate.style);
+                    const int bestRank = styleRank(best.style);
+                    wins = rank != bestRank ? rank > bestRank
+                                            : priority > best.priority;
+                }
+            }
+            if (wins) {
+                candidate.priority = priority;
+                best = candidate;
+            }
+        };
+        const auto tableHasBorder = [&](int side) {
+            return styleEdge(s, side).valid;
+        };
+
+        for (Row& row : rows) {
+            row.el->clearLayoutBorder();
+            if (row.group) {
+                row.group->clearLayoutBorder();
+            }
+            for (Cell& cell : row.cells) {
+                cell.el->clearLayoutBorder();
             }
         }
-        auto cellNatural = [&](Cell& cell) {
-            const float natural = measureNatural(*cell.el, cell.style, true);
-            return (cell.box.width > 0.0f ? cell.box.width : natural) +
-                   cell.box.horizontalChrome();
+
+        if (!separate) {
+            // Rows and row groups never paint their own border in the collapsed
+            // model; their edges have already been folded into a cell.
+            const Element::LayoutBorder noBorder;
+            for (Row& row : rows) {
+                row.el->setLayoutBorder(noBorder);
+                if (row.group) {
+                    row.group->setLayoutBorder(noBorder);
+                }
+            }
+
+            std::vector<std::vector<Cell*>> grid(
+                rows.size(), std::vector<Cell*>(columns, nullptr));
+            for (Row& row : rows) {
+                for (Cell& cell : row.cells) {
+                    const int endCol = std::min(columns, cell.col + cell.colspan);
+                    const int endRow =
+                        std::min(static_cast<int>(rows.size()), cell.row + cell.rowspan);
+                    for (int r = cell.row; r < endRow; ++r) {
+                        for (int c = cell.col; c < endCol; ++c) {
+                            grid[r][c] = &cell;
+                        }
+                    }
+                }
+            }
+
+            for (Row& row : rows) {
+                for (Cell& cell : row.cells) {
+                    const int endCol = std::min(columns, cell.col + cell.colspan);
+                    const int endRow =
+                        std::min(static_cast<int>(rows.size()), cell.row + cell.rowspan);
+
+                    if (cell.col == 0 && !tableHasBorder(3)) {
+                        considerEdge(cell.left, cell.style, 3, 3);
+                        for (int r = cell.row; r < endRow; ++r) {
+                            considerEdge(cell.left, rows[r].style, 3, 2);
+                            if (rows[r].group) {
+                                considerEdge(cell.left, rows[r].groupStyle, 3, 1);
+                            }
+                        }
+                    }
+                    if (endCol >= columns && !tableHasBorder(1)) {
+                        considerEdge(cell.right, cell.style, 1, 3);
+                        for (int r = cell.row; r < endRow; ++r) {
+                            considerEdge(cell.right, rows[r].style, 1, 2);
+                            if (rows[r].group) {
+                                considerEdge(cell.right, rows[r].groupStyle, 1, 1);
+                            }
+                        }
+                    }
+                    if (cell.row == 0 && !tableHasBorder(0)) {
+                        considerEdge(cell.top, cell.style, 0, 3);
+                        considerEdge(cell.top, rows[0].style, 0, 2);
+                        if (rows[0].group) {
+                            considerEdge(cell.top, rows[0].groupStyle, 0, 1);
+                        }
+                    }
+                    if (endRow >= static_cast<int>(rows.size()) && !tableHasBorder(2)) {
+                        const Row& last = rows[endRow - 1];
+                        considerEdge(cell.bottom, cell.style, 2, 3);
+                        considerEdge(cell.bottom, last.style, 2, 2);
+                        if (last.group) {
+                            considerEdge(cell.bottom, last.groupStyle, 2, 1);
+                        }
+                    }
+
+                    if (endCol < columns) {
+                        considerEdge(cell.right, cell.style, 1, 3);
+                        for (int r = cell.row; r < endRow; ++r) {
+                            if (Cell* neighbour = grid[r][endCol]) {
+                                considerEdge(cell.right, neighbour->style, 3, 3);
+                            }
+                        }
+                    }
+                    if (endRow < static_cast<int>(rows.size())) {
+                        considerEdge(cell.bottom, cell.style, 2, 3);
+                        for (int c = cell.col; c < endCol; ++c) {
+                            if (Cell* neighbour = grid[endRow][c]) {
+                                considerEdge(cell.bottom, neighbour->style, 0, 3);
+                            }
+                        }
+                        const Row& above = rows[endRow - 1];
+                        const Row& below = rows[endRow];
+                        considerEdge(cell.bottom, above.style, 2, 2);
+                        considerEdge(cell.bottom, below.style, 0, 2);
+                        if (above.group && above.group != below.group) {
+                            considerEdge(cell.bottom, above.groupStyle, 2, 1);
+                        }
+                        if (below.group && below.group != above.group) {
+                            considerEdge(cell.bottom, below.groupStyle, 0, 1);
+                        }
+                    }
+                }
+            }
+
+            for (Row& row : rows) {
+                for (Cell& cell : row.cells) {
+                    cell.layoutStyle = cell.style;
+                    const auto apply = [&](int side, const BorderEdge& edge) {
+                        Length& width = side == 0   ? cell.layoutStyle.borderWidth.top
+                                        : side == 1 ? cell.layoutStyle.borderWidth.right
+                                        : side == 2 ? cell.layoutStyle.borderWidth.bottom
+                                                    : cell.layoutStyle.borderWidth.left;
+                        ComputedStyle::BorderStyle& style =
+                            side == 0   ? cell.layoutStyle.borderStyles.top
+                            : side == 1 ? cell.layoutStyle.borderStyles.right
+                            : side == 2 ? cell.layoutStyle.borderStyles.bottom
+                                        : cell.layoutStyle.borderStyles.left;
+                        width = Length(edge.valid ? edge.width : 0.0f);
+                        style = edge.valid ? edge.style
+                                           : ComputedStyle::BorderStyleNone;
+                    };
+                    apply(0, cell.top);
+                    apply(1, cell.right);
+                    apply(2, cell.bottom);
+                    apply(3, cell.left);
+                    cell.box = usedBox(cell.layoutStyle, kUnbounded);
+
+                    Element::LayoutBorder painted;
+                    const auto toPainted = [](const BorderEdge& edge) {
+                        Element::LayoutBorderSide side;
+                        if (edge.valid) {
+                            side.width = edge.width;
+                            side.color = edge.color;
+                            side.style = edge.style;
+                        }
+                        return side;
+                    };
+                    painted.top = toPainted(cell.top);
+                    painted.right = toPainted(cell.right);
+                    painted.bottom = toPainted(cell.bottom);
+                    painted.left = toPainted(cell.left);
+                    cell.el->setLayoutBorder(painted);
+                }
+            }
+        }
+
+        // Column widths: an authored column width is a floor; authored cell
+        // widths and intrinsic minimums establish the lower bound, while the
+        // max-content width establishes the upper bound. The table's used width
+        // chooses a point between the two, so a column shrinks toward its
+        // minimum before it starts squeezing another column below its own.
+        std::vector<float> colMin(columns, 0.0f);
+        std::vector<float> colMax(columns, 0.0f);
+        for (int c = 0; c < static_cast<int>(hintWidth.size()) && c < columns; ++c) {
+            if (hintWidth[c] >= 0.0f) {
+                colMin[c] = std::max(colMin[c], hintWidth[c]);
+                colMax[c] = std::max(colMax[c], hintWidth[c]);
+            }
+        }
+
+        // Each cell contributes a min-content and max-content width. An authored
+        // width and min-width are floors for both, while max-width caps the
+        // max-content contribution without pushing it below the minimum.
+        for (Row& row : rows) {
+            for (Cell& cell : row.cells) {
+                const float chrome = cell.box.horizontalChrome();
+                const float contentMin = measureMinContent(*cell.el, cell.layoutStyle);
+                // A cell's authored width is a floor, not its preferred width:
+                // the max-content probe must still see the whole content.
+                ComputedStyle maxProbe = cell.layoutStyle;
+                maxProbe.width = decltype(maxProbe.width){};
+                const float contentMax = measureNatural(*cell.el, maxProbe, true);
+                float minW = contentMin + chrome;
+                float maxW = contentMax + chrome;
+                if (cell.box.width > 0.0f) {
+                    minW = std::max(minW, cell.box.width + chrome);
+                    maxW = std::max(maxW, cell.box.width + chrome);
+                }
+                if (cell.box.minWidth > 0.0f) {
+                    minW = std::max(minW, cell.box.minWidth + chrome);
+                }
+                if (cell.box.maxWidth > 0.0f) {
+                    maxW = std::min(maxW, cell.box.maxWidth + chrome);
+                }
+                cell.minWidth = std::max(0.0f, minW);
+                cell.maxWidth = std::max(cell.minWidth, maxW);
+            }
+        }
+
+        for (Row& row : rows) {
+            for (Cell& cell : row.cells) {
+                if (cell.colspan == 1) {
+                    colMin[cell.col] = std::max(colMin[cell.col], cell.minWidth);
+                    colMax[cell.col] = std::max(colMax[cell.col], cell.maxWidth);
+                }
+            }
+        }
+
+        // A spanning cell imposes the same constraint on the sum of the columns
+        // it covers. Narrow spans are resolved first so a wider span sees their
+        // settled contributions; only the deficit is shared, never the excess.
+        std::vector<Cell*> spanning;
+        for (Row& row : rows) {
+            for (Cell& cell : row.cells) {
+                if (cell.colspan > 1) {
+                    spanning.push_back(&cell);
+                }
+            }
+        }
+        std::stable_sort(spanning.begin(), spanning.end(),
+                         [](const Cell* a, const Cell* b) {
+                             return a->colspan < b->colspan;
+                         });
+        const auto spanWidth = [&](const std::vector<float>& widths, const Cell& cell) {
+            const int end = std::min(columns, cell.col + cell.colspan);
+            float width = spacingX * static_cast<float>(std::max(0, end - cell.col - 1));
+            for (int c = cell.col; c < end; ++c) {
+                width += widths[c];
+            }
+            return width;
         };
+        for (Cell* cell : spanning) {
+            const int end = std::min(columns, cell->col + cell->colspan);
+            if (end <= cell->col) {
+                continue;
+            }
+            const float have = spanWidth(colMin, *cell);
+            if (cell->minWidth > have) {
+                const float share =
+                    (cell->minWidth - have) / static_cast<float>(end - cell->col);
+                for (int c = cell->col; c < end; ++c) {
+                    colMin[c] += share;
+                }
+            }
+        }
+        for (int c = 0; c < columns; ++c) {
+            colMax[c] = std::max(colMax[c], colMin[c]);
+        }
+        for (Cell* cell : spanning) {
+            const int end = std::min(columns, cell->col + cell->colspan);
+            if (end <= cell->col) {
+                continue;
+            }
+            const float have = spanWidth(colMax, *cell);
+            if (cell->maxWidth > have) {
+                const float share =
+                    (cell->maxWidth - have) / static_cast<float>(end - cell->col);
+                for (int c = cell->col; c < end; ++c) {
+                    colMax[c] += share;
+                }
+            }
+        }
+        for (int c = 0; c < columns; ++c) {
+            colMax[c] = std::max(colMax[c], colMin[c]);
+        }
+
+        std::vector<float> colWidth(columns, 0.0f);
         auto columnSpanWidth = [&](const Cell& cell) {
             const int end = std::min(columns, cell.col + cell.colspan);
             float w = spacingX * static_cast<float>(std::max(0, end - cell.col - 1));
@@ -3259,78 +3628,60 @@ private:
         // A cell is as wide as its column: the authored width only informs the
         // column sizing, so the used width is dropped before laying the cell out.
         auto cellSized = [&](const Cell& cell) {
-            ComputedStyle sized = cell.style;
+            ComputedStyle sized = cell.layoutStyle;
             sized.width = decltype(sized.width){};
             return sized;
         };
-        for (Row& row : rows) {
-            for (Cell& cell : row.cells) {
-                if (cell.colspan == 1) {
-                    colWidth[cell.col] = std::max(colWidth[cell.col], cellNatural(cell));
-                }
-            }
-        }
-        for (Row& row : rows) {
-            for (Cell& cell : row.cells) {
-                if (cell.colspan <= 1) {
-                    continue;
-                }
-                const int end = std::min(columns, cell.col + cell.colspan);
-                float spanned = spacingX * static_cast<float>(end - cell.col - 1);
-                for (int c = cell.col; c < end; ++c) {
-                    spanned += colWidth[c];
-                }
-                const float wanted = cellNatural(cell);
-                if (wanted > spanned && end > cell.col) {
-                    const float share =
-                        (wanted - spanned) / static_cast<float>(end - cell.col);
-                    for (int c = cell.col; c < end; ++c) {
-                        colWidth[c] += share;
-                    }
-                }
-            }
-        }
 
-        // Table width: the authored one, or the sum of the columns plus spacing.
         const float spacingTotal = spacingX * static_cast<float>(columns + 1);
-        float contentWidth = spacingTotal;
-        for (float w : colWidth) {
-            contentWidth += w;
+        float sumMin = 0.0f;
+        float sumMax = 0.0f;
+        for (int c = 0; c < columns; ++c) {
+            sumMin += colMin[c];
+            sumMax += colMax[c];
         }
-        if (box.width > 0.0f) {
-            contentWidth = box.width;
-        } else if (s.tableLayout == ComputedStyle::TableLayoutFixed && availableWidth > 0.0f &&
-                   availableWidth < kUnbounded) {
-            contentWidth = std::max(contentWidth, availableWidth);
+        const float minTable = spacingTotal + sumMin;
+        const float maxTable = std::max(minTable, spacingTotal + sumMax);
+
+        // Auto tables take the authored width when there is one, otherwise shrink
+        // to fit the containing block between the min-content and max-content
+        // widths. Fixed tables use the available width as their base and let the
+        // first row divide it below.
+        float contentWidth = 0.0f;
+        if (s.tableLayout == ComputedStyle::TableLayoutFixed) {
+            contentWidth = box.width > 0.0f
+                               ? std::max(box.width, minTable)
+                               : (availableContent < kUnbounded
+                                      ? std::max(maxTable, availableContent)
+                                      : maxTable);
+        } else if (box.width > 0.0f) {
+            contentWidth = std::max(box.width, minTable);
+        } else if (availableContent < kUnbounded) {
+            contentWidth = std::max(minTable, std::min(maxTable, availableContent));
+        } else {
+            contentWidth = maxTable;
         }
 
-        // An automatic table with an authored width spreads what is left over
-        // across the columns, the way a browser expands a table to fill it.
-        if (box.width > 0.0f && s.tableLayout == ComputedStyle::TableLayoutAuto &&
-            columns > 0) {
-            float natural = 0.0f;
-            for (float w : colWidth) {
-                natural += w;
+        const float free = std::max(0.0f, contentWidth - spacingTotal);
+        if (free >= sumMax) {
+            for (int c = 0; c < columns; ++c) {
+                colWidth[c] = colMax[c];
             }
-            const float free = std::max(0.0f, contentWidth - spacingTotal);
-            if (natural <= 0.0f) {
-                for (float& w : colWidth) {
-                    w = free / static_cast<float>(columns);
+            const float extra = free - sumMax;
+            if (extra > 0.0f && columns > 0) {
+                const float each = extra / static_cast<float>(columns);
+                for (float& width : colWidth) {
+                    width += each;
                 }
-            } else {
-                const float extra = free - natural;
-                if (extra >= 0.0f) {
-                    const float each = extra / static_cast<float>(columns);
-                    for (float& w : colWidth) {
-                        w += each;
-                    }
-                } else {
-                    // Shrink proportionally rather than to nothing.
-                    const float scale = free / natural;
-                    for (float& w : colWidth) {
-                        w *= scale;
-                    }
-                }
+            }
+        } else if (free > sumMin && sumMax > sumMin) {
+            const float ratio = (free - sumMin) / (sumMax - sumMin);
+            for (int c = 0; c < columns; ++c) {
+                colWidth[c] = colMin[c] + (colMax[c] - colMin[c]) * ratio;
+            }
+        } else {
+            for (int c = 0; c < columns; ++c) {
+                colWidth[c] = colMin[c];
             }
         }
 

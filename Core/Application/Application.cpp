@@ -382,19 +382,20 @@ sui::Radii radiiOf(const ComputedStyle& s, const SDL_FRect& box, float rootFontS
         {px(authored.bottomLeft.x, box.w), px(authored.bottomLeft.y, box.h)}};
 }
 
+sui::Dash dashOf(ComputedStyle::BorderStyle style) {
+    switch (style) {
+        case ComputedStyle::BorderDashed:
+            return sui::Dash::Dashed;
+        case ComputedStyle::BorderDotted:
+            return sui::Dash::Dotted;
+        default:
+            return sui::Dash::Solid;
+    }
+}
+
 sui::SideDashes dashesOf(const ComputedStyle& s) {
-    const auto dash = [](ComputedStyle::BorderStyle style) {
-        switch (style) {
-            case ComputedStyle::BorderDashed:
-                return sui::Dash::Dashed;
-            case ComputedStyle::BorderDotted:
-                return sui::Dash::Dotted;
-            default:
-                return sui::Dash::Solid;
-        }
-    };
-    return sui::SideDashes{dash(s.borderStyles.top), dash(s.borderStyles.right),
-                           dash(s.borderStyles.bottom), dash(s.borderStyles.left)};
+    return sui::SideDashes{dashOf(s.borderStyles.top), dashOf(s.borderStyles.right),
+                           dashOf(s.borderStyles.bottom), dashOf(s.borderStyles.left)};
 }
 
 bool borderEdgeVisible(ComputedStyle::BorderStyle style) {
@@ -3119,6 +3120,8 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
               bool showCaret = false, int selStart = -1, int selEnd = -1,
               const char* compositionText = nullptr, int compCursor = 0) {
     const ComputedStyle s = resolver.resolve(el);
+    const Element::LayoutBorder* const layoutBorder =
+        el.hasLayoutBorder() ? &el.layoutBorder() : nullptr;
     const SDL_FRect box{el.layoutX() - offX, el.layoutY() - offY, el.layoutWidth(),
                         el.layoutHeight()};
     const float rootFontSize = resolver.rootFontSize();
@@ -3331,30 +3334,65 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         paintInsetShadow(s, box, radii, renderer, rootFontSize, opacity);
 
         // A border image replaces the border rings: it paints the sliced
-        // source over the border area instead of stroking it.
-        if (!blankCellDecoration &&
+        // source over the border area instead of stroking it. A collapsed table
+        // edge is already a resolved used value, so it always strokes.
+        if (!blankCellDecoration && !layoutBorder &&
             s.borderImage.source.kind != ComputedStyle::BackgroundImage::None) {
             paintBorderImage(s.borderImage, boxes, s.fontSize, rootFontSize, opacity,
                              renderer, images);
-        } else if (!blankCellDecoration && border.a > 0) {
+        } else if (!blankCellDecoration &&
+                   (layoutBorder != nullptr || border.a > 0)) {
             // A side CSS leaves invisible is dropped outright rather than drawn with a
             // zero width, and four sides that disagree about width or pattern are drawn
             // one at a time so they are not forced into a single ring.
-            const float widths[4] = {
-                borderEdgeVisible(s.borderStyles.top) ? s.borderWidth.top.resolve() : 0.0f,
-                borderEdgeVisible(s.borderStyles.right) ? s.borderWidth.right.resolve() : 0.0f,
-                borderEdgeVisible(s.borderStyles.bottom) ? s.borderWidth.bottom.resolve() : 0.0f,
-                borderEdgeVisible(s.borderStyles.left) ? s.borderWidth.left.resolve() : 0.0f};
-            const sui::SideDashes dashes = dashesOf(s);
+            float widths[4];
+            sui::Color colors[4];
+            sui::SideDashes dashes;
+            if (layoutBorder) {
+                const auto widthOf = [](const Element::LayoutBorderSide& side) {
+                    return side.style != ComputedStyle::BorderStyleNone ? side.width
+                                                                         : 0.0f;
+                };
+                widths[0] = widthOf(layoutBorder->top);
+                widths[1] = widthOf(layoutBorder->right);
+                widths[2] = widthOf(layoutBorder->bottom);
+                widths[3] = widthOf(layoutBorder->left);
+                colors[0] = multiplyAlpha(toColor(layoutBorder->top.color), opacity);
+                colors[1] = multiplyAlpha(toColor(layoutBorder->right.color), opacity);
+                colors[2] = multiplyAlpha(toColor(layoutBorder->bottom.color), opacity);
+                colors[3] = multiplyAlpha(toColor(layoutBorder->left.color), opacity);
+                dashes = sui::SideDashes{dashOf(layoutBorder->top.style),
+                                         dashOf(layoutBorder->right.style),
+                                         dashOf(layoutBorder->bottom.style),
+                                         dashOf(layoutBorder->left.style)};
+            } else {
+                widths[0] = borderEdgeVisible(s.borderStyles.top)
+                                ? s.borderWidth.top.resolve()
+                                : 0.0f;
+                widths[1] = borderEdgeVisible(s.borderStyles.right)
+                                ? s.borderWidth.right.resolve()
+                                : 0.0f;
+                widths[2] = borderEdgeVisible(s.borderStyles.bottom)
+                                ? s.borderWidth.bottom.resolve()
+                                : 0.0f;
+                widths[3] = borderEdgeVisible(s.borderStyles.left)
+                                ? s.borderWidth.left.resolve()
+                                : 0.0f;
+                colors[0] = colors[1] = colors[2] = colors[3] = border;
+                dashes = dashesOf(s);
+            }
             const bool uniform = widths[0] > 0.0f && widths[0] == widths[1] &&
-                                 widths[0] == widths[2] && widths[0] == widths[3];
+                                 widths[0] == widths[2] && widths[0] == widths[3] &&
+                                 colors[0].a > 0 && colors[0] == colors[1] &&
+                                 colors[0] == colors[2] && colors[0] == colors[3] &&
+                                 dashes.uniform();
             if (uniform) {
-                renderer.strokeRect(box, border, widths[0], radii, dashes);
+                renderer.strokeRect(box, colors[0], widths[0], radii, dashes);
             } else {
                 const Side sides[4] = {Side::Top, Side::Right, Side::Bottom, Side::Left};
                 for (int i = 0; i < 4; ++i) {
-                    if (widths[i] > 0.0f) {
-                        renderer.strokeSide(box, sides[i], border, widths[i], radii,
+                    if (widths[i] > 0.0f && colors[i].a > 0) {
+                        renderer.strokeSide(box, sides[i], colors[i], widths[i], radii,
                                             dashes.of(sides[i]));
                     }
                 }

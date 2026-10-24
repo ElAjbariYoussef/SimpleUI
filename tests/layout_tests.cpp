@@ -8379,6 +8379,273 @@ void testTableLayout() {
               "the undeclared columns share the remaining width");
     }
 
+    // Collapsed adjacent cell borders resolve to one edge: the left cell owns
+    // the shared stroke, so the right cell does not paint a second copy.
+    {
+        auto document = parseOrNull(
+            "<sui><body><table id=\"t\">"
+            "<tr><td id=\"a\"></td><td id=\"b\"></td></tr>"
+            "</table></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{border-collapse:collapse}"
+            "td{padding:0;border:4px solid red}"
+            "#a{width:50px;height:20px} #b{width:50px;height:20px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* t = document->getElementById("t");
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        check(t != nullptr && std::fabs(t->layoutWidth() - 112.0f) < 0.5f,
+              "a collapsed table counts each shared border once");
+        check(a != nullptr && std::fabs(a->layoutWidth() - 58.0f) < 0.5f &&
+                  std::fabs(a->layoutX() - 0.0f) < 0.5f,
+              "the left cell paints the shared right border");
+        check(b != nullptr && std::fabs(b->layoutX() - 58.0f) < 0.5f &&
+                  std::fabs(b->layoutWidth() - 54.0f) < 0.5f,
+              "the right cell drops its left border into the shared edge");
+    }
+
+    // The table's own border is the outer edge when it has one; the outer cell
+    // borders are folded under it instead of painting a second line.
+    {
+        auto document = parseOrNull(
+            "<sui><body><table id=\"t\">"
+            "<tr><td id=\"a\"></td><td id=\"b\"></td></tr>"
+            "</table></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{border-collapse:collapse;border:5px solid blue}"
+            "td{padding:0;border:1px solid red}"
+            "#a{width:50px;height:20px} #b{width:50px;height:20px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* t = document->getElementById("t");
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        check(t != nullptr && std::fabs(t->layoutWidth() - 111.0f) < 0.5f,
+              "a table border owns the outer edge of a collapsed table");
+        check(a != nullptr && std::fabs(a->layoutX() - 5.0f) < 0.5f &&
+                  std::fabs(a->layoutWidth() - 51.0f) < 0.5f,
+              "cells start inside the table border and retain the shared edge");
+        check(b != nullptr && std::fabs(b->layoutX() - 56.0f) < 0.5f &&
+                  std::fabs(b->layoutWidth() - 50.0f) < 0.5f,
+              "the right cell has no outer border of its own under the table border");
+    }
+
+    // Row and row-group borders join the same conflict: a row border wins over
+    // cell edges, a group border applies only at the group's own boundary, and
+    // the last group's bottom border survives at the table's outer edge.
+    {
+        auto document = parseOrNull(
+            "<sui><body><table id=\"t\">"
+            "<thead style=\"border-bottom:6px solid #0000ff\">"
+            "<tr><td id=\"a\"></td></tr></thead>"
+            "<tbody style=\"border-bottom:9px solid #00ff00\">"
+            "<tr style=\"border-bottom:5px solid #ff00ff\"><td id=\"b\"></td></tr>"
+            "<tr><td id=\"c\"></td></tr>"
+            "</tbody></table></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{border-collapse:collapse}"
+            "td{padding:0;border:1px solid red;width:50px;height:20px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* t = document->getElementById("t");
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        check(a != nullptr && std::fabs(a->layoutHeight() - 27.0f) < 0.5f,
+              "a row-group bottom border wins the cell edge below the group");
+        check(b != nullptr && std::fabs(b->layoutHeight() - 25.0f) < 0.5f,
+              "a group border does not leak into a boundary inside the group");
+        check(c != nullptr && std::fabs(c->layoutHeight() - 29.0f) < 0.5f,
+              "the last row group's bottom border applies at the table edge");
+        check(t != nullptr && std::fabs(t->layoutHeight() - 81.0f) < 0.5f,
+              "row, group, and cell heights all include the winning collapsed edge");
+    }
+
+    // Auto tables shrink between the min-content and max-content widths, and
+    // never below the min-content width. The two inline-blocks can sit on one
+    // line (100px) or stack (50px).
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"wrap\"><table id=\"t\"><tr><td id=\"a\">"
+            "<span class=\"b\"></span><span class=\"b\"></span>"
+            "</td></tr></table></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #wrap{width:80px} #t{border-collapse:collapse}"
+            "td{padding:0} .b{display:inline-block;width:50px;height:10px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* t = document->getElementById("t");
+        Element* a = document->getElementById("a");
+        check(t != nullptr && std::fabs(t->layoutWidth() - 80.0f) < 0.5f,
+              "an auto table fits the available width between min and max content");
+        check(a != nullptr && std::fabs(a->layoutWidth() - 80.0f) < 0.5f,
+              "the column takes the table width between its content bounds");
+    }
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"wrap\"><table id=\"t\"><tr><td id=\"a\">"
+            "<span class=\"b\"></span><span class=\"b\"></span>"
+            "</td></tr></table></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #wrap{width:20px} #t{border-collapse:collapse}"
+            "td{padding:0} .b{display:inline-block;width:50px;height:10px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* t = document->getElementById("t");
+        check(t != nullptr && std::fabs(t->layoutWidth() - 50.0f) < 0.5f,
+              "an auto table stops at its min-content width");
+    }
+    {
+        auto document = parseOrNull(
+            "<sui><body><table id=\"t\"><tr><td id=\"a\">"
+            "<span class=\"b\"></span><span class=\"b\"></span>"
+            "</td></tr></table></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{border-collapse:collapse;width:30px}"
+            "td{padding:0} .b{display:inline-block;width:50px;height:10px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* t = document->getElementById("t");
+        check(t != nullptr && std::fabs(t->layoutWidth() - 50.0f) < 0.5f,
+              "an authored table width below min-content is raised to the minimum");
+    }
+
+    {
+        auto document = parseOrNull(
+            "<sui><body><table id=\"t\"><tr><td id=\"a\">"
+            "<span class=\"b\"></span><span class=\"b\"></span>"
+            "</td></tr></table></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #t{border-collapse:collapse}"
+            "td{padding:0;width:10px} .b{display:inline-block;width:50px;height:10px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* t = document->getElementById("t");
+        check(t != nullptr && std::fabs(t->layoutWidth() - 100.0f) < 0.5f,
+              "an authored cell width does not cap the column's max-content width");
+    }
+
+    // A colspan cell distributes its minimum and maximum constraints across the
+    // covered columns. At 50px the table cannot go below the span's 60px
+    // min-content width; at 80px the span's max-content width provides the
+    // upper bound and the columns interpolate evenly.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"wrap\"><table id=\"t\">"
+            "<tr><td id=\"a\" colspan=\"2\">"
+            "<span class=\"x\"></span><span class=\"x\"></span></td></tr>"
+            "<tr><td id=\"b\"><span class=\"y\"></span></td>"
+            "<td id=\"c\"><span class=\"y\"></span></td></tr>"
+            "</table></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #wrap{width:50px} #t{border-collapse:collapse}"
+            "td{padding:0;font-size:0} .x{display:inline-block;width:60px;height:10px}"
+            ".y{display:inline-block;width:20px;height:10px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* t = document->getElementById("t");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        check(t != nullptr && std::fabs(t->layoutWidth() - 60.0f) < 0.5f,
+              "a colspan cell raises the table to its distributed min-content width");
+        check(b != nullptr && std::fabs(b->layoutWidth() - 30.0f) < 0.5f &&
+                  c != nullptr && std::fabs(c->layoutWidth() - 30.0f) < 0.5f,
+              "the spanning minimum is shared by the covered columns");
+    }
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"wrap\"><table id=\"t\">"
+            "<tr><td id=\"a\" colspan=\"2\">"
+            "<span class=\"x\"></span><span class=\"x\"></span></td></tr>"
+            "<tr><td id=\"b\"><span class=\"y\"></span></td>"
+            "<td id=\"c\"><span class=\"y\"></span></td></tr>"
+            "</table></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #wrap{width:80px} #t{border-collapse:collapse}"
+            "td{padding:0;font-size:0} .x{display:inline-block;width:60px;height:10px}"
+            ".y{display:inline-block;width:20px;height:10px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* t = document->getElementById("t");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        check(t != nullptr && std::fabs(t->layoutWidth() - 80.0f) < 0.5f,
+              "a colspan max-content constraint lets the table use the extra width");
+        check(b != nullptr && std::fabs(b->layoutWidth() - 40.0f) < 0.5f &&
+                  c != nullptr && std::fabs(c->layoutWidth() - 40.0f) < 0.5f,
+              "the covered columns interpolate toward the spanning maximum");
+    }
+
+    // When two columns have different min/max ranges, the reduction is shared
+    // by range rather than by the final max-content width. The first column can
+    // give up 75px; the second is already at its minimum.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"wrap\"><table id=\"t\"><tr>"
+            "<td id=\"a\">"
+            "<span class=\"q\"></span><span class=\"q\"></span>"
+            "<span class=\"q\"></span><span class=\"q\"></span>"
+            "</td><td id=\"b\"><span class=\"w\"></span></td>"
+            "</tr></table></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #wrap{width:150px} #t{border-collapse:collapse}"
+            "td{padding:0;font-size:0} .q{display:inline-block;width:25px;height:10px}"
+            ".w{display:inline-block;width:100px;height:10px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* t = document->getElementById("t");
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        check(t != nullptr && std::fabs(t->layoutWidth() - 150.0f) < 0.5f,
+              "a multi-column auto table fits the available width");
+        check(a != nullptr && std::fabs(a->layoutWidth() - 50.0f) < 0.5f,
+              "the flexible column absorbs the shrink down to its range");
+        check(b != nullptr && std::fabs(b->layoutX() - 50.0f) < 0.5f &&
+                  std::fabs(b->layoutWidth() - 100.0f) < 0.5f,
+              "a column already at its minimum does not shrink further");
+    }
+
     // The table properties parse and serialize back.
     {
         auto document = parseOrNull("<sui><body><div id=\"x\"></div></body></sui>");

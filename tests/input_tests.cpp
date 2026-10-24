@@ -4561,6 +4561,95 @@ int main() {
         }
     }
 
+    // A collapsed shared edge paints once. The doubled-border layout would leave
+    // red at x=60 (the right cell's left border); the merged layout leaves the
+    // right cell white there. A wider neighbour border also wins the colour and
+    // width of the shared edge.
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "sui-table-border-check";
+        fs::remove_all(root);
+        fs::create_directories(root);
+        {
+            std::ofstream out(root / "index.sui", std::ios::binary);
+            out << "<sui><body style=\"margin:0;background:#000000\">"
+                   "<table style=\"margin:0;border-collapse:collapse\"><tr>"
+                   "<td id=\"a\" style=\"width:50px;height:20px;border:4px solid #ff0000;"
+                   "padding:0;background:#ffffff\"></td>"
+                   "<td id=\"b\" style=\"width:50px;height:20px;border:4px solid #ff0000;"
+                   "padding:0;background:#ffffff\"></td>"
+                   "</tr></table>"
+                   "<table style=\"margin:0;border-collapse:collapse\"><tr>"
+                   "<td id=\"c\" style=\"width:50px;height:20px;border-right:2px solid #ff0000;"
+                   "padding:0;background:#ffffff\"></td>"
+                   "<td id=\"d\" style=\"width:50px;height:20px;border-left:6px solid #0000ff;"
+                   "padding:0;background:#ffffff\"></td>"
+                   "</tr></table>"
+                   "<table style=\"margin:0;border-collapse:collapse\"><tr>"
+                   "<td id=\"e\" style=\"width:50px;height:20px;border-right:4px solid #ff0000;"
+                   "padding:0;background:#ffffff\"></td>"
+                   "<td id=\"f\" style=\"width:50px;height:20px;border-left:4px double #0000ff;"
+                   "padding:0;background:#ffffff\"></td>"
+                   "</tr></table>"
+                   "</body></sui>";
+        }
+        const fs::path previous = fs::current_path();
+        struct RestoreTableBorder {
+            fs::path previous;
+            ~RestoreTableBorder() {
+                std::error_code ec;
+                fs::current_path(previous, ec);
+            }
+        } restoreTableBorder{previous};
+        fs::current_path(root);
+
+        sui::Application app;
+        std::string error;
+        check(app.start("index.sui", error), "a table-border project starts");
+        if (app.platform()) {
+            const sui::WindowId primary = app.platform()->primaryWindow();
+            check(app.renderFrame(primary), "the table-border page lays out");
+            const auto readPixel = [&](float x, float y, int& r, int& g, int& b) -> bool {
+                SDL_Renderer* renderer = app.platform()->renderer(primary);
+                if (!renderer) {
+                    return false;
+                }
+                const SDL_Rect rect{static_cast<int>(x), static_cast<int>(y), 1, 1};
+                SDL_Surface* read = SDL_RenderReadPixels(renderer, &rect);
+                if (!read) {
+                    return false;
+                }
+                SDL_Surface* conv = SDL_ConvertSurface(read, SDL_PIXELFORMAT_ABGR8888);
+                SDL_DestroySurface(read);
+                if (!conv) {
+                    return false;
+                }
+                const Uint8* px = static_cast<const Uint8*>(conv->pixels);
+                r = px[0];
+                g = px[1];
+                b = px[2];
+                SDL_DestroySurface(conv);
+                return true;
+            };
+            int r = 0, g = 0, b = 0;
+            const auto white = [](int cr, int cg, int cb) {
+                return cr == 255 && cg == 255 && cb == 255;
+            };
+            check(readPixel(56.0f, 14.0f, r, g, b) && r == 255 && g == 0 && b == 0,
+                  "the shared collapsed border paints its one red line");
+            check(readPixel(60.0f, 14.0f, r, g, b) && white(r, g, b),
+                  "the right cell paints no second copy of the shared border");
+            check(readPixel(51.0f, 42.0f, r, g, b) && b == 255 && r == 0 && g == 0,
+                  "a wider neighbouring border wins the collapsed edge's colour");
+            check(readPixel(57.0f, 42.0f, r, g, b) && white(r, g, b),
+                  "the winning shared edge paints once rather than twice");
+            check(readPixel(52.0f, 58.0f, r, g, b) && b == 255 && r == 0 && g == 0,
+                  "at equal width the stronger border style wins the shared edge");
+            check(readPixel(56.0f, 58.0f, r, g, b) && white(r, g, b),
+                  "the double-style winner still paints only the shared edge");
+        }
+    }
+
     platform->shutdown();
 
     std::printf("input_tests: %d checks, %d failures\n", checks, failures);

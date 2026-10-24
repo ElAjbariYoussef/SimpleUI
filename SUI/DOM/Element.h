@@ -6,6 +6,7 @@
 #pragma once
 
 #include "Core/Object/Object.h"
+#include "CSS/Style.h"
 
 #include <cstdint>
 #include <functional>
@@ -186,6 +187,28 @@ public:
     // Depth-first walk over this node and its descendants.
     void visit(const std::function<void(Element&)>& fn);
 
+    // A collapsed table border edge is a used value, not the element's CSS:
+    // adjacent cells share one winning edge and the layout pass overwrites the
+    // losing side. Paint reads this instead of resolving the cell again.
+    struct LayoutBorderSide {
+        float width = 0.0f;
+        SDL_Color color = {0, 0, 0, 0};
+        ComputedStyle::BorderStyle style = ComputedStyle::BorderStyleNone;
+    };
+    struct LayoutBorder {
+        LayoutBorderSide top;
+        LayoutBorderSide right;
+        LayoutBorderSide bottom;
+        LayoutBorderSide left;
+    };
+    void setLayoutBorder(const LayoutBorder& border) noexcept {
+        layoutBorder_ = border;
+        hasLayoutBorder_ = true;
+    }
+    void clearLayoutBorder() noexcept { hasLayoutBorder_ = false; }
+    bool hasLayoutBorder() const noexcept { return hasLayoutBorder_; }
+    const LayoutBorder& layoutBorder() const noexcept { return layoutBorder_; }
+
     // Layout data (owned by element for now). X/Y are the border-box origin in
     // window space; Width/Height are border-box dimensions.
     void setLayoutX(float x) noexcept { layoutX_ = x; }
@@ -284,6 +307,8 @@ private:
     float layoutY_ = 0.0f;
     float layoutW_ = 0.0f;
     float layoutH_ = 0.0f;
+    LayoutBorder layoutBorder_;
+    bool hasLayoutBorder_ = false;
     float paddingX_ = 0.0f;
     float paddingY_ = 0.0f;
     float paddingW_ = 0.0f;
