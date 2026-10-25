@@ -4651,6 +4651,301 @@ void testFlexReverseDirections() {
     checkNear(b2->layoutY(), 200.0f, 0.5f, "the second item sits above it");
 }
 
+// Auto cross sizes come from content, not from the viewport: a row's lines are
+// as tall as their tallest item, and a column's lines are as wide as their
+// widest item. Those line sizes then drive stretching and cross alignment.
+void testFlexAutoCrossSizing() {
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"stretch\"><div id=\"s1\">alpha</div>"
+        "<div id=\"s2\">alpha<br/>beta</div></div>"
+        "<div id=\"centre\"><div id=\"c1\">alpha</div>"
+        "<div id=\"c2\">alpha<br/>beta</div></div>"
+        "<div id=\"end\"><div id=\"e1\">alpha</div>"
+        "<div id=\"e2\">alpha<br/>beta</div></div>"
+        "<div id=\"chrome\"><div id=\"ch1\">alpha</div>"
+        "<div id=\"ch2\">alpha<br/>beta</div></div>"
+        "<div id=\"autoMargin\"><div id=\"am1\">alpha</div>"
+        "<div id=\"am2\">alpha<br/>beta</div></div>"
+        "<div id=\"wrap\"><div id=\"w1\">alpha</div>"
+        "<div id=\"w2\">alpha<br/>beta</div><div id=\"w3\">alpha</div></div>"
+        "<div id=\"rev\"><div id=\"rv1\">alpha</div><div id=\"rv2\">alpha</div></div>"
+        "<div id=\"colstretch\"><div id=\"csWide\"><div id=\"csInner\"></div></div>"
+        "<div id=\"csEmpty\"></div></div>"
+        "<div id=\"colcentre\"><div id=\"ccWide\"><div id=\"ccWideInner\"></div></div>"
+        "<div id=\"ccNarrow\"></div></div>"
+        "<div id=\"zero\"><div id=\"z0\"></div><div id=\"zAuto\">alpha</div></div>"
+        "<div id=\"clamp\"><div id=\"clMax\">alpha<br/>beta</div>"
+        "<div id=\"clMin\">alpha</div></div>"
+        "<div id=\"arRow\"><div id=\"arR\"></div><div id=\"arS\"></div></div>"
+        "<div id=\"arCol\"><div id=\"arC\"></div></div>"
+        "<div id=\"colclamp\"><div id=\"cwMax\"><div id=\"cwMaxInner\"></div></div>"
+        "<div id=\"cwFill\"></div><div id=\"cwMin\"></div>"
+        "<div id=\"cwFixed\"></div></div>"
+        "<div id=\"colnested\"><div id=\"cnOuter\"><div id=\"cnInner\">"
+        "<div id=\"cnLeaf\"></div></div></div><div id=\"cnFill\"></div></div>"
+        "<div id=\"coltext\"><div id=\"ctText\">alpha</div>"
+        "<div id=\"ctFill\"></div></div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin: 0; line-height: 20px }"
+        "#stretch, #centre, #end, #chrome, #autoMargin, #wrap, #rev"
+        " { display: flex; width: 300px }"
+        "#centre { align-items: center }"
+        "#end { align-items: flex-end }"
+        "#chrome { padding: 5px; border: 1px solid #000; align-items: center }"
+        "#autoMargin { align-items: flex-start }"
+        "#wrap { flex-wrap: wrap; width: 120px; row-gap: 6px }"
+        "#rev { flex-wrap: wrap-reverse; width: 120px; row-gap: 5px }"
+        "#s1, #s2, #c1, #c2, #e1, #e2 { width: 100px }"
+        "#ch1, #ch2 { width: 50px; padding: 4px; border: 1px solid #000;"
+        " margin: 3px 0 }"
+        "#am1, #am2 { width: 50px }"
+        "#am1 { margin-top: auto }"
+        "#w1, #w2, #w3 { width: 100px }"
+        "#rv1, #rv2 { width: 100px; height: 10px }"
+        "#colstretch { display: flex; flex-direction: column }"
+        "#csInner { width: 80px; height: 10px }"
+        "#csEmpty { height: 20px }"
+        "#colcentre { display: flex; flex-direction: column; align-items: center }"
+        "#ccWideInner { width: 120px; height: 10px }"
+        "#ccNarrow { width: 40px; height: 10px }"
+        "#zero { display: flex; width: 100px }"
+        "#z0 { width: 20px; height: 0 }"
+        "#zAuto { width: 20px }"
+        "#clamp { display: flex; width: 200px; align-items: center }"
+        "#clMax { width: 50px; max-height: 20px }"
+        "#clMin { width: 50px; min-height: 30px }"
+        "#arRow { display: flex; width: 200px; align-items: center }"
+        "#arR { width: 100px; aspect-ratio: 2 / 1 }"
+        "#arS { width: 20px; height: 20px }"
+        "#arCol { display: flex; flex-direction: column; align-items: flex-start }"
+        "#arC { height: 100px; aspect-ratio: 2 / 1 }"
+        "#colclamp { display: flex; flex-direction: column }"
+        "#cwMaxInner { width: 80px; height: 10px }"
+        "#cwMax { max-width: 40px }"
+        "#cwFill { height: 20px }"
+        "#cwMin { height: 10px; min-width: 60px }"
+        "#cwFixed { width: 20px; height: 10px; align-self: center }"
+        "#colnested { display: flex; flex-direction: column }"
+        "#cnLeaf { width: 90px; height: 10px }"
+        "#cnFill { height: 10px }"
+        "#coltext { display: flex; flex-direction: column }"
+        "#ctFill { height: 10px }"));
+    layoutRoot(*document, resolver, 800.0f);
+    const auto box = [&](const char* id) { return document->getElementById(id); };
+    Element* stretch = box("stretch");
+    Element* s1 = box("s1");
+    Element* s2 = box("s2");
+    Element* centre = box("centre");
+    Element* c1 = box("c1");
+    Element* c2 = box("c2");
+    Element* end = box("end");
+    Element* e1 = box("e1");
+    Element* e2 = box("e2");
+    Element* chrome = box("chrome");
+    Element* ch1 = box("ch1");
+    Element* ch2 = box("ch2");
+    Element* autoMargin = box("autoMargin");
+    Element* am1 = box("am1");
+    Element* am2 = box("am2");
+    Element* wrap = box("wrap");
+    Element* w1 = box("w1");
+    Element* w2 = box("w2");
+    Element* w3 = box("w3");
+    Element* rev = box("rev");
+    Element* rv1 = box("rv1");
+    Element* rv2 = box("rv2");
+    Element* colstretch = box("colstretch");
+    Element* csWide = box("csWide");
+    Element* csEmpty = box("csEmpty");
+    Element* colcentre = box("colcentre");
+    Element* ccWide = box("ccWide");
+    Element* ccNarrow = box("ccNarrow");
+    Element* zero = box("zero");
+    Element* z0 = box("z0");
+    Element* zAuto = box("zAuto");
+    Element* clamp = box("clamp");
+    Element* clMax = box("clMax");
+    Element* clMin = box("clMin");
+    Element* arRow = box("arRow");
+    Element* arR = box("arR");
+    Element* arS = box("arS");
+    Element* arCol = box("arCol");
+    Element* arC = box("arC");
+    Element* colclamp = box("colclamp");
+    Element* cwMax = box("cwMax");
+    Element* cwFill = box("cwFill");
+    Element* cwMin = box("cwMin");
+    Element* cwFixed = box("cwFixed");
+    Element* colnested = box("colnested");
+    Element* cnOuter = box("cnOuter");
+    Element* cnInner = box("cnInner");
+    Element* cnFill = box("cnFill");
+    Element* coltext = box("coltext");
+    Element* ctText = box("ctText");
+    Element* ctFill = box("ctFill");
+    if (!stretch || !s1 || !s2 || !centre || !c1 || !c2 || !end || !e1 ||
+        !e2 || !chrome || !ch1 || !ch2 || !autoMargin || !am1 || !am2 ||
+        !wrap || !w1 || !w2 || !w3 || !rev || !rv1 || !rv2 || !colstretch ||
+        !csWide || !csEmpty || !colcentre || !ccWide || !ccNarrow || !zero ||
+        !z0 || !zAuto || !clamp || !clMax || !clMin || !arRow || !arR || !arS ||
+        !arCol || !arC || !colclamp || !cwMax || !cwFill || !cwMin ||
+        !cwFixed || !colnested || !cnOuter || !cnInner || !cnFill || !coltext ||
+        !ctText || !ctFill) {
+        check(false, "flex auto cross-size fixture elements found");
+        return;
+    }
+
+    const auto relY = [](Element* el, Element* container) {
+        return el->layoutY() - container->layoutY();
+    };
+    const auto relX = [](Element* el, Element* container) {
+        return el->layoutX() - container->layoutX();
+    };
+
+    // The tallest auto-height item sets the row's 40px line, so the one-line
+    // item stretches to it.
+    checkNear(stretch->layoutHeight(), 40.0f, 0.5f,
+              "an auto-height row is as tall as its tallest item's content");
+    checkNear(s1->layoutHeight(), 40.0f, 0.5f,
+              "stretch fills a content-sized line");
+    checkNear(s2->layoutHeight(), 40.0f, 0.5f,
+              "the tallest item keeps its content height");
+
+    // Alignment now has the real 40px line to work against.
+    checkNear(centre->layoutHeight(), 40.0f, 0.5f,
+              "an auto row line is measured before alignment");
+    checkNear(relY(c1, centre), 10.0f, 0.5f,
+              "center uses the measured line height");
+    checkNear(relY(c2, centre), 0.0f, 0.5f,
+              "the tallest item sits at the line start");
+    checkNear(relY(e1, end), 20.0f, 0.5f,
+              "flex-end aligns against the measured line");
+    checkNear(relY(e2, end), 0.0f, 0.5f,
+              "the tallest item remains at the line start");
+
+    // Cross chrome and margins join the content when the line is sized.
+    checkNear(chrome->layoutHeight(), 68.0f, 0.5f,
+              "a content-sized line includes item chrome and margins");
+    checkNear(ch1->layoutHeight(), 30.0f, 0.5f,
+              "the item keeps its own border box height");
+    checkNear(ch2->layoutHeight(), 50.0f, 0.5f,
+              "the taller item's chrome is not added twice");
+    checkNear(relY(ch1, chrome), 19.0f, 0.5f,
+              "centring works with padding, border, and margins");
+    checkNear(relY(ch2, chrome), 9.0f, 0.5f,
+              "the taller item starts after its top margin");
+
+    // Cross auto margins absorb the free space the measured line exposes.
+    checkNear(relY(am1, autoMargin), 20.0f, 0.5f,
+              "an auto cross margin takes the measured free space");
+    checkNear(relY(am2, autoMargin), 0.0f, 0.5f,
+              "the marginless item stays at the line start");
+    checkNear(autoMargin->layoutHeight(), 40.0f, 0.5f,
+              "the auto margin does not grow the line");
+
+    // Wrapped lines stack by their own content heights plus the row gap.
+    checkNear(wrap->layoutHeight(), 92.0f, 0.5f,
+              "wrapped auto-height lines add up to the content height");
+    checkNear(relY(w1, wrap), 0.0f, 0.5f, "the first line starts at the top");
+    checkNear(relY(w2, wrap), 26.0f, 0.5f,
+              "the second line clears the first line and the gap");
+    checkNear(relY(w3, wrap), 72.0f, 0.5f,
+              "the third line follows the taller second line");
+
+    // wrap-reverse must not reserve viewport-sized empty space above its lines.
+    checkNear(rev->layoutHeight(), 25.0f, 0.5f,
+              "an auto-height wrap-reverse container is content-sized");
+    checkNear(relY(rv1, rev), 15.0f, 0.5f,
+              "wrap-reverse places the first line at the cross end");
+    checkNear(relY(rv2, rev), 0.0f, 0.5f,
+              "wrap-reverse places the next line above it");
+
+    // A column's auto width is the widest item content width.
+    checkNear(colstretch->layoutWidth(), 80.0f, 0.5f,
+              "an auto-width column is as wide as its widest item");
+    checkNear(csWide->layoutWidth(), 80.0f, 0.5f,
+              "the widest auto-width item keeps its content width");
+    checkNear(csEmpty->layoutWidth(), 80.0f, 0.5f,
+              "stretch fills the measured column line");
+    checkNear(colstretch->layoutHeight(), 30.0f, 0.5f,
+              "column main sizing is unchanged by cross measurement");
+
+    checkNear(colcentre->layoutWidth(), 120.0f, 0.5f,
+              "the column line takes the widest content width");
+    checkNear(relX(ccWide, colcentre), 0.0f, 0.5f,
+              "the widest item starts at the line start");
+    checkNear(relX(ccNarrow, colcentre), 40.0f, 0.5f,
+              "a narrower item centres in the measured column line");
+
+    // Only an auto cross size stretches; an authored zero stays zero.
+    checkNear(zero->layoutHeight(), 20.0f, 0.5f,
+              "the measured line still sizes the row");
+    checkNear(z0->layoutHeight(), 0.0f, 0.5f,
+              "an explicit zero cross size does not stretch");
+    checkNear(zAuto->layoutHeight(), 20.0f, 0.5f,
+              "the auto-height sibling still fills the line");
+
+    // min-height and max-height clamp the contribution an item makes.
+    checkNear(clamp->layoutHeight(), 30.0f, 0.5f,
+              "cross min/max clamp the measured line height");
+    checkNear(clMax->layoutHeight(), 20.0f, 0.5f,
+              "max-height caps the tall item's content contribution");
+    checkNear(clMin->layoutHeight(), 30.0f, 0.5f,
+              "min-height raises the short item's contribution");
+    checkNear(relY(clMax, clamp), 5.0f, 0.5f,
+              "centring uses the clamped item height");
+    checkNear(relY(clMin, clamp), 0.0f, 0.5f,
+              "the minimum-sized item fills the clamped line");
+
+    // A definite main size still drives the other axis through aspect-ratio.
+    checkNear(arRow->layoutHeight(), 50.0f, 0.5f,
+              "a row item's aspect ratio supplies its auto cross size");
+    checkNear(arR->layoutHeight(), 50.0f, 0.5f,
+              "the aspect-ratio item keeps the derived height");
+    checkNear(relY(arS, arRow), 15.0f, 0.5f,
+              "the short item centres in the aspect-derived line");
+    checkNear(arCol->layoutWidth(), 200.0f, 0.5f,
+              "a column item's aspect ratio supplies its auto cross width");
+    checkNear(arC->layoutWidth(), 200.0f, 0.5f,
+              "the aspect-ratio item keeps the derived width");
+
+    // The same clamping applies to an auto column cross size.
+    checkNear(colclamp->layoutWidth(), 60.0f, 0.5f,
+              "column min/max clamp the measured line width");
+    checkNear(cwMax->layoutWidth(), 40.0f, 0.5f,
+              "max-width caps the wide item's contribution");
+    checkNear(cwFill->layoutWidth(), 60.0f, 0.5f,
+              "the auto-width sibling stretches to the clamped line");
+    checkNear(cwMin->layoutWidth(), 60.0f, 0.5f,
+              "min-width raises the empty item's contribution");
+    checkNear(relX(cwFixed, colclamp), 20.0f, 0.5f,
+              "centring uses the clamped column line");
+
+    // Nested auto-width blocks contribute their own descendants' widths.
+    checkNear(colnested->layoutWidth(), 90.0f, 0.5f,
+              "max-content width follows nested auto-width blocks");
+    checkNear(cnOuter->layoutWidth(), 90.0f, 0.5f,
+              "the outer auto-width item takes the nested width");
+    checkNear(cnInner->layoutWidth(), 90.0f, 0.5f,
+              "the inner auto-width box takes the leaf width");
+    checkNear(cnFill->layoutWidth(), 90.0f, 0.5f,
+              "the empty sibling stretches to the nested width");
+
+    // Inline-only content is measured with an unbounded probe.
+    checkNear(ctText->layoutWidth(), ctFill->layoutWidth(), 0.5f,
+              "inline content sets the column line width");
+    check(ctText->layoutWidth() > 0.0f,
+          "the inline max-content probe finds text width");
+    checkNear(coltext->layoutWidth(), ctText->layoutWidth(), 0.5f,
+              "the column adopts the probed text width");
+}
+
 void testFlexItemMarginsAndPadding() {
     auto document = parseOrNull(
         "<sui><body><div id=\"row\"><div id=\"a\"></div><div id=\"b\"></div>"
@@ -14328,6 +14623,7 @@ int main() {
     testFlexAlignItems();
     testFlexWrap();
     testFlexReverseDirections();
+    testFlexAutoCrossSizing();
     testFlexItemMarginsAndPadding();
     testBlockAutoMargins();
     testShrinkToFitAutoMargins();

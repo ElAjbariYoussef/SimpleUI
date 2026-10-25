@@ -1692,6 +1692,59 @@ private:
         return row ? width : height;
     }
 
+    // The width an auto-width block wants before it has to wrap. Inline content
+    // measures itself with an unbounded probe, while stacked block children
+    // contribute the widest one plus its chrome and margins. Used for a flex
+    // item's cross size in a column, where the item may be auto-width.
+    float measureMaxContentWidth(Element& el, const ComputedStyle& s) {
+        if (s.contentVisibility == ComputedStyle::ContentHidden) {
+            const float em = s.fontSize;
+            const float rem = resolver_.rootFontSize();
+            return s.width.isAuto()
+                       ? std::max(0.0f, s.containIntrinsicWidth.resolve(
+                                            kUnbounded, em, rem))
+                       : std::max(0.0f, s.width.resolve(kUnbounded, em, rem));
+        }
+        const UsedBox box = usedBox(s, kUnbounded);
+        if (box.width > 0.0f) {
+            return box.width;
+        }
+        if (s.isFlexContainer() || s.isGridContainer() || s.isTableContainer()) {
+            float width = 0.0f;
+            layoutContents(el, s, box, kUnbounded, 0.0f, 0.0f, width);
+            return std::max(0.0f, width);
+        }
+        if (!hasBlockChild(el)) {
+            return std::max(0.0f, probeWidth(el, box));
+        }
+        float widest = 0.0f;
+        for (const auto& child : el.children()) {
+            if (!child || child->isTextNode() || !laidOut(*child)) {
+                continue;
+            }
+            const ComputedStyle cs = resolver_.resolve(*child);
+            if (cs.display == ComputedStyle::None || !cs.visible ||
+                cs.position == ComputedStyle::Absolute ||
+                cs.position == ComputedStyle::Fixed) {
+                continue;
+            }
+            const UsedBox cb = usedBox(cs, kUnbounded);
+            float childWidth = 0.0f;
+            if (cb.width > 0.0f) {
+                childWidth = cb.width;
+            } else if (isBlockLevel(cs)) {
+                childWidth = measureMaxContentWidth(*child, cs);
+            } else {
+                childWidth = std::max(0.0f, probeWidth(*child, cb));
+            }
+            const float outer = childWidth + cb.horizontalChrome() +
+                                (cs.margin.left.isAuto() ? 0.0f : cb.margin.left) +
+                                (cs.margin.right.isAuto() ? 0.0f : cb.margin.right);
+            widest = std::max(widest, outer);
+        }
+        return widest;
+    }
+
     // The width below which the content cannot shrink without overflow. An
     // inline probe at zero width wraps at every opportunity, so its widest line
     // is the longest unbreakable run. Block children stack, so the widest one
@@ -1890,6 +1943,19 @@ private:
         return std::max(0.0f, value);
     }
 
+    // The same clamp on the cross axis: height for a row, width for a column.
+    float clampCross(float value, const UsedBox& box, bool row) const {
+        const float min = row ? box.minHeight : box.minWidth;
+        const float max = row ? box.maxHeight : box.maxWidth;
+        if (max > 0.0f) {
+            value = std::min(value, max);
+        }
+        if (min > 0.0f) {
+            value = std::max(value, min);
+        }
+        return std::max(0.0f, value);
+    }
+
     // Hands any space still unclaimed — or still oversubscribed after a clamp — to
     // the items that are not frozen. CSS calls this the second flexing pass.
     static void redistribute(std::vector<FlexItem>& items, const FlexLine& l, bool row,
@@ -1979,12 +2045,6 @@ private:
                        : std::max(0.0f, viewportHeight_ -
                                             verticalEdges(box.padding, box.borderWidth)));
         const float crossDefinite = row ? box.height : box.width;
-        const float crossAvailable =
-            crossDefinite > 0.0f
-                ? crossDefinite
-                : (row ? std::max(0.0f, viewportHeight_ -
-                                             verticalEdges(box.padding, box.borderWidth))
-                       : std::max(0.0f, availableWidth - box.horizontalChrome()));
         // A row's items are spaced by the column gap and its lines by the row
         // gap; a column container swaps the pair.
         const float mainGap = std::max(0.0f, row ? s.columnGap : s.rowGap);
@@ -2091,15 +2151,40 @@ private:
 
         // 4. Size each line on the cross axis. An item's cross size is its own
         //    cross-axis length, or for an auto one the height/width its content
-        //    turned out to need once laid out.
+        //    turned out to need once laid out. A row measures the height at the
+        //    item's resolved main size, so wrapping text contributes every line
+        //    it will actually use; a column measures the max-content width.
+        for (FlexItem& item : items) {
+            const bool crossAuto = row ? item.style.height.isAuto()
+                                       : item.style.width.isAuto();
+            float natural = crossAuto ? 0.0f : (row ? item.box.height : item.box.width);
+            if (crossAuto && row) {
+                ComputedStyle probe = item.style;
+                probe.width = Length(item.mainSize);
+                probe.height = Length();
+                probe.boxSizing = BoxSizing::ContentBox;
+                probe.margin = {};
+                const float chrome =
+                    verticalEdges(item.box.padding, item.box.borderWidth);
+                natural = measureAtWidth(
+                              *item.el, probe,
+                              item.mainSize +
+                                  horizontalEdges(item.box.padding, item.box.borderWidth)) -
+                          chrome;
+                if (item.style.aspectRatio() > 0.0f) {
+                    natural = item.mainSize / item.style.aspectRatio();
+                }
+            } else if (crossAuto) {
+                natural = measureMaxContentWidth(*item.el, item.style);
+            }
+            item.crossSize = clampCross(natural, item.box, row);
+        }
         for (FlexLine& l : lines) {
             l.crossSize = 0.0f;
             for (const std::size_t idx : l.items) {
-                FlexItem& item = items[idx];
-                const float natural = row ? item.box.height : item.box.width;
-                item.crossSize = natural;
+                const FlexItem& item = items[idx];
                 l.crossSize = std::max(l.crossSize,
-                                       natural + crossChrome(item.box, row) +
+                                       item.crossSize + crossChrome(item.box, row) +
                                            crossMargins(item.box, row));
             }
         }
@@ -2112,10 +2197,12 @@ private:
         if (lines.size() == 1 && crossDefinite > 0.0f &&
             (s.flexWrap == ComputedStyle::NoWrap ||
              s.alignContent == ComputedStyle::AlignStretch)) {
-            lines[0].crossSize = crossAvailable;
+            lines[0].crossSize = crossDefinite;
         }
 
-        // 5. Stack the lines on the cross axis.
+        // 5. Stack the lines on the cross axis. An auto cross size is exactly
+        //    the space the lines need; a definite one gives wrap-reverse a fixed
+        //    far edge to stack against.
         float crossCursor = 0.0f;
         for (FlexLine& l : lines) {
             l.crossPos = crossCursor;
@@ -2124,7 +2211,8 @@ private:
         if (!lines.empty()) {
             crossCursor -= crossGap;
         }
-        applyWrapReverse(s, lines, crossAvailable, crossGap);
+        applyWrapReverse(s, lines, crossDefinite > 0.0f ? crossDefinite : crossCursor,
+                         crossGap);
 
         // 6. Place each item on the main axis, honouring `justify-content`.
         for (FlexLine& l : lines) {
@@ -2248,7 +2336,8 @@ private:
                 // auto: an auto margin takes the free space instead, which is
                 // what makes the margin win over the alignment.
                 float crossContent = item.crossSize;
-                const float authored = row ? item.box.height : item.box.width;
+                const bool crossSizeAuto = row ? item.style.height.isAuto()
+                                               : item.style.width.isAuto();
                 const bool crossStartAuto =
                     row ? item.style.margin.top.isAuto()
                         : item.style.margin.left.isAuto();
@@ -2258,7 +2347,7 @@ private:
                 const bool crossAuto = crossStartAuto || crossEndAuto;
                 float crossStart = row ? item.box.margin.top : item.box.margin.left;
                 float crossEnd = row ? item.box.margin.bottom : item.box.margin.right;
-                if (align == ComputedStyle::AlignStretch && authored <= 0.0f &&
+                if (align == ComputedStyle::AlignStretch && crossSizeAuto &&
                     !crossAuto) {
                     crossContent = std::max(0.0f, l.crossSize - crossChrome(item.box, row) -
                                                      crossStart - crossEnd);
@@ -2340,19 +2429,17 @@ private:
     // of the near one. Only the line offsets change; items keep their place inside
     // their line.
     void applyWrapReverse(const ComputedStyle& s, std::vector<FlexLine>& lines,
-                          float crossAvailable, float crossGap) {
+                          float crossExtent, float crossGap) {
         if (s.flexWrap != ComputedStyle::WrapReverse) {
             return;
         }
-        float total = 0.0f;
-        for (const FlexLine& line : lines) {
-            total += line.crossSize;
-        }
-        const float gaps = crossGap * static_cast<float>(lines.size() - 1);
-        float cursor = std::max(0.0f, crossAvailable - total - gaps);
+        // The cross-start edge is the far edge, so the first line occupies the
+        // bottom (or right) edge and later lines stack back towards the start.
+        float cursor = std::max(0.0f, crossExtent);
         for (FlexLine& line : lines) {
+            cursor -= line.crossSize;
             line.crossPos = cursor;
-            cursor += line.crossSize + crossGap;
+            cursor -= crossGap;
         }
     }
 
