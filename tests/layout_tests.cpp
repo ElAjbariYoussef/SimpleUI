@@ -8477,6 +8477,62 @@ void testFloatsAndClear() {
               "text beside a right float keeps the left edge");
     }
 
+    // A float's margin box sizes and positions the next float; margins are not
+    // counted twice just because the float also has padding and borders.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\">"
+            "<img id=\"a\"/><img id=\"b\"/>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:100px}"
+            "#a{float:left;width:40px;height:30px;padding:5px;margin:10px;"
+            "border:4px solid}"
+            "#b{float:left;width:15px;height:20px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        check(a != nullptr && std::fabs(a->layoutX() - 10.0f) < 0.5f &&
+                  std::fabs(a->layoutWidth() - 58.0f) < 0.5f,
+              "a float's border box excludes its margins");
+        check(b != nullptr && std::fabs(b->layoutX() - 78.0f) < 0.5f &&
+                  std::fabs(b->layoutY() - 0.0f) < 0.5f,
+              "a second float fits against the first float's margin box");
+    }
+
+    // A right float with margins also sizes and positions the next float from
+    // its margin box, without counting the margins twice.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\">"
+            "<img id=\"a\"/><img id=\"b\"/>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:100px}"
+            "#a{float:right;width:40px;height:20px;padding:5px;margin:10px;"
+            "border:4px solid}"
+            "#b{float:right;width:15px;height:15px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        check(a != nullptr && std::fabs(a->layoutX() - 32.0f) < 0.5f &&
+                  std::fabs(a->layoutWidth() - 58.0f) < 0.5f,
+              "a right float's border box excludes its margins");
+        check(b != nullptr && std::fabs(b->layoutX() - 7.0f) < 0.5f &&
+                  std::fabs(b->layoutY() - 0.0f) < 0.5f,
+              "a second right float fits against the first float's margin box");
+    }
+
     // `clear:left` moves a block below the float.
     {
         auto document = parseOrNull(
@@ -8524,6 +8580,438 @@ void testFloatsAndClear() {
         const auto& runs = p->textRuns();
         check(!runs.empty() && std::fabs(runs[0].x - 60.0f) < 0.5f,
               "a following block's text wraps around the float");
+    }
+}
+
+void testShapeOutside() {
+    // The parser shares clip-path's basic shapes but defaults floated shapes to
+    // the margin box and reads both properties back.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"x\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        Element* x = document->getElementById("x");
+        if (!x) {
+            check(false, "shape-outside test element found");
+            return;
+        }
+        using Shape = sui::ComputedStyle::ClipPath;
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "#x{shape-outside:circle(40% at 30% 70%) padding-box;"
+            "shape-margin:12px}"));
+        const ComputedStyle style = resolver.resolve(*x);
+        check(style.shapeOutside.shape == Shape::Shape::Circle,
+              "shape-outside parses a circle");
+        check(style.shapeOutside.box == Shape::Box::Padding,
+              "shape-outside keeps an explicit reference box");
+        check(sui::StyleResolver::propertyValue(style, "shape-outside") ==
+                  "circle(40% at 30% 70%) padding-box",
+              "shape-outside reads back the parsed shape");
+        check(sui::StyleResolver::propertyValue(style, "shape-margin") == "12px",
+              "shape-margin reads back its length");
+
+        sui::StyleResolver defaults;
+        defaults.setRules(sui::CSSParser::parse("#x{shape-outside:inset(5px)}"));
+        const ComputedStyle inset = defaults.resolve(*x);
+        check(inset.shapeOutside.box == Shape::Box::Margin,
+              "a float shape defaults to the margin box");
+        check(sui::StyleResolver::propertyValue(inset, "shape-outside") ==
+                  "inset(5px 5px 5px 5px)",
+              "an omitted shape reference box is not serialized");
+
+        defaults.setRules(sui::CSSParser::parse(
+            "#x{shape-outside:padding-box circle(50%)}"));
+        const ComputedStyle prefixed = defaults.resolve(*x);
+        check(prefixed.shapeOutside.shape == Shape::Shape::Circle &&
+                  prefixed.shapeOutside.box == Shape::Box::Padding,
+              "shape-outside accepts the reference box before the shape");
+
+        defaults.setRules(sui::CSSParser::parse(
+            "#x{shape-margin:12px;shape-margin:-3px}"));
+        check(sui::StyleResolver::propertyValue(defaults.resolve(*x), "shape-margin") ==
+                  "12px",
+              "a negative shape-margin is rejected");
+
+        defaults.setRules(sui::CSSParser::parse(
+            "#x{shape-outside:circle(25%);shape-outside:path('M 0 0')}"));
+        check(defaults.resolve(*x).shapeOutside.shape == Shape::Shape::Circle,
+              "an unsupported shape keeps the previous winner");
+    }
+
+    // A top inset leaves the first lines beside nothing and starts indenting
+    // where the shape begins; the indentation ends at the shape's bottom.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\"><img id=\"f\"/>"
+            "a<br/>b<br/>c<br/>d<br/>e<br/>f</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:200px;font-size:10px;line-height:12px}"
+            "#f{float:left;width:60px;height:60px;"
+            "shape-outside:inset(30px 20px 20px 0)}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* box = document->getElementById("box");
+        const auto& runs = box->textRuns();
+        check(runs.size() >= 6, "inset fixture lays out six lines");
+        if (runs.size() >= 6) {
+            checkNear(runs[0].x, 0.0f, 0.5f,
+                      "text above an inset shape keeps the full line");
+            checkNear(runs[1].x, 0.0f, 0.5f,
+                      "the line above the shape's top stays clear");
+            checkNear(runs[2].x, 40.0f, 0.5f,
+                      "text beside the inset shape clears its right edge");
+            checkNear(runs[4].x, 0.0f, 0.5f,
+                      "text below the shape reclaims the full line");
+        }
+    }
+
+    // The margin-box reference includes the float's margin, padding, and border.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\"><img id=\"f\"/>"
+            "a<br/>b</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:200px;font-size:10px;line-height:12px}"
+            "#f{float:left;width:50px;height:20px;padding:5px;margin:10px;"
+            "border:4px solid;shape-outside:inset(0)}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* f = document->getElementById("f");
+        Element* box = document->getElementById("box");
+        check(f != nullptr && std::fabs(f->layoutX() - 10.0f) < 0.5f &&
+                  std::fabs(f->layoutWidth() - 68.0f) < 0.5f,
+              "the shaped float records its border box without margins");
+        const auto& runs = box->textRuns();
+        check(runs.size() >= 1, "margin-box shape fixture lays out a line");
+        if (!runs.empty()) {
+            checkNear(runs[0].x, 88.0f, 0.5f,
+                      "a default margin-box shape wraps past the float's margin");
+        }
+    }
+
+    // A content-box reference starts inside the float's padding and margin.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\"><img id=\"f\"/>"
+            "a<br/>b<br/>c<br/>d</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:200px;font-size:10px;line-height:12px}"
+            "#f{float:left;width:50px;height:50px;padding:5px;margin:10px;"
+            "shape-outside:inset(0) content-box}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* f = document->getElementById("f");
+        Element* box = document->getElementById("box");
+        check(f != nullptr && std::fabs(f->contentX() - 15.0f) < 0.5f,
+              "the shaped float's content box is offset by padding and margin");
+        const auto& runs = box->textRuns();
+        check(runs.size() >= 2, "content-box fixture lays out two lines");
+        if (runs.size() >= 2) {
+            checkNear(runs[0].x, 0.0f, 0.5f,
+                      "a content-box shape starts below the float's padding");
+            checkNear(runs[1].x, 65.0f, 0.5f,
+                      "a content-box shape wraps at its content edge");
+        }
+    }
+
+    // Border-box and padding-box references resolve to their own boxes. The
+    // float's margins and chrome shift each one differently.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\"><img id=\"f\"/>"
+            "a<br/>b</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:200px;font-size:10px;line-height:12px}"
+            "#f{float:left;width:50px;height:50px;padding:5px;margin:10px;"
+            "border:4px solid;shape-outside:inset(0) border-box}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* box = document->getElementById("box");
+        const auto& runs = box->textRuns();
+        check(runs.size() >= 1, "border-box shape fixture lays out a line");
+        if (!runs.empty()) {
+            checkNear(runs[0].x, 78.0f, 0.5f,
+                      "a border-box shape wraps at the float's border edge");
+        }
+    }
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\"><img id=\"f\"/>"
+            "a<br/>b</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:200px;font-size:10px;line-height:12px}"
+            "#f{float:left;width:50px;height:50px;padding:5px;margin:10px;"
+            "border:4px solid;shape-outside:inset(0) padding-box}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* box = document->getElementById("box");
+        const auto& runs = box->textRuns();
+        check(runs.size() >= 2, "padding-box shape fixture lays out two lines");
+        if (runs.size() >= 2) {
+            checkNear(runs[0].x, 0.0f, 0.5f,
+                      "a padding-box shape starts below the float's border");
+            checkNear(runs[1].x, 74.0f, 0.5f,
+                      "a padding-box shape wraps at the padding edge");
+        }
+    }
+
+    // A circle's width changes with the line's height through the curve.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\"><img id=\"f\"/>"
+            "a<br/>b<br/>c<br/>d</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:200px;font-size:10px;line-height:12px}"
+            "#f{float:left;width:60px;height:60px;shape-outside:circle(50%)}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* box = document->getElementById("box");
+        const auto& runs = box->textRuns();
+        check(runs.size() >= 3, "circle fixture lays out three lines");
+        if (runs.size() >= 3) {
+            checkNear(runs[0].x, 54.0f, 0.5f,
+                      "a line at the circle's top clears only its narrow cap");
+            checkNear(runs[2].x, 60.0f, 0.5f,
+                      "a line through the circle's centre clears its widest part");
+        }
+    }
+
+    // An ellipse uses independent horizontal and vertical radii and a centre
+    // measured inside the reference box.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\"><img id=\"f\"/>"
+            "a<br/>b<br/>c</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:200px;font-size:10px;line-height:12px}"
+            "#f{float:left;width:60px;height:40px;"
+            "shape-outside:ellipse(20px 10px at 10px 20px)}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* box = document->getElementById("box");
+        const auto& runs = box->textRuns();
+        check(runs.size() >= 2, "ellipse fixture lays out two lines");
+        if (runs.size() >= 2) {
+            checkNear(runs[0].x, 22.0f, 0.5f,
+                      "the first line clears the ellipse's upper curve");
+            checkNear(runs[1].x, 30.0f, 0.5f,
+                      "the second line clears the ellipse's centre");
+        }
+    }
+
+    // A radial keyword measures from the shape's centre in its reference box.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\"><img id=\"f\"/>"
+            "a<br/>b<br/>c</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:200px;font-size:10px;line-height:12px}"
+            "#f{float:left;width:80px;height:40px;"
+            "shape-outside:circle(closest-side at 75% 50%)}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* box = document->getElementById("box");
+        const auto& runs = box->textRuns();
+        check(runs.size() >= 2, "circle keyword fixture lays out two lines");
+        if (runs.size() >= 2) {
+            checkNear(runs[0].x, 78.33f, 0.5f,
+                      "closest-side sizes the circle from its off-centre position");
+            checkNear(runs[1].x, 80.0f, 0.5f,
+                      "the keyword circle reaches its widest point on the centre line");
+        }
+    }
+
+    // A percentage shape-margin resolves against the containing block width.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\"><img id=\"f\"/>"
+            "a<br/>b<br/>c<br/>d</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:200px;font-size:10px;line-height:12px}"
+            "#f{float:left;width:60px;height:60px;shape-outside:circle(50%);"
+            "shape-margin:5%}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* box = document->getElementById("box");
+        const auto& runs = box->textRuns();
+        check(runs.size() >= 3, "shape-margin fixture lays out three lines");
+        if (runs.size() >= 3) {
+            checkNear(runs[0].x, 65.72f, 0.5f,
+                      "shape-margin pushes the first line further out");
+            checkNear(runs[2].x, 70.0f, 0.5f,
+                      "the widened circle reaches through the centre line");
+        }
+    }
+
+    // A negative calc result clamps to zero instead of shrinking the shape.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\"><img id=\"f\"/>"
+            "a<br/>b<br/>c<br/>d</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:200px;font-size:10px;line-height:12px}"
+            "#f{float:left;width:60px;height:60px;shape-outside:circle(50%);"
+            "shape-margin:calc(10px - 20px)}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* box = document->getElementById("box");
+        const auto& runs = box->textRuns();
+        check(runs.size() >= 3, "negative calc shape-margin fixture lays out lines");
+        if (runs.size() >= 3) {
+            checkNear(runs[0].x, 54.0f, 0.5f,
+                      "a negative calc shape-margin clamps to zero");
+            checkNear(runs[2].x, 60.0f, 0.5f,
+                      "the clamped shape keeps its unwidened centre");
+        }
+    }
+
+    // A polygon narrows line by line just like its edges do.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\"><img id=\"f\"/>"
+            "a<br/>b<br/>c<br/>d</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:200px;font-size:10px;line-height:12px}"
+            "#f{float:left;width:60px;height:60px;"
+            "shape-outside:polygon(0 0, 60px 60px, 0 60px)}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* box = document->getElementById("box");
+        const auto& runs = box->textRuns();
+        check(runs.size() >= 4, "polygon fixture lays out four lines");
+        if (runs.size() >= 4) {
+            checkNear(runs[0].x, 12.0f, 0.5f,
+                      "the first line clears the polygon's narrow top");
+            checkNear(runs[3].x, 48.0f, 0.5f,
+                      "a lower line clears the polygon's widening edge");
+        }
+    }
+
+    // Another float is positioned against the first float's margin box, not
+    // against the opening in its shape.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\">"
+            "<img id=\"a\"/><img id=\"b\"/>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:200px}"
+            "#a{float:left;width:60px;height:30px;"
+            "shape-outside:inset(20px 0 0 0)}"
+            "#b{float:left;width:40px;height:20px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* b = document->getElementById("b");
+        check(b != nullptr && std::fabs(b->layoutX() - 60.0f) < 0.5f &&
+                  std::fabs(b->layoutY() - 0.0f) < 0.5f,
+              "float placement ignores the opening in a shaped float");
+    }
+
+    // An inset can grow a right float's shape past its margin box too.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\"><img id=\"f\"/>"
+            "aaaaaaaaa bbbbbbbbb</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:200px;font-size:10px;line-height:12px}"
+            "#f{float:right;width:100px;height:100px;"
+            "shape-outside:inset(0 0 0 -40px)}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* box = document->getElementById("box");
+        const auto& runs = box->textRuns();
+        check(runs.size() >= 2, "right inset fixture lays out two words");
+        if (runs.size() >= 2) {
+            checkNear(runs[1].y, 12.0f, 0.5f,
+                      "a right float's inset shape narrows the line");
+        }
+    }
+
+    // A right float's shape-margin can extend beyond its margin box, leaving
+    // less room for the following line.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"box\"><img id=\"f\"/>"
+            "aaaaaaaaa bbbbbbbbb</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0} #box{width:200px;font-size:10px;line-height:12px}"
+            "#f{float:right;width:100px;height:100px;"
+            "shape-outside:margin-box;shape-margin:20px}"));
+        layoutRoot(*document, resolver, 400.0f);
+
+        Element* f = document->getElementById("f");
+        Element* box = document->getElementById("box");
+        check(f != nullptr && std::fabs(f->layoutX() - 100.0f) < 0.5f,
+              "a shaped right float still uses its margin-box position");
+        const auto& runs = box->textRuns();
+        check(runs.size() >= 2, "right shape fixture lays out two words");
+        if (runs.size() >= 2) {
+            checkNear(runs[0].x, 0.0f, 0.5f,
+                      "text beside a right float keeps the left edge");
+            checkNear(runs[1].x, 0.0f, 0.5f,
+                      "shape-margin wraps the second word onto the next line");
+            checkNear(runs[1].y, 12.0f, 0.5f,
+                      "the wrapped right-shape word moves down one line");
+        }
     }
 }
 
@@ -14696,6 +15184,7 @@ int main() {
     testCssCounters();
     testHasSelector();
     testFloatsAndClear();
+    testShapeOutside();
     testTableLayout();
     testImportantAndCssWideKeywords();
     testBorderWidthLonghands();

@@ -256,15 +256,236 @@ int intAttribute(Element& el, const char* name, int fallback) {
     return value < 1 ? fallback : value;
 }
 
+struct FloatPoint {
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
 // A floated box, recorded as its margin box in window coordinates so any line or
-// block can ask how much room is left beside it.
+// block can ask how much room is left beside it. `shape` is the optional
+// shape-outside outline; when it is set, line boxes use its horizontal extent
+// instead of the margin box.
 struct FloatBox {
+    enum class ShapeKind : std::uint8_t { None, Rect, Circle, Ellipse, Polygon };
+
+    FloatBox() = default;
+    FloatBox(float top, float bottom, float left, float right, bool isLeft)
+        : top(top), bottom(bottom), left(left), right(right), isLeft(isLeft) {}
+
     float top = 0.0f;
     float bottom = 0.0f;
     float left = 0.0f;
     float right = 0.0f;
     bool isLeft = true;
+
+    ShapeKind shape = ShapeKind::None;
+    float shapeMargin = 0.0f;
+    float shapeLeft = 0.0f;
+    float shapeTop = 0.0f;
+    float shapeRight = 0.0f;
+    float shapeBottom = 0.0f;
+    float shapeCenterX = 0.0f;
+    float shapeCenterY = 0.0f;
+    float shapeRadiusX = 0.0f;
+    float shapeRadiusY = 0.0f;
+    std::vector<FloatPoint> shapePoints;
+
+    // The horizontal span of the shaped float area within a line box's vertical
+    // slice. A left float pushes the line past `right`; a right float pulls its
+    // right edge back to `left`. False when the slice misses the shape.
+    bool horizontalExtent(float yTop, float yBottom, float& x0, float& x1) const {
+        if (yBottom < yTop) {
+            std::swap(yTop, yBottom);
+        }
+        const auto include = [](float& low, float& high, bool& found, float x) {
+            low = found ? std::min(low, x) : x;
+            high = found ? std::max(high, x) : x;
+            found = true;
+        };
+        switch (shape) {
+            case ShapeKind::None:
+                return false;
+            case ShapeKind::Rect: {
+                const float top = shapeTop - shapeMargin;
+                const float bottom = shapeBottom + shapeMargin;
+                if (bottom <= yTop || top >= yBottom) {
+                    return false;
+                }
+                x0 = shapeLeft - shapeMargin;
+                x1 = shapeRight + shapeMargin;
+                return x1 > x0;
+            }
+            case ShapeKind::Circle:
+            case ShapeKind::Ellipse: {
+                // Circle expansion is exact; growing both ellipse radii is an
+                // approximation of the true offset curve.
+                const float rx = shapeRadiusX + shapeMargin;
+                const float ry = shapeRadiusY + shapeMargin;
+                if (rx <= 0.0f || ry <= 0.0f || shapeCenterY - ry >= yBottom ||
+                    shapeCenterY + ry <= yTop) {
+                    return false;
+                }
+                // The widest part of the curve within this slice is the point
+                // closest to the shape's vertical centre.
+                const float nearestY = std::clamp(shapeCenterY, yTop, yBottom);
+                const float dy = (nearestY - shapeCenterY) / ry;
+                const float dx = rx * std::sqrt(std::max(0.0f, 1.0f - dy * dy));
+                x0 = shapeCenterX - dx;
+                x1 = shapeCenterX + dx;
+                return x1 > x0;
+            }
+            case ShapeKind::Polygon: {
+                if (shapePoints.empty()) {
+                    return false;
+                }
+                float low = 0.0f;
+                float high = 0.0f;
+                bool found = false;
+                for (const FloatPoint& point : shapePoints) {
+                    if (point.y >= yTop - shapeMargin && point.y <= yBottom + shapeMargin) {
+                        include(low, high, found, point.x);
+                    }
+                }
+                for (std::size_t i = 0; i < shapePoints.size(); ++i) {
+                    const FloatPoint& a = shapePoints[i];
+                    const FloatPoint& b = shapePoints[(i + 1) % shapePoints.size()];
+                    const auto crossing = [&](float y) {
+                        if ((a.y < y && b.y >= y) || (a.y >= y && b.y < y)) {
+                            const float t = (y - a.y) / (b.y - a.y);
+                            include(low, high, found, a.x + t * (b.x - a.x));
+                        }
+                    };
+                    crossing(yTop - shapeMargin);
+                    crossing(yBottom + shapeMargin);
+                }
+                if (!found) {
+                    return false;
+                }
+                x0 = low - shapeMargin;
+                x1 = high + shapeMargin;
+                return x1 > x0;
+            }
+        }
+        return false;
+    }
 };
+
+// A shape reference box in window coordinates, measured after the float has laid
+// out so its margin, border, padding, and content boxes are all available.
+struct FloatReferenceBox {
+    float x = 0.0f;
+    float y = 0.0f;
+    float width = 0.0f;
+    float height = 0.0f;
+};
+
+// The same radial keyword rules `clip-path` uses, relative to a float's
+// reference box.
+float floatRadialSize(ComputedStyle::ClipPath::Radial radial, float explicitSize,
+                      float centerX, float centerY, const FloatReferenceBox& ref,
+                      bool allSides, bool horizontal) {
+    using Radial = ComputedStyle::ClipPath::Radial;
+    const float left = centerX - ref.x;
+    const float right = ref.x + ref.width - centerX;
+    const float top = centerY - ref.y;
+    const float bottom = ref.y + ref.height - centerY;
+    const float nearSide =
+        allSides ? std::min(std::min(left, right), std::min(top, bottom))
+                 : (horizontal ? std::min(left, right) : std::min(top, bottom));
+    const float farSide =
+        allSides ? std::max(std::max(left, right), std::max(top, bottom))
+                 : (horizontal ? std::max(left, right) : std::max(top, bottom));
+    switch (radial) {
+        case Radial::Explicit:
+            return explicitSize;
+        case Radial::ClosestSide:
+            return nearSide;
+        case Radial::FarthestSide:
+            return farSide;
+        case Radial::ClosestCorner:
+        case Radial::FarthestCorner: {
+            const float corners[4] = {
+                std::sqrt(left * left + top * top), std::sqrt(right * right + top * top),
+                std::sqrt(left * left + bottom * bottom),
+                std::sqrt(right * right + bottom * bottom)};
+            float picked = corners[0];
+            for (float c : corners) {
+                picked = radial == Radial::ClosestCorner ? std::min(picked, c)
+                                                         : std::max(picked, c);
+            }
+            return picked;
+        }
+    }
+    return explicitSize;
+}
+
+// Turns the parsed `shape-outside` value into coordinates a float can test
+// against each line slice. Rounded inset corners are ignored: the rectangle is
+// still the correct outer bound for wrapping.
+void resolveFloatShape(FloatBox& out, const ComputedStyle::ClipPath& shape,
+                       const FloatReferenceBox& ref, float fontSize, float rootFontSize,
+                       float shapeMargin) {
+    using CP = ComputedStyle::ClipPath;
+    using Kind = FloatBox::ShapeKind;
+    out.shape = Kind::None;
+    out.shapeMargin = std::max(0.0f, shapeMargin);
+    if (shape.shape == CP::Shape::None) {
+        return;
+    }
+    const auto px = [&](const Length& l, float base) {
+        return l.resolve(base, fontSize, rootFontSize);
+    };
+    if (shape.shape == CP::Shape::Inset) {
+        const float top = px(shape.inset[0], ref.height);
+        const float right = px(shape.inset[1], ref.width);
+        const float bottom = px(shape.inset[2], ref.height);
+        const float left = px(shape.inset[3], ref.width);
+        out.shape = Kind::Rect;
+        out.shapeLeft = ref.x + left;
+        out.shapeTop = ref.y + top;
+        out.shapeRight = ref.x + ref.width - right;
+        out.shapeBottom = ref.y + ref.height - bottom;
+        return;
+    }
+    const float cx = ref.x + px(shape.centerX, ref.width);
+    const float cy = ref.y + px(shape.centerY, ref.height);
+    if (shape.shape == CP::Shape::Circle) {
+        const float radius =
+            shape.radius == CP::Radial::Explicit
+                ? px(shape.radiusLength,
+                     std::sqrt(ref.width * ref.width + ref.height * ref.height) /
+                         std::sqrt(2.0f))
+                : floatRadialSize(shape.radius, 0.0f, cx, cy, ref, true, true);
+        out.shape = Kind::Circle;
+        out.shapeCenterX = cx;
+        out.shapeCenterY = cy;
+        out.shapeRadiusX = std::max(0.0f, radius);
+        out.shapeRadiusY = out.shapeRadiusX;
+        return;
+    }
+    if (shape.shape == CP::Shape::Ellipse) {
+        const float rx = shape.radiusX == CP::Radial::Explicit
+                             ? px(shape.radiusXLength, ref.width)
+                             : floatRadialSize(shape.radiusX, 0.0f, cx, cy, ref, false,
+                                               true);
+        const float ry = shape.radiusY == CP::Radial::Explicit
+                             ? px(shape.radiusYLength, ref.height)
+                             : floatRadialSize(shape.radiusY, 0.0f, cx, cy, ref, false,
+                                               false);
+        out.shape = Kind::Ellipse;
+        out.shapeCenterX = cx;
+        out.shapeCenterY = cy;
+        out.shapeRadiusX = std::max(0.0f, rx);
+        out.shapeRadiusY = std::max(0.0f, ry);
+        return;
+    }
+    out.shape = Kind::Polygon;
+    out.shapePoints.reserve(shape.points.size());
+    for (const auto& point : shape.points) {
+        out.shapePoints.push_back(
+            FloatPoint{ref.x + px(point.x, ref.width), ref.y + px(point.y, ref.height)});
+    }
+}
 
 // The floated boxes belonging to one containing block. Browsers place a float at
 // the position of the line or block it belongs to and let everything that follows
@@ -273,8 +494,24 @@ struct FloatBox {
 // the layout engine's line and box coordinates.
 class FloatContext {
 public:
-    void available(float yTop, float yBottom, float& leftEdge, float& rightEdge) const {
+    // `includeShapes` is true for line boxes, which wrap around shape-outside.
+    // Float placement still uses margin boxes, as CSS float positioning does.
+    void available(float yTop, float yBottom, float& leftEdge, float& rightEdge,
+                   bool includeShapes = true) const {
         for (const FloatBox& f : floats_) {
+            if (includeShapes && f.shape != FloatBox::ShapeKind::None) {
+                float x0 = 0.0f;
+                float x1 = 0.0f;
+                if (!f.horizontalExtent(yTop, yBottom, x0, x1)) {
+                    continue;
+                }
+                if (f.isLeft) {
+                    leftEdge = std::max(leftEdge, x1);
+                } else {
+                    rightEdge = std::min(rightEdge, x0);
+                }
+                continue;
+            }
             // Half-open intervals: a float exactly touching the slice edge does
             // not overlap it.
             if (f.bottom <= yTop || f.top >= yBottom) {
@@ -1537,12 +1774,18 @@ private:
         floats_ = nullptr;
 
         child.clearTextRuns();
+        const float chromeW = box.borderWidth.left + box.borderWidth.right +
+                              box.padding.left + box.padding.right;
         float borderW = box.width;
         if (borderW <= 0.0f) {
-            // Shrink to fit: the natural width, capped at the container.
-            borderW = std::min(contentWidth, probeWidth(child, box));
+            // Shrink to fit: the natural width, capped at the room the margin
+            // box has in the container.
+            const float room = std::max(0.0f, contentWidth - box.margin.left -
+                                                 box.margin.right);
+            borderW = std::min(room, probeWidth(child, box) + chromeW);
+        } else {
+            borderW += chromeW;
         }
-        borderW += box.horizontalChrome();
         const float outerW = borderW + box.margin.left + box.margin.right;
 
         // Lower the float until the slice at its top has room for it. Each step
@@ -1553,7 +1796,7 @@ private:
         for (int guard = 0; guard < 1000; ++guard) {
             leftEdge = contentX;
             rightEdge = contentX + contentWidth;
-            ctx.available(y, y + 0.01f, leftEdge, rightEdge);
+            ctx.available(y, y + 0.01f, leftEdge, rightEdge, false);
             if (rightEdge - leftEdge >= outerW - 0.01f) {
                 break;
             }
@@ -1570,7 +1813,38 @@ private:
 
         const float top = y;
         const float bottom = y + box.margin.top + child.layoutHeight() + box.margin.bottom;
-        ctx.add({top, bottom, x, x + outerW, left});
+        FloatBox placed;
+        placed.top = top;
+        placed.bottom = bottom;
+        placed.left = x;
+        placed.right = x + child.layoutWidth() + box.margin.left + box.margin.right;
+        placed.isLeft = left;
+        if (cs.shapeOutside.shape != ComputedStyle::ClipPath::Shape::None) {
+            FloatReferenceBox ref;
+            switch (cs.shapeOutside.box) {
+                case ComputedStyle::ClipPath::Box::Margin:
+                    ref = {x, y, child.layoutWidth() + box.margin.left + box.margin.right,
+                           bottom - y};
+                    break;
+                case ComputedStyle::ClipPath::Box::Border:
+                    ref = {child.layoutX(), child.layoutY(), child.layoutWidth(),
+                           child.layoutHeight()};
+                    break;
+                case ComputedStyle::ClipPath::Box::Padding:
+                    ref = {child.paddingX(), child.paddingY(), child.paddingWidth(),
+                           child.paddingHeight()};
+                    break;
+                case ComputedStyle::ClipPath::Box::Content:
+                    ref = {child.contentX(), child.contentY(), child.contentWidth(),
+                           child.contentHeight()};
+                    break;
+            }
+            const float margin =
+                cs.shapeMargin.resolve(contentWidth, cs.fontSize, resolver_.rootFontSize());
+            resolveFloatShape(placed, cs.shapeOutside, ref, cs.fontSize,
+                              resolver_.rootFontSize(), margin);
+        }
+        ctx.add(placed);
     }
 
     float layoutBlockContainer(Element& el, const ComputedStyle& s, const UsedBox& box,

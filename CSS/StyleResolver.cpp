@@ -4469,7 +4469,8 @@ bool parseClipRadial(std::string_view token, ComputedStyle::ClipPath::Radial& ra
 }
 
 bool parseClipInset(std::string_view args, std::string_view rest,
-                    ComputedStyle::ClipPath& clip) {
+                    ComputedStyle::ClipPath& clip,
+                    ComputedStyle::ClipPath::Box defaultBox) {
     using CP = ComputedStyle::ClipPath;
     std::string_view main = args;
     std::string_view round;
@@ -4494,6 +4495,7 @@ bool parseClipInset(std::string_view args, std::string_view rest,
     }
     CP box;
     box.shape = CP::Shape::Inset;
+    box.box = defaultBox;
     box.inset[0] = parsed[0];
     box.inset[1] = sides.size() > 1 ? parsed[1] : parsed[0];
     box.inset[2] = sides.size() > 2 ? parsed[2] : parsed[0];
@@ -4507,7 +4509,8 @@ bool parseClipInset(std::string_view args, std::string_view rest,
 }
 
 bool parseClipCircle(std::string_view args, std::string_view rest,
-                     ComputedStyle::ClipPath& clip) {
+                     ComputedStyle::ClipPath& clip,
+                     ComputedStyle::ClipPath::Box defaultBox) {
     using CP = ComputedStyle::ClipPath;
     const std::size_t at = findTopLevelWord(args, "at");
     const std::string_view radiusPart = trim(at == std::string_view::npos
@@ -4517,6 +4520,7 @@ bool parseClipCircle(std::string_view args, std::string_view rest,
         at == std::string_view::npos ? std::string_view{} : trim(args.substr(at + 2));
     CP circle;
     circle.shape = CP::Shape::Circle;
+    circle.box = defaultBox;
     if (!radiusPart.empty()) {
         const std::vector<std::string_view> tokens = splitTopLevelSpaces(radiusPart);
         if (tokens.size() != 1 ||
@@ -4539,7 +4543,8 @@ bool parseClipCircle(std::string_view args, std::string_view rest,
 }
 
 bool parseClipEllipse(std::string_view args, std::string_view rest,
-                      ComputedStyle::ClipPath& clip) {
+                      ComputedStyle::ClipPath& clip,
+                      ComputedStyle::ClipPath::Box defaultBox) {
     using CP = ComputedStyle::ClipPath;
     const std::size_t at = findTopLevelWord(args, "at");
     const std::string_view radiusPart = trim(at == std::string_view::npos
@@ -4549,6 +4554,7 @@ bool parseClipEllipse(std::string_view args, std::string_view rest,
         at == std::string_view::npos ? std::string_view{} : trim(args.substr(at + 2));
     CP ellipse;
     ellipse.shape = CP::Shape::Ellipse;
+    ellipse.box = defaultBox;
     if (!radiusPart.empty()) {
         const std::vector<std::string_view> tokens = splitTopLevelSpaces(radiusPart);
         if (tokens.size() != 2 ||
@@ -4573,7 +4579,8 @@ bool parseClipEllipse(std::string_view args, std::string_view rest,
 }
 
 bool parseClipPolygon(std::string_view args, std::string_view rest,
-                      ComputedStyle::ClipPath& clip) {
+                      ComputedStyle::ClipPath& clip,
+                      ComputedStyle::ClipPath::Box defaultBox) {
     using CP = ComputedStyle::ClipPath;
     const std::vector<std::string_view> parts = splitTopLevelCommas(args);
     if (parts.empty()) {
@@ -4581,6 +4588,7 @@ bool parseClipPolygon(std::string_view args, std::string_view rest,
     }
     CP polygon;
     polygon.shape = CP::Shape::Polygon;
+    polygon.box = defaultBox;
     std::size_t first = 0;
     const std::string_view head = trim(parts[0]);
     if (head == "evenodd" || head == "nonzero") {
@@ -4608,29 +4616,32 @@ bool parseClipPolygon(std::string_view args, std::string_view rest,
     return true;
 }
 
-bool parseClipPath(std::string_view value, ComputedStyle::ClipPath& clip) {
+bool parseClipPath(std::string_view value, ComputedStyle::ClipPath& clip,
+                   ComputedStyle::ClipPath::Box defaultBox =
+                       ComputedStyle::ClipPath::Box::Border) {
     using CP = ComputedStyle::ClipPath;
     const std::string_view text = trim(value);
     if (text == "none") {
         clip = CP();
+        clip.box = defaultBox;
         return true;
     }
     std::string_view args;
     std::string_view rest;
     if (splitCall(text, "inset", args, rest)) {
-        return parseClipInset(args, rest, clip);
+        return parseClipInset(args, rest, clip, defaultBox);
     }
     if (splitCall(text, "circle", args, rest)) {
-        return parseClipCircle(args, rest, clip);
+        return parseClipCircle(args, rest, clip, defaultBox);
     }
     if (splitCall(text, "ellipse", args, rest)) {
-        return parseClipEllipse(args, rest, clip);
+        return parseClipEllipse(args, rest, clip, defaultBox);
     }
     if (splitCall(text, "polygon", args, rest)) {
-        return parseClipPolygon(args, rest, clip);
+        return parseClipPolygon(args, rest, clip, defaultBox);
     }
     // A bare geometry box crops to itself, like `inset(0)` against that box.
-    CP::Box box = CP::Box::Border;
+    CP::Box box = defaultBox;
     if (!text.empty() && parseClipBox(text, box)) {
         clip = CP();
         clip.shape = CP::Shape::Inset;
@@ -4638,6 +4649,26 @@ bool parseClipPath(std::string_view value, ComputedStyle::ClipPath& clip) {
         return true;
     }
     return false;
+}
+
+// `[ <basic-shape> || <shape-box> ]` allows the box on either side. The shared
+// clip parser handles the shape-first order and a bare box; this wrapper also
+// accepts a box prefix, which `shape-outside` authors may write.
+bool parseShapeOutside(std::string_view value, ComputedStyle::ClipPath& shape) {
+    using CP = ComputedStyle::ClipPath;
+    if (parseClipPath(value, shape, CP::Box::Margin)) {
+        return true;
+    }
+    const std::string_view text = trim(value);
+    const std::size_t space = text.find(' ');
+    if (space == std::string_view::npos) {
+        return false;
+    }
+    CP::Box box = CP::Box::Margin;
+    if (!parseClipBox(trim(text.substr(0, space)), box)) {
+        return false;
+    }
+    return parseClipPath(trim(text.substr(space + 1)), shape, box);
 }
 
 // A `border`-style value list: one width, style, and colour at most, in any
@@ -6712,6 +6743,22 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         if (parseClipPath(value, parsed)) {
             s.clipPath = parsed;
         }
+    } else if (property == "shape-outside") {
+        // Floats measure their shape against the margin box unless the value
+        // names another reference box. The unsupported image and path forms
+        // fail to parse and keep the previous cascade winner.
+        ComputedStyle::ClipPath parsed;
+        if (parseShapeOutside(value, parsed)) {
+            s.shapeOutside = parsed;
+        }
+    } else if (property == "shape-margin") {
+        const Length parsed = parseLength(value);
+        // A negative margin is invalid; calc() can only be checked once its
+        // percentages and font units are known, so layout clamps it to zero.
+        if (parsed.unit != Length::Auto &&
+            (parsed.unit == Length::Calc || parsed.value >= 0.0f)) {
+            s.shapeMargin = parsed;
+        }
     } else if (property == "word-break") {
         // `keep-all` behaves as normal here: only spaces break lines either way.
         // Garbage keeps the previous cascade winner.
@@ -8610,20 +8657,25 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         }
         return "visible";
     }
-    if (property == "clip-path") {
-        using Clip = ComputedStyle::ClipPath;
-        const auto& clip = style.clipPath;
-        if (clip.shape == Clip::Shape::None) {
-            return "none";
+    using Clip = ComputedStyle::ClipPath;
+    // `clip-path` and `shape-outside` share their basic-shape grammar, but an
+    // omitted reference box means different things: the border box for a clip,
+    // the margin box for a float shape.
+    const auto basicShapeValue = [&](const Clip& shape, Clip::Box defaultBox) {
+        if (shape.shape == Clip::Shape::None) {
+            return std::string("none");
         }
         const auto boxName = [&] {
-            switch (clip.box) {
-                case Clip::Box::Margin: return " margin-box";
-                case Clip::Box::Padding: return " padding-box";
-                case Clip::Box::Content: return " content-box";
-                case Clip::Box::Border: return "";
+            if (shape.box == defaultBox) {
+                return std::string();
             }
-            return "";
+            switch (shape.box) {
+                case Clip::Box::Margin: return std::string(" margin-box");
+                case Clip::Box::Padding: return std::string(" padding-box");
+                case Clip::Box::Content: return std::string(" content-box");
+                case Clip::Box::Border: return std::string(" border-box");
+            }
+            return std::string();
         };
         const auto radialName = [&](Clip::Radial radial, const Length& size) {
             switch (radial) {
@@ -8635,33 +8687,33 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             }
             return std::string();
         };
-        if (clip.shape == Clip::Shape::Inset) {
-            std::string out = "inset(" + length(clip.inset[0]) + " " +
-                              length(clip.inset[1]) + " " +
-                              length(clip.inset[2]) + " " +
-                              length(clip.inset[3]);
-            if (clip.insetRadius.unit != Length::Auto) {
-                out += " round " + length(clip.insetRadius);
+        if (shape.shape == Clip::Shape::Inset) {
+            std::string out = "inset(" + length(shape.inset[0]) + " " +
+                              length(shape.inset[1]) + " " +
+                              length(shape.inset[2]) + " " +
+                              length(shape.inset[3]);
+            if (shape.insetRadius.unit != Length::Auto) {
+                out += " round " + length(shape.insetRadius);
             }
             return out + ")" + boxName();
         }
-        if (clip.shape == Clip::Shape::Circle) {
-            return "circle(" + radialName(clip.radius, clip.radiusLength) + " at " +
-                   length(clip.centerX) + " " + length(clip.centerY) + ")" +
+        if (shape.shape == Clip::Shape::Circle) {
+            return "circle(" + radialName(shape.radius, shape.radiusLength) + " at " +
+                   length(shape.centerX) + " " + length(shape.centerY) + ")" +
                    boxName();
         }
-        if (clip.shape == Clip::Shape::Ellipse) {
-            return "ellipse(" + radialName(clip.radiusX, clip.radiusXLength) + " " +
-                   radialName(clip.radiusY, clip.radiusYLength) + " at " +
-                   length(clip.centerX) + " " + length(clip.centerY) + ")" +
+        if (shape.shape == Clip::Shape::Ellipse) {
+            return "ellipse(" + radialName(shape.radiusX, shape.radiusXLength) + " " +
+                   radialName(shape.radiusY, shape.radiusYLength) + " at " +
+                   length(shape.centerX) + " " + length(shape.centerY) + ")" +
                    boxName();
         }
         std::string out = "polygon(";
-        if (clip.evenOdd) {
+        if (shape.evenOdd) {
             out += "evenodd, ";
         }
         bool first = true;
-        for (const auto& point : clip.points) {
+        for (const auto& point : shape.points) {
             if (!first) {
                 out += ", ";
             }
@@ -8669,6 +8721,15 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
             out += length(point.x) + " " + length(point.y);
         }
         return out + ")" + boxName();
+    };
+    if (property == "clip-path") {
+        return basicShapeValue(style.clipPath, Clip::Box::Border);
+    }
+    if (property == "shape-outside") {
+        return basicShapeValue(style.shapeOutside, Clip::Box::Margin);
+    }
+    if (property == "shape-margin") {
+        return length(style.shapeMargin);
     }
     const auto containerNameList = [&]() {
         if (style.containerNames.empty()) {

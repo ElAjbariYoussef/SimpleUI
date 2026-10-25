@@ -346,6 +346,13 @@ struct ComputedStyle {
     };
     ClipPath clipPath;
 
+    // `shape-outside` reuses the clip-path grammar, but a floated element's
+    // default reference box is its margin box. The layout engine turns the
+    // parsed shape into the outline line boxes must clear.
+    ClipPath shapeOutside;
+    // Extra space around the float shape, resolved when the float is placed.
+    Length shapeMargin;
+
     // An outline is drawn outside the border box and takes no space in layout.
     struct Outline {
         Length width;
