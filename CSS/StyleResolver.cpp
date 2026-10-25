@@ -1186,6 +1186,9 @@ const char* alignName(ComputedStyle::FlexAlign v) {
         case ComputedStyle::AlignEnd: return "flex-end";
         case ComputedStyle::AlignCenter: return "center";
         case ComputedStyle::AlignBaseline: return "baseline";
+        case ComputedStyle::AlignSpaceBetween: return "space-between";
+        case ComputedStyle::AlignSpaceAround: return "space-around";
+        case ComputedStyle::AlignSpaceEvenly: return "space-evenly";
         default: return "normal";
     }
 }
@@ -1455,6 +1458,15 @@ ComputedStyle::FlexAlign parseAlign(std::string_view v) {
     }
     if (v == "baseline") {
         return ComputedStyle::AlignBaseline;
+    }
+    if (v == "space-between") {
+        return ComputedStyle::AlignSpaceBetween;
+    }
+    if (v == "space-around") {
+        return ComputedStyle::AlignSpaceAround;
+    }
+    if (v == "space-evenly") {
+        return ComputedStyle::AlignSpaceEvenly;
     }
     return ComputedStyle::AlignStretch;
 }
