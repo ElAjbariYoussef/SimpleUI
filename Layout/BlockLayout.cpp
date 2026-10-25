@@ -2200,19 +2200,50 @@ private:
             lines[0].crossSize = crossDefinite;
         }
 
-        // 5. Stack the lines on the cross axis. An auto cross size is exactly
-        //    the space the lines need; a definite one gives wrap-reverse a fixed
-        //    far edge to stack against.
-        float crossCursor = 0.0f;
+        // 5. Distribute the lines on the cross axis with `align-content`, then
+        //    stack them from the cross start. `stretch` gives every line an equal
+        //    share of positive free space before items align inside it; the other
+        //    values only move whole lines. An auto cross size has no free space,
+        //    so the lines simply stack from the start.
+        float lineTotal = crossGap * static_cast<float>(lines.size() - 1);
+        for (const FlexLine& l : lines) {
+            lineTotal += l.crossSize;
+        }
+        const float crossExtent = crossDefinite > 0.0f ? crossDefinite : lineTotal;
+        float freeSpace = crossDefinite > 0.0f ? crossDefinite - lineTotal : 0.0f;
+        float before = 0.0f;
+        float between = crossGap;
+        if (s.alignContent == ComputedStyle::AlignStretch && freeSpace > 0.5f) {
+            const float extra = freeSpace / static_cast<float>(lines.size());
+            for (FlexLine& l : lines) {
+                l.crossSize += extra;
+            }
+        } else if (s.alignContent == ComputedStyle::AlignEnd) {
+            before = freeSpace;
+        } else if (s.alignContent == ComputedStyle::AlignCenter) {
+            before = freeSpace * 0.5f;
+        } else if (s.alignContent == ComputedStyle::AlignSpaceBetween) {
+            if (lines.size() > 1) {
+                between += std::max(0.0f, freeSpace) /
+                           static_cast<float>(lines.size() - 1);
+            }
+        } else if (s.alignContent == ComputedStyle::AlignSpaceAround) {
+            const float room = std::max(0.0f, freeSpace);
+            const float n = static_cast<float>(lines.size());
+            before = room / n * 0.5f;
+            between += room / n;
+        } else if (s.alignContent == ComputedStyle::AlignSpaceEvenly) {
+            const float room = std::max(0.0f, freeSpace);
+            const float share = room / static_cast<float>(lines.size() + 1);
+            before = share;
+            between += share;
+        }
+        float crossCursor = before;
         for (FlexLine& l : lines) {
             l.crossPos = crossCursor;
-            crossCursor += l.crossSize + crossGap;
+            crossCursor += l.crossSize + between;
         }
-        if (!lines.empty()) {
-            crossCursor -= crossGap;
-        }
-        applyWrapReverse(s, lines, crossDefinite > 0.0f ? crossDefinite : crossCursor,
-                         crossGap);
+        applyWrapReverse(s, lines, crossExtent);
 
         // 6. Place each item on the main axis, honouring `justify-content`.
         for (FlexLine& l : lines) {
@@ -2425,21 +2456,16 @@ private:
         return box.height > 0.0f ? box.height : (row ? maxCross : maxMain);
     }
 
-    // `wrap-reverse` stacks the lines from the far end of the cross axis instead
-    // of the near one. Only the line offsets change; items keep their place inside
-    // their line.
+    // `wrap-reverse` swaps the cross-start and cross-end edges. The lines have
+    // already been positioned from the start, so mirror each line box inside the
+    // container. Items keep their place inside their line.
     void applyWrapReverse(const ComputedStyle& s, std::vector<FlexLine>& lines,
-                          float crossExtent, float crossGap) {
+                          float crossExtent) {
         if (s.flexWrap != ComputedStyle::WrapReverse) {
             return;
         }
-        // The cross-start edge is the far edge, so the first line occupies the
-        // bottom (or right) edge and later lines stack back towards the start.
-        float cursor = std::max(0.0f, crossExtent);
         for (FlexLine& line : lines) {
-            cursor -= line.crossSize;
-            line.crossPos = cursor;
-            cursor -= crossGap;
+            line.crossPos = crossExtent - (line.crossPos + line.crossSize);
         }
     }
 

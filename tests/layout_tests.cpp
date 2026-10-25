@@ -4946,6 +4946,144 @@ void testFlexAutoCrossSizing() {
               "the column adopts the probed text width");
 }
 
+void testFlexAlignContent() {
+    // A 200px-tall row with three 20px lines and 10px row gaps leaves 120px of
+    // free cross space for `align-content` to distribute. The single-line and
+    // auto-height rows below check the boundaries of the same algorithm.
+    std::string html = "<sui><body>";
+    const char* const rowIds[] = {"acStart",  "acCenter", "acEnd",  "acBetween",
+                                  "acAround", "acEvenly", "acStretch", "acReverse",
+                                  "acReverseCenter", "acOne", "acOneBetween", "acAuto"};
+    for (const char* id : rowIds) {
+        html += "<div id=\"";
+        html += id;
+        html += "\" class=\"flexrow\">";
+        const bool singleLine = std::strcmp(id, "acOne") == 0 ||
+                                std::strcmp(id, "acOneBetween") == 0;
+        for (int i = 0; i < (singleLine ? 1 : 3); ++i) {
+            html += "<div class=\"cell\">alpha</div>";
+        }
+        html += "</div>";
+    }
+    html += "<div id=\"acColumn\" class=\"column\">";
+    for (int i = 0; i < 3; ++i) {
+        html += "<div class=\"cell\">alpha</div>";
+    }
+    html += "</div></body></sui>";
+
+    auto document = parseOrNull(html.c_str());
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body { margin:0; line-height:20px }"
+        ".flexrow { display:flex; flex-wrap:wrap; width:100px; height:200px; "
+        "row-gap:10px }"
+        ".cell { width:60px }"
+        "#acStart { align-content:flex-start }"
+        "#acCenter { align-content:center }"
+        "#acEnd { align-content:flex-end }"
+        "#acBetween { align-content:space-between }"
+        "#acAround { align-content:space-around }"
+        "#acEvenly { align-content:space-evenly }"
+        "#acStretch { align-content:stretch }"
+        "#acReverse { flex-wrap:wrap-reverse; align-content:flex-start }"
+        "#acReverseCenter { flex-wrap:wrap-reverse; align-content:center }"
+        "#acOne { height:100px; align-content:center }"
+        "#acOneBetween { height:100px; align-content:space-between }"
+        "#acAuto { height:auto; align-content:center }"
+        ".column { display:flex; flex-direction:column; flex-wrap:wrap; "
+        "width:200px; height:100px; column-gap:10px; align-content:center }"
+        ".column .cell { width:20px; height:60px }"));
+    layoutRoot(*document, resolver, 800.0f);
+
+    const auto childAt = [&](const char* id, std::size_t index) -> Element* {
+        Element* parent = document->getElementById(id);
+        if (!parent || index >= parent->children().size()) {
+            return nullptr;
+        }
+        return parent->children()[index].get();
+    };
+    const auto relY = [&](const char* id, std::size_t index) {
+        Element* parent = document->getElementById(id);
+        Element* child = childAt(id, index);
+        return parent && child ? child->layoutY() - parent->layoutY() : -1000.0f;
+    };
+    const auto relX = [&](const char* id, std::size_t index) {
+        Element* parent = document->getElementById(id);
+        Element* child = childAt(id, index);
+        return parent && child ? child->layoutX() - parent->layoutX() : -1000.0f;
+    };
+    const auto childHeight = [&](const char* id, std::size_t index) {
+        Element* child = childAt(id, index);
+        return child ? child->layoutHeight() : -1000.0f;
+    };
+
+    const auto readBack = [&](const char* id, const char* expected) {
+        Element* el = document->getElementById(id);
+        return el &&
+               sui::StyleResolver::propertyValue(resolver.resolve(*el),
+                                                 "align-content") == expected;
+    };
+    check(readBack("acBetween", "space-between"),
+          "align-content: space-between reads back");
+    check(readBack("acAround", "space-around"),
+          "align-content: space-around reads back");
+    check(readBack("acEvenly", "space-evenly"),
+          "align-content: space-evenly reads back");
+
+    struct LineCase {
+        const char* id;
+        float first;
+        float second;
+        float third;
+        const char* name;
+    };
+    const LineCase cases[] = {
+        {"acStart", 0.0f, 30.0f, 60.0f, "flex-start"},
+        {"acCenter", 60.0f, 90.0f, 120.0f, "center"},
+        {"acEnd", 120.0f, 150.0f, 180.0f, "flex-end"},
+        {"acBetween", 0.0f, 90.0f, 180.0f, "space-between"},
+        {"acAround", 20.0f, 90.0f, 160.0f, "space-around"},
+        {"acEvenly", 30.0f, 90.0f, 150.0f, "space-evenly"},
+        {"acStretch", 0.0f, 70.0f, 140.0f, "stretch"},
+        {"acReverse", 180.0f, 150.0f, 120.0f, "wrap-reverse flex-start"},
+        {"acReverseCenter", 120.0f, 90.0f, 60.0f, "wrap-reverse center"},
+        {"acAuto", 0.0f, 30.0f, 60.0f, "auto-height center"},
+    };
+    for (const LineCase& c : cases) {
+        const std::string prefix = std::string("align-content ") + c.name;
+        checkNear(relY(c.id, 0), c.first, 0.5f,
+                  (prefix + " places the first line").c_str());
+        checkNear(relY(c.id, 1), c.second, 0.5f,
+                  (prefix + " places the second line").c_str());
+        checkNear(relY(c.id, 2), c.third, 0.5f,
+                  (prefix + " places the third line").c_str());
+    }
+
+    checkNear(childHeight("acStretch", 0), 60.0f, 0.5f,
+              "stretch grows the first line and its auto-height items");
+    checkNear(childHeight("acStretch", 1), 60.0f, 0.5f,
+              "stretch grows the second line and its auto-height items");
+    checkNear(childHeight("acStretch", 2), 60.0f, 0.5f,
+              "stretch grows the third line and its auto-height items");
+    checkNear(relY("acOne", 0), 40.0f, 0.5f,
+              "a single wrapping line is centred by align-content");
+    checkNear(relY("acOneBetween", 0), 0.0f, 0.5f,
+              "a single line has no space-between gaps");
+    Element* autoContainer = document->getElementById("acAuto");
+    checkNear(autoContainer ? autoContainer->layoutHeight() : -1000.0f, 80.0f, 0.5f,
+              "an auto-height container gives align-content no free space");
+
+    checkNear(relX("acColumn", 0), 60.0f, 0.5f,
+              "a column centres the first cross line");
+    checkNear(relX("acColumn", 1), 90.0f, 0.5f,
+              "a column centres the second cross line");
+    checkNear(relX("acColumn", 2), 120.0f, 0.5f,
+              "a column centres the third cross line");
+}
+
 void testFlexItemMarginsAndPadding() {
     auto document = parseOrNull(
         "<sui><body><div id=\"row\"><div id=\"a\"></div><div id=\"b\"></div>"
@@ -5417,7 +5555,7 @@ void testGapShorthand() {
         "<div id=\"w1\" style=\"width:30px;height:10px\"></div>"
         "<div id=\"w2\" style=\"width:30px;height:10px\"></div></div>"
         "<div id=\"reverse\" style=\"display:flex;flex-wrap:wrap-reverse;"
-        "width:70px;height:60px;gap:5px 40px\">"
+        "align-content:flex-start;width:70px;height:60px;gap:5px 40px\">"
         "<div id=\"v1\" style=\"width:30px;height:10px\"></div>"
         "<div id=\"v2\" style=\"width:30px;height:10px\"></div></div>"
         "<div id=\"grid\" style=\"display:grid;grid-template-columns:40px 40px;"
@@ -14624,6 +14762,7 @@ int main() {
     testFlexWrap();
     testFlexReverseDirections();
     testFlexAutoCrossSizing();
+    testFlexAlignContent();
     testFlexItemMarginsAndPadding();
     testBlockAutoMargins();
     testShrinkToFitAutoMargins();

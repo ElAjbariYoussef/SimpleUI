@@ -1186,6 +1186,9 @@ const char* alignName(ComputedStyle::FlexAlign v) {
         case ComputedStyle::AlignEnd: return "flex-end";
         case ComputedStyle::AlignCenter: return "center";
         case ComputedStyle::AlignBaseline: return "baseline";
+        case ComputedStyle::AlignSpaceBetween: return "space-between";
+        case ComputedStyle::AlignSpaceAround: return "space-around";
+        case ComputedStyle::AlignSpaceEvenly: return "space-evenly";
         default: return "normal";
     }
 }
@@ -1457,6 +1460,21 @@ ComputedStyle::FlexAlign parseAlign(std::string_view v) {
         return ComputedStyle::AlignBaseline;
     }
     return ComputedStyle::AlignStretch;
+}
+
+// `align-content` is the alignment longhand that also takes the content
+// distribution keywords. `align-items` and the other align longhands do not.
+ComputedStyle::FlexAlign parseAlignContent(std::string_view v) {
+    if (v == "space-between") {
+        return ComputedStyle::AlignSpaceBetween;
+    }
+    if (v == "space-around") {
+        return ComputedStyle::AlignSpaceAround;
+    }
+    if (v == "space-evenly") {
+        return ComputedStyle::AlignSpaceEvenly;
+    }
+    return parseAlign(v);
 }
 
 // One token of a grid track list. Brackets stay whole even when they contain
@@ -5357,7 +5375,7 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
     } else if (property == "align-self") {
         s.alignSelf = parseAlign(value);
     } else if (property == "align-content") {
-        s.alignContent = parseAlign(value);
+        s.alignContent = parseAlignContent(value);
     } else if (property == "justify-items") {
         s.justifyItems = parseAlign(value);
     } else if (property == "justify-self") {
