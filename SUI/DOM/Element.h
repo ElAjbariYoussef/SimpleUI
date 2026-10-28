@@ -220,6 +220,12 @@ public:
     float layoutWidth() const noexcept { return layoutW_; }
     float layoutHeight() const noexcept { return layoutH_; }
 
+    // Used multi-column geometry from the latest layout pass: how many column
+    // boxes the container produced, so paint can draw `column-rule` between
+    // them. Zero on everything that is not a multi-column container.
+    void setLayoutColumnCount(int count) noexcept { layoutColumnCount_ = count; }
+    int layoutColumnCount() const noexcept { return layoutColumnCount_; }
+
     // Drops the text runs and geometry of this node and every descendant, used
     // when `content-visibility: hidden` skips a subtree so stale runs from a
     // previous layout pass cannot paint at old positions.
@@ -307,6 +313,7 @@ private:
     float layoutY_ = 0.0f;
     float layoutW_ = 0.0f;
     float layoutH_ = 0.0f;
+    int layoutColumnCount_ = 0;
     LayoutBorder layoutBorder_;
     bool hasLayoutBorder_ = false;
     float paddingX_ = 0.0f;

@@ -101,6 +101,39 @@ float parseNumber(std::string_view value) {
     return std::strtof(std::string(value).c_str(), nullptr);
 }
 
+// A CSS `<integer>` at least one, which is what `column-count` accepts. A sign
+// is allowed, as in the spec, but a fraction or unit is not.
+bool parsePositiveInteger(std::string_view value, int& out) {
+    if (value.empty()) {
+        return false;
+    }
+    std::size_t i = 0;
+    bool negative = false;
+    if (value[0] == '+' || value[0] == '-') {
+        negative = value[0] == '-';
+        i = 1;
+    }
+    if (i == value.size()) {
+        return false;
+    }
+    long long parsed = 0;
+    for (; i < value.size(); ++i) {
+        const char c = value[i];
+        if (!std::isdigit(static_cast<unsigned char>(c))) {
+            return false;
+        }
+        parsed = parsed * 10 + (c - '0');
+        if (parsed > 100000) {
+            return false;
+        }
+    }
+    if (negative || parsed < 1) {
+        return false;
+    }
+    out = static_cast<int>(parsed);
+    return true;
+}
+
 // Splits on whitespace, but only at paren depth zero, so a function argument such
 // as `minmax(100px, 1fr)` stays one token.
 std::vector<std::string_view> splitTopLevelSpaces(std::string_view value) {
@@ -5437,6 +5470,128 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         s.columnGap = value == "normal"
                           ? -1.0f
                           : parseLength(value).resolve(0.0f, s.fontSize, rootFontSize);
+    } else if (property == "column-count") {
+        // `auto` leaves the count to `column-width` (or makes one column when
+        // that is auto too). An invalid count keeps the previous winner.
+        if (value == "auto") {
+            s.columnCount = 0;
+        } else {
+            int count = 0;
+            if (parsePositiveInteger(value, count)) {
+                s.columnCount = count;
+            }
+        }
+    } else if (property == "column-width") {
+        // The ideal column width. It is a length, not a percentage, and may not
+        // be negative; `auto` leaves the width to fill the container.
+        if (value == "auto") {
+            s.columnWidth = Length();
+        } else {
+            const Length parsed = parseLength(value);
+            if (!parsed.isAuto() && parsed.unit != Length::Percent &&
+                parsed.unit != Length::Number &&
+                (parsed.unit == Length::Calc || parsed.value >= 0.0f)) {
+                s.columnWidth = parsed;
+            }
+        }
+    } else if (property == "columns") {
+        // `<column-width> || <column-count>`, in either order. `auto` fills
+        // whichever slot is still open, so one `auto` resets both and
+        // `10em auto` keeps only the width. A malformed value leaves both
+        // longhands at their previous cascade winner, like any failed shorthand.
+        const std::vector<std::string_view> parts = splitTopLevelSpaces(value);
+        bool ok = !parts.empty() && parts.size() <= 2;
+        bool hasWidth = false;
+        bool hasCount = false;
+        bool autoWidth = false;
+        bool autoCount = false;
+        Length width;
+        int count = 0;
+        for (const std::string_view part : parts) {
+            if (part == "auto") {
+                if (!hasWidth && !autoWidth) {
+                    autoWidth = true;
+                } else if (!hasCount && !autoCount) {
+                    autoCount = true;
+                } else {
+                    ok = false;
+                }
+                continue;
+            }
+            int parsedCount = 0;
+            if (parsePositiveInteger(part, parsedCount)) {
+                if (hasCount) {
+                    ok = false;
+                } else {
+                    hasCount = true;
+                    count = parsedCount;
+                }
+                continue;
+            }
+            const Length parsedWidth = parseLength(part);
+            if (!parsedWidth.isAuto() && parsedWidth.unit != Length::Percent &&
+                parsedWidth.unit != Length::Number &&
+                (parsedWidth.unit == Length::Calc || parsedWidth.value >= 0.0f)) {
+                if (hasWidth) {
+                    ok = false;
+                } else {
+                    hasWidth = true;
+                    width = parsedWidth;
+                }
+                continue;
+            }
+            ok = false;
+        }
+        if (ok) {
+            s.columnWidth = hasWidth ? width : Length();
+            s.columnCount = hasCount ? count : 0;
+        }
+    } else if (property == "column-rule") {
+        // Width, style, and colour in any order, like `border`; only the slots
+        // the value names are written. A percentage or negative width is
+        // invalid for the whole declaration.
+        BorderSlots slots;
+        bool valid = parseBorderSlots(value, slots);
+        if (valid && slots.hasWidth &&
+            (slots.width.isAuto() || slots.width.unit == Length::Percent ||
+             slots.width.unit == Length::Number ||
+             (slots.width.unit != Length::Calc && slots.width.value < 0.0f))) {
+            valid = false;
+        }
+        if (valid) {
+            if (slots.hasWidth) {
+                s.columnRuleWidth = slots.width;
+            }
+            if (slots.hasStyle) {
+                s.columnRuleStyle = slots.style;
+            }
+            if (slots.hasColor) {
+                s.columnRuleColor = slots.color;
+            }
+        }
+    } else if (property == "column-rule-width") {
+        const Length parsed = parseBorderWidth(value);
+        if (!parsed.isAuto() && parsed.unit != Length::Percent &&
+            parsed.unit != Length::Number &&
+            (parsed.unit == Length::Calc || parsed.value >= 0.0f)) {
+            s.columnRuleWidth = parsed;
+        }
+    } else if (property == "column-rule-style") {
+        ComputedStyle::BorderStyle parsed = ComputedStyle::BorderStyleNone;
+        if (parseBorderStyle(value, parsed)) {
+            s.columnRuleStyle = parsed;
+        }
+    } else if (property == "column-rule-color") {
+        SDL_Color parsed{};
+        if (parseColorValue(value, parsed)) {
+            s.columnRuleColor = parsed;
+        }
+    } else if (property == "column-span") {
+        if (value == "none") {
+            s.columnSpan = ComputedStyle::ColumnSpan::None;
+        } else if (value == "all") {
+            s.columnSpan = ComputedStyle::ColumnSpan::All;
+        }
     } else if (property == "flex") {
         applyFlexShorthand(s, value, rootFontSize);
     } else if (property == "flex-grow") {
@@ -9144,6 +9299,43 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "column-gap") {
         return style.columnGap < 0.0f ? std::string("normal") : number(style.columnGap);
     }
+    if (property == "column-count") {
+        return style.columnCount > 0 ? std::to_string(style.columnCount)
+                                     : std::string("auto");
+    }
+    if (property == "column-width") {
+        return length(style.columnWidth, "auto");
+    }
+    if (property == "columns") {
+        if (style.columnWidth.isAuto() && style.columnCount == 0) {
+            return "auto";
+        }
+        const std::string width = length(style.columnWidth, "auto");
+        if (style.columnCount == 0) {
+            return width;
+        }
+        const std::string count = std::to_string(style.columnCount);
+        return style.columnWidth.isAuto() ? count : width + " " + count;
+    }
+    if (property == "column-rule-width") return length(style.columnRuleWidth);
+    if (property == "column-rule-style") {
+        return std::string(borderStyleName(style.columnRuleStyle));
+    }
+    if (property == "column-rule-color") {
+        return isCurrentColor(style.columnRuleColor) ? std::string("currentcolor")
+                                                     : color(style.columnRuleColor);
+    }
+    if (property == "column-rule") {
+        const std::string ruleColor =
+            isCurrentColor(style.columnRuleColor) ? std::string("currentcolor")
+                                                  : color(style.columnRuleColor);
+        return length(style.columnRuleWidth) + " " +
+               std::string(borderStyleName(style.columnRuleStyle)) + " " + ruleColor;
+    }
+    if (property == "column-span") {
+        return style.columnSpan == ComputedStyle::ColumnSpan::All ? std::string("all")
+                                                                  : std::string("none");
+    }
     if (property == "transition" || property == "transition-property" ||
         property == "transition-duration" || property == "transition-delay" ||
         property == "transition-timing-function" || property == "transition-behavior") {
@@ -10058,6 +10250,7 @@ void substituteCurrentColor(ComputedStyle& style) {
     };
     swap(style.backgroundColor);
     swap(style.borderColor);
+    swap(style.columnRuleColor);
     swap(style.accentColor);
     swap(style.textDecorationColor);
     if (style.hasCaretColor) {

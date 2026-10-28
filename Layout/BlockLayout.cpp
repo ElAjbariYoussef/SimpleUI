@@ -730,6 +730,9 @@ public:
         if (s.isFlexContainer() || s.isGridContainer() || s.isTableContainer()) {
             return true;
         }
+        if (s.isMulticolContainer()) {
+            return true;
+        }
         if (s.contentVisibility == ComputedStyle::ContentHidden) {
             return true;
         }
@@ -1201,6 +1204,7 @@ public:
         applySvgSize(el, s);
         const UsedBox box = usedBox(s, availableWidth);
         el.clearTextRuns();
+        el.setLayoutColumnCount(0);
         if (s.display == ComputedStyle::None || !s.visible) {
             el.setLayoutX(originX);
             el.setLayoutY(originY);
@@ -1927,6 +1931,7 @@ private:
         el.setLayoutY(0.0f);
         el.setLayoutWidth(0.0f);
         el.setLayoutHeight(0.0f);
+        el.setLayoutColumnCount(0);
         for (const auto& child : el.children()) {
             if (child) {
                 clearSubtree(*child);
@@ -2063,6 +2068,7 @@ private:
                  float originY) {
         const UsedBox box = usedBox(sized, availableWidth);
         el.clearTextRuns();
+        el.setLayoutColumnCount(0);
         if (sized.display == ComputedStyle::None || !sized.visible) {
             el.setLayoutX(originX);
             el.setLayoutY(originY);
@@ -2124,7 +2130,18 @@ private:
         if (s.isTableContainer()) {
             return layoutTable(el, s, box, availableWidth, contentX, contentY, outWidth);
         }
+        if (s.isMulticolContainer()) {
+            return layoutMulticol(el, s, box, availableWidth, contentX, contentY, outWidth);
+        }
+        return layoutFlowContents(el, s, box, availableWidth, contentX, contentY, outWidth,
+                                  allowParentChild);
+    }
 
+    // Ordinary block or inline flow, with no multi-column fragmentation. Probes,
+    // plain boxes, and the unsupported multicol fallbacks all use this path.
+    float layoutFlowContents(Element& el, const ComputedStyle& s, const UsedBox& box,
+                             float availableWidth, float contentX, float contentY,
+                             float& outWidth, bool allowParentChild) {
         // A container that declares floats owns a context for them; in-flow
         // descendants inherit it so their lines wrap beside the floats. A
         // container without floats simply passes the ancestor's context through.
@@ -2158,6 +2175,290 @@ private:
         if (ownsFloats) {
             height = std::max(height, floatCtx.bottom(contentY) - contentY);
             floats_ = savedFloats;
+        }
+        return height;
+    }
+
+    // CSS multi-column. The flow is laid out once at the used column width, then
+    // its block children or line boxes are moved into the columns as whole
+    // fragments. That keeps floats, bidi runs, and atomic inline boxes intact at
+    // the cost of not splitting a single block (or a tall atomic box) between
+    // columns. A direct float or `column-span: all` child has no credible
+    // fragment model here, so it falls back to one full-width column.
+    static constexpr int kMaxColumns = 1000;
+
+    // How many columns a greedy packing needs at `target` height. An item taller
+    // than the target still occupies an empty column rather than disappearing;
+    // the next item starts a new one.
+    static int columnsNeededAt(const std::vector<float>& heights, float target) {
+        int columns = 1;
+        float used = 0.0f;
+        for (float height : heights) {
+            if (used > 0.0f && used + height > target) {
+                ++columns;
+                used = 0.0f;
+            }
+            used += height;
+        }
+        return columns;
+    }
+
+    float layoutMulticol(Element& el, const ComputedStyle& s, const UsedBox& box,
+                         float availableWidth, float contentX, float contentY,
+                         float& outWidth) {
+        // An unbounded probe measures one unwrapped column; the real pass lays
+        // the flow out again at the width the containing block offers.
+        if (availableWidth >= kUnbounded) {
+            const float height = layoutFlowContents(el, s, box, availableWidth, contentX,
+                                                    contentY, outWidth, false);
+            el.setLayoutColumnCount(1);
+            return height;
+        }
+
+        bool fallback = false;
+        for (const auto& child : el.children()) {
+            if (!child || child->isTextNode() || !laidOut(*child)) {
+                continue;
+            }
+            const ComputedStyle cs = resolver_.resolve(*child);
+            if (isFloated(cs) || cs.columnSpan == ComputedStyle::ColumnSpan::All) {
+                fallback = true;
+                break;
+            }
+        }
+        if (fallback) {
+            el.setLayoutColumnCount(1);
+            return layoutFlowContents(el, s, box, availableWidth, contentX, contentY,
+                                      outWidth, false);
+        }
+
+        const float rem = resolver_.rootFontSize();
+        const float em = s.fontSize;
+        const float width = applyMinMax(
+            box.width > 0.0f ? box.width
+                             : std::max(0.0f, availableWidth - box.horizontalChrome()),
+            box);
+        // `column-gap: normal` is one em in a multi-column container. A negative
+        // authored gap is invalid; the parser drops it, and this clamp guards a
+        // calc() that only turns negative once resolved.
+        const float gap = std::max(0.0f, s.columnGap >= 0.0f ? s.columnGap : em);
+        const float ideal =
+            s.columnWidth.isAuto()
+                ? 0.0f
+                : std::max(0.0f, s.columnWidth.resolve(width, em, rem));
+        // The spec floors the used count so every column keeps at least 1px.
+        int maxByWidth = 1;
+        if (width > 0.0f) {
+            maxByWidth = std::max(
+                1, static_cast<int>(std::floor((width + gap) / (1.0f + gap))));
+        }
+        int fitting = 1;
+        if (ideal > 0.0f && width > 0.0f) {
+            fitting = std::max(
+                1, static_cast<int>(std::floor((width + gap) / (ideal + gap))));
+        }
+        int usedCount = 1;
+        if (s.columnCount > 0 && ideal > 0.0f) {
+            usedCount = std::min(s.columnCount, fitting);
+        } else if (s.columnCount > 0) {
+            usedCount = s.columnCount;
+        } else if (ideal > 0.0f) {
+            usedCount = fitting;
+        }
+        usedCount = std::clamp(usedCount, 1, std::min(maxByWidth, kMaxColumns));
+        const float columnWidth =
+            usedCount > 1
+                ? std::max(0.0f, (width - gap * static_cast<float>(usedCount - 1)) /
+                                     static_cast<float>(usedCount))
+                : width;
+        el.setLayoutColumnCount(usedCount);
+
+        // Lay the flow out in the first column at the used column width. The
+        // width override matters: a container with a definite `width` would
+        // otherwise hand its children the full content width.
+        ComputedStyle flowStyle = s;
+        flowStyle.width = Length(columnWidth);
+        UsedBox flowBox = box;
+        flowBox.width = columnWidth;
+        float flowWidth = 0.0f;
+        layoutFlowContents(el, flowStyle, flowBox, columnWidth, contentX, contentY,
+                           flowWidth, false);
+
+        struct Fragment {
+            float top = 0.0f;
+            float height = 0.0f;
+            std::vector<std::size_t> runs;
+            std::vector<Element*> boxes;
+        };
+        std::vector<Fragment> fragments;
+
+        if (hasBlockChild(el)) {
+            // Each in-flow block is one atomic fragment. A band starts where
+            // the previous block ended, so the gap before its border (its top
+            // margin) travels with the block into the column.
+            float cursor = contentY;
+            for (const auto& child : el.children()) {
+                if (!child || child->isTextNode() || !laidOut(*child)) {
+                    continue;
+                }
+                const ComputedStyle cs = resolver_.resolve(*child);
+                if (cs.display == ComputedStyle::None || !cs.visible ||
+                    cs.position == ComputedStyle::Absolute ||
+                    cs.position == ComputedStyle::Fixed || isFloated(cs) ||
+                    !isBlockLevel(cs)) {
+                    continue;
+                }
+                const float bottom = child->layoutY() + child->layoutHeight();
+                Fragment fragment;
+                fragment.top = cursor;
+                fragment.height = std::max(0.0f, bottom - cursor);
+                fragment.boxes.push_back(child.get());
+                fragments.push_back(std::move(fragment));
+                cursor = std::max(cursor, bottom);
+            }
+        } else {
+            // One fragment per line box. Runs are appended line by line, but a
+            // vertical-align shift can make their y coordinates non-monotonic,
+            // so sort a copy of the indices by y before grouping.
+            const auto& runs = el.textRuns();
+            std::vector<std::size_t> order(runs.size());
+            for (std::size_t i = 0; i < order.size(); ++i) {
+                order[i] = i;
+            }
+            std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+                return runs[a].y < runs[b].y;
+            });
+            std::size_t at = 0;
+            while (at < order.size()) {
+                const float top = runs[order[at]].y;
+                Fragment fragment;
+                fragment.top = top;
+                float bottom = top;
+                while (at < order.size() && runs[order[at]].y - top <= 0.5f) {
+                    const Element::TextRun& run = runs[order[at]];
+                    fragment.runs.push_back(order[at]);
+                    bottom = std::max(bottom, run.y + run.height);
+                    ++at;
+                }
+                fragment.height = std::max(0.0f, bottom - top);
+                fragments.push_back(std::move(fragment));
+            }
+            // Preserve the line pitch: a fragment reaches the next line's top,
+            // not just the tallest glyph on it.
+            for (std::size_t i = 0; i + 1 < fragments.size(); ++i) {
+                fragments[i].height =
+                    std::max(0.0f, fragments[i + 1].top - fragments[i].top);
+            }
+
+            // Atomic inline children (inline-block, replaced media) are boxes
+            // with their own layout. Attach each to the line band it overlaps so
+            // it moves with that line; with no text at all, overlapping boxes
+            // form their own line fragments.
+            for (const auto& child : el.children()) {
+                if (!child || child->isTextNode() || !laidOut(*child)) {
+                    continue;
+                }
+                const ComputedStyle cs = resolver_.resolve(*child);
+                if (cs.display == ComputedStyle::None || !cs.visible ||
+                    cs.display == ComputedStyle::Inline || isFloated(cs) ||
+                    cs.position == ComputedStyle::Absolute ||
+                    cs.position == ComputedStyle::Fixed) {
+                    continue;
+                }
+                const float top = child->layoutY();
+                const float bottom = top + child->layoutHeight();
+                if (fragments.empty()) {
+                    Fragment fragment;
+                    fragment.top = top;
+                    fragment.height = std::max(0.0f, bottom - top);
+                    fragment.boxes.push_back(child.get());
+                    fragments.push_back(std::move(fragment));
+                } else {
+                    std::size_t best = fragments.size();
+                    for (std::size_t i = 0; i < fragments.size(); ++i) {
+                        const float bandBottom =
+                            i + 1 < fragments.size()
+                                ? fragments[i + 1].top
+                                : fragments[i].top + fragments[i].height;
+                        if (top < bandBottom && bottom > fragments[i].top) {
+                            best = i;
+                            break;
+                        }
+                    }
+                    if (best == fragments.size()) {
+                        float nearest = 1.0e30f;
+                        for (std::size_t i = 0; i < fragments.size(); ++i) {
+                            const float distance = std::fabs(top - fragments[i].top);
+                            if (distance < nearest) {
+                                nearest = distance;
+                                best = i;
+                            }
+                        }
+                    }
+                    Fragment& fragment = fragments[best];
+                    fragment.boxes.push_back(child.get());
+                    fragment.height = std::max(fragment.height, bottom - fragment.top);
+                }
+            }
+        }
+
+        // A definite height fills columns top-down. An auto height balances:
+        // binary-search the smallest target whose greedy packing fits the used
+        // count, which is the same shape a browser's balancer aims for.
+        std::vector<float> heights;
+        heights.reserve(fragments.size());
+        float total = 0.0f;
+        for (const Fragment& fragment : fragments) {
+            heights.push_back(fragment.height);
+            total += fragment.height;
+        }
+        float target = box.height;
+        if (box.height <= 0.0f && !heights.empty()) {
+            float low = 0.0f;
+            float high = total;
+            for (int iteration = 0; iteration < 30; ++iteration) {
+                const float mid = (low + high) * 0.5f;
+                if (columnsNeededAt(heights, mid) <= usedCount) {
+                    high = mid;
+                } else {
+                    low = mid;
+                }
+            }
+            target = high;
+        }
+
+        const float step = columnWidth + gap;
+        std::vector<float> columnUsed(static_cast<std::size_t>(usedCount), 0.0f);
+        int column = 0;
+        float usedHeight = 0.0f;
+        for (const Fragment& fragment : fragments) {
+            if (usedHeight > 0.0f && usedHeight + fragment.height > target &&
+                column + 1 < usedCount) {
+                ++column;
+                usedHeight = 0.0f;
+            }
+            const float dx = step * static_cast<float>(column);
+            const float dy = contentY + usedHeight - fragment.top;
+            for (std::size_t index : fragment.runs) {
+                Element::TextRun& run = el.textRuns()[index];
+                run.x += dx;
+                run.y += dy;
+            }
+            for (Element* fragmentBox : fragment.boxes) {
+                shiftSubtree(*fragmentBox, dx, dy);
+            }
+            usedHeight += fragment.height;
+            columnUsed[static_cast<std::size_t>(column)] =
+                std::max(columnUsed[static_cast<std::size_t>(column)], usedHeight);
+        }
+
+        outWidth = width;
+        if (box.height > 0.0f) {
+            return box.height;
+        }
+        float height = 0.0f;
+        for (float columnHeight : columnUsed) {
+            height = std::max(height, columnHeight);
         }
         return height;
     }
@@ -5985,6 +6286,31 @@ void BlockLayout::layout(Element* root, const LayoutInput& input) {
         clearHiddenBoxes(*root, *input.resolver);
     }
     measureScrollExtents(*root, *input.resolver);
+}
+
+std::vector<ColumnRuleSpan> columnRuleSpans(const Element& el, float gap) {
+    std::vector<ColumnRuleSpan> spans;
+    const int columns = el.layoutColumnCount();
+    const float width = el.contentWidth();
+    const float height = el.contentHeight();
+    if (columns < 2 || width <= 0.0f || height <= 0.0f) {
+        return spans;
+    }
+    gap = std::max(0.0f, gap);
+    const float columnWidth =
+        (width - gap * static_cast<float>(columns - 1)) / static_cast<float>(columns);
+    if (columnWidth <= 0.0f) {
+        return spans;
+    }
+    spans.reserve(static_cast<std::size_t>(columns - 1));
+    for (int column = 1; column < columns; ++column) {
+        // The rule sits in the middle of the gap after that column: the gap
+        // spans from the column's right edge to the next column's left.
+        spans.push_back(
+            {el.contentX() + static_cast<float>(column) * (columnWidth + gap) - gap * 0.5f,
+             el.contentY(), height});
+    }
+    return spans;
 }
 
 }  // namespace sui

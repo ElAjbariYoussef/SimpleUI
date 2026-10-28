@@ -3427,6 +3427,46 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         }
     }
 
+    // Column rules sit in the middle of every gap between the columns the last
+    // layout pass used. They paint behind this box's content, which is drawn
+    // later in this function and by the child boxes that follow.
+    if (el.layoutColumnCount() > 1 &&
+        s.columnRuleStyle != ComputedStyle::BorderStyleNone) {
+        const float ruleWidth =
+            s.columnRuleWidth.resolve(0.0f, s.fontSize, rootFontSize);
+        if (ruleWidth > 0.0f) {
+            const float gap = s.columnGap >= 0.0f ? s.columnGap : s.fontSize;
+            const sui::Color ruleColor =
+                multiplyAlpha(toColor(s.columnRuleColor), opacity);
+            const auto dash = [](ComputedStyle::BorderStyle style) {
+                switch (style) {
+                    case ComputedStyle::BorderDashed:
+                        return sui::Dash::Dashed;
+                    case ComputedStyle::BorderDotted:
+                        return sui::Dash::Dotted;
+                    default:
+                        return sui::Dash::Solid;
+                }
+            };
+            for (const sui::ColumnRuleSpan& span : sui::columnRuleSpans(el, gap)) {
+                const float x = span.x - offX;
+                const float top = span.top - offY;
+                if (s.columnRuleStyle == ComputedStyle::BorderDouble) {
+                    // `double` is two equal thin lines with a gap between them.
+                    const float thin = std::max(1.0f, ruleWidth / 3.0f);
+                    const float offset = ruleWidth / 3.0f;
+                    renderer.strokePath({{x - offset, top}, {x - offset, top + span.height}},
+                                        ruleColor, thin, false, sui::Dash::Solid);
+                    renderer.strokePath({{x + offset, top}, {x + offset, top + span.height}},
+                                        ruleColor, thin, false, sui::Dash::Solid);
+                } else {
+                    renderer.strokePath({{x, top}, {x, top + span.height}}, ruleColor,
+                                        ruleWidth, false, dash(s.columnRuleStyle));
+                }
+            }
+        }
+    }
+
     // Overlay scrollbars float above the box's edge: a track with a thumb
     // sized and placed by the scroll extents. Later siblings may overlap them;
     // the bars paint with their own box either way.

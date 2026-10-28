@@ -9015,6 +9015,373 @@ void testShapeOutside() {
     }
 }
 
+void testMultiColumn() {
+    // Parsing and read-back: the longhands, the `columns` shorthand, and the
+    // rule shorthand all expose computed values an author could have written.
+    {
+        auto document =
+            parseOrNull("<sui><body><div id=\"x\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        Element* x = document->getElementById("x");
+        if (!x) {
+            check(false, "multi-column style element found");
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "#x{column-count:3;column-width:12em;"
+            "column-rule:2px dashed #ff0000;column-span:all}"));
+        const ComputedStyle style = resolver.resolve(*x);
+        check(style.columnCount == 3, "column-count parses an integer");
+        check(style.columnWidth.unit == sui::Length::Em &&
+                  style.columnWidth.value == 12.0f,
+              "column-width keeps its unit");
+        check(style.columnRuleWidth.value == 2.0f,
+              "column-rule width parses");
+        check(style.columnRuleStyle == ComputedStyle::BorderDashed,
+              "column-rule style parses");
+        check(style.columnRuleColor.r == 255 && style.columnRuleColor.g == 0 &&
+                  style.columnRuleColor.b == 0,
+              "column-rule colour parses");
+        check(style.columnSpan == ComputedStyle::ColumnSpan::All,
+              "column-span: all parses");
+        check(sui::StyleResolver::propertyValue(style, "column-count") == "3",
+              "column-count reads back");
+        check(sui::StyleResolver::propertyValue(style, "column-width") == "12em",
+              "column-width reads back");
+        check(sui::StyleResolver::propertyValue(style, "columns") == "12em 3",
+              "columns reads back as width and count");
+        check(sui::StyleResolver::propertyValue(style, "column-rule") ==
+                  "2px dashed #ff0000",
+              "column-rule reads back");
+        check(sui::StyleResolver::propertyValue(style, "column-span") == "all",
+              "column-span reads back");
+        check(sui::StyleResolver::propertyValue(ComputedStyle{}, "column-count") ==
+                  "auto",
+              "column-count starts auto");
+        check(sui::StyleResolver::propertyValue(ComputedStyle{},
+                                                "column-rule-color") ==
+                  "currentcolor",
+              "column-rule colour starts currentcolor");
+    }
+
+    // Invalid declarations are dropped and leave the previous winner alone,
+    // including a malformed shorthand, which may not half-apply.
+    {
+        auto document =
+            parseOrNull("<sui><body><div id=\"y\"></div><div id=\"z\"></div>"
+                        "<div id=\"cc\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        Element* y = document->getElementById("y");
+        Element* z = document->getElementById("z");
+        Element* cc = document->getElementById("cc");
+        if (!y || !z || !cc) {
+            check(false, "multi-column invalid elements found");
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "#y{color:#336699;column-count:3;column-count:2.5;"
+            "column-width:-4px;columns:10px 2 3;column-rule-width:thin;"
+            "column-rule-style:dotted;column-rule-color:#123456}"
+            "#z{columns:12em 3;columns:auto}"
+            "#cc{color:#336699;column-rule-color:currentcolor}"));
+        const ComputedStyle style = resolver.resolve(*y);
+        check(style.columnCount == 3, "an invalid column-count keeps the winner");
+        check(style.columnWidth.isAuto(), "a negative column-width is invalid");
+        check(sui::StyleResolver::propertyValue(style, "columns") == "3",
+              "a three-part columns shorthand is rejected whole");
+        check(style.columnGap < 0.0f, "an unauthored column-gap is normal");
+        check(style.columnRuleWidth.value == 1.0f,
+              "column-rule-width accepts a width keyword");
+        check(style.columnRuleStyle == ComputedStyle::BorderDotted,
+              "column-rule-style parses a longhand");
+        check(style.columnRuleColor.r == 0x12 && style.columnRuleColor.g == 0x34 &&
+                  style.columnRuleColor.b == 0x56,
+              "column-rule-color parses a longhand");
+        const ComputedStyle current = resolver.resolve(*cc);
+        check(current.columnRuleColor.r == 0x33 && current.columnRuleColor.g == 0x66 &&
+                  current.columnRuleColor.b == 0x99,
+              "column-rule-color resolves currentColor to the element colour");
+        const ComputedStyle reset = resolver.resolve(*z);
+        check(reset.columnCount == 0 && reset.columnWidth.isAuto(),
+              "columns:auto resets both longhands");
+        check(sui::StyleResolver::propertyValue(reset, "columns") == "auto",
+              "a reset columns shorthand reads back auto");
+    }
+
+    auto document = parseOrNull(
+        "<sui><body>"
+        "<div id=\"count\"><div id=\"c1\" class=\"i\"></div>"
+        "<div id=\"c2\" class=\"i\"></div><div id=\"c3\" class=\"i\"></div></div>"
+        "<div id=\"width\"><div id=\"w1\" class=\"i\"></div>"
+        "<div id=\"w2\" class=\"i\"></div><div id=\"w3\" class=\"i\"></div></div>"
+        "<div id=\"both\"><div id=\"b1\" class=\"i\"></div>"
+        "<div id=\"b2\" class=\"i\"></div></div>"
+        "<div id=\"cap\"><div id=\"p1\" class=\"i\"></div>"
+        "<div id=\"p2\" class=\"i\"></div></div>"
+        "<div id=\"gap\"><div id=\"g1\" class=\"i\"></div>"
+        "<div id=\"g2\" class=\"i\"></div></div>"
+        "<div id=\"one\"><div id=\"o1\" class=\"i\"></div></div>"
+        "<div id=\"bal\"><div id=\"ba\" class=\"h20\"></div>"
+        "<div id=\"bb\" class=\"h20\"></div><div id=\"bc\" class=\"h20\"></div>"
+        "<div id=\"bd\" class=\"h20\"></div></div>"
+        "<div id=\"lines\">aaaa bbbb cccc dddd eeee ffff</div>"
+        "<div id=\"line1\">aaaa</div>"
+        "<div id=\"ib\">aaaa bbbb cccc dddd "
+        "<span id=\"ibox\" style=\"display:inline-block;width:12px;height:12px\">"
+        "</span></div>"
+        "<div id=\"fixed\"><div id=\"f1\" class=\"h20\"></div>"
+        "<div id=\"f2\" class=\"h20\"></div><div id=\"f3\" class=\"h20\"></div>"
+        "<div id=\"f4\" class=\"h20\"></div><div id=\"f5\" class=\"h20\"></div>"
+        "<div id=\"f6\" class=\"h20\"></div></div>"
+        "<div id=\"fl\"><div id=\"float\" class=\"i\" "
+        "style=\"float:left;width:50px\"></div>"
+        "<div id=\"after\" class=\"i\"></div></div>"
+        "<div id=\"span\"><div id=\"sp\" class=\"i\" "
+        "style=\"column-span:all\"></div>"
+        "<div id=\"s2\" class=\"i\"></div></div>"
+        "<div id=\"mcm\"><div id=\"mckid\"></div></div>"
+        "</body></sui>");
+    if (!document) {
+        return;
+    }
+    sui::StyleResolver resolver;
+    resolver.setRules(sui::CSSParser::parse(
+        "body{margin:0;line-height:20px}"
+        ".i{height:10px}.h20{height:20px}"
+        "#count{width:300px;column-count:3;column-gap:0}"
+        "#width{width:320px;column-width:100px;column-gap:10px}"
+        "#both{width:250px;columns:2 100px;column-gap:10px}"
+        "#cap{width:350px;columns:2 100px;column-gap:10px}"
+        "#gap{width:300px;column-count:2;column-gap:normal;font-size:20px}"
+        "#one{width:300px;column-count:3;column-gap:0}"
+        "#bal{width:200px;column-count:2;column-gap:0}"
+        "#lines{width:200px;column-count:2;column-gap:0;font-size:16px}"
+        "#line1{width:200px;column-count:2;column-gap:0;font-size:16px}"
+        "#ib{width:200px;column-count:2;column-gap:0;font-size:16px}"
+        "#fixed{width:200px;column-count:2;column-gap:0;height:50px}"
+        "#fl{width:300px;column-count:2;column-gap:0}"
+        "#span{width:300px;column-count:2;column-gap:0}"
+        "#mcm{width:200px;column-count:2;column-gap:0;margin-top:5px}"
+        "#mckid{margin-top:20px;height:10px}"));
+    layoutRoot(*document, resolver, 400.0f);
+
+    Element* count = document->getElementById("count");
+    Element* width = document->getElementById("width");
+    Element* both = document->getElementById("both");
+    Element* gap = document->getElementById("gap");
+    Element* one = document->getElementById("one");
+    Element* bal = document->getElementById("bal");
+    Element* lines = document->getElementById("lines");
+    Element* fixed = document->getElementById("fixed");
+    Element* fl = document->getElementById("fl");
+    Element* span = document->getElementById("span");
+    if (!count || !width || !both || !gap || !one || !bal || !lines || !fixed ||
+        !fl || !span) {
+        check(false, "multi-column fixture elements found");
+        return;
+    }
+
+    // Count only: the columns split the content width equally.
+    check(count->layoutColumnCount() == 3, "column-count creates three columns");
+    Element* c1 = document->getElementById("c1");
+    Element* c2 = document->getElementById("c2");
+    Element* c3 = document->getElementById("c3");
+    if (c1 && c2 && c3) {
+        checkNear(c1->layoutWidth(), 100.0f, 0.01f, "count column width");
+        checkNear(c1->layoutX(), count->contentX(), 0.01f, "first column x");
+        checkNear(c2->layoutX(), count->contentX() + 100.0f, 0.01f,
+                  "second column x");
+        checkNear(c3->layoutX(), count->contentX() + 200.0f, 0.01f,
+                  "third column x");
+        checkNear(c2->layoutY(), count->contentY(), 0.01f,
+                  "balanced siblings share the column top");
+    }
+    checkNear(count->layoutHeight(), 10.0f, 0.01f,
+              "a count-only container is one item tall when balanced");
+
+    // Width only: the count is the largest that fits while each column keeps
+    // its ideal width, and the columns then fill the line.
+    check(width->layoutColumnCount() == 3, "column-width derives the count");
+    Element* w1 = document->getElementById("w1");
+    Element* w2 = document->getElementById("w2");
+    if (w1 && w2) {
+        checkNear(w1->layoutWidth(), 100.0f, 0.01f, "width column width");
+        checkNear(w2->layoutX(), width->contentX() + 110.0f, 0.01f,
+                  "width column leaves the gap");
+    }
+
+    // Both: column-count caps the fitting count, and the used width fills.
+    check(both->layoutColumnCount() == 2, "both longhands cap the used count");
+    Element* b1 = document->getElementById("b1");
+    Element* b2 = document->getElementById("b2");
+    if (b1 && b2) {
+        checkNear(b1->layoutWidth(), 120.0f, 0.01f,
+                  "both columns fill the content width");
+        checkNear(b2->layoutX(), both->contentX() + 130.0f, 0.01f,
+                  "both columns keep the authored gap");
+    }
+
+    // The explicit count caps an otherwise fitting third column, and the used
+    // width still fills the content box.
+    Element* cap = document->getElementById("cap");
+    if (cap) {
+        check(cap->layoutColumnCount() == 2,
+              "column-count caps a fitting third column");
+        Element* p2 = document->getElementById("p2");
+        if (p2) {
+            checkNear(p2->layoutX(), cap->contentX() + 180.0f, 0.01f,
+                      "capped columns split the content width");
+        }
+    }
+
+    // `column-gap: normal` is 1em inside a multi-column container.
+    Element* g2 = document->getElementById("g2");
+    if (g2) {
+        checkNear(g2->layoutX(), gap->contentX() + 160.0f, 0.01f,
+                  "normal gap is one em wide");
+    }
+    const auto gapSpans = sui::columnRuleSpans(*gap, 20.0f);
+    check(gapSpans.size() == 1, "normal gap produces one rule span");
+    if (gapSpans.size() == 1) {
+        checkNear(gapSpans[0].x, gap->contentX() + 150.0f, 0.01f,
+                  "a rule sits midway through the gap");
+        checkNear(gapSpans[0].height, 10.0f, 0.01f,
+                  "a rule spans the column height");
+    }
+
+    // A count creates empty trailing columns; they still produce rules.
+    check(one->layoutColumnCount() == 3, "empty trailing columns still count");
+    const auto oneSpans = sui::columnRuleSpans(*one, 0.0f);
+    check(oneSpans.size() == 2, "empty columns leave room for both rules");
+    Element* o1 = document->getElementById("o1");
+    if (o1) {
+        checkNear(o1->layoutWidth(), 100.0f, 0.01f,
+                  "one item still uses the counted column width");
+    }
+
+    // Auto height balancing: four 20px blocks split two per column.
+    check(bal->layoutColumnCount() == 2, "balanced container uses two columns");
+    Element* ba = document->getElementById("ba");
+    Element* bb = document->getElementById("bb");
+    Element* bc = document->getElementById("bc");
+    Element* bd = document->getElementById("bd");
+    if (ba && bb && bc && bd) {
+        checkNear(ba->layoutY(), bal->contentY(), 0.01f, "first block at the top");
+        checkNear(bb->layoutY(), bal->contentY() + 20.0f, 0.01f,
+                  "second block under the first");
+        checkNear(bc->layoutX(), bal->contentX() + 100.0f, 0.01f,
+                  "third block starts the second column");
+        checkNear(bc->layoutY(), bal->contentY(), 0.01f,
+                  "third block restarts at the column top");
+        checkNear(bd->layoutY(), bal->contentY() + 20.0f, 0.01f,
+                  "fourth block under the third");
+    }
+    checkNear(bal->layoutHeight(), 40.0f, 0.01f,
+              "balanced columns are half the single-column height");
+
+    // Inline content fragments between line boxes.
+    check(lines->layoutColumnCount() == 2, "line content uses two columns");
+    check(lines->textRuns().size() == 6, "every word produced a run");
+    if (lines->textRuns().size() == 6) {
+        checkNear(lines->textRuns()[2].y, lines->contentY() + 20.0f, 0.01f,
+                  "second line stays under the first");
+        checkNear(lines->textRuns()[4].y, lines->contentY(), 0.01f,
+                  "the third line moves to the top of the next column");
+        checkNear(lines->textRuns()[4].x, lines->contentX() + 100.0f, 0.01f,
+                  "the third line moves to the second column");
+    }
+    checkNear(lines->layoutHeight(), 40.0f, 0.01f,
+              "two balanced lines set the container height");
+
+    // A single line keeps its line-height even though no following line can
+    // supply the pitch, and the empty second column still counts.
+    Element* line1 = document->getElementById("line1");
+    if (line1) {
+        check(line1->layoutColumnCount() == 2,
+              "a single line still records the counted columns");
+        checkNear(line1->layoutHeight(), 20.0f, 0.01f,
+                  "a single line keeps its line-height");
+    }
+
+    // An atomic inline box rides the line fragment it overlaps when that line
+    // moves into another column.
+    Element* ib = document->getElementById("ib");
+    Element* ibox = document->getElementById("ibox");
+    if (ib && ibox && ib->textRuns().size() == 4) {
+        check(ib->layoutColumnCount() == 2, "atomic inline content uses two columns");
+        checkNear(ibox->layoutX(), ib->textRuns()[2].x + 68.0f, 0.01f,
+                  "an atomic inline box moves with its line");
+        check(ibox->layoutY() >= ib->contentY() &&
+                  ibox->layoutY() < ib->contentY() + 20.0f,
+              "an atomic inline box stays in its line band");
+    }
+
+    // A definite height fills columns top-down instead of balancing, and
+    // content past the last column overflows it.
+    check(fixed->layoutColumnCount() == 2, "fixed height uses the authored count");
+    checkNear(fixed->layoutHeight(), 50.0f, 0.01f,
+              "a definite height pins the container");
+    Element* f1 = document->getElementById("f1");
+    Element* f3 = document->getElementById("f3");
+    Element* f5 = document->getElementById("f5");
+    Element* f6 = document->getElementById("f6");
+    if (f1 && f3 && f5 && f6) {
+        checkNear(f1->layoutY(), fixed->contentY(), 0.01f,
+                  "fixed-height first item at the top");
+        checkNear(f3->layoutX(), fixed->contentX() + 100.0f, 0.01f,
+                  "fixed-height third item starts the second column");
+        checkNear(f3->layoutY(), fixed->contentY(), 0.01f,
+                  "fixed-height second column restarts at the top");
+        checkNear(f5->layoutY(), fixed->contentY() + 40.0f, 0.01f,
+                  "fixed-height overflow stacks in the last column");
+        checkNear(f6->layoutY(), fixed->contentY() + 60.0f, 0.01f,
+                  "overflow keeps stacking below the box");
+    }
+
+    // A float or a spanning child has no fragment model; the container falls
+    // back to one full-width column rather than detaching lines from floats.
+    check(fl->layoutColumnCount() == 1, "a direct float falls back to one column");
+    Element* after = document->getElementById("after");
+    if (after) {
+        checkNear(after->layoutWidth(), 300.0f, 0.01f,
+                  "a float fallback keeps the full content width");
+    }
+    check(span->layoutColumnCount() == 1,
+          "column-span: all falls back to one column");
+    Element* s2 = document->getElementById("s2");
+    if (s2) {
+        checkNear(s2->layoutWidth(), 300.0f, 0.01f,
+                  "a span fallback keeps the full content width");
+    }
+
+    // A multi-column container is a block formatting context root, so the
+    // child's top margin stays inside it instead of collapsing out.
+    Element* mcm = document->getElementById("mcm");
+    Element* mckid = document->getElementById("mckid");
+    if (mcm && mckid) {
+        checkNear(mcm->layoutY(), span->layoutY() + span->layoutHeight() + 5.0f, 0.01f,
+                  "a multicol container's own top margin does not collapse");
+        checkNear(mckid->layoutY(), mcm->contentY() + 20.0f, 0.01f,
+                  "a multicol container keeps its child's top margin");
+        checkNear(mcm->layoutHeight(), 30.0f, 0.01f,
+                  "the kept margin contributes to the column height");
+    }
+
+    // Dropping the multicol declarations on a fresh pass clears the used count,
+    // so stale columns cannot keep painting rules or splitting content.
+    sui::StyleResolver plain;
+    plain.setRules(sui::CSSParser::parse("body{margin:0}.i{height:10px}"));
+    layoutRoot(*document, plain, 400.0f);
+    check(count->layoutColumnCount() == 0,
+          "a plain relayout clears the used column count");
+}
+
 void testTableLayout() {
     // Cells are placed side by side; a column is as wide as its widest cell and
     // a row as tall as its tallest.
@@ -15185,6 +15552,7 @@ int main() {
     testHasSelector();
     testFloatsAndClear();
     testShapeOutside();
+    testMultiColumn();
     testTableLayout();
     testImportantAndCssWideKeywords();
     testBorderWidthLonghands();

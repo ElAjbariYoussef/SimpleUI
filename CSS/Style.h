@@ -307,6 +307,25 @@ struct ComputedStyle {
     };
     Radii borderRadii;
 
+    // Multi-column layout. `columnCount` is 0 for `auto`; `columnWidth` is Auto
+    // for `auto`. Either one alone creates columns, and both together cap the
+    // count while keeping the width ideal. `column-gap` doubles as the flex/grid
+    // gap; in a multi-column container its unauthored `normal` value is 1em.
+    int columnCount = 0;
+    Length columnWidth;
+    enum class ColumnSpan : std::uint8_t { None, All };
+    ColumnSpan columnSpan = ColumnSpan::None;
+    // The rule painted midway through every column gap. Width starts at CSS's
+    // `medium` even though the initial style is `none`; colour starts at
+    // `currentColor`.
+    Length columnRuleWidth{3.0f};
+    BorderStyle columnRuleStyle = BorderStyleNone;
+    SDL_Color columnRuleColor = kCurrentColor;
+
+    bool isMulticolContainer() const noexcept {
+        return columnCount > 0 || !columnWidth.isAuto();
+    }
+
     // A `clip-path` shape, kept as lengths for the same reason as the radii:
     // percentages resolve against the reference box at paint time. Anything
     // the parser cannot express (`path()`, `url()`) stays `None`.

@@ -2,6 +2,8 @@
 
 #include "CSS/Style.h"
 
+#include <vector>
+
 namespace sui {
 
 class Element;
@@ -31,5 +33,15 @@ public:
     // translated onto the box that hosts it.
     static void translateSubtree(Element& el, float dx, float dy);
 };
+
+// The centre x and vertical span of each painted column rule, one per gap
+// between the used columns recorded by the latest layout pass. `gap` is the
+// used `column-gap`. Empty for anything with fewer than two columns.
+struct ColumnRuleSpan {
+    float x = 0.0f;
+    float top = 0.0f;
+    float height = 0.0f;
+};
+std::vector<ColumnRuleSpan> columnRuleSpans(const Element& el, float gap);
 
 }  // namespace sui

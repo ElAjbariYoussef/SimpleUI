@@ -214,6 +214,7 @@ void Element::clearLayoutSubtree() {
     layoutY_ = 0.0f;
     layoutW_ = 0.0f;
     layoutH_ = 0.0f;
+    layoutColumnCount_ = 0;
     paddingX_ = 0.0f;
     paddingY_ = 0.0f;
     paddingW_ = 0.0f;
