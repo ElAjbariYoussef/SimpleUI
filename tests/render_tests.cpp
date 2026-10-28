@@ -2138,6 +2138,77 @@ void testBackgroundBlendPixels() {
     SDL_DestroySurface(surf);
 }
 
+// `drawTextureRotated` maps a finished run's texture into its column. The
+// destination box supplies the centre; the image turns a quarter clockwise, so
+// its left half ends up at the top. The unrotated footprint stays untouched.
+void testRotatedTexturePixels() {
+    SDL_Surface* surf = SDL_CreateSurface(100, 100, SDL_PIXELFORMAT_ABGR8888);
+    check(surf != nullptr, "a rotation surface exists");
+    if (!surf) {
+        return;
+    }
+    SDL_Renderer* sr = SDL_CreateSoftwareRenderer(surf);
+    check(sr != nullptr, "a rotation renderer exists");
+    if (!sr) {
+        SDL_DestroySurface(surf);
+        return;
+    }
+
+    constexpr int texW = 16;
+    constexpr int texH = 8;
+    SDL_Surface* source = SDL_CreateSurface(texW, texH, SDL_PIXELFORMAT_ABGR8888);
+    check(source != nullptr, "a rotation source surface exists");
+    if (!source) {
+        SDL_DestroyRenderer(sr);
+        SDL_DestroySurface(surf);
+        return;
+    }
+    auto* texels = static_cast<std::uint32_t*>(source->pixels);
+    for (int y = 0; y < texH; ++y) {
+        for (int x = 0; x < texW; ++x) {
+            const bool left = x < texW / 2;
+            texels[y * texW + x] =
+                SDL_MapSurfaceRGBA(source, left ? 255 : 0, 0, left ? 0 : 255, 255);
+        }
+    }
+    SDL_Texture* texture = SDL_CreateTextureFromSurface(sr, source);
+    SDL_DestroySurface(source);
+    check(texture != nullptr, "a rotation texture exists");
+    if (!texture) {
+        SDL_DestroyRenderer(sr);
+        SDL_DestroySurface(surf);
+        return;
+    }
+
+    SDL_SetRenderDrawColor(sr, 0, 0, 0, 255);
+    SDL_RenderClear(sr);
+    sui::Renderer renderer(sr);
+    renderer.drawTextureRotated(texture, SDL_FRect{40.0f, 40.0f, 40.0f, 40.0f}, nullptr,
+                                90.0, sui::Color{255, 255, 255, 255});
+    SDL_FlushRenderer(sr);
+
+    const auto pixel = [&](int x, int y) {
+        const auto* p = static_cast<const std::uint8_t*>(surf->pixels);
+        const std::size_t at = static_cast<std::size_t>(y) * surf->pitch +
+                               static_cast<std::size_t>(x) * 4;
+        return std::array<std::uint8_t, 4>{p[at], p[at + 1], p[at + 2], p[at + 3]};
+    };
+    // The destination box is 40x40 but the texture keeps its natural 16x8, so
+    // only its centre matters. Centre (60, 60); the image becomes 8x16,
+    // spanning x 56..64 and y 52..68.
+    const auto top = pixel(60, 56);
+    const auto bottom = pixel(60, 64);
+    check(top[0] == 255 && top[2] == 0, "the texture's left half rotates to the top");
+    check(bottom[0] == 0 && bottom[2] == 255,
+          "the texture's right half rotates to the bottom");
+    const auto beside = pixel(40, 40);
+    check(beside[0] == 0 && beside[1] == 0 && beside[2] == 0,
+          "the unrotated footprint is not painted");
+    SDL_DestroyTexture(texture);
+    SDL_DestroyRenderer(sr);
+    SDL_DestroySurface(surf);
+}
+
 // A blended surface over its backdrop, per channel with source-over alpha.
 // One opaque pixel over one opaque pixel tells each mode apart.
 void testBlendImage() {
@@ -2520,6 +2591,7 @@ int main() {
     testSvgMarkers();
     testTextOnPath();
     testBackgroundBlendPixels();
+    testRotatedTexturePixels();
     testObjectFitDst();
     testColorMatrix();
     testClipCoverage();

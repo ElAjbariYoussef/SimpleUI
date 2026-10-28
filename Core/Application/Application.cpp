@@ -544,10 +544,16 @@ void paintTextShadow(const ComputedStyle::TextShadow& shadow, const Element::Tex
         }
         float texW = 0.0f, texH = 0.0f;
         SDL_GetTextureSize(texture, &texW, &texH);
-        renderer.drawTexture(
-            texture, SDL_FRect{std::floor(run.x + dx + ux * reach),
-                               std::floor(run.y + dy + uy * reach), texW, texH},
-            nullptr, Color{255, 255, 255, static_cast<Uint8>(weight * 255.0f)});
+        const SDL_FRect box{std::floor(run.x + dx + ux * reach),
+                            std::floor(run.y + dy + uy * reach),
+                            run.rotation != 0.0f ? run.width : texW,
+                            run.rotation != 0.0f ? run.height : texH};
+        const Color tintAlpha{255, 255, 255, static_cast<Uint8>(weight * 255.0f)};
+        if (run.rotation != 0.0f) {
+            renderer.drawTextureRotated(texture, box, nullptr, run.rotation, tintAlpha);
+        } else {
+            renderer.drawTexture(texture, box, nullptr, tintAlpha);
+        }
 
 
         SDL_DestroyTexture(texture);
@@ -4085,8 +4091,15 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
         // run moves by this box's scroll on top of every ancestor's.
         const float tx = offX + (s.overflowX != ComputedStyle::Visible ? el.scrollLeft() : 0.0f);
         const float ty = offY + (s.overflowY != ComputedStyle::Visible ? el.scrollTop() : 0.0f);
-        const SDL_FRect dst{std::floor(run.x - tx), std::floor(run.y - ty), texW, texH};
-        SDL_RenderTexture(sdlRenderer, texture, nullptr, &dst);
+        if (run.rotation != 0.0f) {
+            renderer.drawTextureRotated(
+                texture, SDL_FRect{std::floor(run.x - tx), std::floor(run.y - ty),
+                                   run.width, run.height},
+                nullptr, run.rotation, Color{255, 255, 255, 255});
+        } else {
+            const SDL_FRect dst{std::floor(run.x - tx), std::floor(run.y - ty), texW, texH};
+            SDL_RenderTexture(sdlRenderer, texture, nullptr, &dst);
+        }
 
         // `::first-line` repaints whole runs; `::first-letter` repaints the
         // first grapheme from the same shaping. Both land before the
@@ -4107,9 +4120,17 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                 return;
             }
             const SDL_FRect src{sx0, 0.0f, std::min(sx1, texW) - sx0, texH};
-            const SDL_FRect fgDst{std::floor(run.x - tx) + sx0,
-                                  std::floor(run.y - ty), src.w, src.h};
-            SDL_RenderTexture(sdlRenderer, fgTex, &src, &fgDst);
+            if (run.rotation != 0.0f) {
+                renderer.drawTextureRotated(
+                    fgTex,
+                    SDL_FRect{std::floor(run.x - tx),
+                              std::floor(run.y - ty + sx0), run.width, src.w},
+                    &src, run.rotation, Color{255, 255, 255, 255});
+            } else {
+                const SDL_FRect fgDst{std::floor(run.x - tx) + sx0,
+                                      std::floor(run.y - ty), src.w, src.h};
+                SDL_RenderTexture(sdlRenderer, fgTex, &src, &fgDst);
+            }
             SDL_DestroyTexture(fgTex);
         };
         if (lineColors.fgSet) {
@@ -4150,9 +4171,17 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                     continue;
                 }
                 const SDL_FRect src{sx0, 0.0f, std::min(sx1, texW) - sx0, texH};
-                const SDL_FRect fgDst{std::floor(run.x - tx) + sx0,
-                                      std::floor(run.y - ty), src.w, src.h};
-                SDL_RenderTexture(sdlRenderer, fgTex, &src, &fgDst);
+                if (run.rotation != 0.0f) {
+                    renderer.drawTextureRotated(
+                        fgTex,
+                        SDL_FRect{std::floor(run.x - tx),
+                                  std::floor(run.y - ty + sx0), run.width, src.w},
+                        &src, run.rotation, Color{255, 255, 255, 255});
+                } else {
+                    const SDL_FRect fgDst{std::floor(run.x - tx) + sx0,
+                                          std::floor(run.y - ty), src.w, src.h};
+                    SDL_RenderTexture(sdlRenderer, fgTex, &src, &fgDst);
+                }
                 SDL_DestroyTexture(fgTex);
             }
         }
@@ -4172,16 +4201,32 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                 decCol.r, decCol.g, decCol.b,
                 static_cast<Uint8>(static_cast<float>(decCol.a) * opacity)};
             SDL_SetRenderDrawColor(sdlRenderer, c.r, c.g, c.b, c.a);
-            // Each decoration is one rule at its own offset from the baseline:
-            // under it, over the ascender, or through roughly the middle.
-            float lineY = y0 + run.baseline;
-            if (s.textDecorationLine == ComputedStyle::DecOverline) {
-                lineY = y0 + run.baseline - run.fontSize;
-            } else if (s.textDecorationLine == ComputedStyle::DecLineThrough) {
-                lineY = y0 + run.baseline - run.fontSize * 0.3f;
+            if (run.rotation != 0.0f) {
+                // Horizontal rules rotate with the glyphs: the baseline becomes
+                // a vertical line near the band's left edge, and "above" moves
+                // toward the right edge.
+                const float baselineX = x0 + run.width - run.baseline;
+                float lineX = baselineX - lineThick;
+                if (s.textDecorationLine == ComputedStyle::DecOverline) {
+                    lineX = baselineX + run.fontSize - lineThick;
+                } else if (s.textDecorationLine == ComputedStyle::DecLineThrough) {
+                    lineX = baselineX + run.fontSize * 0.3f - lineThick;
+                }
+                const SDL_FRect rule{lineX, y0, lineThick, run.height};
+                SDL_RenderFillRect(sdlRenderer, &rule);
+            } else {
+                // Each decoration is one rule at its own offset from the
+                // baseline: under it, over the ascender, or through roughly the
+                // middle.
+                float lineY = y0 + run.baseline;
+                if (s.textDecorationLine == ComputedStyle::DecOverline) {
+                    lineY = y0 + run.baseline - run.fontSize;
+                } else if (s.textDecorationLine == ComputedStyle::DecLineThrough) {
+                    lineY = y0 + run.baseline - run.fontSize * 0.3f;
+                }
+                const SDL_FRect rule{x0, lineY, w, lineThick};
+                SDL_RenderFillRect(sdlRenderer, &rule);
             }
-            const SDL_FRect rule{x0, lineY, w, lineThick};
-            SDL_RenderFillRect(sdlRenderer, &rule);
         }
         SDL_DestroyTexture(texture);
     }

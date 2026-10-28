@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <string>
 #include <string_view>
@@ -611,7 +612,15 @@ public:
 
     // Exposed for Flow, which needs the same answers run() uses.
     bool isLaidOut(Element& el) const { return laidOut(el); }
-    ComputedStyle resolveStyle(Element& el) const { return resolver_.resolve(el); }
+    ComputedStyle resolveStyle(Element& el) const {
+        ComputedStyle s = resolver_.resolve(el);
+        // A fallback formatting context forces its descendants horizontal so an
+        // inherited vertical mode cannot leak into a subtree laid out normally.
+        if (suppressWritingMode_) {
+            s.writingMode = ComputedStyle::WritingMode::HorizontalTB;
+        }
+        return s;
+    }
     bool hasFirstLineRules() const { return resolver_.hasFirstLineRules(); }
     bool hasFirstLetterRules() const { return resolver_.hasFirstLetterRules(); }
     PseudoFont firstLineFont(Element& el, const ComputedStyle& base) const {
@@ -782,7 +791,7 @@ public:
             if (!laidOut(*child)) {
                 continue;
             }
-            const ComputedStyle cs = resolver_.resolve(*child);
+            const ComputedStyle cs = resolveStyle(*child);
             if (cs.display == ComputedStyle::None || !cs.visible) {
                 continue;
             }
@@ -812,7 +821,7 @@ public:
             if (!laidOut(*child)) {
                 continue;
             }
-            const ComputedStyle cs = resolver_.resolve(*child);
+            const ComputedStyle cs = resolveStyle(*child);
             if (cs.display == ComputedStyle::None || !cs.visible) {
                 continue;
             }
@@ -841,7 +850,7 @@ public:
         if (!first) {
             return false;
         }
-        const ComputedStyle cs = resolver_.resolve(*first);
+        const ComputedStyle cs = resolveStyle(*first);
         return cs.clearType == ComputedStyle::ClearNone;
     }
 
@@ -911,7 +920,7 @@ public:
             if (!laidOut(*child)) {
                 continue;
             }
-            const ComputedStyle cs = resolver_.resolve(*child);
+            const ComputedStyle cs = resolveStyle(*child);
             if (cs.display == ComputedStyle::None || !cs.visible) {
                 continue;
             }
@@ -946,7 +955,7 @@ public:
             return cached->second;
         }
         const MarginStrut result = [&]() -> MarginStrut {
-        const ComputedStyle s = resolver_.resolve(el);
+        const ComputedStyle s = resolveStyle(el);
         const UsedBox b = usedBox(s, width);
         MarginStrut out;
         out.add(b.margin.top);
@@ -956,7 +965,7 @@ public:
                 if (!child || child->isTextNode() || !laidOut(*child)) {
                     continue;
                 }
-                const ComputedStyle cs = resolver_.resolve(*child);
+                const ComputedStyle cs = resolveStyle(*child);
                 if (cs.display == ComputedStyle::None || !cs.visible ||
                     isFloated(cs) || cs.position == ComputedStyle::Absolute ||
                     cs.position == ComputedStyle::Fixed || !isBlockLevel(cs)) {
@@ -985,7 +994,7 @@ public:
             if (!laidOut(*child)) {
                 continue;
             }
-            const ComputedStyle cs = resolver_.resolve(*child);
+            const ComputedStyle cs = resolveStyle(*child);
             if (cs.display == ComputedStyle::None || !cs.visible ||
                 isFloated(cs) || cs.position == ComputedStyle::Absolute ||
                 cs.position == ComputedStyle::Fixed) {
@@ -1016,7 +1025,7 @@ public:
             return cached->second;
         }
         const MarginStrut result = [&]() -> MarginStrut {
-        const ComputedStyle s = resolver_.resolve(el);
+        const ComputedStyle s = resolveStyle(el);
         const UsedBox b = usedBox(s, width);
         MarginStrut out;
         out.add(b.margin.bottom);
@@ -1028,7 +1037,7 @@ public:
                 if (!child || child->isTextNode() || !laidOut(*child)) {
                     continue;
                 }
-                const ComputedStyle cs = resolver_.resolve(*child);
+                const ComputedStyle cs = resolveStyle(*child);
                 if (cs.display == ComputedStyle::None || !cs.visible ||
                     isFloated(cs) || cs.position == ComputedStyle::Absolute ||
                     cs.position == ComputedStyle::Fixed || !isBlockLevel(cs)) {
@@ -1059,7 +1068,7 @@ public:
             if (!laidOut(*child)) {
                 continue;
             }
-            const ComputedStyle cs = resolver_.resolve(*child);
+            const ComputedStyle cs = resolveStyle(*child);
             if (cs.display == ComputedStyle::None || !cs.visible ||
                 isFloated(cs) || cs.position == ComputedStyle::Absolute ||
                 cs.position == ComputedStyle::Fixed) {
@@ -1095,7 +1104,7 @@ public:
             if (!child || child->isTextNode() || !laidOut(*child)) {
                 continue;
             }
-            const ComputedStyle cs = resolver_.resolve(*child);
+            const ComputedStyle cs = resolveStyle(*child);
             if (cs.display == ComputedStyle::None || !cs.visible ||
                 isFloated(cs) || cs.position == ComputedStyle::Absolute ||
                 cs.position == ComputedStyle::Fixed) {
@@ -1173,7 +1182,7 @@ public:
             if (!laidOut(*child)) {
                 continue;
             }
-            const ComputedStyle cs = resolver_.resolve(*child);
+            const ComputedStyle cs = resolveStyle(*child);
             if (cs.display == ComputedStyle::None || !cs.visible) {
                 continue;
             }
@@ -1197,7 +1206,7 @@ public:
         // width. Auto margins still resolve against the containing block, so keep
         // the offered width for that decision.
         const float containingWidth = availableWidth;
-        ComputedStyle s = resolver_.resolve(el);
+        ComputedStyle s = resolveStyle(el);
         applyTextAreaSize(el, s);
         applySelectSize(el, s);
         applyMeterProgressSize(el, s);
@@ -1296,6 +1305,12 @@ public:
                                              contentWidth, collapsible);
         cbOwner_ = savedOwner;
 
+        if (box.height <= 0.0f && s.height.isAuto() && s.isVerticalWriting() &&
+            verticalStretchHeight_ > 0.0f) {
+            contentHeight = std::max(
+                contentHeight,
+                std::max(0.0f, verticalStretchHeight_ - box.verticalChrome()));
+        }
         if (box.height > 0.0f) {
             contentHeight = box.height;
         } else if (s.aspectRatio() > 0.0f && contentWidth > 0.0f && s.height.isAuto()) {
@@ -1396,7 +1411,7 @@ public:
             }
             // Only a genuinely inline box fails to be a block container; an
             // inline-block, inline-flex or inline-grid still boxes its children.
-            const ComputedStyle as = resolver_.resolve(*a);
+            const ComputedStyle as = resolveStyle(*a);
             if (as.display == ComputedStyle::None || as.display == ComputedStyle::Inline) {
                 continue;
             }
@@ -1413,7 +1428,7 @@ public:
             if (!a->isVisual()) {
                 continue;
             }
-            const ComputedStyle as = resolver_.resolve(*a);
+            const ComputedStyle as = resolveStyle(*a);
             const auto overflow = vertical ? as.overflowY : as.overflowX;
             if (as.display != ComputedStyle::None && overflow != ComputedStyle::Visible) {
                 return a;
@@ -1521,7 +1536,7 @@ public:
             return {0.0f, 0.0f, viewportWidth_, viewportHeight_};
         }
         Element& owner = *item.owner;
-        const UsedBox chrome = usedBox(resolver_.resolve(owner), owner.layoutWidth());
+        const UsedBox chrome = usedBox(resolveStyle(owner), owner.layoutWidth());
         const float insetX = chrome.borderWidth.left + chrome.padding.left;
         const float insetY = chrome.borderWidth.top + chrome.padding.top;
         return {owner.layoutX() + insetX,
@@ -1552,7 +1567,7 @@ public:
     }
 
     void placeAbsolute(Element& el, const Box& cb) {
-        const ComputedStyle s = resolver_.resolve(el);
+        const ComputedStyle s = resolveStyle(el);
         const float em = s.fontSize;
         const float rem = resolver_.rootFontSize();
         const UsedBox box = usedBox(s, cb.width);
@@ -1713,6 +1728,14 @@ private:
     // their line boxes wrap around the floats.
     FloatContext* floats_ = nullptr;
 
+    // A fallback from an unsupported vertical formatting context lays its
+    // subtree out horizontally. The flag is saved and restored by the caller.
+    bool suppressWritingMode_ = false;
+    // The inline size offered by a vertical block container to its children,
+    // and the inline size a child should stretch its auto block size to.
+    float verticalLineLength_ = 0.0f;
+    float verticalStretchHeight_ = 0.0f;
+
     bool laidOut(Element& el) const {
         auto found = laidOutCache_.find(&el);
         if (found != laidOutCache_.end()) {
@@ -1720,7 +1743,7 @@ private:
         }
         bool result = false;
         if (el.isVisual()) {
-            const ComputedStyle cs = resolver_.resolve(el);
+            const ComputedStyle cs = resolveStyle(el);
             result = cs.display != ComputedStyle::None && cs.visible;
         }
         laidOutCache_.emplace(&el, result);
@@ -1730,7 +1753,7 @@ private:
     bool hasBlockChild(Element& el) const {
         for (const auto& child : el.children()) {
             if (child && !child->isTextNode() && laidOut(*child)) {
-                const ComputedStyle cs = resolver_.resolve(*child);
+                const ComputedStyle cs = resolveStyle(*child);
                 // A floated child is taken out of flow, so it does not force the
                 // container into block layout; it is placed while its siblings flow.
                 if (isBlockLevel(cs) && !isFloated(cs)) {
@@ -1749,7 +1772,7 @@ private:
         bool result = false;
         for (const auto& child : el.children()) {
             if (child && !child->isTextNode() && laidOut(*child) &&
-                isFloated(resolver_.resolve(*child))) {
+                isFloated(resolveStyle(*child))) {
                 result = true;
                 break;
             }
@@ -1866,7 +1889,7 @@ private:
                 if (!child || child->isTextNode() || !laidOut(*child)) {
                     continue;
                 }
-                const ComputedStyle childStyle = resolver_.resolve(*child);
+                const ComputedStyle childStyle = resolveStyle(*child);
                 if (isFloated(childStyle)) {
                     continue;
                 }
@@ -1895,7 +1918,7 @@ private:
             if (!child || child->isTextNode() || !laidOut(*child)) {
                 continue;
             }
-            const ComputedStyle cs = resolver_.resolve(*child);
+            const ComputedStyle cs = resolveStyle(*child);
             if (isFloated(cs)) {
                 // A float takes no flow space; it sits beside whatever follows.
                 if (ctx) {
@@ -1943,7 +1966,7 @@ private:
     // this writes is discarded: run() repeats it at the real width.
     float probeWidth(Element& el, const UsedBox& box) {
         float width = 0.0f;
-        layoutContents(el, resolver_.resolve(el), box, kUnbounded, 0.0f, 0.0f, width);
+        layoutContents(el, resolveStyle(el), box, kUnbounded, 0.0f, 0.0f, width);
         return width;
     }
 
@@ -2001,7 +2024,7 @@ private:
             if (!child || child->isTextNode() || !laidOut(*child)) {
                 continue;
             }
-            const ComputedStyle cs = resolver_.resolve(*child);
+            const ComputedStyle cs = resolveStyle(*child);
             if (cs.display == ComputedStyle::None || !cs.visible ||
                 cs.position == ComputedStyle::Absolute ||
                 cs.position == ComputedStyle::Fixed) {
@@ -2041,7 +2064,7 @@ private:
                 if (!child || child->isTextNode() || !laidOut(*child)) {
                     continue;
                 }
-                const ComputedStyle cs = resolver_.resolve(*child);
+                const ComputedStyle cs = resolveStyle(*child);
                 if (!isBlockLevel(cs) || isFloated(cs)) {
                     continue;
                 }
@@ -2087,6 +2110,11 @@ private:
         float width = 0.0f;
         float height = layoutContents(el, sized, box, availableWidth, contentX, contentY, width);
         cbOwner_ = savedOwner;
+        if (box.height <= 0.0f && sized.height.isAuto() && sized.isVerticalWriting() &&
+            verticalStretchHeight_ > 0.0f) {
+            height = std::max(
+                height, std::max(0.0f, verticalStretchHeight_ - box.verticalChrome()));
+        }
         if (box.height > 0.0f) {
             height = box.height;
         }
@@ -2142,6 +2170,25 @@ private:
     float layoutFlowContents(Element& el, const ComputedStyle& s, const UsedBox& box,
                              float availableWidth, float contentX, float contentY,
                              float& outWidth, bool allowParentChild) {
+        if (s.isVerticalWriting()) {
+            if (canLayoutVertically(el, s)) {
+                return layoutVerticalFlowContents(el, s, box, availableWidth, contentX,
+                                                  contentY, outWidth);
+            }
+            // Mixed block/inline content, floats, atomic inline boxes, and form
+            // controls keep the established horizontal flow. Suppress the
+            // inherited vertical mode for the subtree so it reads normally
+            // instead of half-rotating its text.
+            const bool savedSuppress = suppressWritingMode_;
+            suppressWritingMode_ = true;
+            ComputedStyle horizontal = s;
+            horizontal.writingMode = ComputedStyle::WritingMode::HorizontalTB;
+            const float height =
+                layoutFlowContents(el, horizontal, box, availableWidth, contentX, contentY,
+                                   outWidth, allowParentChild);
+            suppressWritingMode_ = savedSuppress;
+            return height;
+        }
         // A container that declares floats owns a context for them; in-flow
         // descendants inherit it so their lines wrap beside the floats. A
         // container without floats simply passes the ancestor's context through.
@@ -2220,7 +2267,7 @@ private:
             if (!child || child->isTextNode() || !laidOut(*child)) {
                 continue;
             }
-            const ComputedStyle cs = resolver_.resolve(*child);
+            const ComputedStyle cs = resolveStyle(*child);
             if (isFloated(cs) || cs.columnSpan == ComputedStyle::ColumnSpan::All) {
                 fallback = true;
                 break;
@@ -2301,7 +2348,7 @@ private:
                 if (!child || child->isTextNode() || !laidOut(*child)) {
                     continue;
                 }
-                const ComputedStyle cs = resolver_.resolve(*child);
+                const ComputedStyle cs = resolveStyle(*child);
                 if (cs.display == ComputedStyle::None || !cs.visible ||
                     cs.position == ComputedStyle::Absolute ||
                     cs.position == ComputedStyle::Fixed || isFloated(cs) ||
@@ -2358,7 +2405,7 @@ private:
                 if (!child || child->isTextNode() || !laidOut(*child)) {
                     continue;
                 }
-                const ComputedStyle cs = resolver_.resolve(*child);
+                const ComputedStyle cs = resolveStyle(*child);
                 if (cs.display == ComputedStyle::None || !cs.visible ||
                     cs.display == ComputedStyle::Inline || isFloated(cs) ||
                     cs.position == ComputedStyle::Absolute ||
@@ -2589,7 +2636,7 @@ private:
         std::vector<std::pair<int, Element*>> ordered;
         for (const auto& child : el.children()) {
             if (child && !child->isTextNode() && laidOut(*child)) {
-                ordered.emplace_back(resolver_.resolve(*child).order, child.get());
+                ordered.emplace_back(resolveStyle(*child).order, child.get());
             }
         }
         std::stable_sort(ordered.begin(), ordered.end(),
@@ -2630,7 +2677,7 @@ private:
         for (Element* child : flexChildren(el)) {
             FlexItem item;
             item.el = child;
-            item.style = resolver_.resolve(*child);
+            item.style = resolveStyle(*child);
             item.box = usedBox(item.style, row ? availableWidth : viewportHeight_);
             items.push_back(item);
         }
@@ -3364,7 +3411,7 @@ private:
         std::vector<bool> hasExplicitRow(children.size(), false);
 
         for (std::size_t i = 0; i < children.size(); ++i) {
-            const ComputedStyle cs = resolver_.resolve(*children[i]);
+            const ComputedStyle cs = resolveStyle(*children[i]);
             const GridPlacement placement = placementFor(cs);
             cSpan[i] = std::min<int>(static_cast<int>(columnCount),
                                      std::max(1, placement.colSpan));
@@ -3688,7 +3735,7 @@ private:
         for (std::size_t i = 0; i < children.size(); ++i) {
             const std::size_t col = itemCol[i];
             const std::size_t row = itemRow[i];
-            ComputedStyle sized = resolver_.resolve(*children[i]);
+            ComputedStyle sized = resolveStyle(*children[i]);
             const ComputedStyle::FlexAlign justify =
                 sized.justifySelf != ComputedStyle::AlignStretch ? sized.justifySelf
                                                                  : s.justifyItems;
@@ -3786,7 +3833,7 @@ private:
             if (rSpan[i] <= 1) {
                 continue;
             }
-            ComputedStyle cs2 = resolver_.resolve(*children[i]);
+            ComputedStyle cs2 = resolveStyle(*children[i]);
             const ComputedStyle::FlexAlign align2 =
                 cs2.alignSelf != ComputedStyle::AlignStretch ? cs2.alignSelf : s.alignItems;
             if (align2 != ComputedStyle::AlignStretch) {
@@ -3808,7 +3855,7 @@ private:
         }
         for (std::size_t i = 0; i < children.size(); ++i) {
             const std::size_t row = itemRow[i];
-            const ComputedStyle cs = resolver_.resolve(*children[i]);
+            const ComputedStyle cs = resolveStyle(*children[i]);
             const ComputedStyle::FlexAlign align =
                 cs.alignSelf != ComputedStyle::AlignStretch ? cs.alignSelf : s.alignItems;
             // The block an item may align inside is every row it spans, gaps
@@ -3887,15 +3934,15 @@ private:
             Row row;
             row.el = rowEl;
             row.group = groupEl;
-            row.style = resolver_.resolve(*rowEl);
+            row.style = resolveStyle(*rowEl);
             if (groupEl) {
-                row.groupStyle = resolver_.resolve(*groupEl);
+                row.groupStyle = resolveStyle(*groupEl);
             }
             for (const auto& child : rowEl->children()) {
                 if (!child || child->isTextNode() || !laidOut(*child)) {
                     continue;
                 }
-                const ComputedStyle cs = resolver_.resolve(*child);
+                const ComputedStyle cs = resolveStyle(*child);
                 if (!cs.isTableCell()) {
                     continue;
                 }
@@ -3915,7 +3962,7 @@ private:
             if (!child || child->isTextNode()) {
                 continue;
             }
-            const ComputedStyle cs = resolver_.resolve(*child);
+            const ComputedStyle cs = resolveStyle(*child);
             if (cs.display == ComputedStyle::None || !cs.visible) {
                 continue;
             }
@@ -3928,7 +3975,7 @@ private:
                     if (!gc || gc->isTextNode()) {
                         continue;
                     }
-                    if (resolver_.resolve(*gc).isTableRow()) {
+                    if (resolveStyle(*gc).isTableRow()) {
                         collectRow(gc.get(), child.get());
                     }
                 }
@@ -3980,7 +4027,7 @@ private:
             }
         };
         auto addCol = [&](Element& colEl, float inherited) {
-            const ComputedStyle cs = resolver_.resolve(colEl);
+            const ComputedStyle cs = resolveStyle(colEl);
             if (cs.display == ComputedStyle::None) {
                 return;
             }
@@ -3994,7 +4041,7 @@ private:
                 continue;
             }
             if (child->tag() == "colgroup") {
-                const ComputedStyle groupStyle = resolver_.resolve(*child);
+                const ComputedStyle groupStyle = resolveStyle(*child);
                 if (groupStyle.display == ComputedStyle::None) {
                     continue;
                 }
@@ -4511,7 +4558,7 @@ private:
         // A caption spans the table's width and sits above or below the rows
         // depending on `caption-side`.
         auto layCaption = [&](Element* caption, float atY) {
-            const ComputedStyle cs = resolver_.resolve(*caption);
+            const ComputedStyle cs = resolveStyle(*caption);
             runWith(*caption, cs, contentWidth, contentX, atY);
             const UsedBox captionBox = usedBox(cs, contentWidth);
             return captionBox.margin.top + caption->layoutHeight() + captionBox.margin.bottom;
@@ -4961,6 +5008,15 @@ private:
             bottom_ = std::max(bottom_, boxBottom);
         }
 
+        // Bands of the lines the pass produced, for vertical writing modes.
+        // Each entry is the line's top and its final line-height, in the
+        // container's coordinate space.
+        struct LineBand {
+            float top = 0.0f;
+            float height = 0.0f;
+        };
+        const std::vector<LineBand>& lineBands() const { return lineBands_; }
+
         // Reorders one finished line's runs into visual order (positions only;
         // the vector stays logical so caret mapping keeps working). Pure LTR
         // lines return untouched. Levels come from FriBiDi over the joined
@@ -5182,6 +5238,7 @@ private:
             reorderBidiLine();
             distributeLine(false);
             ++linesCommitted_;
+            lineBands_.push_back({originY_ + cursorY_, lineHeight_});
             if (lineClamp_ > 0 && linesCommitted_ >= lineClamp_) {
                 // The line just finished is the last allowed: end it with an
                 // ellipsis and swallow everything after. finish() takes the
@@ -5207,6 +5264,9 @@ private:
             }
             reorderBidiLine();
             distributeLine(true);
+            if (lineHasContent_ && !clamped_) {
+                lineBands_.push_back({originY_ + cursorY_, lineHeight_});
+            }
         }
 
         // Ends the last allowed line with an ellipsis, dropping whole tail
@@ -6035,6 +6095,7 @@ private:
         bool breakAllowed_ = false;
         bool ellipsisAdded_ = false;
         std::size_t lineRunStartIndex_ = 0;
+        std::vector<LineBand> lineBands_;
         Spacing spacing_ = spacingFor(ComputedStyle::WrapText);
         // `line-clamp`: lines committed so far, the cap (0 while probing, so
         // max-content measurement never clamps), and the clamp state. The
@@ -6117,6 +6178,251 @@ private:
             }
         }
         return inner;
+    }
+
+    // True when an inline-only vertical container can be laid out without
+    // atomic inline boxes. Out-of-flow boxes are positioned separately and do
+    // not force the fallback.
+    bool hasAtomicInlineContent(Element& el) const {
+        for (const auto& child : el.children()) {
+            if (!child || child->isTextNode() || !laidOut(*child)) {
+                continue;
+            }
+            const ComputedStyle cs = resolveStyle(*child);
+            if (cs.display == ComputedStyle::None || !cs.visible ||
+                cs.position == ComputedStyle::Absolute ||
+                cs.position == ComputedStyle::Fixed) {
+                continue;
+            }
+            if (isFloated(cs) || cs.display != ComputedStyle::Inline) {
+                return true;
+            }
+            if (hasAtomicInlineContent(*child)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool canLayoutVertically(Element& el, const ComputedStyle& s) const {
+        // Form controls need caret and hit-testing geometry that is still
+        // horizontal, so they keep the fallback rather than showing a caret in
+        // the wrong place.
+        if (el.tag() == "input" || el.tag() == "textarea" || el.tag() == "select") {
+            return false;
+        }
+        if (hasFloatChild(el)) {
+            return false;
+        }
+        if (resolver_.hasFirstLetterRules() && el.tag() != "input" &&
+            el.tag() != "textarea" && el.tag() != "select") {
+            const PseudoFont letter = resolver_.firstLetterFont(el, s);
+            if (letter.floatSet && letter.floatType != ComputedStyle::FloatNone) {
+                return false;
+            }
+        }
+        if (hasBlockChild(el)) {
+            return pureBlockFlow(el, s);
+        }
+        return !hasAtomicInlineContent(el);
+    }
+
+    // The inline size available to a vertical formatting context. A definite
+    // height wins; otherwise a vertical block parent passes its own inline
+    // size down, and the document root/body use the viewport height. Blocks
+    // with no such constraint are fit-content, which is one unwrapped column.
+    float verticalInlineLength(Element& el, const UsedBox& box) const {
+        if (box.height > 0.0f) {
+            return box.height;
+        }
+        if (verticalLineLength_ > 0.0f) {
+            return verticalLineLength_;
+        }
+        if (el.tag() == "body" || el.parent() == nullptr) {
+            return std::max(1.0f, viewportHeight_ - box.verticalChrome());
+        }
+        return kUnbounded;
+    }
+
+    float layoutVerticalFlowContents(Element& el, const ComputedStyle& s,
+                                     const UsedBox& box, float availableWidth,
+                                     float contentX, float contentY, float& outWidth) {
+        FloatContext* const savedFloats = floats_;
+        floats_ = nullptr;
+        float height = 0.0f;
+        if (hasBlockChild(el)) {
+            height = layoutVerticalBlockContainer(el, s, box, availableWidth, contentX,
+                                                  contentY, outWidth);
+        } else {
+            height = layoutVerticalInlineContainer(el, s, box, contentX, contentY, outWidth);
+        }
+        floats_ = savedFloats;
+        return height;
+    }
+
+    // Vertical inline content: the horizontal line breaker runs at the inline
+    // size (the physical height), then each finished line becomes a vertical
+    // column. That reuses wrapping, bidi order, alignment, pseudo fonts, and
+    // word metrics; the only new step is the coordinate and rotation mapping.
+    float layoutVerticalInlineContainer(Element& el, const ComputedStyle& s,
+                                        const UsedBox& box, float contentX, float contentY,
+                                        float& outWidth) {
+        const float lineLength = verticalInlineLength(el, box);
+        const std::size_t runStart = el.textRuns().size();
+
+        Flow flow(*this, el, s, metricsFor(font_, s), lineLength, contentX, contentY);
+        flow.inlineBox(el, s);
+        flow.finish();
+
+        const auto& bands = flow.lineBands();
+        float total = 0.0f;
+        for (const Flow::LineBand& band : bands) {
+            total += band.height;
+        }
+        const float contentWidth = box.width > 0.0f ? box.width : total;
+
+        float usedInline = 0.0f;
+        auto& runs = el.textRuns();
+        for (std::size_t i = runStart; i < runs.size(); ++i) {
+            Element::TextRun& run = runs[i];
+            if (bands.empty()) {
+                continue;
+            }
+            std::size_t line = 0;
+            float best = std::numeric_limits<float>::max();
+            for (std::size_t b = 0; b < bands.size(); ++b) {
+                const float d = std::fabs(run.y - bands[b].top);
+                if (d < best) {
+                    best = d;
+                    line = b;
+                }
+            }
+            const float bandWidth = bands[line].height;
+            float offset = 0.0f;
+            for (std::size_t b = 0; b < line; ++b) {
+                offset += bands[b].height;
+            }
+            const float columnX =
+                s.writingMode == ComputedStyle::WritingMode::VerticalRL
+                    ? contentX + contentWidth - offset - bandWidth
+                    : contentX + offset;
+            const float along = run.x - contentX;
+            usedInline = std::max(usedInline, along + run.width);
+
+            const float advance = run.width;
+            run.x = columnX;
+            run.y = contentY + along;
+            run.width = bandWidth;
+            run.height = advance;
+            run.rotation = 90.0f;
+        }
+
+        float contentHeight = usedInline;
+        if (box.height > 0.0f) {
+            contentHeight = box.height;
+        } else if (el.tag() == "body" || el.parent() == nullptr) {
+            contentHeight = std::max(contentHeight, lineLength);
+        }
+        outWidth = contentWidth;
+        return contentHeight;
+    }
+
+    struct VerticalChild {
+        Element* el = nullptr;
+        float outer = 0.0f;
+        float left = 0.0f;
+        float rightMargin = 0.0f;
+    };
+
+    // Pure block flow in a vertical writing mode. Direct block children stack
+    // along the block axis (right-to-left or left-to-right), while each child
+    // keeps its own inline flow. Auto-height children stretch to the container's
+    // inline size when that size is definite.
+    float layoutVerticalBlockContainer(Element& el, const ComputedStyle& s,
+                                       const UsedBox& box, float availableWidth,
+                                       float contentX, float contentY, float& outWidth) {
+        float contentHeight = box.height;
+        if (contentHeight <= 0.0f && verticalLineLength_ > 0.0f) {
+            contentHeight = verticalLineLength_;
+        }
+        if (contentHeight <= 0.0f && (el.tag() == "body" || el.parent() == nullptr)) {
+            contentHeight = std::max(1.0f, viewportHeight_ - box.verticalChrome());
+        }
+        const float offered = box.width > 0.0f ? box.width : availableWidth;
+
+        std::vector<VerticalChild> children;
+        float total = 0.0f;
+        float usedHeight = 0.0f;
+        for (const auto& childPtr : el.children()) {
+            if (!childPtr || childPtr->isTextNode() || !laidOut(*childPtr)) {
+                continue;
+            }
+            Element& child = *childPtr;
+            const ComputedStyle cs = resolveStyle(child);
+            if (cs.display == ComputedStyle::None || !cs.visible ||
+                cs.position == ComputedStyle::Absolute ||
+                cs.position == ComputedStyle::Fixed) {
+                continue;
+            }
+            if (isFloated(cs)) {
+                continue;
+            }
+            const UsedBox cb = usedBox(cs, offered);
+            const bool island = cs.isFlexContainer() || cs.isGridContainer() ||
+                                cs.isTableContainer() || cs.isMulticolContainer();
+
+            const bool savedSuppress = suppressWritingMode_;
+            const float savedLine = verticalLineLength_;
+            const float savedStretch = verticalStretchHeight_;
+            if (island) {
+                suppressWritingMode_ = true;
+            }
+            verticalLineLength_ = contentHeight > 0.0f ? contentHeight : 0.0f;
+            verticalStretchHeight_ =
+                (!island && contentHeight > 0.0f && cs.height.isAuto() &&
+                 isBlockLevel(cs))
+                    ? contentHeight
+                    : 0.0f;
+
+            run(child, offered, 0.0f, 0.0f);
+
+            suppressWritingMode_ = savedSuppress;
+            verticalLineLength_ = savedLine;
+            verticalStretchHeight_ = savedStretch;
+
+            float outer = cb.margin.left + child.layoutWidth() + cb.margin.right;
+            outer = std::max(0.0f, outer);
+            children.push_back({&child, outer, child.layoutX(), cb.margin.right});
+            total += outer;
+            usedHeight = std::max(usedHeight, child.layoutY() + child.layoutHeight() +
+                                                 std::max(0.0f, cb.margin.bottom));
+        }
+
+        const float contentWidth = box.width > 0.0f ? box.width : total;
+        float cursor = 0.0f;
+        for (const VerticalChild& placed : children) {
+            float dx = 0.0f;
+            if (s.writingMode == ComputedStyle::WritingMode::VerticalRL) {
+                // The margin box's right edge sits at the remaining block edge.
+                const float marginRight =
+                    placed.left + placed.el->layoutWidth() + placed.rightMargin;
+                dx = contentWidth - cursor - marginRight;
+            } else {
+                // The child was laid out at the local origin, so its margin
+                // box starts at zero; moving by the cursor seats it there.
+                dx = cursor;
+            }
+            if (dx != 0.0f || contentX != 0.0f || contentY != 0.0f) {
+                BlockLayout::translateSubtree(*placed.el, contentX + dx, contentY);
+            }
+            cursor += placed.outer;
+        }
+
+        if (contentHeight <= 0.0f) {
+            contentHeight = usedHeight;
+        }
+        outWidth = contentWidth;
+        return contentHeight;
     }
 
     const StyleResolver& resolver_;

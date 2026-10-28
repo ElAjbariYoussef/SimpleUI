@@ -6218,6 +6218,17 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.direction = ComputedStyle::Direction::RTL;
             s.specified |= ComputedStyle::SpecifiedDirection;
         }
+    } else if (property == "writing-mode") {
+        if (value == "horizontal-tb") {
+            s.writingMode = ComputedStyle::WritingMode::HorizontalTB;
+            s.specified |= ComputedStyle::SpecifiedWritingMode;
+        } else if (value == "vertical-rl") {
+            s.writingMode = ComputedStyle::WritingMode::VerticalRL;
+            s.specified |= ComputedStyle::SpecifiedWritingMode;
+        } else if (value == "vertical-lr") {
+            s.writingMode = ComputedStyle::WritingMode::VerticalLR;
+            s.specified |= ComputedStyle::SpecifiedWritingMode;
+        }
     } else if (property == "visibility") {
         s.visible = parseBool(value);
     } else if (property == "transition") {
@@ -8657,6 +8668,16 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "direction") {
         return style.direction == ComputedStyle::Direction::RTL ? "rtl" : "ltr";
     }
+    if (property == "writing-mode") {
+        switch (style.writingMode) {
+            case ComputedStyle::WritingMode::VerticalRL:
+                return "vertical-rl";
+            case ComputedStyle::WritingMode::VerticalLR:
+                return "vertical-lr";
+            default:
+                return "horizontal-tb";
+        }
+    }
     if (property == "quotes") {
         if (style.quotes.empty()) {
             return "none";
@@ -10196,6 +10217,7 @@ bool isInheritable(std::string_view property) {
            property == "text-decoration-color" || property == "pointer-events" ||
            property == "cursor" || property == "list-style-position" ||
            property == "quotes" || property == "caret-color" || property == "direction" ||
+           property == "writing-mode" ||
            property == "font-variant" || property == "text-align-last" ||
            property == "empty-cells" || property == "tab-size" ||
            property == "white-space" || property == "text-wrap" ||

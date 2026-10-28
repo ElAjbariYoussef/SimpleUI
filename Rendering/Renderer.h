@@ -229,6 +229,11 @@ public:
     // and `<img>` case and is worth a direct blit.
     void drawTexture(SDL_Texture* texture, const SDL_FRect& destination,
                      const SDL_FRect* source, Color tint);
+    // Draws `texture` rotated clockwise by `angle` degrees, centred in
+    // `destination`. The texture keeps its natural pixel size; `destination`
+    // only supplies the centre and is the box the run occupies for hit testing.
+    void drawTextureRotated(SDL_Texture* texture, const SDL_FRect& destination,
+                            const SDL_FRect* source, double angle, Color tint);
 
     // Clipping. Clips nest and intersect; the renderer restores them.
     void pushClip(const SDL_FRect& rect);

@@ -893,6 +893,34 @@ void Renderer::drawTexture(SDL_Texture* texture, const SDL_FRect& destination,
     }
 }
 
+void Renderer::drawTextureRotated(SDL_Texture* texture, const SDL_FRect& destination,
+                                  const SDL_FRect* source, double angle, Color tint) {
+    if (!texture || destination.w <= 0.0f || destination.h <= 0.0f || tint.a == 0) {
+        return;
+    }
+    float texW = 0.0f, texH = 0.0f;
+    SDL_GetTextureSize(texture, &texW, &texH);
+    const float width = source ? source->w : texW;
+    const float height = source ? source->h : texH;
+    if (width <= 0.0f || height <= 0.0f) {
+        return;
+    }
+    const float cx = destination.x + destination.w * 0.5f;
+    const float cy = destination.y + destination.h * 0.5f;
+    const SDL_FRect pre{cx - width * 0.5f, cy - height * 0.5f, width, height};
+    const bool modulated = !(tint == Color{255, 255, 255, 255});
+    if (modulated) {
+        SDL_SetTextureAlphaMod(texture, tint.a);
+        SDL_SetTextureColorMod(texture, tint.r, tint.g, tint.b);
+    }
+    SDL_RenderTextureRotated(renderer_, texture, source, &pre, angle, nullptr,
+                             SDL_FLIP_NONE);
+    if (modulated) {
+        SDL_SetTextureAlphaMod(texture, 255);
+        SDL_SetTextureColorMod(texture, 255, 255, 255);
+    }
+}
+
 void Renderer::pushClip(const SDL_FRect& rect) {
     clipStack_.push_back(current_);
     const SDL_Rect incoming{static_cast<int>(std::floor(rect.x)),

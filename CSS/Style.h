@@ -859,6 +859,15 @@ struct ComputedStyle {
     enum class Direction : std::uint8_t { LTR, RTL };
     Direction direction = Direction::LTR;
 
+    // Writing mode. Inherited. `vertical-rl` stacks blocks and columns from
+    // right to left; `vertical-lr` stacks them left to right. Inline content in
+    // both vertical modes advances top to bottom.
+    enum class WritingMode : std::uint8_t { HorizontalTB, VerticalRL, VerticalLR };
+    WritingMode writingMode = WritingMode::HorizontalTB;
+    bool isVerticalWriting() const noexcept {
+        return writingMode != WritingMode::HorizontalTB;
+    }
+
     // Positioning (minimal for now)
     enum Position : std::uint8_t { Static, Relative, Absolute, Fixed, Sticky };
     Position position = Static;
@@ -1242,6 +1251,7 @@ struct ComputedStyle {
         SpecifiedTextWrapMode = 1ULL << 42,
         SpecifiedTextWrapStyle = 1ULL << 43,
         SpecifiedHyphens = 1ULL << 44,
+        SpecifiedWritingMode = 1ULL << 45,
         SpecifiedScrollBehavior = 1u << 25,
         SpecifiedColorScheme = 1u << 26,
         // A marker, not a property: the element still carries the user-agent
@@ -1581,6 +1591,9 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     }
     if (!(style.specified & ComputedStyle::SpecifiedDirection)) {
         style.direction = parent.direction;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedWritingMode)) {
+        style.writingMode = parent.writingMode;
     }
     }
     if (!(style.specified & ComputedStyle::SpecifiedFontStyle)) {

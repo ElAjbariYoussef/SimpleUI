@@ -288,6 +288,9 @@ public:
         // The first `font-family` in effect where the run was laid out, so the
         // painter rasters with the face it measured with.
         std::string fontFamily;
+        // Clockwise rotation in degrees for vertical writing modes. Zero for
+        // ordinary horizontal text.
+        float rotation = 0.0f;
     };
     const std::vector<TextRun>& textRuns() const noexcept { return textRuns_; }
     std::vector<TextRun>& textRuns() noexcept { return textRuns_; }

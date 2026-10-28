@@ -9382,6 +9382,502 @@ void testMultiColumn() {
           "a plain relayout clears the used column count");
 }
 
+void testWritingModes() {
+    // Parsing, inheritance, read-back, and invalid values.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"a\"><span id=\"inh\"></span>"
+            "<span id=\"b\"></span><span id=\"c\"></span>"
+            "<span id=\"u\"></span></div>"
+            "<div id=\"d\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        Element* a = document->getElementById("a");
+        Element* inh = document->getElementById("inh");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        Element* u = document->getElementById("u");
+        Element* d = document->getElementById("d");
+        if (!a || !inh || !b || !c || !u || !d) {
+            check(false, "writing-mode elements found");
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "#a{writing-mode:vertical-rl}"
+            "#b{writing-mode:vertical-lr}"
+            "#c{writing-mode:sideways-rl;writing-mode:vertical-lr}"
+            "#u{writing-mode:unset}"
+            "#d{writing-mode:vertical-rl;writing-mode:bogus}"));
+        const ComputedStyle sa = resolver.resolve(*a);
+        const ComputedStyle si = resolver.resolve(*inh);
+        const ComputedStyle sb = resolver.resolve(*b);
+        const ComputedStyle sc = resolver.resolve(*c);
+        const ComputedStyle su = resolver.resolve(*u);
+        const ComputedStyle sd = resolver.resolve(*d);
+        check(sa.writingMode == ComputedStyle::WritingMode::VerticalRL,
+              "writing-mode parses vertical-rl");
+        check(si.writingMode == ComputedStyle::WritingMode::VerticalRL,
+              "writing-mode inherits");
+        check(su.writingMode == ComputedStyle::WritingMode::VerticalRL,
+              "unset writing-mode inherits");
+        check(sb.writingMode == ComputedStyle::WritingMode::VerticalLR,
+              "writing-mode parses vertical-lr");
+        check(sc.writingMode == ComputedStyle::WritingMode::VerticalLR,
+              "an invalid writing-mode keeps the winner");
+        check(sd.writingMode == ComputedStyle::WritingMode::VerticalRL,
+              "a later invalid writing-mode is ignored");
+        check(sui::StyleResolver::propertyValue(sa, "writing-mode") == "vertical-rl",
+              "writing-mode reads back");
+        check(sui::StyleResolver::propertyValue(ComputedStyle{}, "writing-mode") ==
+                  "horizontal-tb",
+              "writing-mode defaults to horizontal-tb");
+    }
+
+    // Vertical-rl inline content wraps at the physical height and stacks its
+    // lines right to left. With no font, a 4-char word is 32px and the line
+    // height is 19.2px.
+    {
+        auto document = parseOrNull(
+            "<sui><body>"
+            "<div id=\"vrl\">aaaa bbbb cccc dddd</div>"
+            "<div id=\"vlr\">aaaa bbbb cccc dddd</div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}"
+            "#vrl{writing-mode:vertical-rl;height:60px;font-size:16px}"
+            "#vlr{writing-mode:vertical-lr;height:60px;font-size:16px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* vrl = document->getElementById("vrl");
+        Element* vlr = document->getElementById("vlr");
+        if (!vrl || !vlr) {
+            check(false, "vertical writing elements found");
+            return;
+        }
+        const auto& rr = vrl->textRuns();
+        const auto& lr = vlr->textRuns();
+        check(rr.size() == 4, "vertical-rl wraps each word into a column");
+        checkNear(vrl->layoutWidth(), 76.8f, 0.01f,
+                  "vertical-rl auto width spans four columns");
+        checkNear(vrl->layoutHeight(), 60.0f, 0.01f,
+                  "vertical-rl keeps its definite height");
+        if (rr.size() == 4) {
+            checkNear(rr[0].x, 57.6f, 0.01f, "vertical-rl first column sits at the right");
+            checkNear(rr[1].x, 38.4f, 0.01f, "vertical-rl columns move left");
+            checkNear(rr[3].x, 0.0f, 0.01f, "vertical-rl last column sits at the left");
+            checkNear(rr[0].y, 0.0f, 0.01f, "vertical text starts at the top");
+            checkNear(rr[0].width, 19.2f, 0.01f, "a vertical run is one line band wide");
+            checkNear(rr[0].height, 32.0f, 0.01f, "a vertical run's height is its advance");
+            check(rr[0].rotation == 90.0f, "vertical text runs rotate clockwise");
+        }
+        check(lr.size() == 4, "vertical-lr wraps each word into a column");
+        checkNear(vlr->layoutWidth(), 76.8f, 0.01f,
+                  "vertical-lr auto width spans four columns");
+        if (lr.size() == 4) {
+            checkNear(lr[0].x, 0.0f, 0.01f, "vertical-lr first column sits at the left");
+            checkNear(lr[1].x, 19.2f, 0.01f, "vertical-lr columns move right");
+            checkNear(lr[3].x, 57.6f, 0.01f, "vertical-lr last column sits at the right");
+            check(lr[0].rotation == 90.0f, "vertical-lr text also rotates clockwise");
+        }
+    }
+
+    // With no definite height a vertical block is fit-content: one unwrapped
+    // column, as tall as its text.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"auto\">aaaa</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}#auto{writing-mode:vertical-rl;font-size:16px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* autoV = document->getElementById("auto");
+        if (!autoV) {
+            return;
+        }
+        checkNear(autoV->layoutWidth(), 19.2f, 0.01f,
+                  "an auto-height vertical block is one column wide");
+        checkNear(autoV->layoutHeight(), 32.0f, 0.01f,
+                  "an auto-height vertical block is as tall as its text");
+        if (!autoV->textRuns().empty()) {
+            checkNear(autoV->textRuns()[0].x, 0.0f, 0.01f,
+                      "a lone column starts at the block edge");
+        }
+    }
+
+    // `text-align` moves runs along the inline axis, which is vertical here.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"centre\">aaaa</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}#centre{writing-mode:vertical-rl;height:100px;"
+            "text-align:center;font-size:16px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* centre = document->getElementById("centre");
+        if (!centre || centre->textRuns().empty()) {
+            return;
+        }
+        checkNear(centre->textRuns()[0].y, 34.0f, 0.01f,
+                  "text-align centers vertical text along its column");
+    }
+
+    // A forced break starts a new column.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"brk\">aaaa<br>bbbb</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}#brk{writing-mode:vertical-lr;height:100px;font-size:16px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* brk = document->getElementById("brk");
+        if (!brk) {
+            return;
+        }
+        checkNear(brk->layoutWidth(), 38.4f, 0.01f,
+                  "a forced break adds a second column");
+        if (brk->textRuns().size() == 2) {
+            checkNear(brk->textRuns()[0].x, 0.0f, 0.01f,
+                      "the first broken line keeps the first column");
+            checkNear(brk->textRuns()[1].x, 19.2f, 0.01f,
+                      "the second broken line takes the next column");
+        }
+    }
+
+    // Direct block children stack along the block axis and auto-height children
+    // stretch to the container's inline size.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"blocks\">"
+            "<div id=\"b1\" style=\"width:30px;height:100px\"></div>"
+            "<div id=\"b2\" style=\"width:40px;height:100px\"></div>"
+            "<div id=\"b3\" style=\"width:50px\"></div>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}#blocks{writing-mode:vertical-rl;height:100px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* blocks = document->getElementById("blocks");
+        Element* b1 = document->getElementById("b1");
+        Element* b2 = document->getElementById("b2");
+        Element* b3 = document->getElementById("b3");
+        if (!blocks || !b1 || !b2 || !b3) {
+            return;
+        }
+        checkNear(blocks->layoutWidth(), 120.0f, 0.01f,
+                  "vertical block children add up along the block axis");
+        checkNear(b1->layoutX(), 90.0f, 0.01f,
+                  "the first vertical block child sits at the right edge");
+        checkNear(b2->layoutX(), 50.0f, 0.01f,
+                  "the second vertical block child follows leftward");
+        checkNear(b3->layoutX(), 0.0f, 0.01f,
+                  "the third vertical block child reaches the left edge");
+        checkNear(b3->layoutHeight(), 100.0f, 0.01f,
+                  "an auto-height vertical child stretches to the inline size");
+    }
+
+    // A vertical block child inherits the mode, wraps at the parent's inline
+    // size, and gets its own column width.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"parent\">"
+            "<div id=\"child\">aaaa bbbb cccc</div>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}#parent{writing-mode:vertical-rl;height:60px;font-size:16px}"
+            "#child{font-size:16px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* parent = document->getElementById("parent");
+        Element* child = document->getElementById("child");
+        if (!parent || !child) {
+            return;
+        }
+        checkNear(child->layoutHeight(), 60.0f, 0.01f,
+                  "a nested vertical child stretches to the parent inline size");
+        checkNear(child->layoutWidth(), 57.6f, 0.01f,
+                  "a nested vertical child keeps its three columns");
+        if (child->textRuns().size() == 3) {
+            checkNear(child->textRuns()[0].x, 38.4f, 0.01f,
+                      "the nested first column starts at its right edge");
+            checkNear(child->textRuns()[2].x, 0.0f, 0.01f,
+                      "the nested last column reaches its left edge");
+            check(child->textRuns()[0].rotation == 90.0f,
+                  "nested vertical text rotates");
+        }
+    }
+
+    // An auto-height vertical block container is as tall as its tallest child,
+    // and the children still stack along the block axis.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"vauto\">"
+            "<div id=\"va1\" style=\"width:20px;height:50px\"></div>"
+            "<div id=\"va2\" style=\"width:20px;height:70px\"></div>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}#vauto{writing-mode:vertical-rl}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* vauto = document->getElementById("vauto");
+        Element* va1 = document->getElementById("va1");
+        Element* va2 = document->getElementById("va2");
+        if (!vauto || !va1 || !va2) {
+            return;
+        }
+        checkNear(vauto->layoutWidth(), 40.0f, 0.01f,
+                  "an auto-height vertical block is as wide as its children");
+        checkNear(vauto->layoutHeight(), 70.0f, 0.01f,
+                  "an auto-height vertical block is as tall as its tallest child");
+        checkNear(va1->layoutX(), 20.0f, 0.01f,
+                  "the first auto-height block child starts at the right");
+        checkNear(va2->layoutX(), 0.0f, 0.01f,
+                  "the second auto-height block child follows leftward");
+    }
+
+    // vertical-lr stacks direct block children left to right.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"blockslr\">"
+            "<div id=\"l1\" style=\"width:30px;height:100px\"></div>"
+            "<div id=\"l2\" style=\"width:40px;height:100px\"></div>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}#blockslr{writing-mode:vertical-lr;height:100px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* lrBlocks = document->getElementById("blockslr");
+        Element* l1 = document->getElementById("l1");
+        Element* l2 = document->getElementById("l2");
+        if (!lrBlocks || !l1 || !l2) {
+            return;
+        }
+        checkNear(lrBlocks->layoutWidth(), 70.0f, 0.01f,
+                  "vertical-lr block children add up along the block axis");
+        checkNear(l1->layoutX(), 0.0f, 0.01f,
+                  "the first vertical-lr block child sits at the left edge");
+        checkNear(l2->layoutX(), 30.0f, 0.01f,
+                  "the second vertical-lr block child follows rightward");
+    }
+
+    // A vertical body has no definite height of its own, so its inline length
+    // is the viewport height and its single column fills the page.
+    {
+        auto document = parseOrNull("<sui><body id=\"page\">aaaa</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0;writing-mode:vertical-rl;font-size:16px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* page = document->getElementById("page");
+        if (!page) {
+            return;
+        }
+        checkNear(page->layoutWidth(), 19.2f, 0.01f,
+                  "a vertical body is one column wide");
+        checkNear(page->layoutHeight(), 600.0f, 0.01f,
+                  "a vertical body takes the viewport height");
+        if (!page->textRuns().empty()) {
+            checkNear(page->textRuns()[0].y, 0.0f, 0.01f,
+                      "vertical body text starts at the viewport top");
+            check(page->textRuns()[0].rotation == 90.0f,
+                  "vertical body text rotates");
+        }
+    }
+
+    // Flex, grid, table, and multi-column children are horizontal islands. The
+    // inherited vertical mode is suppressed inside each, and the island box
+    // itself stacks along the parent's block axis.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"islands\">"
+            "<div id=\"iflex\" style=\"display:flex;width:40px;height:20px\">"
+            "<span id=\"tf\">f</span></div>"
+            "<div id=\"igrid\" style=\"display:grid;width:40px;height:20px\">"
+            "<span id=\"tg\">g</span></div>"
+            "<div id=\"itable\" style=\"display:table;width:40px;height:20px\">"
+            "<div style=\"display:table-row\"><div id=\"ct\" "
+            "style=\"display:table-cell\">"
+            "<span id=\"tt\">t</span></div></div></div>"
+            "<div id=\"imc\" style=\"columns:2;width:40px;height:20px\">"
+            "<span id=\"tm\">m</span></div>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}#islands{writing-mode:vertical-rl;height:20px;"
+            "font-size:16px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* islands = document->getElementById("islands");
+        Element* iflex = document->getElementById("iflex");
+        Element* igrid = document->getElementById("igrid");
+        Element* itable = document->getElementById("itable");
+        Element* imc = document->getElementById("imc");
+        Element* tf = document->getElementById("tf");
+        Element* tg = document->getElementById("tg");
+        Element* tt = document->getElementById("tt");
+        Element* tm = document->getElementById("tm");
+        Element* ct = document->getElementById("ct");
+        if (!islands || !iflex || !igrid || !itable || !imc || !tf || !tg || !tt ||
+            !tm || !ct) {
+            return;
+        }
+        checkNear(islands->layoutWidth(), 160.0f, 0.01f,
+                  "four island children add up along the block axis");
+        checkNear(iflex->layoutX(), 120.0f, 0.01f,
+                  "the flex island sits at the right edge");
+        checkNear(igrid->layoutX(), 80.0f, 0.01f,
+                  "the grid island follows leftward");
+        checkNear(itable->layoutX(), 40.0f, 0.01f,
+                  "the table island follows leftward");
+        checkNear(imc->layoutX(), 0.0f, 0.01f,
+                  "the multicol island reaches the left edge");
+        check(!tf->textRuns().empty() && tf->textRuns()[0].rotation == 0.0f,
+              "flex island content stays horizontal");
+        check(!tg->textRuns().empty() && tg->textRuns()[0].rotation == 0.0f,
+              "grid island content stays horizontal");
+        check(!ct->textRuns().empty() && ct->textRuns()[0].rotation == 0.0f,
+              "table island content stays horizontal");
+        check(!imc->textRuns().empty() && imc->textRuns()[0].rotation == 0.0f,
+              "multicol island content stays horizontal");
+    }
+
+    // Mixed block and inline content, atomic inline boxes, floats, and form
+    // controls fall back to the horizontal flow instead of half-rotating.
+    {
+        auto document = parseOrNull(
+            "<sui><body>"
+            "<div id=\"mixed\"><span id=\"mixedtext\">text</span>"
+            "<div id=\"inner\">block</div></div>"
+            "<div id=\"atomic\"><span id=\"atomicbox\" style=\"display:inline-block;"
+            "width:10px;height:10px\">x</span></div>"
+            "<div id=\"control\"><input id=\"field\" value=\"abc\"></div>"
+            "<input id=\"self\" value=\"def\" style=\"writing-mode:vertical-rl\">"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}"
+            "#mixed,#atomic,#control{writing-mode:vertical-rl;height:50px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* mixed = document->getElementById("mixed");
+        Element* mixedText = document->getElementById("mixedtext");
+        Element* inner = document->getElementById("inner");
+        Element* atomic = document->getElementById("atomic");
+        Element* atomicBox = document->getElementById("atomicbox");
+        Element* control = document->getElementById("control");
+        Element* field = document->getElementById("field");
+        Element* self = document->getElementById("self");
+        if (!mixed || !mixedText || !inner || !atomic || !atomicBox || !control ||
+            !field || !self) {
+            return;
+        }
+        if (!mixedText->textRuns().empty()) {
+            check(mixedText->textRuns()[0].rotation == 0.0f,
+                  "mixed vertical content falls back to horizontal text");
+        }
+        if (!inner->textRuns().empty()) {
+            check(inner->textRuns()[0].rotation == 0.0f,
+                  "the fallback also keeps a block child horizontal");
+        }
+        if (!atomicBox->textRuns().empty()) {
+            check(atomicBox->textRuns()[0].rotation == 0.0f,
+                  "an atomic inline box forces the horizontal fallback");
+        }
+        if (!field->textRuns().empty()) {
+            check(field->textRuns()[0].rotation == 0.0f,
+                  "a form control inside vertical content stays horizontal");
+        }
+        if (!self->textRuns().empty()) {
+            check(self->textRuns()[0].rotation == 0.0f,
+                  "writing-mode on a form control itself is ignored");
+        }
+    }
+
+    // A float and a floated ::first-letter drop cap both need the horizontal
+    // flow's float placement, so the container falls back whole.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"floaty\">"
+            "<span style=\"float:left;width:20px;height:10px\"></span>aaaa</div>"
+            "<div id=\"cap\">word</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}"
+            "#floaty,#cap{writing-mode:vertical-rl;height:100px;font-size:16px}"
+            "#cap::first-letter{float:left;font-size:32px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* floaty = document->getElementById("floaty");
+        Element* cap = document->getElementById("cap");
+        if (!floaty || !cap) {
+            return;
+        }
+        if (!floaty->textRuns().empty()) {
+            check(floaty->textRuns()[0].rotation == 0.0f,
+                  "a float forces the horizontal fallback");
+        }
+        if (!cap->textRuns().empty()) {
+            check(cap->textRuns()[0].rotation == 0.0f,
+                  "a floated first letter forces the horizontal fallback");
+        }
+    }
+
+    // An explicit horizontal-tb child opts out of an inherited vertical mode.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"vparent\"><div id=\"hchild\">aaaa</div>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}#vparent{writing-mode:vertical-rl;height:100px;font-size:16px}"
+            "#hchild{writing-mode:horizontal-tb;font-size:16px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* hchild = document->getElementById("hchild");
+        if (!hchild || hchild->textRuns().empty()) {
+            return;
+        }
+        check(hchild->textRuns()[0].rotation == 0.0f,
+              "an explicit horizontal child keeps horizontal text");
+    }
+}
+
 void testTableLayout() {
     // Cells are placed side by side; a column is as wide as its widest cell and
     // a row as tall as its tallest.
@@ -15553,6 +16049,7 @@ int main() {
     testFloatsAndClear();
     testShapeOutside();
     testMultiColumn();
+    testWritingModes();
     testTableLayout();
     testImportantAndCssWideKeywords();
     testBorderWidthLonghands();
