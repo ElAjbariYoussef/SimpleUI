@@ -5018,26 +5018,122 @@ private:
         const std::vector<LineBand>& lineBands() const { return lineBands_; }
 
         // Reorders one finished line's runs into visual order (positions only;
-        // the vector stays logical so caret mapping keeps working). Pure LTR
-        // lines return untouched. Levels come from FriBiDi over the joined
-        // line text, and fribidi_reorder_line maps visual positions back to
-        // logical runs; runs then lay out from the line start (or end for an
-        // RTL base) with uniform gaps. Mixed-script runs keep printed order
-        // inside, and caret/selection stay logical approximations.
+        // the vector stays logical so caret mapping keeps working). Explicit
+        // `unicode-bidi` values wrap each group of consecutive runs that share
+        // a control in the matching Unicode embedding/isolate/override
+        // characters, so FriBiDi resolves embeddings, isolates, overrides, and
+        // first-strong isolation as one paragraph. `unicode-bidi: plaintext` on
+        // the block also resolves the line base from its first strong
+        // character. Levels come from FriBiDi over the joined line text, and
+        // fribidi_reorder_line reports where each logical glyph lands; runs
+        // then lay out from the line start with uniform gaps. Mixed-script runs
+        // keep printed order inside, override moves whole runs rather than
+        // glyphs, and caret/selection stay logical approximations.
         void reorderBidiLine() {
+            lineBaseRtl_ = style_.direction == ComputedStyle::Direction::RTL;
             auto& runs = ownerEl_.textRuns();
             if (lineRunStartIndex_ >= runs.size()) {
                 return;
             }
-            // Logical chars with their run slot; gap spaces keep neighbors honest.
+            const std::size_t first = lineRunStartIndex_;
+            const std::size_t count = runs.size() - first;
+            // A block-level `plaintext` already resolved the line base below,
+            // so its own direct runs need no FSI wrapper; an inline
+            // `plaintext` group inside an ordinary block still isolates.
+            const bool blockPlain =
+                style_.unicodeBidi == ComputedStyle::UnicodeBidi::Plaintext;
+            const auto controlOf = [blockPlain](const Element::TextRun& run) {
+                if (blockPlain &&
+                    run.unicodeBidi == ComputedStyle::UnicodeBidi::Plaintext) {
+                    return ComputedStyle::UnicodeBidi::Normal;
+                }
+                return run.unicodeBidi;
+            };
+            // Consecutive runs share one group when their control matches.
+            // `plaintext` ignores `direction` because FSI picks the direction
+            // itself; every other control needs the same direction to nest.
+            const auto sameGroup = [&controlOf](const Element::TextRun& a,
+                                                const Element::TextRun& b) {
+                const auto controlA = controlOf(a);
+                if (controlA != controlOf(b)) {
+                    return false;
+                }
+                return controlA == ComputedStyle::UnicodeBidi::Plaintext ||
+                       a.direction == b.direction;
+            };
+            const auto pushOpen = [](std::vector<FriBidiChar>& out,
+                                     std::vector<int>& slots,
+                                     ComputedStyle::UnicodeBidi ub,
+                                     ComputedStyle::Direction direction) {
+                const bool rtl = direction == ComputedStyle::Direction::RTL;
+                const auto add = [&](FriBidiChar control) {
+                    out.push_back(control);
+                    slots.push_back(-1);
+                };
+                using UB = ComputedStyle::UnicodeBidi;
+                switch (ub) {
+                    case UB::Embed:
+                        add(rtl ? FRIBIDI_CHAR_RLE : FRIBIDI_CHAR_LRE);
+                        break;
+                    case UB::Isolate:
+                        add(rtl ? FRIBIDI_CHAR_RLI : FRIBIDI_CHAR_LRI);
+                        break;
+                    case UB::BidiOverride:
+                        add(rtl ? FRIBIDI_CHAR_RLO : FRIBIDI_CHAR_LRO);
+                        break;
+                    case UB::IsolateOverride:
+                        add(rtl ? FRIBIDI_CHAR_RLI : FRIBIDI_CHAR_LRI);
+                        add(rtl ? FRIBIDI_CHAR_RLO : FRIBIDI_CHAR_LRO);
+                        break;
+                    case UB::Plaintext:
+                        add(FRIBIDI_CHAR_FSI);
+                        break;
+                    default:
+                        break;
+                }
+            };
+            const auto pushClose = [](std::vector<FriBidiChar>& out,
+                                      std::vector<int>& slots,
+                                      ComputedStyle::UnicodeBidi ub) {
+                const auto add = [&](FriBidiChar control) {
+                    out.push_back(control);
+                    slots.push_back(-1);
+                };
+                using UB = ComputedStyle::UnicodeBidi;
+                switch (ub) {
+                    case UB::Embed:
+                    case UB::BidiOverride:
+                        add(FRIBIDI_CHAR_PDF);
+                        break;
+                    case UB::Isolate:
+                        add(FRIBIDI_CHAR_PDI);
+                        break;
+                    case UB::IsolateOverride:
+                        add(FRIBIDI_CHAR_PDF);
+                        add(FRIBIDI_CHAR_PDI);
+                        break;
+                    case UB::Plaintext:
+                        add(FRIBIDI_CHAR_PDI);
+                        break;
+                    default:
+                        break;
+                }
+            };
+            // Logical chars with their run slot; gap spaces keep neighbors
+            // honest, while opening controls sit after the gap and closing
+            // controls before it, so no separator is swallowed by a group.
             std::vector<FriBidiChar> ustr;
             std::vector<int> charRun;
-            for (std::size_t k = lineRunStartIndex_; k < runs.size(); ++k) {
-                if (k > lineRunStartIndex_) {
+            for (std::size_t slot = 0; slot < count; ++slot) {
+                const auto& run = runs[first + slot];
+                if (slot > 0) {
                     ustr.push_back(' ');
                     charRun.push_back(-1);
                 }
-                const std::string& text = runs[k].text;
+                if (slot == 0 || !sameGroup(runs[first + slot - 1], run)) {
+                    pushOpen(ustr, charRun, controlOf(run), run.direction);
+                }
+                const std::string& text = run.text;
                 for (std::size_t i = 0; i < text.size();) {
                     unsigned char c = static_cast<unsigned char>(text[i]);
                     FriBidiChar cp = 0xFFFDu;
@@ -5074,7 +5170,11 @@ private:
                     }
                     i += extra + 1;
                     ustr.push_back(cp);
-                    charRun.push_back(static_cast<int>(k - lineRunStartIndex_));
+                    charRun.push_back(static_cast<int>(slot));
+                }
+                if (slot + 1 == count ||
+                    !sameGroup(run, runs[first + slot + 1])) {
+                    pushClose(ustr, charRun, controlOf(run));
                 }
             }
             if (ustr.empty()) {
@@ -5083,28 +5183,41 @@ private:
             const FriBidiStrIndex len = static_cast<FriBidiStrIndex>(ustr.size());
             std::vector<FriBidiCharType> types(static_cast<std::size_t>(len));
             fribidi_get_bidi_types(ustr.data(), len, types.data());
-            bool rtl = false;
-            for (FriBidiCharType type : types) {
-                if (type == FRIBIDI_TYPE_RTL || type == FRIBIDI_TYPE_AL) {
-                    rtl = true;
-                    break;
-                }
-            }
-            if (!rtl) {
-                return;
-            }
             // The base direction is the block's own: `rtl` flips mixed-script
             // lines even when Latin leads, and `ltr` (the default) never moves
             // runs -- first-strong guessing would flip Latin-led RTL text that
-            // CSS lays out straight.
+            // CSS lays out straight. `plaintext` opts into that first-strong
+            // guess and also drives `start`/`end` alignment, while a line with
+            // no strong character keeps the CSS direction.
             FriBidiParType base = style_.direction == ComputedStyle::Direction::RTL
                                       ? FRIBIDI_PAR_RTL
                                       : FRIBIDI_PAR_LTR;
+            if (style_.unicodeBidi == ComputedStyle::UnicodeBidi::Plaintext) {
+                const FriBidiParType strong =
+                    fribidi_get_par_direction(types.data(), len);
+                if (strong == FRIBIDI_PAR_RTL || strong == FRIBIDI_PAR_LTR) {
+                    base = strong;
+                }
+                lineBaseRtl_ = base == FRIBIDI_PAR_RTL;
+            }
             std::vector<FriBidiBracketType> brackets(static_cast<std::size_t>(len));
             fribidi_get_bracket_types(ustr.data(), len, types.data(), brackets.data());
             std::vector<FriBidiLevel> levels(static_cast<std::size_t>(len));
             if (fribidi_get_par_embedding_levels_ex(types.data(), brackets.data(), len,
                                                      &base, levels.data()) == 0) {
+                return;
+            }
+            // Only odd (right-to-left) levels reorder runs. A line of even
+            // levels keeps its logical order even inside an RTL paragraph, so
+            // leaving the positions untouched preserves its real gaps.
+            bool anyOdd = false;
+            for (FriBidiLevel level : levels) {
+                if ((level & 1) != 0) {
+                    anyOdd = true;
+                    break;
+                }
+            }
+            if (!anyOdd) {
                 return;
             }
             std::vector<FriBidiStrIndex> map(static_cast<std::size_t>(len));
@@ -5117,14 +5230,20 @@ private:
             if (reordered == 0) {
                 return;
             }
-            // Visual run order: runs by first visual appearance. Positions
-            // only; the vector stays logical.
-            const std::size_t count = runs.size() - lineRunStartIndex_;
+            // Visual run order: `map[i]` is the visual position of logical
+            // glyph `i`, so invert it to walk the line left to right and take
+            // the first appearance of each run. Positions only; the vector
+            // stays logical.
+            std::vector<FriBidiStrIndex> inverse(static_cast<std::size_t>(len));
+            for (FriBidiStrIndex i = 0; i < len; ++i) {
+                inverse[static_cast<std::size_t>(map[static_cast<std::size_t>(i)])] = i;
+            }
             std::vector<std::size_t> order;
             order.reserve(count);
             std::vector<bool> seen(count, false);
             for (FriBidiStrIndex visual = 0; visual < len; ++visual) {
-                const int slot = charRun[static_cast<std::size_t>(map[static_cast<std::size_t>(visual)])];
+                const int slot =
+                    charRun[static_cast<std::size_t>(inverse[static_cast<std::size_t>(visual)])];
                 if (slot >= 0 && !seen[static_cast<std::size_t>(slot)]) {
                     seen[static_cast<std::size_t>(slot)] = true;
                     order.push_back(static_cast<std::size_t>(slot));
@@ -5158,7 +5277,7 @@ private:
             if (lineRunStartIndex_ >= runs.size() || lineAvail_ >= kUnbounded / 2) {
                 return;
             }
-            const bool rtl = style_.direction == ComputedStyle::Direction::RTL;
+            const bool rtl = lineBaseRtl_;
             // The last line answers `text-align-last`: `auto` repeats the block
             // alignment, except a justified block starts its last line over.
             ComputedStyle::TextAlign align = style_.textAlign;
@@ -5294,7 +5413,8 @@ private:
                  originY_ + cursorY_ + verticalAlignShift(style_, &metrics_, &metrics_), ellWidth,
                  lineHeight_, metrics_.ascent, style_.fontSize, style_.color.r,
                  style_.color.g, style_.color.b, style_.color.a, style_.fontBold,
-                 style_.fontStyle != ComputedStyle::FontNormal, style_.fontFamily});
+                 style_.fontStyle != ComputedStyle::FontNormal, style_.fontFamily,
+                 0.0f, style_.direction, style_.unicodeBidi});
             penX_ = endX - originX_ - lineIndent_ + ellWidth;
         }
 
@@ -5463,7 +5583,7 @@ private:
                                  gap, lineHeight_, metrics_.ascent + ascentDelta,
                                  s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
                                  s.fontBold, s.fontStyle != ComputedStyle::FontNormal,
-                                 s.fontFamily});
+                                 s.fontFamily, 0.0f, s.direction, s.unicodeBidi});
             penX_ += gap;
             lineHasContent_ = true;
             if (firstLetterPending_ && linesCommitted_ == 0) {
@@ -5495,7 +5615,8 @@ private:
                                  metrics_.spaceWidth, lineHeight_,
                                  metrics_.ascent + ascentDelta, s.fontSize, s.color.r, s.color.g,
                                  s.color.b, s.color.a, s.fontBold,
-                                 s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
+                                 s.fontStyle != ComputedStyle::FontNormal, s.fontFamily,
+                                 0.0f, s.direction, s.unicodeBidi});
             penX_ += metrics_.spaceWidth;
             lineHasContent_ = true;
             if (firstLetterPending_ && linesCommitted_ == 0) {
@@ -5576,7 +5697,8 @@ private:
                      originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), pieceWidth,
                      lineHeight_, metrics_.ascent + ascentDelta, s.fontSize, s.color.r,
                      s.color.g, s.color.b, s.color.a, s.fontBold,
-                     s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
+                     s.fontStyle != ComputedStyle::FontNormal, s.fontFamily,
+                     0.0f, s.direction, s.unicodeBidi});
                 penX_ += space + pieceWidth;
                 lineHasContent_ = true;
                 widest_ = std::max(widest_, penX_);
@@ -5662,7 +5784,8 @@ private:
                      originY_ + cursorY_ + verticalAlignShift(s, &metrics_, &m), pieceWidth,
                      lineHeight_, metrics_.ascent + ascentDelta, s.fontSize, s.color.r,
                      s.color.g, s.color.b, s.color.a, s.fontBold,
-                     s.fontStyle != ComputedStyle::FontNormal, s.fontFamily});
+                     s.fontStyle != ComputedStyle::FontNormal, s.fontFamily,
+                     0.0f, s.direction, s.unicodeBidi});
                 penX_ += space + pieceWidth;
                 lineHasContent_ = true;
                 widest_ = std::max(widest_, penX_);
@@ -5813,7 +5936,8 @@ private:
                              letterStyle.color.g, letterStyle.color.b,
                              letterStyle.color.a, letterStyle.fontBold,
                              letterStyle.fontStyle != ComputedStyle::FontNormal,
-                             letterStyle.fontFamily});
+                             letterStyle.fontFamily, 0.0f, letterStyle.direction,
+                             letterStyle.unicodeBidi});
                         owner_.floats_->add({y, y + letterMetrics.lineHeight, x,
                                              x + letterWidth, left});
                         bottom_ = std::max(bottom_, cursorY_ + letterMetrics.lineHeight);
@@ -5837,7 +5961,8 @@ private:
                              letterStyle.color.b, letterStyle.color.a,
                              letterStyle.fontBold,
                              letterStyle.fontStyle != ComputedStyle::FontNormal,
-                             letterStyle.fontFamily});
+                             letterStyle.fontFamily, 0.0f, letterStyle.direction,
+                             letterStyle.unicodeBidi});
                         penX_ += letterWidth;
                         lineHasContent_ = true;
                         widest_ = std::max(widest_, penX_);
@@ -5972,7 +6097,10 @@ private:
                                              activeStyle->color.a, activeStyle->fontBold,
                                              activeStyle->fontStyle !=
                                                  ComputedStyle::FontNormal,
-                                             activeStyle->fontFamily});
+                                             activeStyle->fontFamily,
+                                             0.0f,
+                                             activeStyle->direction,
+                                             activeStyle->unicodeBidi});
                         penX_ += space + rWidth;
                         lineHasContent_ = true;
                         widest_ = std::max(widest_, penX_);
@@ -5992,7 +6120,8 @@ private:
                          activeStyle->color.b, activeStyle->color.a,
                          activeStyle->fontBold,
                          activeStyle->fontStyle != ComputedStyle::FontNormal,
-                         activeStyle->fontFamily});
+                         activeStyle->fontFamily, 0.0f, activeStyle->direction,
+                         activeStyle->unicodeBidi});
                     penX_ += space + ellWidth;
                     lineHasContent_ = true;
                     widest_ = std::max(widest_, penX_);
@@ -6035,7 +6164,8 @@ private:
                      activeStyle->color.g, activeStyle->color.b,
                      activeStyle->color.a, activeStyle->fontBold,
                      activeStyle->fontStyle != ComputedStyle::FontNormal,
-                     activeStyle->fontFamily});
+                     activeStyle->fontFamily, 0.0f, activeStyle->direction,
+                     activeStyle->unicodeBidi});
                 penX_ = ellWidth;
                 lineHasContent_ = true;
                 widest_ = std::max(widest_, penX_);
@@ -6052,7 +6182,8 @@ private:
                  activeStyle->fontSize, activeStyle->color.r, activeStyle->color.g,
                  activeStyle->color.b, activeStyle->color.a, activeStyle->fontBold,
                  activeStyle->fontStyle != ComputedStyle::FontNormal,
-                 activeStyle->fontFamily});
+                 activeStyle->fontFamily, 0.0f, activeStyle->direction,
+                 activeStyle->unicodeBidi});
             penX_ += space + wWidth;
             lineHasContent_ = true;
             widest_ = std::max(widest_, penX_);
@@ -6077,6 +6208,10 @@ private:
         float lineIndent_ = 0.0f;
         float lineAvail_ = 0.0f;
         bool lineHasContent_ = false;
+        // Resolved base direction of the line just finished. `plaintext`
+        // recomputes it from the line's first strong character, and
+        // `start`/`end` alignment reads this rather than the block direction.
+        bool lineBaseRtl_ = false;
         // The first formatted line still owes its first-grapheme split. Leading
         // preserved spaces or an inside marker may already have content on the
         // line, so those paths remember that the letter still follows.

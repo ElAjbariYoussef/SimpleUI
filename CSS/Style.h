@@ -859,6 +859,20 @@ struct ComputedStyle {
     enum class Direction : std::uint8_t { LTR, RTL };
     Direction direction = Direction::LTR;
 
+    // Explicit bidirectional control. Not inherited: each element opts in, and
+    // `normal` leaves the Unicode algorithm to order its inline content. Values
+    // map to the matching Unicode embedding/isolate/override controls; `plaintext`
+    // resolves the base direction from the first strong character.
+    enum class UnicodeBidi : std::uint8_t {
+        Normal,
+        Embed,
+        Isolate,
+        BidiOverride,
+        IsolateOverride,
+        Plaintext
+    };
+    UnicodeBidi unicodeBidi = UnicodeBidi::Normal;
+
     // Writing mode. Inherited. `vertical-rl` stacks blocks and columns from
     // right to left; `vertical-lr` stacks them left to right. Inline content in
     // both vertical modes advances top to bottom.

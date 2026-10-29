@@ -291,6 +291,10 @@ public:
         // Clockwise rotation in degrees for vertical writing modes. Zero for
         // ordinary horizontal text.
         float rotation = 0.0f;
+        // Bidi controls in effect where the run was laid out. The line orders
+        // runs as groups of equal `unicodeBidi`/`direction`.
+        ComputedStyle::Direction direction = ComputedStyle::Direction::LTR;
+        ComputedStyle::UnicodeBidi unicodeBidi = ComputedStyle::UnicodeBidi::Normal;
     };
     const std::vector<TextRun>& textRuns() const noexcept { return textRuns_; }
     std::vector<TextRun>& textRuns() noexcept { return textRuns_; }

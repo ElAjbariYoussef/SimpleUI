@@ -6218,6 +6218,20 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.direction = ComputedStyle::Direction::RTL;
             s.specified |= ComputedStyle::SpecifiedDirection;
         }
+    } else if (property == "unicode-bidi") {
+        if (value == "normal") {
+            s.unicodeBidi = ComputedStyle::UnicodeBidi::Normal;
+        } else if (value == "embed") {
+            s.unicodeBidi = ComputedStyle::UnicodeBidi::Embed;
+        } else if (value == "isolate") {
+            s.unicodeBidi = ComputedStyle::UnicodeBidi::Isolate;
+        } else if (value == "bidi-override") {
+            s.unicodeBidi = ComputedStyle::UnicodeBidi::BidiOverride;
+        } else if (value == "isolate-override") {
+            s.unicodeBidi = ComputedStyle::UnicodeBidi::IsolateOverride;
+        } else if (value == "plaintext") {
+            s.unicodeBidi = ComputedStyle::UnicodeBidi::Plaintext;
+        }
     } else if (property == "writing-mode") {
         if (value == "horizontal-tb") {
             s.writingMode = ComputedStyle::WritingMode::HorizontalTB;
@@ -8667,6 +8681,22 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     }
     if (property == "direction") {
         return style.direction == ComputedStyle::Direction::RTL ? "rtl" : "ltr";
+    }
+    if (property == "unicode-bidi") {
+        switch (style.unicodeBidi) {
+            case ComputedStyle::UnicodeBidi::Embed:
+                return "embed";
+            case ComputedStyle::UnicodeBidi::Isolate:
+                return "isolate";
+            case ComputedStyle::UnicodeBidi::BidiOverride:
+                return "bidi-override";
+            case ComputedStyle::UnicodeBidi::IsolateOverride:
+                return "isolate-override";
+            case ComputedStyle::UnicodeBidi::Plaintext:
+                return "plaintext";
+            default:
+                return "normal";
+        }
     }
     if (property == "writing-mode") {
         switch (style.writingMode) {

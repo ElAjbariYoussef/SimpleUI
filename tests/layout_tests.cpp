@@ -13659,6 +13659,438 @@ void testBidiOrder() {
     }
 }
 
+// Explicit `unicode-bidi`: the six keywords parse and read back, `unset`
+// resets the non-inherited property, and grouped Unicode controls reorder
+// runs around embeddings, isolates, overrides, and plaintext.
+void testUnicodeBidi() {
+    // Parsing, read-back, default, inheritance, and invalid values.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"p\">"
+            "<span id=\"inh\"></span><span id=\"embed\"></span>"
+            "<span id=\"iso\"></span><span id=\"over\"></span>"
+            "<span id=\"isoover\"></span><span id=\"plain\"></span>"
+            "<span id=\"unset\"></span><span id=\"norm\"></span>"
+            "<span id=\"bad\"></span><span id=\"child\"></span>"
+            "</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        Element* p = document->getElementById("p");
+        Element* inh = document->getElementById("inh");
+        Element* embed = document->getElementById("embed");
+        Element* iso = document->getElementById("iso");
+        Element* over = document->getElementById("over");
+        Element* isoover = document->getElementById("isoover");
+        Element* plain = document->getElementById("plain");
+        Element* unset = document->getElementById("unset");
+        Element* norm = document->getElementById("norm");
+        Element* bad = document->getElementById("bad");
+        Element* child = document->getElementById("child");
+        check(p && inh && embed && iso && over && isoover && plain && unset &&
+                  norm && bad && child,
+              "unicode-bidi elements found");
+        if (!p || !inh || !embed || !iso || !over || !isoover || !plain ||
+            !unset || !norm || !bad || !child) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "#p{unicode-bidi:isolate}"
+            "#inh{unicode-bidi:inherit}"
+            "#embed{unicode-bidi:embed}"
+            "#iso{unicode-bidi:isolate}"
+            "#over{unicode-bidi:bidi-override}"
+            "#isoover{unicode-bidi:isolate-override}"
+            "#plain{unicode-bidi:plaintext}"
+            "#unset{unicode-bidi:unset}"
+            "#norm{unicode-bidi:normal}"
+            "#bad{unicode-bidi:isolate-override;unicode-bidi:banana}"));
+        const ComputedStyle sp = resolver.resolve(*p);
+        const ComputedStyle si = resolver.resolve(*inh);
+        const ComputedStyle se = resolver.resolve(*embed);
+        const ComputedStyle sis = resolver.resolve(*iso);
+        const ComputedStyle so = resolver.resolve(*over);
+        const ComputedStyle sio = resolver.resolve(*isoover);
+        const ComputedStyle spt = resolver.resolve(*plain);
+        const ComputedStyle su = resolver.resolve(*unset);
+        const ComputedStyle sn = resolver.resolve(*norm);
+        const ComputedStyle sbad = resolver.resolve(*bad);
+        const ComputedStyle sc = resolver.resolve(*child);
+        check(sp.unicodeBidi == ComputedStyle::UnicodeBidi::Isolate,
+              "unicode-bidi parses isolate");
+        check(si.unicodeBidi == ComputedStyle::UnicodeBidi::Isolate,
+              "unicode-bidi:inherit copies the parent");
+        check(sc.unicodeBidi == ComputedStyle::UnicodeBidi::Normal,
+              "unicode-bidi is not inherited");
+        check(se.unicodeBidi == ComputedStyle::UnicodeBidi::Embed,
+              "unicode-bidi parses embed");
+        check(sis.unicodeBidi == ComputedStyle::UnicodeBidi::Isolate,
+              "unicode-bidi parses isolate on a child");
+        check(so.unicodeBidi == ComputedStyle::UnicodeBidi::BidiOverride,
+              "unicode-bidi parses bidi-override");
+        check(sio.unicodeBidi == ComputedStyle::UnicodeBidi::IsolateOverride,
+              "unicode-bidi parses isolate-override");
+        check(spt.unicodeBidi == ComputedStyle::UnicodeBidi::Plaintext,
+              "unicode-bidi parses plaintext");
+        check(su.unicodeBidi == ComputedStyle::UnicodeBidi::Normal,
+              "unset resets unicode-bidi");
+        check(sn.unicodeBidi == ComputedStyle::UnicodeBidi::Normal,
+              "unicode-bidi parses normal");
+        check(sbad.unicodeBidi == ComputedStyle::UnicodeBidi::IsolateOverride,
+              "an invalid unicode-bidi keeps the winner");
+        check(ComputedStyle{}.unicodeBidi == ComputedStyle::UnicodeBidi::Normal,
+              "unicode-bidi defaults to normal");
+        check(sui::StyleResolver::propertyValue(sp, "unicode-bidi") == "isolate",
+              "unicode-bidi reads back isolate");
+        check(sui::StyleResolver::propertyValue(se, "unicode-bidi") == "embed",
+              "unicode-bidi reads back embed");
+        check(sui::StyleResolver::propertyValue(so, "unicode-bidi") ==
+                  "bidi-override",
+              "unicode-bidi reads back bidi-override");
+        check(sui::StyleResolver::propertyValue(sio, "unicode-bidi") ==
+                  "isolate-override",
+              "unicode-bidi reads back isolate-override");
+        check(sui::StyleResolver::propertyValue(spt, "unicode-bidi") == "plaintext",
+              "unicode-bidi reads back plaintext");
+        check(sui::StyleResolver::propertyValue(ComputedStyle{}, "unicode-bidi") ==
+                  "normal",
+              "unicode-bidi reads back normal by default");
+    }
+
+    // Grouped controls: an RTL-base line reverses around an embedding but an
+    // isolate keeps its logical slot; an override reverses the whole line,
+    // while isolate-override only reverses inside its own group.
+    {
+        auto document = parseOrNull(
+            "<sui><body>"
+            "<div id=\"embed\" style=\"direction:rtl\">abc "
+            "<span style=\"direction:rtl;unicode-bidi:embed\">"
+            "\xD7\x90\xD7\x91\xD7\x92</span> def</div>"
+            "<div id=\"isolate\" style=\"direction:rtl\">abc "
+            "<span style=\"direction:rtl;unicode-bidi:isolate\">"
+            "\xD7\x90\xD7\x91\xD7\x92</span> def</div>"
+            "<div id=\"over\" style=\"direction:rtl\">abc "
+            "<span style=\"direction:rtl;unicode-bidi:bidi-override\">"
+            "one two</span> def</div>"
+            "<div id=\"isoover\" style=\"direction:rtl\">abc "
+            "<span style=\"direction:rtl;unicode-bidi:isolate-override\">"
+            "one two</span> def</div>"
+            "<div id=\"isomix\">abc "
+            "<span style=\"direction:rtl;unicode-bidi:isolate\">one "
+            "\xD7\x90\xD7\x91\xD7\x92</span> def</div>"
+            "<div id=\"ptinline\">abc "
+            "<span style=\"unicode-bidi:plaintext\">\xD7\x90\xD7\x91\xD7\x92 "
+            "def</span> ghi</div>"
+            "<div id=\"ptmerge\">abc "
+            "<span style=\"unicode-bidi:plaintext\">"
+            "\xD7\x90\xD7\x91\xD7\x92</span> "
+            "<span style=\"unicode-bidi:plaintext;direction:rtl\">def</span> "
+            "ghi</div>"
+            "<div id=\"embedltr\" style=\"direction:rtl\">abc "
+            "<span style=\"direction:ltr;unicode-bidi:embed\">"
+            "\xD7\x90\xD7\x91\xD7\x92</span> def</div>"
+            "<div id=\"isolateltr\" style=\"direction:rtl\">abc "
+            "<span style=\"direction:ltr;unicode-bidi:isolate\">one "
+            "\xD7\x90\xD7\x91\xD7\x92</span> def</div>"
+            "<div id=\"overltr\" style=\"direction:rtl\">abc "
+            "<span style=\"direction:ltr;unicode-bidi:bidi-override\">"
+            "one two</span> def</div>"
+            "<div id=\"isooverltr\" style=\"direction:rtl\">abc "
+            "<span style=\"direction:ltr;unicode-bidi:isolate-override\">"
+            "one two</span> def</div>"
+            "<div id=\"dirsplit\" style=\"direction:rtl\">abc "
+            "<span style=\"direction:rtl;unicode-bidi:embed\">"
+            "\xD7\x90\xD7\x91\xD7\x92</span> "
+            "<span style=\"direction:ltr;unicode-bidi:embed\">one</span> "
+            "def</div>"
+            "<div id=\"embedltrbase\">abc "
+            "<span style=\"direction:rtl;unicode-bidi:embed\">"
+            "\xD7\x90\xD7\x91\xD7\x92</span> def</div>"
+            "<div id=\"overltrbase\">abc "
+            "<span style=\"direction:rtl;unicode-bidi:bidi-override\">"
+            "one two</span> def</div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        Element* embed = document->getElementById("embed");
+        Element* isolate = document->getElementById("isolate");
+        Element* over = document->getElementById("over");
+        Element* isoover = document->getElementById("isoover");
+        Element* isomix = document->getElementById("isomix");
+        Element* ptinline = document->getElementById("ptinline");
+        Element* ptmerge = document->getElementById("ptmerge");
+        Element* embedltr = document->getElementById("embedltr");
+        Element* isolateltr = document->getElementById("isolateltr");
+        Element* overltr = document->getElementById("overltr");
+        Element* isooverltr = document->getElementById("isooverltr");
+        Element* dirsplit = document->getElementById("dirsplit");
+        Element* embedltrbase = document->getElementById("embedltrbase");
+        Element* overltrbase = document->getElementById("overltrbase");
+        check(embed && isolate && over && isoover && isomix && ptinline &&
+                  embedltr && isolateltr && overltr && isooverltr && dirsplit &&
+                  embedltrbase && overltrbase && ptmerge,
+              "bidi control elements found");
+        if (!embed || !isolate || !over || !isoover || !isomix || !ptinline ||
+            !embedltr || !isolateltr || !overltr || !isooverltr || !dirsplit ||
+            !embedltrbase || !overltrbase || !ptmerge) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("body{margin:0;font-size:16px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        const auto xs = [](Element& e) {
+            std::vector<float> out;
+            for (const auto& run : e.textRuns()) {
+                out.push_back(run.x);
+            }
+            return out;
+        };
+        {
+            const std::vector<float> at = xs(*embed);
+            check(at.size() == 3, "embed keeps three runs");
+            if (at.size() == 3) {
+                check(at[2] < at[1] && at[1] < at[0],
+                      "embed reverses the rtl-base run order");
+            }
+        }
+        {
+            const std::vector<float> at = xs(*isolate);
+            check(at.size() == 3, "isolate keeps three runs");
+            if (at.size() == 3) {
+                check(at[0] < at[1] && at[1] < at[2],
+                      "isolate keeps the logical run order");
+            }
+        }
+        {
+            const std::vector<float> at = xs(*over);
+            check(at.size() == 4, "bidi-override keeps four runs");
+            if (at.size() == 4) {
+                check(at[3] < at[2] && at[2] < at[1] && at[1] < at[0],
+                      "bidi-override reverses the whole rtl-base line");
+            }
+        }
+        {
+            const std::vector<float> at = xs(*isoover);
+            check(at.size() == 4, "isolate-override keeps four runs");
+            if (at.size() == 4) {
+                check(at[0] < at[2] && at[2] < at[1] && at[1] < at[3],
+                      "isolate-override contains its reversal");
+            }
+        }
+        {
+            // The Hebrew-led group shares its isolate with a Latin run: an
+            // RLI keeps `one` before the Hebrew visually, while an LRI would
+            // let the whole group read left to right.
+            const std::vector<float> at = xs(*isomix);
+            check(at.size() == 4, "a mixed isolate keeps four runs");
+            if (at.size() == 4) {
+                check(at[0] < at[2] && at[2] < at[1] && at[1] < at[3],
+                      "an rtl isolate orders its mixed group right to left");
+            }
+        }
+        {
+            // FSI resolves the span's own first-strong direction: the Hebrew
+            // run follows `def` visually even though the block is LTR.
+            const std::vector<float> at = xs(*ptinline);
+            check(at.size() == 4, "an inline plaintext span keeps four runs");
+            if (at.size() == 4) {
+                check(at[0] < at[2] && at[2] < at[1] && at[1] < at[3],
+                      "inline plaintext resolves its own rtl direction");
+            }
+        }
+        {
+            // Adjacent plaintext runs group by control alone, so two sibling
+            // spans share one FSI even when their CSS directions differ. That
+            // approximates per-element isolation without a group identity.
+            const std::vector<float> at = xs(*ptmerge);
+            check(at.size() == 4, "adjacent plaintext spans keep four runs");
+            if (at.size() == 4) {
+                check(at[0] < at[2] && at[2] < at[1] && at[1] < at[3],
+                      "adjacent plaintext spans share one isolate");
+            }
+        }
+        {
+            // The ltr arms of each control: an LRE group keeps the Hebrew in
+            // ascending order on an rtl-base line, unlike the RLE group above.
+            const std::vector<float> at = xs(*embedltr);
+            check(at.size() == 3, "an ltr embed keeps three runs");
+            if (at.size() == 3) {
+                check(at[0] < at[1] && at[1] < at[2],
+                      "an ltr embed keeps the rtl-base run order");
+            }
+        }
+        {
+            const std::vector<float> at = xs(*isolateltr);
+            check(at.size() == 4, "an ltr isolate keeps four runs");
+            if (at.size() == 4) {
+                check(at[0] < at[1] && at[1] < at[2] && at[2] < at[3],
+                      "an ltr isolate orders its mixed group left to right");
+            }
+        }
+        {
+            const std::vector<float> at = xs(*overltr);
+            check(at.size() == 4, "an ltr override keeps four runs");
+            if (at.size() == 4) {
+                check(at[0] < at[1] && at[1] < at[2] && at[2] < at[3],
+                      "an ltr override keeps the rtl-base run order");
+            }
+        }
+        {
+            const std::vector<float> at = xs(*isooverltr);
+            check(at.size() == 4, "an ltr isolate-override keeps four runs");
+            if (at.size() == 4) {
+                check(at[0] < at[1] && at[1] < at[2] && at[2] < at[3],
+                      "an ltr isolate-override contains its ltr override");
+            }
+        }
+        {
+            // Consecutive embeds with different directions nest separately:
+            // an RLE group around the Hebrew and an LRE group around `one`.
+            // Sharing one RLE group would put `one` inside the Hebrew level
+            // and flip those two runs.
+            const std::vector<float> at = xs(*dirsplit);
+            check(at.size() == 4, "adjacent embed groups keep four runs");
+            if (at.size() == 4) {
+                check(at[3] < at[2] && at[2] < at[0] && at[0] < at[1],
+                      "adjacent embeds open in their own directions");
+            }
+        }
+        {
+            // The PDF closes the embedding before `def`; dropping it (or
+            // replacing it with a PDI) leaves `def` inside the RLE level and
+            // flips it ahead of the Hebrew.
+            const std::vector<float> at = xs(*embedltrbase);
+            check(at.size() == 3, "an ltr-base embed keeps three runs");
+            if (at.size() == 3) {
+                check(at[0] < at[1] && at[1] < at[2],
+                      "an embed closes before later ltr text");
+            }
+        }
+        {
+            // Likewise the override's PDF keeps `def` un-overridden.
+            const std::vector<float> at = xs(*overltrbase);
+            check(at.size() == 4, "an ltr-base override keeps four runs");
+            if (at.size() == 4) {
+                check(at[0] < at[2] && at[2] < at[1] && at[1] < at[3],
+                      "an override closes before later ltr text");
+            }
+        }
+    }
+
+    // `plaintext` resolves the base from the first strong character of each
+    // line and applies it to `text-align:start`; a neutral line keeps the CSS
+    // direction.
+    {
+        auto document = parseOrNull(
+            "<sui><body>"
+            "<div id=\"prtl\" style=\"unicode-bidi:plaintext;text-align:start;"
+            "width:200px\">\xD7\x90\xD7\x91\xD7\x92 abc</div>"
+            "<div id=\"pltr\" style=\"unicode-bidi:plaintext;text-align:start;"
+            "width:200px\">abc \xD7\x90\xD7\x91\xD7\x92</div>"
+            "<div id=\"pnum\" style=\"unicode-bidi:plaintext;text-align:start;"
+            "width:200px\">123 456</div>"
+            "<div id=\"psole\" style=\"unicode-bidi:plaintext;text-align:start;"
+            "width:200px\">\xD7\x90\xD7\x91\xD7\x92</div>"
+            "<div id=\"pltrrtl\" style=\"unicode-bidi:plaintext;text-align:start;"
+            "width:200px;direction:rtl\">abc \xD7\x90\xD7\x91\xD7\x92</div>"
+            "<div id=\"pnumrtl\" style=\"unicode-bidi:plaintext;text-align:start;"
+            "width:200px;direction:rtl\">123 456</div>"
+            "<div id=\"pmix\" style=\"unicode-bidi:plaintext;text-align:start;"
+            "width:200px\">\xD7\x90\xD7\x91\xD7\x92 abc<br/>abc "
+            "\xD7\x90\xD7\x91\xD7\x92</div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        Element* prtl = document->getElementById("prtl");
+        Element* pltr = document->getElementById("pltr");
+        Element* pnum = document->getElementById("pnum");
+        Element* psole = document->getElementById("psole");
+        Element* pltrrtl = document->getElementById("pltrrtl");
+        Element* pnumrtl = document->getElementById("pnumrtl");
+        Element* pmix = document->getElementById("pmix");
+        check(prtl && pltr && pnum && psole && pltrrtl && pnumrtl && pmix,
+              "plaintext elements found");
+        if (!prtl || !pltr || !pnum || !psole || !pltrrtl || !pnumrtl || !pmix) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse("body{margin:0;font-size:16px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        const auto xs = [](Element& e) {
+            std::vector<float> out;
+            for (const auto& run : e.textRuns()) {
+                out.push_back(run.x);
+            }
+            return out;
+        };
+        {
+            const std::vector<float> at = xs(*prtl);
+            check(at.size() == 2, "rtl-led plaintext splits into two runs");
+            if (at.size() == 2) {
+                check(at[1] < at[0], "rtl-led plaintext flips the run order");
+                check(at[0] > 0.0f, "rtl-led plaintext starts from the right");
+            }
+        }
+        {
+            const std::vector<float> at = xs(*pltr);
+            check(at.size() == 2, "ltr-led plaintext splits into two runs");
+            if (at.size() == 2) {
+                check(at[0] < at[1], "ltr-led plaintext keeps the run order");
+                check(at[0] == 0.0f, "ltr-led plaintext starts from the left");
+            }
+        }
+        {
+            const std::vector<float> at = xs(*pnum);
+            check(at.size() == 2, "a neutral plaintext line splits into two runs");
+            if (at.size() == 2) {
+                check(at[0] < at[1] && at[0] == 0.0f,
+                      "a neutral plaintext line keeps the CSS direction");
+            }
+        }
+        {
+            // One run makes the resolved base observable: with no FSI wrapper
+            // the line is a single RTL paragraph, so `start` moves it right.
+            const std::vector<float> at = xs(*psole);
+            check(at.size() == 1, "a single-run plaintext line stays one run");
+            if (at.size() == 1) {
+                check(at[0] > 0.0f,
+                      "a single rtl plaintext line starts from the right");
+            }
+        }
+        {
+            // An LTR first strong overrides the block's rtl CSS direction.
+            const std::vector<float> at = xs(*pltrrtl);
+            check(at.size() == 2, "ltr-led rtl-block plaintext keeps two runs");
+            if (at.size() == 2) {
+                check(at[0] < at[1] && at[0] == 0.0f,
+                      "ltr first strong overrides the rtl direction");
+            }
+        }
+        {
+            // With no strong character the CSS direction still wins.
+            const std::vector<float> at = xs(*pnumrtl);
+            check(at.size() == 2, "a neutral rtl-block line splits into two runs");
+            if (at.size() == 2) {
+                check(at[1] < at[0] && at[1] > 0.0f,
+                      "a neutral plaintext line keeps the rtl direction");
+            }
+        }
+        {
+            const std::vector<float> at = xs(*pmix);
+            check(at.size() == 4, "plaintext resolves each line separately");
+            if (at.size() == 4) {
+                check(at[1] < at[0], "the rtl-led line flips its runs");
+                check(at[0] > 0.0f, "the rtl-led line starts from the right");
+                check(at[2] < at[3], "the ltr-led line keeps its runs");
+                check(at[2] == 0.0f, "the ltr-led line starts from the left");
+            }
+        }
+    }
+}
+
 // Lines distribute across their width: center and right shift runs,
 // justify spreads the leftover across the gaps (all but the last line), and
 // `start`/`end` read through `direction`. `direction` itself parses,
@@ -16198,6 +16630,7 @@ int main() {
     testCurrentColor();
     testValidationApi();
     testBidiOrder();
+    testUnicodeBidi();
     testTextAlign();
     testTextAlignLast();
     testValidationPseudos();
