@@ -4096,6 +4096,14 @@ void paintBox(Element& el, Renderer& renderer, SDL_Renderer* sdlRenderer,
                 texture, SDL_FRect{std::floor(run.x - tx), std::floor(run.y - ty),
                                    run.width, run.height},
                 nullptr, run.rotation, Color{255, 255, 255, 255});
+        } else if (run.vertical) {
+            // Upright text keeps its glyphs horizontal inside a vertical
+            // column: centre the texture in the run's band and em advance.
+            SDL_FRect dst = uprightTextDst(
+                SDL_FRect{run.x - tx, run.y - ty, run.width, run.height}, texW, texH);
+            dst.x = std::floor(dst.x);
+            dst.y = std::floor(dst.y);
+            SDL_RenderTexture(sdlRenderer, texture, nullptr, &dst);
         } else {
             const SDL_FRect dst{std::floor(run.x - tx), std::floor(run.y - ty), texW, texH};
             SDL_RenderTexture(sdlRenderer, texture, nullptr, &dst);

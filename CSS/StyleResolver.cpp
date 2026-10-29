@@ -6243,6 +6243,17 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
             s.writingMode = ComputedStyle::WritingMode::VerticalLR;
             s.specified |= ComputedStyle::SpecifiedWritingMode;
         }
+    } else if (property == "text-orientation") {
+        if (value == "mixed") {
+            s.textOrientation = ComputedStyle::TextOrientation::Mixed;
+            s.specified |= ComputedStyle::SpecifiedTextOrientation;
+        } else if (value == "upright") {
+            s.textOrientation = ComputedStyle::TextOrientation::Upright;
+            s.specified |= ComputedStyle::SpecifiedTextOrientation;
+        } else if (value == "sideways") {
+            s.textOrientation = ComputedStyle::TextOrientation::Sideways;
+            s.specified |= ComputedStyle::SpecifiedTextOrientation;
+        }
     } else if (property == "visibility") {
         s.visible = parseBool(value);
     } else if (property == "transition") {
@@ -8708,6 +8719,16 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
                 return "horizontal-tb";
         }
     }
+    if (property == "text-orientation") {
+        switch (style.textOrientation) {
+            case ComputedStyle::TextOrientation::Upright:
+                return "upright";
+            case ComputedStyle::TextOrientation::Sideways:
+                return "sideways";
+            default:
+                return "mixed";
+        }
+    }
     if (property == "quotes") {
         if (style.quotes.empty()) {
             return "none";
@@ -10247,7 +10268,7 @@ bool isInheritable(std::string_view property) {
            property == "text-decoration-color" || property == "pointer-events" ||
            property == "cursor" || property == "list-style-position" ||
            property == "quotes" || property == "caret-color" || property == "direction" ||
-           property == "writing-mode" ||
+           property == "writing-mode" || property == "text-orientation" ||
            property == "font-variant" || property == "text-align-last" ||
            property == "empty-cells" || property == "tab-size" ||
            property == "white-space" || property == "text-wrap" ||

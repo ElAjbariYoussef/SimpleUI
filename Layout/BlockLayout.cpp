@@ -196,6 +196,335 @@ float textWidth(const TextFont* font, const ComputedStyle& s, std::string_view t
     return w;
 }
 
+// --- Vertical text orientation ------------------------------------------------
+// `text-orientation` decides which graphemes stand upright in a vertical line.
+// The helpers below stay deliberately small: they cover UTF-8 decoding, the
+// combining/joiner cases a caret must not split, and the East Asian wide /
+// fullwidth ranges that browsers rotate differently from Latin text.
+
+bool decodeScalar(std::string_view text, std::size_t pos, char32_t& out,
+                  std::size_t& len) {
+    if (pos >= text.size()) {
+        return false;
+    }
+    const unsigned char c = static_cast<unsigned char>(text[pos]);
+    if (c < 0x80) {
+        out = c;
+        len = 1;
+        return true;
+    }
+    std::size_t extra = 0;
+    char32_t value = 0;
+    if ((c & 0xE0) == 0xC0) {
+        extra = 1;
+        value = c & 0x1Fu;
+    } else if ((c & 0xF0) == 0xE0) {
+        extra = 2;
+        value = c & 0x0Fu;
+    } else if ((c & 0xF8) == 0xF0) {
+        extra = 3;
+        value = c & 0x07u;
+    } else {
+        out = 0xFFFDu;
+        len = 1;
+        return false;
+    }
+    if (pos + extra >= text.size()) {
+        out = 0xFFFDu;
+        len = 1;
+        return false;
+    }
+    for (std::size_t j = 1; j <= extra; ++j) {
+        const unsigned char cc = static_cast<unsigned char>(text[pos + j]);
+        if ((cc & 0xC0) != 0x80) {
+            out = 0xFFFDu;
+            len = 1;
+            return false;
+        }
+        value = (value << 6) | (cc & 0x3Fu);
+    }
+    out = value;
+    len = extra + 1;
+    return true;
+}
+
+bool isCombiningOrJoiner(char32_t cp) {
+    // A pragmatic subset of Unicode extending and joining characters: enough
+    // for Latin marks, Arabic/Hebrew pointing, Indic vowel signs, Thai marks,
+    // variation selectors, emoji modifiers, and tag sequences.
+    return (cp >= 0x0300 && cp <= 0x036F) ||
+           (cp >= 0x0483 && cp <= 0x0489) ||
+           (cp >= 0x0591 && cp <= 0x05BD) || cp == 0x05BF ||
+           (cp >= 0x05C1 && cp <= 0x05C2) || (cp >= 0x05C4 && cp <= 0x05C5) ||
+           cp == 0x05C7 || (cp >= 0x0610 && cp <= 0x061A) ||
+           (cp >= 0x064B && cp <= 0x065F) || cp == 0x0670 ||
+           (cp >= 0x06D6 && cp <= 0x06DC) || (cp >= 0x06DF && cp <= 0x06E4) ||
+           (cp >= 0x06E7 && cp <= 0x06E8) || (cp >= 0x06EA && cp <= 0x06ED) ||
+           cp == 0x0711 || (cp >= 0x0730 && cp <= 0x074A) ||
+           (cp >= 0x07A6 && cp <= 0x07B0) || (cp >= 0x07EB && cp <= 0x07F3) ||
+           (cp >= 0x0816 && cp <= 0x082D) || (cp >= 0x0859 && cp <= 0x085B) ||
+           (cp >= 0x08D3 && cp <= 0x0903) || (cp >= 0x093A && cp <= 0x094F) ||
+           (cp >= 0x0951 && cp <= 0x0957) || (cp >= 0x0962 && cp <= 0x0963) ||
+           (cp >= 0x0981 && cp <= 0x0983) || cp == 0x09BC ||
+           (cp >= 0x09BE && cp <= 0x09CD) || cp == 0x09D7 ||
+           (cp >= 0x09E2 && cp <= 0x09E3) || (cp >= 0x0A01 && cp <= 0x0A03) ||
+           cp == 0x0A3C || (cp >= 0x0A3E && cp <= 0x0A4D) || cp == 0x0A51 ||
+           (cp >= 0x0A70 && cp <= 0x0A71) || cp == 0x0A75 ||
+           (cp >= 0x0A81 && cp <= 0x0A83) || cp == 0x0ABC ||
+           (cp >= 0x0ABE && cp <= 0x0ACD) || (cp >= 0x0AE2 && cp <= 0x0AE3) ||
+           (cp >= 0x0B01 && cp <= 0x0B03) || cp == 0x0B3C ||
+           (cp >= 0x0B3E && cp <= 0x0B4D) || (cp >= 0x0B56 && cp <= 0x0B57) ||
+           (cp >= 0x0B62 && cp <= 0x0B63) || cp == 0x0B82 ||
+           (cp >= 0x0BBE && cp <= 0x0BCD) || cp == 0x0BD7 ||
+           (cp >= 0x0C00 && cp <= 0x0C04) || (cp >= 0x0C3E && cp <= 0x0C4D) ||
+           (cp >= 0x0C55 && cp <= 0x0C56) || (cp >= 0x0C62 && cp <= 0x0C63) ||
+           (cp >= 0x0C81 && cp <= 0x0C83) || cp == 0x0CBC ||
+           (cp >= 0x0CBE && cp <= 0x0CCD) || (cp >= 0x0CD5 && cp <= 0x0CD6) ||
+           (cp >= 0x0CE2 && cp <= 0x0CE3) || (cp >= 0x0D00 && cp <= 0x0D03) ||
+           (cp >= 0x0D3B && cp <= 0x0D4D) || cp == 0x0D57 ||
+           (cp >= 0x0D62 && cp <= 0x0D63) || (cp >= 0x0D81 && cp <= 0x0D83) ||
+           cp == 0x0DCA || (cp >= 0x0DCF && cp <= 0x0DDF) || cp == 0x0E31 ||
+           (cp >= 0x0E34 && cp <= 0x0E3A) || (cp >= 0x0E47 && cp <= 0x0E4E) ||
+           cp == 0x0EB1 || (cp >= 0x0EB4 && cp <= 0x0EBC) ||
+           (cp >= 0x0EC8 && cp <= 0x0ECD) || (cp >= 0x0F18 && cp <= 0x0F19) ||
+           cp == 0x0F35 || cp == 0x0F37 || cp == 0x0F39 ||
+           (cp >= 0x0F71 && cp <= 0x0F84) || (cp >= 0x0F86 && cp <= 0x0F87) ||
+           (cp >= 0x0F8D && cp <= 0x0FBC) || cp == 0x0FC6 ||
+           (cp >= 0x102B && cp <= 0x103E) || (cp >= 0x1056 && cp <= 0x1059) ||
+           (cp >= 0x105E && cp <= 0x1060) || (cp >= 0x1062 && cp <= 0x1064) ||
+           (cp >= 0x1067 && cp <= 0x106D) || (cp >= 0x1071 && cp <= 0x1074) ||
+           (cp >= 0x1082 && cp <= 0x108D) || cp == 0x108F ||
+           (cp >= 0x109A && cp <= 0x109D) || (cp >= 0x135D && cp <= 0x135F) ||
+           (cp >= 0x1712 && cp <= 0x1714) || (cp >= 0x1732 && cp <= 0x1734) ||
+           (cp >= 0x1752 && cp <= 0x1753) || (cp >= 0x1772 && cp <= 0x1773) ||
+           (cp >= 0x17B4 && cp <= 0x17D3) || cp == 0x17DD ||
+           (cp >= 0x180B && cp <= 0x180D) || cp == 0x18A9 ||
+           (cp >= 0x1920 && cp <= 0x1922) || (cp >= 0x1927 && cp <= 0x1928) ||
+           cp == 0x1932 || (cp >= 0x1939 && cp <= 0x193B) ||
+           (cp >= 0x1A17 && cp <= 0x1A1B) || (cp >= 0x1A55 && cp <= 0x1A5E) ||
+           (cp >= 0x1A60 && cp <= 0x1A7F) || (cp >= 0x1AB0 && cp <= 0x1ABE) ||
+           (cp >= 0x1B00 && cp <= 0x1B04) || (cp >= 0x1B34 && cp <= 0x1B44) ||
+           (cp >= 0x1B6B && cp <= 0x1B73) || (cp >= 0x1B80 && cp <= 0x1B82) ||
+           (cp >= 0x1BA1 && cp <= 0x1BAD) || (cp >= 0x1BE6 && cp <= 0x1BF3) ||
+           (cp >= 0x1C24 && cp <= 0x1C37) || (cp >= 0x1CD0 && cp <= 0x1CD2) ||
+           (cp >= 0x1CD4 && cp <= 0x1CE8) || cp == 0x1CED ||
+           (cp >= 0x1CF2 && cp <= 0x1CF9) || (cp >= 0x1DC0 && cp <= 0x1DFF) ||
+           (cp >= 0x20D0 && cp <= 0x20F0) || (cp >= 0x2CEF && cp <= 0x2CF1) ||
+           cp == 0x2D7F || (cp >= 0x2DE0 && cp <= 0x2DFF) ||
+           (cp >= 0x302A && cp <= 0x302F) || (cp >= 0x3099 && cp <= 0x309A) ||
+           (cp >= 0xA66F && cp <= 0xA672) || (cp >= 0xA674 && cp <= 0xA67D) ||
+           (cp >= 0xA69E && cp <= 0xA69F) || (cp >= 0xA6F0 && cp <= 0xA6F1) ||
+           cp == 0xA802 || cp == 0xA806 || cp == 0xA80B ||
+           (cp >= 0xA823 && cp <= 0xA827) || (cp >= 0xA880 && cp <= 0xA881) ||
+           (cp >= 0xA8B4 && cp <= 0xA8C5) || (cp >= 0xA8E0 && cp <= 0xA8F1) ||
+           (cp >= 0xA926 && cp <= 0xA92D) || (cp >= 0xA947 && cp <= 0xA953) ||
+           (cp >= 0xA980 && cp <= 0xA983) || (cp >= 0xA9B3 && cp <= 0xA9C0) ||
+           cp == 0xA9E5 || (cp >= 0xAA29 && cp <= 0xAA36) ||
+           cp == 0xAA43 || (cp >= 0xAA4C && cp <= 0xAA4D) ||
+           (cp >= 0xAA7B && cp <= 0xAA7D) || (cp >= 0xAAB0 && cp <= 0xAABF) ||
+           cp == 0xAAC1 || (cp >= 0xAAEB && cp <= 0xAAEF) ||
+           (cp >= 0xAAF5 && cp <= 0xAAF6) || (cp >= 0xABE3 && cp <= 0xABEA) ||
+           (cp >= 0xABEC && cp <= 0xABED) || cp == 0xFB1E ||
+           (cp >= 0xFE00 && cp <= 0xFE0F) || (cp >= 0xFE20 && cp <= 0xFE2F) ||
+           (cp >= 0xFE33 && cp <= 0xFE34) || (cp >= 0xFE4D && cp <= 0xFE4F) ||
+           (cp >= 0xFF9E && cp <= 0xFF9F) || cp == 0x101FD || cp == 0x102E0 ||
+           (cp >= 0x10376 && cp <= 0x1037A) ||
+           (cp >= 0x10A01 && cp <= 0x10A0F) ||
+           (cp >= 0x10A38 && cp <= 0x10A3F) ||
+           (cp >= 0x10AE5 && cp <= 0x10AE6) ||
+           (cp >= 0x11000 && cp <= 0x11002) ||
+           (cp >= 0x11038 && cp <= 0x11046) ||
+           (cp >= 0x1107F && cp <= 0x11082) ||
+           (cp >= 0x110B0 && cp <= 0x110BA) ||
+           (cp >= 0x11100 && cp <= 0x11102) ||
+           (cp >= 0x11127 && cp <= 0x11134) || cp == 0x11173 ||
+           (cp >= 0x11180 && cp <= 0x11182) ||
+           (cp >= 0x111B3 && cp <= 0x111C0) ||
+           (cp >= 0x111CA && cp <= 0x111CC) ||
+           (cp >= 0x1122C && cp <= 0x11237) || cp == 0x1123E ||
+           (cp >= 0x112DF && cp <= 0x112EA) ||
+           (cp >= 0x11300 && cp <= 0x11303) ||
+           (cp >= 0x1133B && cp <= 0x1133C) ||
+           (cp >= 0x1133E && cp <= 0x1134D) || cp == 0x11357 ||
+           (cp >= 0x11362 && cp <= 0x11363) ||
+           (cp >= 0x11366 && cp <= 0x1136C) ||
+           (cp >= 0x11370 && cp <= 0x11374) ||
+           (cp >= 0x11435 && cp <= 0x11446) ||
+           (cp >= 0x114B0 && cp <= 0x114C3) ||
+           (cp >= 0x115AF && cp <= 0x115B5) ||
+           (cp >= 0x115B8 && cp <= 0x115C0) ||
+           (cp >= 0x115DC && cp <= 0x115DD) ||
+           (cp >= 0x11630 && cp <= 0x11640) ||
+           (cp >= 0x116AB && cp <= 0x116B7) ||
+           (cp >= 0x1171D && cp <= 0x1172B) ||
+           (cp >= 0x11C2F && cp <= 0x11C36) ||
+           (cp >= 0x11C38 && cp <= 0x11C3F) ||
+           (cp >= 0x16AF0 && cp <= 0x16AF4) ||
+           (cp >= 0x16B30 && cp <= 0x16B36) ||
+           (cp >= 0x16F8F && cp <= 0x16F92) ||
+           (cp >= 0x1BC9D && cp <= 0x1BC9E) ||
+           (cp >= 0x1D165 && cp <= 0x1D169) ||
+           (cp >= 0x1D16D && cp <= 0x1D172) ||
+           (cp >= 0x1D17B && cp <= 0x1D182) ||
+           (cp >= 0x1D185 && cp <= 0x1D18B) ||
+           (cp >= 0x1D1AA && cp <= 0x1D1AD) ||
+           (cp >= 0x1D242 && cp <= 0x1D244) ||
+           (cp >= 0x1DA00 && cp <= 0x1DA36) ||
+           (cp >= 0x1DA3B && cp <= 0x1DA6C) || cp == 0x1DA75 ||
+           cp == 0x1DA84 || (cp >= 0x1DA9B && cp <= 0x1DA9F) ||
+           (cp >= 0x1DAA1 && cp <= 0x1DAAF) ||
+           (cp >= 0x1E000 && cp <= 0x1E02A) ||
+           (cp >= 0x1E8D0 && cp <= 0x1E8D6) ||
+           (cp >= 0x1E944 && cp <= 0x1E94A) ||
+           (cp >= 0x1F3FB && cp <= 0x1F3FF) ||
+           (cp >= 0xE0020 && cp <= 0xE007F) ||
+           (cp >= 0xE0100 && cp <= 0xE01EF);
+}
+
+bool isRegionalIndicator(char32_t cp) {
+    return cp >= 0x1F1E6 && cp <= 0x1F1FF;
+}
+
+// One grapheme-ish cluster: a base, its combining marks and variation
+// selectors, emoji modifiers and tag sequences, a ZWJ chain, or a regional
+// indicator pair. This is a practical approximation of UAX #29, not a full
+// implementation.
+std::size_t nextGraphemeEnd(std::string_view text, std::size_t start) {
+    char32_t base = 0;
+    std::size_t len = 0;
+    if (!decodeScalar(text, start, base, len)) {
+        return std::min(start + 1, text.size());
+    }
+    std::size_t pos = start + len;
+    if (isRegionalIndicator(base)) {
+        char32_t next = 0;
+        std::size_t nextLen = 0;
+        if (pos < text.size() && decodeScalar(text, pos, next, nextLen) &&
+            isRegionalIndicator(next)) {
+            pos += nextLen;
+        }
+        return pos;
+    }
+    bool joinNext = base == 0x200D;
+    while (pos < text.size()) {
+        char32_t cp = 0;
+        std::size_t nextLen = 0;
+        if (!decodeScalar(text, pos, cp, nextLen)) {
+            break;
+        }
+        if (cp == 0x200D) {
+            pos += nextLen;
+            joinNext = true;
+            continue;
+        }
+        if (isCombiningOrJoiner(cp)) {
+            pos += nextLen;
+            joinNext = false;
+            continue;
+        }
+        if (joinNext) {
+            pos += nextLen;
+            joinNext = false;
+            continue;
+        }
+        break;
+    }
+    return pos;
+}
+
+// East Asian Wide (W) and Fullwidth (F) code points, which `mixed` keeps
+// upright. The list follows the main CJK, Hangul, kana, fullwidth, and enclosed
+// ideographic blocks rather than the full Unicode EastAsianWidth table.
+bool isEastAsianWide(char32_t cp) {
+    return (cp >= 0x1100 && cp <= 0x115F) ||
+           (cp >= 0x2E80 && cp <= 0x303E) ||
+           (cp >= 0x3041 && cp <= 0x33FF) ||
+           (cp >= 0x3400 && cp <= 0x4DBF) ||
+           (cp >= 0x4E00 && cp <= 0x9FFF) ||
+           (cp >= 0xA000 && cp <= 0xA4CF) ||
+           (cp >= 0xA960 && cp <= 0xA97F) ||
+           (cp >= 0xAC00 && cp <= 0xD7A3) ||
+           (cp >= 0xF900 && cp <= 0xFAFF) ||
+           (cp >= 0xFE10 && cp <= 0xFE19) ||
+           (cp >= 0xFE30 && cp <= 0xFE6F) ||
+           (cp >= 0xFF00 && cp <= 0xFF60) ||
+           (cp >= 0xFFE0 && cp <= 0xFFE6) ||
+           (cp >= 0x1B000 && cp <= 0x1B16F) ||
+           (cp >= 0x1F200 && cp <= 0x1F2FF) ||
+           (cp >= 0x20000 && cp <= 0x3FFFD);
+}
+
+struct OrientationPiece {
+    std::size_t begin = 0;
+    std::size_t end = 0;
+    bool upright = false;
+};
+
+std::vector<OrientationPiece> orientationPieces(
+    std::string_view text, ComputedStyle::TextOrientation mode) {
+    std::vector<OrientationPiece> pieces;
+    if (text.empty()) {
+        return pieces;
+    }
+    if (mode == ComputedStyle::TextOrientation::Sideways) {
+        pieces.push_back({0, text.size(), false});
+        return pieces;
+    }
+    if (mode == ComputedStyle::TextOrientation::Upright) {
+        for (std::size_t pos = 0; pos < text.size();) {
+            const std::size_t next = nextGraphemeEnd(text, pos);
+            pieces.push_back({pos, next, true});
+            pos = next;
+        }
+        return pieces;
+    }
+    bool have = false;
+    bool currentUpright = false;
+    std::size_t begin = 0;
+    for (std::size_t pos = 0; pos < text.size();) {
+        const std::size_t next = nextGraphemeEnd(text, pos);
+        char32_t cp = 0;
+        std::size_t len = 0;
+        decodeScalar(text, pos, cp, len);
+        const bool upright = isEastAsianWide(cp);
+        if (!have) {
+            have = true;
+            begin = pos;
+            currentUpright = upright;
+        } else if (upright != currentUpright) {
+            pieces.push_back({begin, pos, currentUpright});
+            begin = pos;
+            currentUpright = upright;
+        }
+        pos = next;
+    }
+    if (have) {
+        pieces.push_back({begin, text.size(), currentUpright});
+    }
+    return pieces;
+}
+
+// Width of a slice of an existing run. Falls back to half an em per code point
+// when no font is loaded, matching the horizontal breaker's estimate.
+float runSliceWidth(const TextFont* font, const Element::TextRun& run,
+                    std::string_view text) {
+    if (text.empty()) {
+        return 0.0f;
+    }
+    std::size_t count = 0;
+    for (unsigned char c : text) {
+        if ((c & 0xC0) != 0x80) {
+            ++count;
+        }
+    }
+    if (!font || !font->hasFont() || run.fontSize <= 0.0f) {
+        return static_cast<float>(count) * run.fontSize * 0.5f;
+    }
+    const sui::FontQuery query{run.fontFamily, run.bold ? 700 : 400, run.italic};
+    return font->measureText(query, text, run.fontSize);
+}
+
+
 bool isFloated(const ComputedStyle& s) {
     return s.floatType != ComputedStyle::FloatNone;
 }
@@ -5414,7 +5743,7 @@ private:
                  lineHeight_, metrics_.ascent, style_.fontSize, style_.color.r,
                  style_.color.g, style_.color.b, style_.color.a, style_.fontBold,
                  style_.fontStyle != ComputedStyle::FontNormal, style_.fontFamily,
-                 0.0f, style_.direction, style_.unicodeBidi});
+                 0.0f, style_.direction, style_.unicodeBidi, style_.textOrientation});
             penX_ = endX - originX_ - lineIndent_ + ellWidth;
         }
 
@@ -5583,7 +5912,7 @@ private:
                                  gap, lineHeight_, metrics_.ascent + ascentDelta,
                                  s.fontSize, s.color.r, s.color.g, s.color.b, s.color.a,
                                  s.fontBold, s.fontStyle != ComputedStyle::FontNormal,
-                                 s.fontFamily, 0.0f, s.direction, s.unicodeBidi});
+                                 s.fontFamily, 0.0f, s.direction, s.unicodeBidi, s.textOrientation});
             penX_ += gap;
             lineHasContent_ = true;
             if (firstLetterPending_ && linesCommitted_ == 0) {
@@ -5616,7 +5945,7 @@ private:
                                  metrics_.ascent + ascentDelta, s.fontSize, s.color.r, s.color.g,
                                  s.color.b, s.color.a, s.fontBold,
                                  s.fontStyle != ComputedStyle::FontNormal, s.fontFamily,
-                                 0.0f, s.direction, s.unicodeBidi});
+                                 0.0f, s.direction, s.unicodeBidi, s.textOrientation});
             penX_ += metrics_.spaceWidth;
             lineHasContent_ = true;
             if (firstLetterPending_ && linesCommitted_ == 0) {
@@ -5698,7 +6027,7 @@ private:
                      lineHeight_, metrics_.ascent + ascentDelta, s.fontSize, s.color.r,
                      s.color.g, s.color.b, s.color.a, s.fontBold,
                      s.fontStyle != ComputedStyle::FontNormal, s.fontFamily,
-                     0.0f, s.direction, s.unicodeBidi});
+                     0.0f, s.direction, s.unicodeBidi, s.textOrientation});
                 penX_ += space + pieceWidth;
                 lineHasContent_ = true;
                 widest_ = std::max(widest_, penX_);
@@ -5785,7 +6114,7 @@ private:
                      lineHeight_, metrics_.ascent + ascentDelta, s.fontSize, s.color.r,
                      s.color.g, s.color.b, s.color.a, s.fontBold,
                      s.fontStyle != ComputedStyle::FontNormal, s.fontFamily,
-                     0.0f, s.direction, s.unicodeBidi});
+                     0.0f, s.direction, s.unicodeBidi, s.textOrientation});
                 penX_ += space + pieceWidth;
                 lineHasContent_ = true;
                 widest_ = std::max(widest_, penX_);
@@ -5937,7 +6266,7 @@ private:
                              letterStyle.color.a, letterStyle.fontBold,
                              letterStyle.fontStyle != ComputedStyle::FontNormal,
                              letterStyle.fontFamily, 0.0f, letterStyle.direction,
-                             letterStyle.unicodeBidi});
+                             letterStyle.unicodeBidi, letterStyle.textOrientation});
                         owner_.floats_->add({y, y + letterMetrics.lineHeight, x,
                                              x + letterWidth, left});
                         bottom_ = std::max(bottom_, cursorY_ + letterMetrics.lineHeight);
@@ -5962,7 +6291,7 @@ private:
                              letterStyle.fontBold,
                              letterStyle.fontStyle != ComputedStyle::FontNormal,
                              letterStyle.fontFamily, 0.0f, letterStyle.direction,
-                             letterStyle.unicodeBidi});
+                             letterStyle.unicodeBidi, letterStyle.textOrientation});
                         penX_ += letterWidth;
                         lineHasContent_ = true;
                         widest_ = std::max(widest_, penX_);
@@ -6100,7 +6429,7 @@ private:
                                              activeStyle->fontFamily,
                                              0.0f,
                                              activeStyle->direction,
-                                             activeStyle->unicodeBidi});
+                                             activeStyle->unicodeBidi, activeStyle->textOrientation});
                         penX_ += space + rWidth;
                         lineHasContent_ = true;
                         widest_ = std::max(widest_, penX_);
@@ -6121,7 +6450,7 @@ private:
                          activeStyle->fontBold,
                          activeStyle->fontStyle != ComputedStyle::FontNormal,
                          activeStyle->fontFamily, 0.0f, activeStyle->direction,
-                         activeStyle->unicodeBidi});
+                         activeStyle->unicodeBidi, activeStyle->textOrientation});
                     penX_ += space + ellWidth;
                     lineHasContent_ = true;
                     widest_ = std::max(widest_, penX_);
@@ -6165,7 +6494,7 @@ private:
                      activeStyle->color.a, activeStyle->fontBold,
                      activeStyle->fontStyle != ComputedStyle::FontNormal,
                      activeStyle->fontFamily, 0.0f, activeStyle->direction,
-                     activeStyle->unicodeBidi});
+                     activeStyle->unicodeBidi, activeStyle->textOrientation});
                 penX_ = ellWidth;
                 lineHasContent_ = true;
                 widest_ = std::max(widest_, penX_);
@@ -6183,7 +6512,7 @@ private:
                  activeStyle->color.b, activeStyle->color.a, activeStyle->fontBold,
                  activeStyle->fontStyle != ComputedStyle::FontNormal,
                  activeStyle->fontFamily, 0.0f, activeStyle->direction,
-                 activeStyle->unicodeBidi});
+                 activeStyle->unicodeBidi, activeStyle->textOrientation});
             penX_ += space + wWidth;
             lineHasContent_ = true;
             widest_ = std::max(widest_, penX_);
@@ -6418,38 +6747,106 @@ private:
 
         float usedInline = 0.0f;
         auto& runs = el.textRuns();
-        for (std::size_t i = runStart; i < runs.size(); ++i) {
-            Element::TextRun& run = runs[i];
-            if (bands.empty()) {
-                continue;
+        if (!bands.empty()) {
+            const std::vector<Element::TextRun> source(
+                runs.begin() + static_cast<std::ptrdiff_t>(runStart), runs.end());
+            std::vector<std::vector<std::size_t>> lineRuns(bands.size());
+            for (std::size_t i = 0; i < source.size(); ++i) {
+                std::size_t line = 0;
+                float best = std::numeric_limits<float>::max();
+                for (std::size_t b = 0; b < bands.size(); ++b) {
+                    const float d = std::fabs(source[i].y - bands[b].top);
+                    if (d < best) {
+                        best = d;
+                        line = b;
+                    }
+                }
+                lineRuns[line].push_back(i);
             }
-            std::size_t line = 0;
-            float best = std::numeric_limits<float>::max();
-            for (std::size_t b = 0; b < bands.size(); ++b) {
-                const float d = std::fabs(run.y - bands[b].top);
-                if (d < best) {
-                    best = d;
-                    line = b;
+
+            std::vector<std::vector<Element::TextRun>> pieces(source.size());
+            for (std::size_t line = 0; line < bands.size(); ++line) {
+                auto& order = lineRuns[line];
+                if (order.empty()) {
+                    continue;
+                }
+                std::sort(order.begin(), order.end(),
+                          [&source](std::size_t a, std::size_t b) {
+                              return source[a].x < source[b].x;
+                          });
+                const float bandWidth = bands[line].height;
+                float offset = 0.0f;
+                for (std::size_t b = 0; b < line; ++b) {
+                    offset += bands[b].height;
+                }
+                const float columnX =
+                    s.writingMode == ComputedStyle::WritingMode::VerticalRL
+                        ? contentX + contentWidth - offset - bandWidth
+                        : contentX + offset;
+
+                // Runs keep their logical order in the vector but are stacked
+                // by visual position. A run's own gaps stay with it; when an
+                // upright split changes its length, later runs move by the
+                // accumulated delta instead of overlapping it.
+                float cursor = contentY + (source[order.front()].x - contentX);
+                for (std::size_t idx : order) {
+                    const Element::TextRun& run = source[idx];
+                    const float start = contentY + (run.x - contentX);
+                    if (cursor < start) {
+                        cursor = start;
+                    }
+                    for (const OrientationPiece& piece :
+                         orientationPieces(run.text, run.textOrientation)) {
+                        if (piece.upright) {
+                            for (std::size_t pos = piece.begin; pos < piece.end;) {
+                                const std::size_t next = nextGraphemeEnd(run.text, pos);
+                                Element::TextRun upright = run;
+                                upright.text = run.text.substr(pos, next - pos);
+                                const float advance =
+                                    run.fontSize > 0.0f ? run.fontSize : 0.0f;
+                                upright.x = columnX;
+                                upright.y = cursor;
+                                upright.width = bandWidth;
+                                upright.height = advance;
+                                upright.rotation = 0.0f;
+                                upright.textOrientation =
+                                    ComputedStyle::TextOrientation::Upright;
+                                upright.vertical = true;
+                                pieces[idx].push_back(std::move(upright));
+                                cursor += advance;
+                                pos = next;
+                            }
+                        } else {
+                            Element::TextRun sideways = run;
+                            sideways.text =
+                                run.text.substr(piece.begin, piece.end - piece.begin);
+                            const bool whole =
+                                piece.begin == 0 && piece.end == run.text.size();
+                            const float advance =
+                                whole ? run.width
+                                      : runSliceWidth(font_, run, sideways.text);
+                            sideways.x = columnX;
+                            sideways.y = cursor;
+                            sideways.width = bandWidth;
+                            sideways.height = advance;
+                            sideways.rotation = 90.0f;
+                            sideways.textOrientation =
+                                ComputedStyle::TextOrientation::Sideways;
+                            sideways.vertical = true;
+                            pieces[idx].push_back(std::move(sideways));
+                            cursor += advance;
+                        }
+                    }
+                }
+                usedInline = std::max(usedInline, cursor - contentY);
+            }
+
+            runs.resize(runStart);
+            for (auto& expanded : pieces) {
+                for (Element::TextRun& piece : expanded) {
+                    runs.push_back(std::move(piece));
                 }
             }
-            const float bandWidth = bands[line].height;
-            float offset = 0.0f;
-            for (std::size_t b = 0; b < line; ++b) {
-                offset += bands[b].height;
-            }
-            const float columnX =
-                s.writingMode == ComputedStyle::WritingMode::VerticalRL
-                    ? contentX + contentWidth - offset - bandWidth
-                    : contentX + offset;
-            const float along = run.x - contentX;
-            usedInline = std::max(usedInline, along + run.width);
-
-            const float advance = run.width;
-            run.x = columnX;
-            run.y = contentY + along;
-            run.width = bandWidth;
-            run.height = advance;
-            run.rotation = 90.0f;
         }
 
         float contentHeight = usedInline;

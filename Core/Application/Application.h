@@ -187,6 +187,16 @@ inline SDL_Color caretColorFor(const ComputedStyle& style) noexcept {
 SDL_FRect objectFitDst(ComputedStyle::ObjectFit fit, Length posX, Length posY, float contentW,
                        float contentH, float imageW, float imageH);
 
+// Destination of an upright glyph texture inside a vertical text run. The run
+// box is one column band wide and one em of advance tall; the glyph texture is
+// centred on both axes so the character sits on the column's centre line.
+inline SDL_FRect uprightTextDst(const SDL_FRect& run, float textureWidth,
+                                float textureHeight) noexcept {
+    return SDL_FRect{run.x + (run.w - textureWidth) * 0.5f,
+                     run.y + (run.h - textureHeight) * 0.5f,
+                     textureWidth, textureHeight};
+}
+
 // The element a `<use>` clones: the same-document `#id` its href names. Null
 // for anything else -- a missing id, an external URL, no document, or a text
 // node -- so callers paint nothing instead of guessing.

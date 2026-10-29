@@ -295,6 +295,14 @@ public:
         // runs as groups of equal `unicodeBidi`/`direction`.
         ComputedStyle::Direction direction = ComputedStyle::Direction::LTR;
         ComputedStyle::UnicodeBidi unicodeBidi = ComputedStyle::UnicodeBidi::Normal;
+        // Orientation requested where the run was laid out, so an inline span
+        // can override the inherited value. Vertical layout rewrites it to the
+        // orientation it actually used for each split piece.
+        ComputedStyle::TextOrientation textOrientation =
+            ComputedStyle::TextOrientation::Mixed;
+        // Set by vertical layout. An upright run keeps `rotation == 0` and is
+        // centred inside its column band by the painter.
+        bool vertical = false;
     };
     const std::vector<TextRun>& textRuns() const noexcept { return textRuns_; }
     std::vector<TextRun>& textRuns() noexcept { return textRuns_; }

@@ -882,6 +882,13 @@ struct ComputedStyle {
         return writingMode != WritingMode::HorizontalTB;
     }
 
+    // Orientation of glyphs inside vertical writing modes. Inherited. `mixed`
+    // keeps East Asian wide/fullwidth characters upright and rotates everything
+    // else; `upright` stacks every grapheme without rotating; `sideways` rotates
+    // whole runs. Horizontal writing modes ignore the property.
+    enum class TextOrientation : std::uint8_t { Mixed, Upright, Sideways };
+    TextOrientation textOrientation = TextOrientation::Mixed;
+
     // Positioning (minimal for now)
     enum Position : std::uint8_t { Static, Relative, Absolute, Fixed, Sticky };
     Position position = Static;
@@ -1266,6 +1273,7 @@ struct ComputedStyle {
         SpecifiedTextWrapStyle = 1ULL << 43,
         SpecifiedHyphens = 1ULL << 44,
         SpecifiedWritingMode = 1ULL << 45,
+        SpecifiedTextOrientation = 1ULL << 46,
         SpecifiedScrollBehavior = 1u << 25,
         SpecifiedColorScheme = 1u << 26,
         // A marker, not a property: the element still carries the user-agent
@@ -1608,6 +1616,9 @@ inline void inheritInto(ComputedStyle& style, const ComputedStyle& parent) noexc
     }
     if (!(style.specified & ComputedStyle::SpecifiedWritingMode)) {
         style.writingMode = parent.writingMode;
+    }
+    if (!(style.specified & ComputedStyle::SpecifiedTextOrientation)) {
+        style.textOrientation = parent.textOrientation;
     }
     }
     if (!(style.specified & ComputedStyle::SpecifiedFontStyle)) {

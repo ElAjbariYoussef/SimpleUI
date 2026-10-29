@@ -2209,6 +2209,21 @@ void testRotatedTexturePixels() {
     SDL_DestroySurface(surf);
 }
 
+void testUprightTextDst() {
+    // A 19.2px column band with a 16px em slot; an 8x19.2 glyph texture sits on
+    // the band's centre line and overlaps the em slot symmetrically.
+    const SDL_FRect run{10.0f, 20.0f, 19.2f, 16.0f};
+    const SDL_FRect dst = sui::uprightTextDst(run, 8.0f, 19.2f);
+    checkNear(dst.x, 15.6f, 0.01f, "an upright glyph centres across the band");
+    checkNear(dst.y, 18.4f, 0.01f, "an upright glyph centres in its em slot");
+    checkNear(dst.w, 8.0f, 0.01f, "an upright glyph keeps its texture width");
+    checkNear(dst.h, 19.2f, 0.01f, "an upright glyph keeps its texture height");
+    // A texture that exactly fills the slot needs no offset.
+    const SDL_FRect exact = sui::uprightTextDst(run, 19.2f, 16.0f);
+    checkNear(exact.x, 10.0f, 0.01f, "an exact-width upright glyph starts at the band");
+    checkNear(exact.y, 20.0f, 0.01f, "an exact-height upright glyph starts at the slot");
+}
+
 // A blended surface over its backdrop, per channel with source-over alpha.
 // One opaque pixel over one opaque pixel tells each mode apart.
 void testBlendImage() {
@@ -2592,6 +2607,7 @@ int main() {
     testTextOnPath();
     testBackgroundBlendPixels();
     testRotatedTexturePixels();
+    testUprightTextDst();
     testObjectFitDst();
     testColorMatrix();
     testClipCoverage();

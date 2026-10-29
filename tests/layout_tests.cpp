@@ -9878,6 +9878,269 @@ void testWritingModes() {
     }
 }
 
+void testTextOrientation() {
+    // Parsing, inheritance, read-back, and invalid values.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"a\"><span id=\"inh\"></span>"
+            "<span id=\"b\"></span><span id=\"c\"></span>"
+            "<span id=\"u\"></span></div>"
+            "<div id=\"d\"></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        Element* a = document->getElementById("a");
+        Element* inh = document->getElementById("inh");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        Element* u = document->getElementById("u");
+        Element* d = document->getElementById("d");
+        if (!a || !inh || !b || !c || !u || !d) {
+            check(false, "text-orientation elements found");
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "#a{text-orientation:upright}"
+            "#b{text-orientation:sideways}"
+            "#c{text-orientation:sideways;text-orientation:bogus}"
+            "#u{text-orientation:unset}"
+            "#d{text-orientation:upright;text-orientation:bogus}"));
+        const ComputedStyle sa = resolver.resolve(*a);
+        const ComputedStyle si = resolver.resolve(*inh);
+        const ComputedStyle sb = resolver.resolve(*b);
+        const ComputedStyle sc = resolver.resolve(*c);
+        const ComputedStyle su = resolver.resolve(*u);
+        const ComputedStyle sd = resolver.resolve(*d);
+        check(sa.textOrientation == ComputedStyle::TextOrientation::Upright,
+              "text-orientation parses upright");
+        check(si.textOrientation == ComputedStyle::TextOrientation::Upright,
+              "text-orientation inherits");
+        check(sb.textOrientation == ComputedStyle::TextOrientation::Sideways,
+              "text-orientation parses sideways");
+        check(sc.textOrientation == ComputedStyle::TextOrientation::Sideways,
+              "an invalid text-orientation keeps the winner");
+        check(su.textOrientation == ComputedStyle::TextOrientation::Upright,
+              "unset text-orientation inherits");
+        check(sd.textOrientation == ComputedStyle::TextOrientation::Upright,
+              "a later invalid text-orientation is ignored");
+        check(sui::StyleResolver::propertyValue(sa, "text-orientation") == "upright",
+              "text-orientation reads back");
+        check(sui::StyleResolver::propertyValue(ComputedStyle{}, "text-orientation") ==
+                  "mixed",
+              "text-orientation defaults to mixed");
+        check(ComputedStyle{}.textOrientation ==
+                  ComputedStyle::TextOrientation::Mixed,
+              "the default text orientation is mixed");
+    }
+
+    // `upright` stacks each grapheme as its own unrotated run, advancing by
+    // one em. With no font, the column band is the 19.2px line height.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"u\">ab</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}"
+            "#u{writing-mode:vertical-rl;text-orientation:upright;"
+            "height:100px;font-size:16px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* u = document->getElementById("u");
+        if (!u) {
+            check(false, "upright element found");
+            return;
+        }
+        const auto& runs = u->textRuns();
+        check(runs.size() == 2, "upright splits each grapheme into a run");
+        if (runs.size() == 2) {
+            check(runs[0].text == "a" && runs[1].text == "b",
+                  "upright preserves the character order");
+            check(runs[0].rotation == 0.0f && runs[1].rotation == 0.0f,
+                  "upright runs do not rotate");
+            check(runs[0].vertical && runs[1].vertical,
+                  "upright runs are marked vertical");
+            check(runs[0].textOrientation ==
+                      ComputedStyle::TextOrientation::Upright,
+                  "upright runs carry their orientation");
+            checkNear(runs[0].y, 0.0f, 0.01f, "upright text starts at the top");
+            checkNear(runs[1].y, 16.0f, 0.01f,
+                      "each upright grapheme advances one em");
+            checkNear(runs[0].height, 16.0f, 0.01f,
+                      "an upright run is one em tall");
+            checkNear(runs[0].width, 19.2f, 0.01f,
+                      "an upright run spans the column band");
+        }
+        checkNear(u->layoutWidth(), 19.2f, 0.01f,
+                  "upright auto width is one column");
+    }
+
+    // `sideways` keeps a whole run rotated, CJK included.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"s\">\xE4\xB8\xAD\xE6\x96\x87</div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}"
+            "#s{writing-mode:vertical-rl;text-orientation:sideways;"
+            "height:100px;font-size:16px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* s = document->getElementById("s");
+        if (!s) {
+            check(false, "sideways element found");
+            return;
+        }
+        const auto& runs = s->textRuns();
+        check(runs.size() == 1, "sideways keeps one rotated run");
+        if (runs.size() == 1) {
+            check(runs[0].text == "\xE4\xB8\xAD\xE6\x96\x87",
+                  "sideways preserves the run text");
+            check(runs[0].rotation == 90.0f, "sideways rotates the whole run");
+            check(runs[0].textOrientation ==
+                      ComputedStyle::TextOrientation::Sideways,
+                  "sideways runs carry their orientation");
+            checkNear(runs[0].height, 16.0f, 0.01f,
+                      "a sideways run advances by its measured width");
+            checkNear(runs[0].width, 19.2f, 0.01f,
+                      "a sideways run spans the column band");
+        }
+    }
+
+    // The default `mixed` turns East Asian wide characters upright while
+    // Latin stays sideways, splitting at the script boundary.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"m\">ab\xE4\xB8\xAD\xE6\x96\x87</div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}#m{writing-mode:vertical-rl;height:100px;font-size:16px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* m = document->getElementById("m");
+        if (!m) {
+            check(false, "mixed element found");
+            return;
+        }
+        const auto& runs = m->textRuns();
+        check(runs.size() == 3, "mixed splits Latin from upright CJK");
+        if (runs.size() == 3) {
+            check(runs[0].text == "ab" && runs[0].rotation == 90.0f,
+                  "mixed keeps Latin sideways");
+            check(runs[1].text == "\xE4\xB8\xAD" && runs[1].rotation == 0.0f,
+                  "mixed turns the first ideograph upright");
+            check(runs[2].text == "\xE6\x96\x87" && runs[2].rotation == 0.0f,
+                  "mixed turns the second ideograph upright");
+            checkNear(runs[0].y, 0.0f, 0.01f, "mixed Latin starts at the top");
+            checkNear(runs[1].y, 16.0f, 0.01f,
+                      "CJK follows the Latin advance");
+            checkNear(runs[2].y, 32.0f, 0.01f,
+                      "the second upright grapheme advances one em");
+        }
+    }
+
+    // Upright splitting keeps combining marks, emoji ZWJ chains, and surrogate
+    // pairs in one grapheme rather than slicing through their bytes.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"g\">e\xCC\x81"
+            "\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x91\xA9"
+            "\xE2\x80\x8D\xF0\x9F\x91\xA7\xE4\xB8\xAD</div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}"
+            "#g{writing-mode:vertical-rl;text-orientation:upright;"
+            "height:200px;font-size:16px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* g = document->getElementById("g");
+        if (!g) {
+            check(false, "grapheme element found");
+            return;
+        }
+        const auto& runs = g->textRuns();
+        check(runs.size() == 3, "upright keeps grapheme clusters whole");
+        if (runs.size() == 3) {
+            check(runs[0].text == "e\xCC\x81",
+                  "a combining mark stays with its base");
+            check(runs[1].text ==
+                      "\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x91\xA9"
+                      "\xE2\x80\x8D\xF0\x9F\x91\xA7",
+                  "a ZWJ emoji sequence stays one grapheme");
+            check(runs[2].text == "\xE4\xB8\xAD",
+                  "the final ideograph follows the emoji");
+        }
+    }
+
+    // An inline span overrides the inherited vertical orientation.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"o\"><span id=\"sp\">ab</span></div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}"
+            "#o{writing-mode:vertical-rl;text-orientation:sideways;"
+            "height:100px;font-size:16px}"
+            "#sp{text-orientation:upright}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* o = document->getElementById("o");
+        Element* sp = document->getElementById("sp");
+        if (!o || !sp) {
+            check(false, "inline orientation override element found");
+            return;
+        }
+        const auto& runs = o->textRuns();
+        check(runs.size() == 2, "an inline span can force upright text");
+        if (runs.size() == 2) {
+            check(runs[0].rotation == 0.0f && runs[1].rotation == 0.0f,
+                  "the overriding span lays out upright runs");
+            checkNear(runs[1].y, 16.0f, 0.01f,
+                      "the override advances by one em per grapheme");
+        }
+    }
+
+    // Horizontal writing modes ignore text-orientation.
+    {
+        auto document = parseOrNull(
+            "<sui><body><div id=\"h\">ab</div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}"
+            "#h{text-orientation:upright;font-size:16px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* h = document->getElementById("h");
+        if (!h) {
+            check(false, "horizontal orientation element found");
+            return;
+        }
+        const auto& runs = h->textRuns();
+        check(runs.size() == 1, "horizontal text stays one run");
+        if (runs.size() == 1) {
+            check(runs[0].text == "ab", "horizontal text keeps its run text");
+            check(runs[0].rotation == 0.0f && !runs[0].vertical,
+                  "vertical orientation does not touch horizontal layout");
+        }
+    }
+}
+
 void testTableLayout() {
     // Cells are placed side by side; a column is as wide as its widest cell and
     // a row as tall as its tallest.
@@ -16482,6 +16745,7 @@ int main() {
     testShapeOutside();
     testMultiColumn();
     testWritingModes();
+    testTextOrientation();
     testTableLayout();
     testImportantAndCssWideKeywords();
     testBorderWidthLonghands();
