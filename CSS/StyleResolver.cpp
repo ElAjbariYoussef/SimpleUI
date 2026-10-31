@@ -1200,6 +1200,190 @@ void applyTwoSides(std::string_view value, Length& start, Length& end) {
     }
 }
 
+// A CSS <dashed-ident>: `--` followed by at least one name character. Escapes
+// are not decoded; anchor names in this engine are plain ASCII/UTF-8 tokens.
+bool isDashedIdent(std::string_view value) {
+    if (value.size() < 3 || value[0] != '-' || value[1] != '-') {
+        return false;
+    }
+    for (std::size_t i = 2; i < value.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(value[i]);
+        if (!(std::isalnum(c) || c == '-' || c == '_' || c >= 0x80)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool anchorSideFromName(std::string_view name,
+                        ComputedStyle::AnchorInset::Side& side) {
+    using Side = ComputedStyle::AnchorInset::Side;
+    if (name == "top") {
+        side = Side::Top;
+    } else if (name == "right") {
+        side = Side::Right;
+    } else if (name == "bottom") {
+        side = Side::Bottom;
+    } else if (name == "left") {
+        side = Side::Left;
+    } else if (name == "center") {
+        side = Side::Center;
+    } else if (name == "start") {
+        side = Side::Start;
+    } else if (name == "end") {
+        side = Side::End;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+bool anchorSideFitsAxis(ComputedStyle::AnchorInset::Side side, bool horizontal) {
+    using Side = ComputedStyle::AnchorInset::Side;
+    if (side == Side::Top || side == Side::Bottom) {
+        return !horizontal;
+    }
+    if (side == Side::Left || side == Side::Right) {
+        return horizontal;
+    }
+    return true;
+}
+
+// `anchor( <name>? <side>, <fallback>? )`. The name is optional, the side is
+// required, and the fallback is a plain length-percentage. Returns false for
+// malformed functions so the declaration can be dropped rather than turned
+// into an accidental `auto`.
+bool parseAnchorFunction(std::string_view value, ComputedStyle::AnchorInset& out) {
+    const std::string_view text = trim(value);
+    if (!startsWith(text, "anchor(") || !endsWith(text, ")")) {
+        return false;
+    }
+    const std::string_view body = trim(text.substr(7, text.size() - 8));
+    const std::vector<std::string_view> args = splitTopLevelCommas(body);
+    if (args.empty() || args.size() > 2) {
+        return false;
+    }
+    ComputedStyle::AnchorInset parsed;
+    bool haveSide = false;
+    for (const std::string_view token : splitTopLevelSpaces(args[0])) {
+        if (token.empty()) {
+            continue;
+        }
+        if (isDashedIdent(token)) {
+            if (!parsed.name.empty()) {
+                return false;
+            }
+            parsed.name = std::string(token);
+        } else {
+            ComputedStyle::AnchorInset::Side side;
+            if (!anchorSideFromName(token, side) || haveSide) {
+                return false;
+            }
+            parsed.side = side;
+            haveSide = true;
+        }
+    }
+    if (!haveSide) {
+        return false;
+    }
+    if (args.size() == 2) {
+        const Length fallback = parseLength(trim(args[1]));
+        if (fallback.isAuto()) {
+            return false;
+        }
+        parsed.fallback = fallback;
+        parsed.hasFallback = true;
+    }
+    parsed.set = true;
+    out = std::move(parsed);
+    return true;
+}
+
+// One inset side: either a plain length or an `anchor()` function. `horizontal`
+// selects the axis an anchor side keyword must belong to.
+struct InsetSlot {
+    Length length;
+    ComputedStyle::AnchorInset anchor;
+};
+
+bool parseInsetValue(std::string_view value, bool horizontal, InsetSlot& out) {
+    const std::string_view text = trim(value);
+    if (startsWith(text, "anchor(")) {
+        ComputedStyle::AnchorInset parsed;
+        if (!parseAnchorFunction(text, parsed) ||
+            !anchorSideFitsAxis(parsed.side, horizontal)) {
+            return false;
+        }
+        out.length = Length{};
+        out.anchor = std::move(parsed);
+        return true;
+    }
+    out.anchor = ComputedStyle::AnchorInset{};
+    out.length = parseLength(text);
+    return true;
+}
+
+// Splits a one-to-four value inset list. `axes[i]` is the physical axis of the
+// i-th value in the authored order, so `inset: anchor(top) ...` accepts a
+// vertical side in the top slot and a horizontal one in the right slot.
+bool parseInsetList(std::string_view value, const bool* axes, std::size_t maxCount,
+                    std::vector<InsetSlot>& out) {
+    const std::vector<std::string_view> parts = splitTopLevelSpaces(value);
+    if (parts.empty() || parts.size() > maxCount) {
+        return false;
+    }
+    out.clear();
+    for (std::size_t i = 0; i < parts.size(); ++i) {
+        InsetSlot slot;
+        if (!parseInsetValue(parts[i], axes[i], slot)) {
+            return false;
+        }
+        out.push_back(std::move(slot));
+    }
+    return true;
+}
+
+// Expands a list of one to four inset slots the way the box shorthands do.
+void expandInsetSlots(const std::vector<InsetSlot>& parts, InsetSlot out[4]) {
+    switch (parts.size()) {
+        case 1:
+            out[0] = out[1] = out[2] = out[3] = parts[0];
+            break;
+        case 2:
+            out[0] = parts[0];
+            out[1] = parts[1];
+            out[2] = parts[0];
+            out[3] = parts[1];
+            break;
+        case 3:
+            out[0] = parts[0];
+            out[1] = parts[1];
+            out[2] = parts[2];
+            out[3] = parts[1];
+            break;
+        case 4:
+            out[0] = parts[0];
+            out[1] = parts[1];
+            out[2] = parts[2];
+            out[3] = parts[3];
+            break;
+        default:
+            break;
+    }
+}
+
+// A single `inset` value is copied to both axes, so its anchor side must be
+// valid for all four physical longhands, not just the first slot.
+bool insetSlotsFitAxes(const InsetSlot (&slots)[4]) {
+    for (int i = 0; i < 4; ++i) {
+        if (slots[i].anchor.set &&
+            !anchorSideFitsAxis(slots[i].anchor.side, i == 1 || i == 3)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 const char* justifyName(ComputedStyle::FlexAlign v) {
     switch (v) {
         case ComputedStyle::AlignStart: return "flex-start";
@@ -5621,33 +5805,102 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         }
         // Only a box that is out of flow joins the paint order.
         s.positioned = s.position != ComputedStyle::Static;
-    } else if (property == "top") {
-        s.top = parseLength(value);
-    } else if (property == "right") {
-        s.right = parseLength(value);
-    } else if (property == "bottom") {
-        s.bottom = parseLength(value);
-    } else if (property == "left") {
-        s.left = parseLength(value);
+    } else if (property == "top" || property == "right" || property == "bottom" ||
+               property == "left") {
+        const bool horizontal = property == "right" || property == "left";
+        InsetSlot slot;
+        if (parseInsetValue(value, horizontal, slot)) {
+            if (property == "top") {
+                s.top = slot.length;
+                s.anchorTop = std::move(slot.anchor);
+            } else if (property == "right") {
+                s.right = slot.length;
+                s.anchorRight = std::move(slot.anchor);
+            } else if (property == "bottom") {
+                s.bottom = slot.length;
+                s.anchorBottom = std::move(slot.anchor);
+            } else {
+                s.left = slot.length;
+                s.anchorLeft = std::move(slot.anchor);
+            }
+        }
     } else if (property == "inset") {
-        BoxEdge e;
-        applyBoxEdges(value, e);
-        s.top = e.top;
-        s.right = e.right;
-        s.bottom = e.bottom;
-        s.left = e.left;
+        const bool axes[4] = {false, true, false, true};
+        std::vector<InsetSlot> parts;
+        if (parseInsetList(value, axes, 4, parts)) {
+            InsetSlot expanded[4];
+            expandInsetSlots(parts, expanded);
+            if (insetSlotsFitAxes(expanded)) {
+                s.top = expanded[0].length;
+                s.anchorTop = std::move(expanded[0].anchor);
+                s.right = expanded[1].length;
+                s.anchorRight = std::move(expanded[1].anchor);
+                s.bottom = expanded[2].length;
+                s.anchorBottom = std::move(expanded[2].anchor);
+                s.left = expanded[3].length;
+                s.anchorLeft = std::move(expanded[3].anchor);
+            }
+        }
     } else if (property == "inset-inline") {
-        applyTwoSides(value, s.left, s.right);
+        const bool axes[2] = {true, true};
+        std::vector<InsetSlot> parts;
+        if (parseInsetList(value, axes, 2, parts)) {
+            const InsetSlot first = parts[0];
+            const InsetSlot second = parts.size() == 2 ? parts[1] : parts[0];
+            s.left = first.length;
+            s.anchorLeft = first.anchor;
+            s.right = second.length;
+            s.anchorRight = second.anchor;
+        }
     } else if (property == "inset-inline-start") {
-        s.left = parseLength(value);
+        InsetSlot slot;
+        if (parseInsetValue(value, true, slot)) {
+            s.left = slot.length;
+            s.anchorLeft = std::move(slot.anchor);
+        }
     } else if (property == "inset-inline-end") {
-        s.right = parseLength(value);
+        InsetSlot slot;
+        if (parseInsetValue(value, true, slot)) {
+            s.right = slot.length;
+            s.anchorRight = std::move(slot.anchor);
+        }
     } else if (property == "inset-block") {
-        applyTwoSides(value, s.top, s.bottom);
+        const bool axes[2] = {false, false};
+        std::vector<InsetSlot> parts;
+        if (parseInsetList(value, axes, 2, parts)) {
+            const InsetSlot first = parts[0];
+            const InsetSlot second = parts.size() == 2 ? parts[1] : parts[0];
+            s.top = first.length;
+            s.anchorTop = first.anchor;
+            s.bottom = second.length;
+            s.anchorBottom = second.anchor;
+        }
     } else if (property == "inset-block-start") {
-        s.top = parseLength(value);
+        InsetSlot slot;
+        if (parseInsetValue(value, false, slot)) {
+            s.top = slot.length;
+            s.anchorTop = std::move(slot.anchor);
+        }
     } else if (property == "inset-block-end") {
-        s.bottom = parseLength(value);
+        InsetSlot slot;
+        if (parseInsetValue(value, false, slot)) {
+            s.bottom = slot.length;
+            s.anchorBottom = std::move(slot.anchor);
+        }
+    } else if (property == "anchor-name") {
+        const std::string_view text = trim(value);
+        if (text == "none") {
+            s.anchorName.clear();
+        } else if (isDashedIdent(text)) {
+            s.anchorName = std::string(text);
+        }
+    } else if (property == "position-anchor") {
+        const std::string_view text = trim(value);
+        if (text == "auto") {
+            s.positionAnchor.clear();
+        } else if (isDashedIdent(text)) {
+            s.positionAnchor = std::string(text);
+        }
     } else if (property == "z-index") {
         s.zIndex = static_cast<int>(parseNumber(value));
     } else if (property == "overflow") {
@@ -7697,6 +7950,40 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
                                                           : "rem";
         return unitless(l.value) + suffix;
     };
+    auto anchorSide = [](ComputedStyle::AnchorInset::Side side) -> const char* {
+        using Side = ComputedStyle::AnchorInset::Side;
+        switch (side) {
+            case Side::Top: return "top";
+            case Side::Right: return "right";
+            case Side::Bottom: return "bottom";
+            case Side::Left: return "left";
+            case Side::Center: return "center";
+            case Side::Start: return "start";
+            case Side::End: return "end";
+        }
+        return "top";
+    };
+    // An inset reads back as its `anchor()` function when one is attached, so
+    // CSS-wide keywords and getComputedStyle keep the authored anchor rather
+    // than collapsing it to `auto`.
+    auto insetValue = [&](const Length& l,
+                          const ComputedStyle::AnchorInset& anchor) -> std::string {
+        if (!anchor.set) {
+            return length(l, "auto");
+        }
+        std::string out = "anchor(";
+        if (!anchor.name.empty()) {
+            out += anchor.name;
+            out += ' ';
+        }
+        out += anchorSide(anchor.side);
+        if (anchor.hasFallback) {
+            out += ", ";
+            out += length(anchor.fallback);
+        }
+        out += ')';
+        return out;
+    };
     auto gridTrack = [&](const ComputedStyle::GridTrack& track) {
         std::string max;
         if (track.isAuto) {
@@ -9002,14 +9289,20 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "padding-inline-end") return length(style.padding.right);
     if (property == "padding-block-start") return length(style.padding.top);
     if (property == "padding-block-end") return length(style.padding.bottom);
-    if (property == "top") return length(style.top, "auto");
-    if (property == "right") return length(style.right, "auto");
-    if (property == "bottom") return length(style.bottom, "auto");
-    if (property == "left") return length(style.left, "auto");
-    if (property == "inset-inline-start") return length(style.left, "auto");
-    if (property == "inset-inline-end") return length(style.right, "auto");
-    if (property == "inset-block-start") return length(style.top, "auto");
-    if (property == "inset-block-end") return length(style.bottom, "auto");
+    if (property == "top") return insetValue(style.top, style.anchorTop);
+    if (property == "right") return insetValue(style.right, style.anchorRight);
+    if (property == "bottom") return insetValue(style.bottom, style.anchorBottom);
+    if (property == "left") return insetValue(style.left, style.anchorLeft);
+    if (property == "inset-inline-start") return insetValue(style.left, style.anchorLeft);
+    if (property == "inset-inline-end") return insetValue(style.right, style.anchorRight);
+    if (property == "inset-block-start") return insetValue(style.top, style.anchorTop);
+    if (property == "inset-block-end") return insetValue(style.bottom, style.anchorBottom);
+    if (property == "anchor-name") {
+        return style.anchorName.empty() ? std::string("none") : style.anchorName;
+    }
+    if (property == "position-anchor") {
+        return style.positionAnchor.empty() ? std::string("auto") : style.positionAnchor;
+    }
     // The box shorthands read back in the form the cascade writes them: one
     // value while both sides agree, `start end` otherwise, and for the
     // four-sided ones a one-to-four value list collapsed the way `margin`
@@ -9050,10 +9343,21 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "padding-block")
         return twoSides(style.padding.top, style.padding.bottom, "0px");
     if (property == "inset") {
-        return fourSides(BoxEdge{style.top, style.right, style.bottom, style.left}, "auto");
+        return collapsed(insetValue(style.top, style.anchorTop),
+                         insetValue(style.right, style.anchorRight),
+                         insetValue(style.bottom, style.anchorBottom),
+                         insetValue(style.left, style.anchorLeft));
     }
-    if (property == "inset-inline") return twoSides(style.left, style.right, "auto");
-    if (property == "inset-block") return twoSides(style.top, style.bottom, "auto");
+    if (property == "inset-inline") {
+        const std::string start = insetValue(style.left, style.anchorLeft);
+        const std::string end = insetValue(style.right, style.anchorRight);
+        return start == end ? start : start + " " + end;
+    }
+    if (property == "inset-block") {
+        const std::string start = insetValue(style.top, style.anchorTop);
+        const std::string end = insetValue(style.bottom, style.anchorBottom);
+        return start == end ? start : start + " " + end;
+    }
     // The two 9-patch families share their shape: a source, slice, width,
     // outset, and per-axis repeat (plus a mode for masks). An unauthored slice
     // or outset reads `0`, which is how paint resolves it; an unauthored width

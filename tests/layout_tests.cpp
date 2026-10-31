@@ -6693,6 +6693,288 @@ void testPositioning() {
     }
 }
 
+void testAnchorPositioning() {
+    // Parsing and read-back. An anchor side must fit the inset axis, and a
+    // malformed function drops the declaration rather than becoming `auto`.
+    {
+        auto document = parseOrNull(
+            "<sui><body style=\"margin:0\">"
+            "<div id=\"a\" style=\"anchor-name:--a\"></div>"
+            "<div id=\"b\" style=\"position-anchor:--a;"
+            "top:anchor(--a bottom, 12px);right:anchor(start);"
+            "bottom:anchor(center);left:anchor(end)\"></div>"
+            "<div id=\"c\" style=\"top:anchor(top);bottom:anchor(bottom)\"></div>"
+            "<div id=\"bad\" style=\"left:anchor(top);top:anchor(left);"
+            "right:anchor(foo);bottom:anchor(bottom, red)\"></div>"
+            "<div id=\"plain\"></div>"
+            "<div id=\"parent\" style=\"anchor-name:--p;position-anchor:--q\">"
+            "<div id=\"child\"></div>"
+            "<div id=\"childReset\" style=\"anchor-name:unset;"
+            "position-anchor:unset\"></div></div>"
+            "<div id=\"reset\" style=\"anchor-name:--r;position-anchor:--s;"
+            "top:anchor(top);left:anchor(left);"
+            "anchor-name:unset;position-anchor:unset;top:unset;"
+            "inset-inline-start:unset\"></div>"
+            "<div id=\"singleTop\" style=\"inset:anchor(--a top)\"></div>"
+            "<div id=\"singleCenter\" style=\"inset:anchor(--a center)\"></div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        const auto value = [&](const char* id, const char* property) {
+            Element* el = document->getElementById(id);
+            if (!el) {
+                return std::string();
+            }
+            const ComputedStyle s = resolver.resolve(*el);
+            return sui::StyleResolver::propertyValue(s, property);
+        };
+
+        check(value("a", "anchor-name") == "--a", "anchor-name reads back");
+        check(value("b", "position-anchor") == "--a", "position-anchor reads back");
+        check(value("b", "top") == "anchor(--a bottom, 12px)",
+              "an explicit anchor name and fallback read back");
+        check(value("b", "right") == "anchor(start)", "an anchor side reads back");
+        check(value("b", "inset") ==
+                  "anchor(--a bottom, 12px) anchor(start) anchor(center) anchor(end)",
+              "the inset shorthand reads back its anchor functions");
+        check(value("b", "inset-inline") == "anchor(end) anchor(start)",
+              "inset-inline reads back anchors on the horizontal axis");
+        check(value("b", "inset-block") == "anchor(--a bottom, 12px) anchor(center)",
+              "inset-block reads back anchors on the vertical axis");
+        check(value("c", "inset-block") == "anchor(top) anchor(bottom)",
+              "inset-block keeps a pair of anchors");
+        check(value("plain", "anchor-name") == "none", "anchor-name defaults to none");
+        check(value("plain", "position-anchor") == "auto",
+              "position-anchor defaults to auto");
+        check(value("child", "anchor-name") == "none",
+              "anchor-name does not inherit");
+        check(value("child", "position-anchor") == "auto",
+              "position-anchor does not inherit");
+        check(value("childReset", "anchor-name") == "none",
+              "unset resets anchor-name instead of inheriting it");
+        check(value("childReset", "position-anchor") == "auto",
+              "unset resets position-anchor instead of inheriting it");
+        check(value("reset", "anchor-name") == "none", "unset clears anchor-name");
+        check(value("reset", "position-anchor") == "auto",
+              "unset clears position-anchor");
+        check(value("reset", "top") == "auto", "unset clears an anchor inset");
+        check(value("reset", "left") == "auto",
+              "unset clears an anchor inset through a logical longhand");
+        check(value("bad", "left") == "auto" && value("bad", "top") == "auto" &&
+                  value("bad", "right") == "auto" && value("bad", "bottom") == "auto",
+              "malformed or wrong-axis anchor functions are dropped");
+        check(value("singleTop", "top") == "auto" &&
+                  value("singleTop", "right") == "auto" &&
+                  value("singleTop", "bottom") == "auto" &&
+                  value("singleTop", "left") == "auto",
+              "a single anchor inset value must fit every side it expands to");
+        check(value("singleCenter", "top") == "anchor(--a center)" &&
+                  value("singleCenter", "right") == "anchor(--a center)" &&
+                  value("singleCenter", "bottom") == "anchor(--a center)" &&
+                  value("singleCenter", "left") == "anchor(--a center)" &&
+                  value("singleCenter", "inset") == "anchor(--a center)",
+              "an axis-neutral anchor inset still expands to all sides");
+    }
+
+    // The implicit anchor comes from position-anchor; each side resolves against
+    // the laid-out border box of the anchor.
+    {
+        auto document = parseOrNull(
+            "<sui><body style=\"margin:0\">"
+            "<div id=\"a\" style=\"position:relative;left:50px;top:20px;"
+            "width:100px;height:40px;anchor-name:--a\"></div>"
+            "<div id=\"implicit\" style=\"position:absolute;width:10px;height:10px;"
+            "position-anchor:--a;top:anchor(bottom);left:anchor(right)\"></div>"
+            "<div id=\"origin\" style=\"position:absolute;width:10px;height:10px;"
+            "position-anchor:--a;top:anchor(top);left:anchor(left)\"></div>"
+            "<div id=\"center\" style=\"position:absolute;width:10px;height:10px;"
+            "position-anchor:--a;top:anchor(center);left:anchor(center)\"></div>"
+            "<div id=\"end\" style=\"position:absolute;width:10px;height:10px;"
+            "position-anchor:--a;top:anchor(end);left:anchor(end)\"></div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        layoutRoot(*document, resolver, 400.0f);
+        Element* a = document->getElementById("a");
+        Element* implicit = document->getElementById("implicit");
+        Element* origin = document->getElementById("origin");
+        Element* center = document->getElementById("center");
+        Element* end = document->getElementById("end");
+        check(a && implicit && origin && center && end, "anchor elements found");
+        if (!a || !implicit || !origin || !center || !end) {
+            return;
+        }
+        checkNear(a->layoutX(), 50.0f, 0.01f, "the anchor sits at its relative offset");
+        checkNear(a->layoutY(), 20.0f, 0.01f, "the anchor keeps its relative top");
+        checkNear(implicit->layoutX(), 150.0f, 0.01f,
+                  "anchor(right) places the left edge at the anchor's right");
+        checkNear(implicit->layoutY(), 60.0f, 0.01f,
+                  "anchor(bottom) places the top edge at the anchor's bottom");
+        checkNear(origin->layoutX(), 50.0f, 0.01f, "anchor(left) uses the anchor's left edge");
+        checkNear(origin->layoutY(), 20.0f, 0.01f, "anchor(top) uses the anchor's top edge");
+        checkNear(center->layoutX(), 100.0f, 0.01f, "anchor(center) centres horizontally");
+        checkNear(center->layoutY(), 40.0f, 0.01f, "anchor(center) centres vertically");
+        checkNear(end->layoutX(), 150.0f, 0.01f, "anchor(end) follows the horizontal end");
+        checkNear(end->layoutY(), 60.0f, 0.01f, "anchor(end) follows the vertical end");
+    }
+
+    // An explicit name overrides position-anchor, and the far-side insets
+    // subtract from the containing block's far edges.
+    {
+        auto document = parseOrNull(
+            "<sui><body style=\"margin:0\">"
+            "<div id=\"a\" style=\"position:relative;left:10px;top:30px;"
+            "width:20px;height:20px;anchor-name:--a\"></div>"
+            "<div id=\"b\" style=\"position:relative;left:250px;top:40px;"
+            "width:60px;height:30px;anchor-name:--b\"></div>"
+            "<div id=\"box\" style=\"position:absolute;width:10px;height:10px;"
+            "position-anchor:--a;right:anchor(--b right);"
+            "bottom:anchor(--b bottom)\"></div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        layoutRoot(*document, resolver, 400.0f);
+        Element* b = document->getElementById("b");
+        Element* box = document->getElementById("box");
+        check(b && box, "explicit anchor elements found");
+        if (!b || !box) {
+            return;
+        }
+        checkNear(b->layoutX(), 250.0f, 0.01f, "the second anchor sits where expected");
+        checkNear(b->layoutY(), 60.0f, 0.01f, "the second anchor keeps its relative top");
+        checkNear(box->layoutX(), 300.0f, 0.01f,
+                  "right:anchor() subtracts the anchor edge from the containing block");
+        checkNear(box->layoutY(), 80.0f, 0.01f,
+                  "bottom:anchor() subtracts the anchor edge from the containing block");
+    }
+
+    // A missing (or unlaid-out) anchor uses the fallback, or behaves as auto
+    // without one. Two anchor edges can also size and place a box at once.
+    {
+        auto document = parseOrNull(
+            "<sui><body style=\"margin:0\">"
+            "<div id=\"a\" style=\"position:relative;left:50px;top:20px;"
+            "width:100px;height:40px;anchor-name:--a\"></div>"
+            "<div id=\"hidden\" style=\"display:none;anchor-name:--hidden\"></div>"
+            "<div id=\"missing\" style=\"position:absolute;width:10px;height:10px;"
+            "left:anchor(--nope left, 33px);top:anchor(--nope top, 12px)\"></div>"
+            "<div id=\"hiddenBox\" style=\"position:absolute;width:10px;height:10px;"
+            "left:anchor(--hidden left, 44px);top:12px\"></div>"
+            "<div id=\"stretch\" style=\"position:absolute;"
+            "left:anchor(--a left);right:anchor(--a right);"
+            "top:anchor(--a top);bottom:anchor(--a bottom)\"></div>"
+            "<div id=\"noFallback\" style=\"position:absolute;width:10px;height:10px;"
+            "left:anchor(--nope left);top:anchor(--nope top)\"></div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        layoutRoot(*document, resolver, 400.0f);
+        Element* missing = document->getElementById("missing");
+        Element* hiddenBox = document->getElementById("hiddenBox");
+        Element* stretch = document->getElementById("stretch");
+        Element* noFallback = document->getElementById("noFallback");
+        check(missing && hiddenBox && stretch && noFallback, "fallback elements found");
+        if (!missing || !hiddenBox || !stretch || !noFallback) {
+            return;
+        }
+        checkNear(missing->layoutX(), 33.0f, 0.01f,
+                  "a missing anchor uses the fallback length");
+        checkNear(missing->layoutY(), 12.0f, 0.01f,
+                  "a missing anchor uses the fallback on the vertical axis");
+        checkNear(hiddenBox->layoutX(), 44.0f, 0.01f,
+                  "an anchor that was not laid out uses the fallback");
+        checkNear(stretch->layoutX(), 50.0f, 0.01f,
+                  "left and right anchor edges place the stretched box");
+        checkNear(stretch->layoutY(), 20.0f, 0.01f,
+                  "top and bottom anchor edges place the stretched box");
+        checkNear(stretch->layoutWidth(), 100.0f, 0.01f,
+                  "left and right anchor edges size the box");
+        checkNear(stretch->layoutHeight(), 40.0f, 0.01f,
+                  "top and bottom anchor edges size the box");
+        checkNear(noFallback->layoutX(), 0.0f, 0.01f,
+                  "a missing anchor without a fallback behaves as auto");
+        checkNear(noFallback->layoutY(), 0.0f, 0.01f,
+                  "an auto anchor inset leaves the vertical position unset");
+    }
+
+    // `start`/`end` follow the anchor's direction on the horizontal axis and
+    // top/bottom on the vertical one.
+    {
+        auto document = parseOrNull(
+            "<sui><body style=\"margin:0\">"
+            "<div id=\"a\" style=\"position:relative;left:50px;top:20px;"
+            "width:100px;height:40px;anchor-name:--a;direction:rtl\"></div>"
+            "<div id=\"start\" style=\"position:absolute;width:10px;height:10px;"
+            "position-anchor:--a;left:anchor(start);top:anchor(start)\"></div>"
+            "<div id=\"end\" style=\"position:absolute;width:10px;height:10px;"
+            "position-anchor:--a;left:anchor(end);top:anchor(end)\"></div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        layoutRoot(*document, resolver, 400.0f);
+        Element* start = document->getElementById("start");
+        Element* end = document->getElementById("end");
+        check(start && end, "rtl anchor elements found");
+        if (!start || !end) {
+            return;
+        }
+        checkNear(start->layoutX(), 150.0f, 0.01f,
+                  "start uses the anchor's right edge in rtl");
+        checkNear(start->layoutY(), 20.0f, 0.01f, "start uses the anchor's top edge");
+        checkNear(end->layoutX(), 50.0f, 0.01f,
+                  "end uses the anchor's left edge in rtl");
+        checkNear(end->layoutY(), 60.0f, 0.01f, "end uses the anchor's bottom edge");
+    }
+
+    // Anchors work through the inset shorthand, and a later declaration replaces
+    // both the length and any anchor function attached to it.
+    {
+        auto document = parseOrNull(
+            "<sui><body style=\"margin:0\">"
+            "<div id=\"a\" style=\"position:relative;left:50px;top:20px;"
+            "width:100px;height:40px;anchor-name:--a\"></div>"
+            "<div id=\"shorthand\" style=\"position:absolute;"
+            "inset:anchor(--a top) 4px anchor(--a bottom) 6px\"></div>"
+            "<div id=\"override\" style=\"position:absolute;width:10px;height:10px;"
+            "top:anchor(--a top);top:7px;left:anchor(--a left);"
+            "inset-inline-start:3px\"></div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        layoutRoot(*document, resolver, 400.0f);
+        Element* shorthand = document->getElementById("shorthand");
+        Element* override = document->getElementById("override");
+        check(shorthand && override, "shorthand anchor elements found");
+        if (!shorthand || !override) {
+            return;
+        }
+        checkNear(shorthand->layoutX(), 6.0f, 0.01f,
+                  "inset anchors resolve the left edge");
+        checkNear(shorthand->layoutY(), 20.0f, 0.01f,
+                  "inset anchors resolve the top edge");
+        checkNear(shorthand->layoutWidth(), 390.0f, 0.01f,
+                  "inset anchors stretch the box horizontally");
+        checkNear(shorthand->layoutHeight(), 40.0f, 0.01f,
+                  "inset anchors stretch the box vertically");
+        checkNear(override->layoutX(), 3.0f, 0.01f,
+                  "a later inset clears an anchor on that side");
+        checkNear(override->layoutY(), 7.0f, 0.01f,
+                  "a later top clears the anchor on that side");
+    }
+}
+
 void testWhiteSpace() {
     const char* source =
         "<sui><body style=\"margin:0\">"
@@ -16736,6 +17018,7 @@ int main() {
     testStructuralPseudoClasses();
     testAttributeSelectors();
     testPositioning();
+    testAnchorPositioning();
     testWhiteSpace();
     testPseudoElements();
     testContentReadBack();

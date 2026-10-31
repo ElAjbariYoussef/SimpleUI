@@ -1895,22 +1895,123 @@ public:
         return std::max(0.0f, (free - extent - margin) * 0.5f);
     }
 
+    // The document tree root above `from`.
+    static Element* rootOf(Element& from) {
+        Element* root = &from;
+        while (root->parent()) {
+            root = root->parent();
+        }
+        return root;
+    }
+
+    // The first laid-out element carrying `anchor-name: --name`, excluding the
+    // positioned element itself. Anchor scoping is not modelled, so this searches
+    // the whole document from its root.
+    Element* findAnchorIn(Element& el, Element& self, std::string_view name) {
+        if (&el != &self && !el.isTextNode() && laidOut(el) &&
+            resolveStyle(el).anchorName.compare(name) == 0) {
+            return &el;
+        }
+        for (const auto& child : el.children()) {
+            if (child) {
+                if (Element* found = findAnchorIn(*child, self, name)) {
+                    return found;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    Element* findAnchor(Element& self, std::string_view name) {
+        if (name.empty()) {
+            return nullptr;
+        }
+        Element* root = rootOf(self);
+        return root ? findAnchorIn(*root, self, name) : nullptr;
+    }
+
+    // One side of an anchor's border box, in window coordinates. `start`/`end`
+    // follow the anchor's own direction on the horizontal axis and top/bottom on
+    // the vertical axis.
+    static float anchorSideCoordinate(const Element& anchor, const ComputedStyle& as,
+                                      ComputedStyle::AnchorInset::Side side,
+                                      bool horizontal) {
+        using Side = ComputedStyle::AnchorInset::Side;
+        const float left = anchor.layoutX();
+        const float right = left + anchor.layoutWidth();
+        const float top = anchor.layoutY();
+        const float bottom = top + anchor.layoutHeight();
+        if (horizontal) {
+            const bool rtl = as.direction == ComputedStyle::Direction::RTL;
+            switch (side) {
+                case Side::Right: return right;
+                case Side::Center: return (left + right) * 0.5f;
+                case Side::Start: return rtl ? right : left;
+                case Side::End: return rtl ? left : right;
+                default: return left;
+            }
+        }
+        switch (side) {
+            case Side::Bottom:
+            case Side::End: return bottom;
+            case Side::Center: return (top + bottom) * 0.5f;
+            default: return top;
+        }
+    }
+
+    // Resolves one `anchor()` inset. `edge` is the physical side being resolved
+    // (0 top, 1 right, 2 bottom, 3 left). Returns false when the declaration
+    // stays `auto`: no matching laid-out anchor exists and the function has no
+    // fallback.
+    bool resolveAnchorInset(Element& self, const ComputedStyle& s,
+                            const ComputedStyle::AnchorInset& inset, int edge,
+                            const Box& cb, float& out) {
+        const bool horizontal = edge == 1 || edge == 3;
+        const std::string_view name =
+            inset.name.empty() ? std::string_view(s.positionAnchor)
+                               : std::string_view(inset.name);
+        Element* anchor = findAnchor(self, name);
+        if (!anchor) {
+            if (!inset.hasFallback) {
+                return false;
+            }
+            out = inset.fallback.resolve(horizontal ? cb.width : cb.height, s.fontSize,
+                                         resolver_.rootFontSize());
+            return true;
+        }
+        const float coord = anchorSideCoordinate(
+            *anchor, resolveStyle(*anchor), inset.side, horizontal);
+        switch (edge) {
+            case 0: out = coord - cb.y; break;
+            case 1: out = cb.x + cb.width - coord; break;
+            case 2: out = cb.y + cb.height - coord; break;
+            default: out = coord - cb.x; break;
+        }
+        return true;
+    }
+
     void placeAbsolute(Element& el, const Box& cb) {
         const ComputedStyle s = resolveStyle(el);
         const float em = s.fontSize;
         const float rem = resolver_.rootFontSize();
         const UsedBox box = usedBox(s, cb.width);
 
-        const float leftUsed =
-            s.left.isAuto() ? 0.0f : s.left.resolve(cb.width, em, rem);
-        const float rightUsed =
-            s.right.isAuto() ? 0.0f : s.right.resolve(cb.width, em, rem);
+        bool leftSet = !s.left.isAuto();
+        bool rightSet = !s.right.isAuto();
+        float leftUsed = leftSet ? s.left.resolve(cb.width, em, rem) : 0.0f;
+        float rightUsed = rightSet ? s.right.resolve(cb.width, em, rem) : 0.0f;
+        if (s.anchorLeft.set) {
+            leftSet = resolveAnchorInset(el, s, s.anchorLeft, 3, cb, leftUsed);
+        }
+        if (s.anchorRight.set) {
+            rightSet = resolveAnchorInset(el, s, s.anchorRight, 1, cb, rightUsed);
+        }
 
         // Both horizontal edges given means the size comes from them; otherwise the
         // box shrink-wraps its content the way a browser-sized replaced element
         // does, never past the containing block.
         float borderW = 0.0f;
-        if (!s.left.isAuto() && !s.right.isAuto()) {
+        if (leftSet && rightSet) {
             borderW = cb.width - leftUsed - rightUsed - box.margin.left - box.margin.right;
         } else if (box.width > 0.0f) {
             borderW = box.width + box.horizontalChrome();
@@ -1922,7 +2023,7 @@ public:
         // An `auto` margin is only distributed when the axis is over-constrained,
         // which is to say when both of its edges are given. Everywhere else it
         // resolves to zero, the same as any other unset margin.
-        const bool bothHorizontal = !s.left.isAuto() && !s.right.isAuto();
+        const bool bothHorizontal = leftSet && rightSet;
         const float marginLeft =
             !s.margin.left.isAuto()
                 ? box.margin.left
@@ -1931,20 +2032,26 @@ public:
                                  box.margin.right)
                        : 0.0f);
         float x = cb.x + marginLeft;
-        if (!s.left.isAuto()) {
+        if (leftSet) {
             x = cb.x + leftUsed + marginLeft;
-        } else if (!s.right.isAuto()) {
+        } else if (rightSet) {
             x = cb.x + cb.width - rightUsed - box.margin.right - borderW;
         }
 
         // With both vertical edges given the height is whatever is left over, so it
         // is known without measuring. Otherwise the content decides.
-        const float topUsed =
-            s.top.isAuto() ? 0.0f : s.top.resolve(cb.height, em, rem);
-        const float bottomUsed =
-            s.bottom.isAuto() ? 0.0f : s.bottom.resolve(cb.height, em, rem);
+        bool topSet = !s.top.isAuto();
+        bool bottomSet = !s.bottom.isAuto();
+        float topUsed = topSet ? s.top.resolve(cb.height, em, rem) : 0.0f;
+        float bottomUsed = bottomSet ? s.bottom.resolve(cb.height, em, rem) : 0.0f;
+        if (s.anchorTop.set) {
+            topSet = resolveAnchorInset(el, s, s.anchorTop, 0, cb, topUsed);
+        }
+        if (s.anchorBottom.set) {
+            bottomSet = resolveAnchorInset(el, s, s.anchorBottom, 2, cb, bottomUsed);
+        }
         float borderH = 0.0f;
-        const bool bothVertical = !s.top.isAuto() && !s.bottom.isAuto();
+        const bool bothVertical = topSet && bottomSet;
         if (bothVertical) {
             borderH = cb.height - topUsed - bottomUsed - box.margin.top -
                       box.margin.bottom;
@@ -1964,9 +2071,9 @@ public:
                        ? centred(cb.height - topUsed - bottomUsed, borderH, box.margin.bottom)
                        : 0.0f);
         float y = cb.y + marginTop;
-        if (!s.top.isAuto()) {
+        if (topSet) {
             y = cb.y + topUsed + marginTop;
-        } else if (!s.bottom.isAuto()) {
+        } else if (bottomSet) {
             y = cb.y + cb.height - bottomUsed - box.margin.bottom - borderH;
         }
         if (borderH <= 0.0f) {

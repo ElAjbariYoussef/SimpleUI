@@ -897,6 +897,29 @@ struct ComputedStyle {
     Length right;
     Length bottom;
 
+    // Anchor positioning. `anchor-name` names this box for other boxes to
+    // reference; `position-anchor` names the implicit anchor used by an
+    // `anchor()` inset that omits its own name. Both are non-inherited.
+    // An empty string means `none` / `auto`.
+    std::string anchorName;
+    std::string positionAnchor;
+
+    // One `anchor()` function attached to an inset. `name` empty means the
+    // name comes from the positioned element's `position-anchor`; the fallback
+    // replaces the function when no matching laid-out anchor exists.
+    struct AnchorInset {
+        enum class Side : std::uint8_t { Top, Right, Bottom, Left, Center, Start, End };
+        bool set = false;
+        std::string name;
+        Side side = Side::Top;
+        Length fallback;
+        bool hasFallback = false;
+    };
+    AnchorInset anchorTop;
+    AnchorInset anchorRight;
+    AnchorInset anchorBottom;
+    AnchorInset anchorLeft;
+
     // Clipping. `Visible` means children may spill past the padding box; the other
     // three crop them to it. `Auto` is kept distinct from `Scroll` so the computed
     // value reads back honestly even though the engine does not draw scrollbars.
