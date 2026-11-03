@@ -4315,7 +4315,7 @@ private:
                     sized.height = Length(std::max(0.0f, trackHeight - chrome));
                 }
             }
-            const bool subgridItem = sized.gridColumnsSubgrid && cSpan[i] > 1;
+            const bool subgridItem = sized.gridColumnsSubgrid;
             if (subgridItem) {
                 pendingSubgrid_.element = children[i];
                 pendingSubgrid_.columns = subgridColumnsFor(
@@ -4435,15 +4435,16 @@ private:
         // rowY and rowHeights are both finalised. Single-row items were already
         // sized in the first pass (when the row track was known); only multi-row
         // items need this deferred re-layout. A row-subgrid item always needs the
-        // second pass, because its parent's used rows only exist now.
+        // second pass, even when it spans one row, because its parent's used rows
+        // only exist now.
         for (std::size_t i = 0; i < children.size(); ++i) {
-            if (rSpan[i] <= 1) {
+            ComputedStyle cs2 = resolveStyle(*children[i]);
+            const bool rowSubgridItem = cs2.gridRowsSubgrid;
+            if (rSpan[i] <= 1 && !rowSubgridItem) {
                 continue;
             }
-            ComputedStyle cs2 = resolveStyle(*children[i]);
             const ComputedStyle::FlexAlign align2 =
                 cs2.alignSelf != ComputedStyle::AlignStretch ? cs2.alignSelf : s.alignItems;
-            const bool rowSubgridItem = cs2.gridRowsSubgrid;
             if (align2 != ComputedStyle::AlignStretch && !rowSubgridItem) {
                 continue;
             }
@@ -4461,7 +4462,7 @@ private:
             cs2.width = Length(itemContentWidth[i]);
             cs2.boxSizing = BoxSizing::ContentBox;
             cs2.margin = {};
-            const bool columnSubgridItem = cs2.gridColumnsSubgrid && cSpan[i] > 1;
+            const bool columnSubgridItem = cs2.gridColumnsSubgrid;
             if (columnSubgridItem || rowSubgridItem) {
                 pendingSubgrid_.element = children[i];
                 if (columnSubgridItem) {

@@ -17347,6 +17347,213 @@ void testGridSubgridRows() {
     }
 }
 
+// A span-one subgrid still adopts the single parent track it covers, and
+// subgrids compose through more than one nesting level.
+void testGridSubgridInheritance() {
+    // A column subgrid spanning one parent track keeps that track's used width
+    // even when its own box is narrower than the track.
+    {
+        auto document = parseOrNull(
+            "<sui><body style=\"margin:0\"><div id=\"g\"><div id=\"sub\">"
+            "<i id=\"child\"></i></div></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}"
+            "#g{display:grid;grid-template-columns:120px 80px;column-gap:10px;"
+            "width:210px}"
+            "#sub{display:grid;grid-template-columns:subgrid;grid-column:1;"
+            "justify-self:start;width:50px;column-gap:30px}"
+            "#child{height:10px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* sub = document->getElementById("sub");
+        Element* child = document->getElementById("child");
+        check(sub && child, "span-one column-subgrid elements found");
+        if (!sub || !child) {
+            return;
+        }
+        checkNear(sub->layoutX(), 0.0f, 0.01f,
+                  "a span-one column subgrid starts on its parent line");
+        checkNear(sub->layoutWidth(), 50.0f, 0.01f,
+                  "the subgrid keeps its own authored width");
+        checkNear(child->layoutX(), 0.0f, 0.01f,
+                  "the span-one child starts at the inherited line");
+        checkNear(child->layoutWidth(), 120.0f, 0.01f,
+                  "the span-one child fills the inherited parent track");
+    }
+
+    // A span-one column subgrid that spans several rows is re-laid out in the
+    // second pass; it must keep the inherited column then too.
+    {
+        auto document = parseOrNull(
+            "<sui><body style=\"margin:0\"><div id=\"g\"><div id=\"sub\">"
+            "<i id=\"child\"></i></div></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}"
+            "#g{display:grid;grid-template-columns:120px 80px;"
+            "grid-template-rows:40px 60px;column-gap:10px;width:210px}"
+            "#sub{display:grid;grid-template-columns:subgrid;grid-column:1;"
+            "grid-row:1 / span 2;justify-self:start;width:50px;column-gap:30px}"
+            "#child{height:10px}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* sub = document->getElementById("sub");
+        Element* child = document->getElementById("child");
+        check(sub && child, "multi-row span-one column-subgrid elements found");
+        if (!sub || !child) {
+            return;
+        }
+        checkNear(sub->layoutHeight(), 100.0f, 0.01f,
+                  "the span-one column subgrid stretches over both parent rows");
+        checkNear(child->layoutWidth(), 120.0f, 0.01f,
+                  "the second pass keeps the inherited span-one column width");
+    }
+
+    // A row subgrid spanning one parent row keeps that row's used height and its
+    // parent line names, including the line after the single inherited track.
+    {
+        auto document = parseOrNull(
+            "<sui><body style=\"margin:0\"><div id=\"g\"><div id=\"sub\">"
+            "<i id=\"fill\"></i><i id=\"atEnd\"></i>"
+            "</div></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}"
+            "#g{display:grid;grid-template-columns:100px;"
+            "grid-template-rows:40px 60px;width:100px}"
+            "#sub{display:grid;grid-template-rows:subgrid [here] [local];"
+            "grid-row:1;align-self:start}"
+            "#sub i{height:10px}"
+            "#atEnd{grid-row:local}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* sub = document->getElementById("sub");
+        Element* fill = document->getElementById("fill");
+        Element* atEnd = document->getElementById("atEnd");
+        check(sub && fill && atEnd, "span-one row-subgrid elements found");
+        if (!sub || !fill || !atEnd) {
+            return;
+        }
+        checkNear(sub->layoutY(), 0.0f, 0.01f,
+                  "a span-one row subgrid starts on its parent line");
+        checkNear(fill->layoutY(), 0.0f, 0.01f,
+                  "the first child starts in the inherited row");
+        checkNear(fill->layoutHeight(), 40.0f, 0.01f,
+                  "the span-one child fills the inherited parent row");
+        checkNear(atEnd->layoutY(), 40.0f, 0.01f,
+                  "the inherited end line name starts the next local row");
+        checkNear(sub->layoutHeight(), 50.0f, 0.01f,
+                  "the subgrid height includes the inherited row and the implicit row");
+    }
+
+    // Nested column subgrids pass the grandparent's used tracks, gutter, and line
+    // names straight through, merging each level's local names.
+    {
+        auto document = parseOrNull(
+            "<sui><body style=\"margin:0\"><div id=\"g\"><div id=\"mid\">"
+            "<div id=\"inner\"><i id=\"deep\"></i><i id=\"second\"></i></div>"
+            "</div></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}"
+            "#g{display:grid;grid-template-columns:[g1] 40px [g2] 60px [g3] 80px [g4];"
+            "column-gap:10px;width:210px}"
+            "#mid{display:grid;grid-template-columns:subgrid [m1] [m2] [m3];"
+            "grid-column:2 / span 2}"
+            "#inner{display:grid;grid-template-columns:subgrid [d1] [d2] [d3];"
+            "grid-column:1 / span 2}"
+            "#inner i{height:10px}"
+            "#deep{grid-column:d1 / d2}"
+            "#second{grid-column:g3 / g4}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* mid = document->getElementById("mid");
+        Element* inner = document->getElementById("inner");
+        Element* deep = document->getElementById("deep");
+        Element* second = document->getElementById("second");
+        check(mid && inner && deep && second, "nested column-subgrid elements found");
+        if (!mid || !inner || !deep || !second) {
+            return;
+        }
+        checkNear(mid->layoutX(), 50.0f, 0.01f,
+                  "the middle subgrid starts on the grandparent's second track");
+        checkNear(mid->layoutWidth(), 150.0f, 0.01f,
+                  "the middle subgrid spans two grandparent tracks and their gutter");
+        checkNear(inner->layoutX(), 50.0f, 0.01f,
+                  "the inner subgrid starts with the middle subgrid");
+        checkNear(inner->layoutWidth(), 150.0f, 0.01f,
+                  "the inner subgrid spans both inherited tracks");
+        checkNear(deep->layoutX(), 50.0f, 0.01f,
+                  "a nested local line name starts the first inherited track");
+        checkNear(deep->layoutWidth(), 60.0f, 0.01f,
+                  "the first nested track keeps the grandparent width");
+        checkNear(second->layoutX(), 120.0f, 0.01f,
+                  "a grandparent line name resolves through two subgrid levels");
+        checkNear(second->layoutWidth(), 80.0f, 0.01f,
+                  "the second nested track keeps the grandparent width");
+    }
+
+    // Nested row subgrids pass used row heights, gutters, and line names through
+    // both levels, and each level re-lays out inside its parent's second pass.
+    {
+        auto document = parseOrNull(
+            "<sui><body style=\"margin:0\"><div id=\"g\"><div id=\"mid\">"
+            "<div id=\"inner\"><i id=\"top\"></i><i id=\"bottom\"></i></div>"
+            "</div></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}"
+            "#g{display:grid;grid-template-columns:100px;"
+            "grid-template-rows:[r1] 40px [r2] 60px [r3] 80px [r4];"
+            "row-gap:10px;width:100px}"
+            "#mid{display:grid;grid-template-rows:subgrid [m1] [m2] [m3];"
+            "grid-row:2 / span 2;align-items:start}"
+            "#inner{display:grid;grid-template-rows:subgrid [d1] [d2] [d3];"
+            "grid-row:1 / span 2}"
+            "#inner i{height:10px}"
+            "#top{grid-row:d1 / d2}"
+            "#bottom{grid-row:r3 / r4}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* mid = document->getElementById("mid");
+        Element* inner = document->getElementById("inner");
+        Element* top = document->getElementById("top");
+        Element* bottom = document->getElementById("bottom");
+        check(mid && inner && top && bottom, "nested row-subgrid elements found");
+        if (!mid || !inner || !top || !bottom) {
+            return;
+        }
+        checkNear(mid->layoutY(), 50.0f, 0.01f,
+                  "the middle row subgrid starts on the grandparent's second row");
+        checkNear(mid->layoutHeight(), 150.0f, 0.01f,
+                  "the middle row subgrid spans both grandparent rows and their gutter");
+        checkNear(inner->layoutY(), 50.0f, 0.01f,
+                  "the inner row subgrid starts with the middle subgrid");
+        checkNear(inner->layoutHeight(), 150.0f, 0.01f,
+                  "the inner row subgrid spans both inherited rows");
+        checkNear(top->layoutY(), 50.0f, 0.01f,
+                  "a nested local line name starts the first inherited row");
+        checkNear(top->layoutHeight(), 60.0f, 0.01f,
+                  "the first nested row keeps the grandparent height");
+        checkNear(bottom->layoutY(), 120.0f, 0.01f,
+                  "the second nested row starts after the first row and gutter");
+        checkNear(bottom->layoutHeight(), 80.0f, 0.01f,
+                  "the second nested row keeps the grandparent height");
+    }
+}
+
+
 // position:sticky: the box stays in the flow, but its place moves with its
 // scrollport's offset once an inset's threshold is crossed, and never leaves
 // its containing block.
@@ -17552,6 +17759,7 @@ int main() {
     testGridAutoTracks();
     testGridSubgridColumns();
     testGridSubgridRows();
+    testGridSubgridInheritance();
     testStickyPositioning();
     testAspectRatio();
     testTextOverflowEllipsis();
