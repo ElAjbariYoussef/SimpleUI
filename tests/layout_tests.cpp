@@ -16798,6 +16798,293 @@ void testGridAutoTracks() {
     }
 }
 
+// `grid-template-columns: subgrid` inherits the parent's column tracks, used
+// gutter, and line names inside the span. Row subgrid is not modelled.
+void testGridSubgridColumns() {
+    // Parsing and read-back, including the reset paths and `inherit`.
+    {
+        auto document = parseOrNull(
+            "<sui><body>"
+            "<div id=\"plain\" style=\"grid-template-columns:subgrid\"></div>"
+            "<div id=\"named\" style=\"grid-template-columns:subgrid [alpha] [beta]\"></div>"
+            "<div id=\"tight\" style=\"grid-template-columns:subgrid[alpha]\"></div>"
+            "<div id=\"reset\" style=\"grid-template-columns:subgrid;"
+            "grid-template-columns:1fr\"></div>"
+            "<div id=\"shorthand\" style=\"grid-template-columns:subgrid;"
+            "grid-template:20px / 1fr\"></div>"
+            "<div id=\"noneReset\" style=\"grid-template-columns:subgrid;"
+            "grid-template:none\"></div>"
+            "<div id=\"areaReset\" style=\"grid-template-columns:subgrid;"
+            "grid-template:'a' / 1fr\"></div>"
+            "<div id=\"unset\" style=\"grid-template-columns:subgrid;"
+            "grid-template-columns:unset\"></div>"
+            "<div id=\"parent\" style=\"grid-template-columns:subgrid [inherited]\">"
+            "<div id=\"child\" style=\"grid-template-columns:inherit\"></div></div>"
+            "<div id=\"bad\" style=\"grid-template-columns:subgrid [a] 2px\"></div>"
+            "</body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        const auto value = [&](const char* id, const char* property) {
+            Element* el = document->getElementById(id);
+            if (!el) {
+                return std::string();
+            }
+            return sui::StyleResolver::propertyValue(resolver.resolve(*el), property);
+        };
+        check(value("plain", "grid-template-columns") == "subgrid",
+              "subgrid reads back as a column template");
+        check(value("plain", "grid-template").empty(),
+              "grid-template has no shorthand form for subgrid");
+        check(value("named", "grid-template-columns") == "subgrid [alpha] [beta]",
+              "subgrid keeps its line-name groups in order");
+        check(value("tight", "grid-template-columns") == "subgrid [alpha]",
+              "a line group may follow the keyword without whitespace");
+        check(value("reset", "grid-template-columns") == "1fr",
+              "a later track list clears the subgrid declaration");
+        check(value("shorthand", "grid-template-columns") == "1fr",
+              "the grid-template shorthand clears subgrid");
+        check(value("noneReset", "grid-template-columns") == "none",
+              "grid-template:none clears subgrid");
+        check(value("areaReset", "grid-template-columns") == "1fr",
+              "an area grid-template shorthand clears subgrid");
+        check(value("unset", "grid-template-columns") == "none",
+              "unset clears a subgrid column template");
+        check(value("child", "grid-template-columns") == "subgrid [inherited]",
+              "inherit replays a subgrid column template");
+        Element* bad = document->getElementById("bad");
+        check(bad && !resolver.resolve(*bad).gridColumnsSubgrid,
+              "a malformed subgrid value does not set the subgrid flag");
+    }
+
+    // A subgrid spanning two fixed parent tracks uses their used sizes, their
+    // gutter, and both parent and local line names. Its own column-gap is ignored.
+    {
+        auto document = parseOrNull(
+            "<sui><body style=\"margin:0\"><div id=\"g\"><div id=\"sub\">"
+            "<i id=\"first\"></i><i id=\"named\"></i>"
+            "<i id=\"fromInner\"></i><i id=\"third\"></i>"
+            "</div></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}"
+            "#g{display:grid;grid-template-columns:50px 100px [mid] 150px;"
+            "column-gap:10px;width:320px}"
+            "#sub{display:grid;grid-template-columns:subgrid [inner];"
+            "grid-column:2 / span 2;column-gap:30px}"
+            "#sub i{height:10px}"
+            "#named{grid-column:mid}"
+            "#fromInner{grid-column:inner}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* g = document->getElementById("g");
+        Element* sub = document->getElementById("sub");
+        Element* first = document->getElementById("first");
+        Element* named = document->getElementById("named");
+        Element* fromInner = document->getElementById("fromInner");
+        Element* third = document->getElementById("third");
+        check(g && sub && first && named && fromInner && third,
+              "fixed subgrid elements found");
+        if (!g || !sub || !first || !named || !fromInner || !third) {
+            return;
+        }
+        checkNear(sub->layoutX(), 60.0f, 0.01f, "the subgrid starts on its parent line");
+        checkNear(sub->layoutWidth(), 260.0f, 0.01f,
+                  "the subgrid spans both parent tracks and their gutter");
+        checkNear(sub->layoutHeight(), 20.0f, 0.01f, "subgrid rows size from their items");
+        checkNear(first->layoutX(), 60.0f, 0.01f,
+                  "an auto item fills inherited column one");
+        checkNear(first->layoutWidth(), 100.0f, 0.01f,
+                  "inherited column one keeps the parent width");
+        checkNear(named->layoutX(), 170.0f, 0.01f,
+                  "a parent line name resolves in local coordinates");
+        checkNear(named->layoutWidth(), 150.0f, 0.01f,
+                  "the named local line opens the second parent track");
+        checkNear(fromInner->layoutX(), 60.0f, 0.01f,
+                  "a local subgrid line name starts at inherited line one");
+        checkNear(fromInner->layoutY(), 10.0f, 0.01f,
+                  "the local line named item wraps to the second row");
+        checkNear(third->layoutX(), 170.0f, 0.01f,
+                  "auto placement wraps after the first inherited column");
+        checkNear(third->layoutY(), 10.0f, 0.01f,
+                  "the fourth item shares the second row");
+        check(sui::StyleResolver::propertyValue(resolver.resolve(*sub),
+                                                "grid-template-columns") ==
+                  "subgrid [inner]",
+              "the laid-out subgrid still reads back its line names");
+    }
+
+    // Space distributed between parent tracks is part of the span: the subgrid
+    // width grows and its local tracks land on the parent positions.
+    {
+        auto document = parseOrNull(
+            "<sui><body style=\"margin:0\"><div id=\"g\"><div id=\"sub\">"
+            "<i id=\"first\"></i><i id=\"named\"></i></div></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}"
+            "#g{display:grid;grid-template-columns:50px 100px 150px;"
+            "column-gap:10px;justify-content:space-between;width:340px}"
+            "#sub{display:grid;grid-template-columns:subgrid;grid-column:2 / span 2}"
+            "#sub i{height:10px}"
+            "#named{grid-column:2}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* sub = document->getElementById("sub");
+        Element* first = document->getElementById("first");
+        Element* named = document->getElementById("named");
+        check(sub && first && named, "distributed subgrid elements found");
+        if (!sub || !first || !named) {
+            return;
+        }
+        checkNear(sub->layoutX(), 70.0f, 0.01f,
+                  "space-between moves the subgrid's parent start line");
+        checkNear(sub->layoutWidth(), 270.0f, 0.01f,
+                  "the subgrid span includes distributed parent space");
+        checkNear(first->layoutWidth(), 100.0f, 0.01f,
+                  "distributed space does not change the first track width");
+        checkNear(named->layoutX(), 190.0f, 0.01f,
+                  "the second local track lands on the parent's second track");
+        checkNear(named->layoutWidth(), 150.0f, 0.01f,
+                  "the second local track keeps its parent width");
+    }
+
+    // Fr parent tracks are resolved before the subgrid inherits them.
+    {
+        auto document = parseOrNull(
+            "<sui><body style=\"margin:0\"><div id=\"g\"><div id=\"sub\">"
+            "<i id=\"first\"></i><i id=\"named\"></i></div></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}"
+            "#g{display:grid;grid-template-columns:50px 1fr 2fr;width:350px}"
+            "#sub{display:grid;grid-template-columns:subgrid;grid-column:2 / span 2}"
+            "#sub i{height:5px}"
+            "#named{grid-column:2}"));
+        layoutRoot(*document, resolver, 400.0f);
+        Element* sub = document->getElementById("sub");
+        Element* first = document->getElementById("first");
+        Element* named = document->getElementById("named");
+        check(sub && first && named, "fr subgrid elements found");
+        if (!sub || !first || !named) {
+            return;
+        }
+        checkNear(sub->layoutX(), 50.0f, 0.01f,
+                  "the subgrid starts after the fixed parent track");
+        checkNear(sub->layoutWidth(), 300.0f, 0.01f,
+                  "the subgrid spans the resolved fr tracks");
+        checkNear(first->layoutWidth(), 100.0f, 0.01f,
+                  "the 1fr parent track becomes the first local track");
+        checkNear(named->layoutX(), 150.0f, 0.01f,
+                  "the 2fr parent track becomes the second local track");
+        checkNear(named->layoutWidth(), 200.0f, 0.01f,
+                  "the second local track keeps the 2fr size");
+    }
+
+    // A `[name]` group after `subgrid` merges onto the inherited local lines, so
+    // it can pin an item to the second track instead of auto-placing it first.
+    {
+        auto document = parseOrNull(
+            "<sui><body style=\"margin:0\"><div id=\"g\"><div id=\"sub\">"
+            "<i id=\"atEnd\"></i></div></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}"
+            "#g{display:grid;grid-template-columns:50px 100px;width:150px}"
+            "#sub{display:grid;grid-template-columns:subgrid [start] [end];"
+            "grid-column:1 / span 2}"
+            "#sub i{height:10px}"
+            "#atEnd{grid-column:end}"));
+        layoutRoot(*document, resolver, 300.0f);
+        Element* atEnd = document->getElementById("atEnd");
+        check(atEnd != nullptr, "local line-name subgrid elements found");
+        if (!atEnd) {
+            return;
+        }
+        checkNear(atEnd->layoutX(), 50.0f, 0.01f,
+                  "a local line group pins an item to the second inherited track");
+        checkNear(atEnd->layoutWidth(), 100.0f, 0.01f,
+                  "the local line group starts the inherited second track");
+    }
+
+    // A parent line name inside the span resolves in the subgrid's local
+    // numbering, so an item can start on the second inherited track.
+    {
+        auto document = parseOrNull(
+            "<sui><body style=\"margin:0\"><div id=\"g\"><div id=\"sub\">"
+            "<i id=\"atMid\"></i></div></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}"
+            "#g{display:grid;grid-template-columns:50px [mid] 100px;width:150px}"
+            "#sub{display:grid;grid-template-columns:subgrid;grid-column:1 / span 2}"
+            "#sub i{height:10px}"
+            "#atMid{grid-column:mid}"));
+        layoutRoot(*document, resolver, 300.0f);
+        Element* atMid = document->getElementById("atMid");
+        check(atMid != nullptr, "parent line-name subgrid elements found");
+        if (!atMid) {
+            return;
+        }
+        checkNear(atMid->layoutX(), 50.0f, 0.01f,
+                  "a parent line name resolves inside the subgrid span");
+        checkNear(atMid->layoutWidth(), 100.0f, 0.01f,
+                  "the parent line name starts the inherited second track");
+    }
+
+    // Column-flow auto-placement would order the subgrid's items down each
+    // inherited track; the local grid stays row-major to keep its span closed.
+    {
+        auto document = parseOrNull(
+            "<sui><body style=\"margin:0\"><div id=\"g\"><div id=\"sub\">"
+            "<i id=\"a\"></i><i id=\"b\"></i><i id=\"c\"></i><i id=\"d\"></i>"
+            "</div></div></body></sui>");
+        if (!document) {
+            return;
+        }
+        sui::StyleResolver resolver;
+        resolver.setRules(sui::CSSParser::parse(
+            "body{margin:0}"
+            "#g{display:grid;grid-template-columns:100px 100px;width:200px}"
+            "#sub{display:grid;grid-template-columns:subgrid;grid-column:1 / span 2;"
+            "grid-auto-flow:column}"
+            "#sub i{height:10px}"));
+        layoutRoot(*document, resolver, 300.0f);
+        Element* a = document->getElementById("a");
+        Element* b = document->getElementById("b");
+        Element* c = document->getElementById("c");
+        Element* d = document->getElementById("d");
+        check(a && b && c && d, "column-flow subgrid elements found");
+        if (!a || !b || !c || !d) {
+            return;
+        }
+        checkNear(b->layoutX(), 100.0f, 0.01f,
+                  "column-flow places the second item in the second local track");
+        checkNear(b->layoutY(), 0.0f, 0.01f,
+                  "column-flow keeps the second item in the first row");
+        checkNear(c->layoutX(), 0.0f, 0.01f,
+                  "the third item wraps back to the first local track");
+        checkNear(c->layoutY(), 10.0f, 0.01f,
+                  "the third item wraps to the second row");
+        checkNear(d->layoutX(), 100.0f, 0.01f,
+                  "the fourth item fills the second local track");
+    }
+}
+
 // position:sticky: the box stays in the flow, but its place moves with its
 // scrollport's offset once an inset's threshold is crossed, and never leaves
 // its containing block.
@@ -17001,6 +17288,7 @@ int main() {
     testLogicalPropertiesAndInsets();
     testBoxShorthands();
     testGridAutoTracks();
+    testGridSubgridColumns();
     testStickyPositioning();
     testAspectRatio();
     testTextOverflowEllipsis();

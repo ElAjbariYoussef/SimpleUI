@@ -743,6 +743,14 @@ struct ComputedStyle {
     };
     std::vector<GridTrack> gridColumns;
     std::vector<GridTrack> gridRows;
+    // `grid-template-columns: subgrid` makes this grid item inherit the column
+    // tracks, gutters, and line names of the parent tracks it spans. The flag is
+    // only acted on when the element is a grid item spanning more than one
+    // column; otherwise the declaration lays out as a regular grid with no
+    // explicit columns. `gridColumnSubgridLines` holds the optional `[name]`
+    // groups after the keyword, one per local line.
+    bool gridColumnsSubgrid = false;
+    std::vector<std::vector<std::string>> gridColumnSubgridLines;
     // Names declared on each grid line by `[name]` groups in the track lists. When
     // non-empty the list has one more entry than the corresponding track list:
     // line 0 is the start edge and the final entry is the end edge. Named areas
