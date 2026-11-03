@@ -924,7 +924,7 @@ public:
         bool fixed;
     };
 
-    // The parent tracks a column-subgrid item inherits. Sizes and gap are the
+    // The parent tracks a subgrid item inherits. Sizes and gap are the
     // parent's used values and line names keep the parent numbering within the
     // span, so the subgrid's children line up with the parent tracks.
     struct SubgridAxis {
@@ -935,6 +935,7 @@ public:
     struct PendingSubgrid {
         const Element* element = nullptr;
         SubgridAxis columns;
+        SubgridAxis rows;
     };
 
     // A relatively positioned box, already in its final place apart from the
@@ -3553,9 +3554,14 @@ private:
                              : std::max(0.0f, availableWidth - box.horizontalChrome());
 
         SubgridAxis inheritedColumns;
-        const bool subgridColumns = pendingSubgrid_.element == &el;
-        if (subgridColumns) {
+        SubgridAxis inheritedRows;
+        const bool pendingSubgrid = pendingSubgrid_.element == &el;
+        const bool subgridColumns =
+            pendingSubgrid && !pendingSubgrid_.columns.sizes.empty();
+        const bool subgridRows = pendingSubgrid && !pendingSubgrid_.rows.sizes.empty();
+        if (pendingSubgrid) {
             inheritedColumns = std::move(pendingSubgrid_.columns);
+            inheritedRows = std::move(pendingSubgrid_.rows);
             pendingSubgrid_ = PendingSubgrid{};
         }
 
@@ -3669,9 +3675,26 @@ private:
             columnLines.resize(columnCount + 1);
         }
 
-        std::vector<std::vector<std::string>> rowLines = s.gridRowLines;
+        // A row subgrid substitutes the parent's used rows for its own track
+        // list, just as the column side substitutes columns above.
+        std::vector<ComputedStyle::GridTrack> rows;
+        std::vector<std::vector<std::string>> rowLines;
+        if (subgridRows) {
+            for (float size : inheritedRows.sizes) {
+                ComputedStyle::GridTrack track;
+                track.size = Length(size);
+                rows.push_back(track);
+            }
+            rowLines = inheritedRows.lines;
+            if (rowLines.size() != rows.size() + 1) {
+                rowLines.resize(rows.size() + 1);
+            }
+        } else {
+            rows = s.gridRows;
+            rowLines = s.gridRowLines;
+        }
         const std::size_t rowLineCount =
-            std::max(s.gridRows.size(), s.gridTemplateAreasRows);
+            subgridRows ? rows.size() : std::max(rows.size(), s.gridTemplateAreasRows);
         if (rowLines.size() < rowLineCount + 1) {
             rowLines.resize(rowLineCount + 1);
         }
@@ -4004,7 +4027,7 @@ private:
         const bool isDense = (s.gridAutoFlow == ComputedStyle::AutoFlowRowDense ||
                               s.gridAutoFlow == ComputedStyle::AutoFlowColumnDense);
         const std::size_t maxRows = std::max<std::size_t>(
-            1, std::max(s.gridRows.size(), s.gridTemplateAreasRows));
+            1, std::max(rows.size(), s.gridTemplateAreasRows));
 
         std::size_t nextRow = 0;
         std::size_t nextCol = 0;
@@ -4151,7 +4174,8 @@ private:
         // parent distributed between its tracks, and does not redistribute it.
         const float columnGap = subgridColumns ? std::max(0.0f, inheritedColumns.gap)
                                                : std::max(0.0f, s.columnGap);
-        const float rowGap = std::max(0.0f, s.rowGap);
+        const float rowGap =
+            subgridRows ? std::max(0.0f, inheritedRows.gap) : std::max(0.0f, s.rowGap);
         const float gapTotal = columnGap * static_cast<float>(columnCount - 1);
         if (frTotal > 0.0f) {
             const float leftover = std::max(0.0f, contentWidth - fixedTotal - gapTotal);
@@ -4240,6 +4264,7 @@ private:
         // once the rows are known, which avoids laying anything out twice.
         std::vector<float> rowHeights(rowCount, 0.0f);
         std::vector<float> itemX(children.size(), 0.0f);
+        std::vector<float> itemContentWidth(children.size(), 0.0f);
         float maxRight = 0.0f;
         for (std::size_t i = 0; i < children.size(); ++i) {
             const std::size_t col = itemCol[i];
@@ -4277,8 +4302,8 @@ private:
                                                                : s.alignItems;
             if (vAlign == ComputedStyle::AlignStretch && rSpan[i] == 1) {
                 const ComputedStyle::GridTrack* rowTrack = nullptr;
-                if (row < s.gridRows.size()) {
-                    rowTrack = &s.gridRows[row];
+                if (row < rows.size()) {
+                    rowTrack = &rows[row];
                 } else if (s.hasGridAutoRows) {
                     rowTrack = &s.gridAutoRows;
                 }
@@ -4299,6 +4324,7 @@ private:
             runWith(*children[i], sized, w, contentX + columnX[col] + off, contentY);
             pendingSubgrid_ = PendingSubgrid{};
             itemX[i] = columnX[col] + off;
+            itemContentWidth[i] = w;
             // A row-spanning item's height is shared by the rows it covers; a
             // single-row item simply raises its own row, which is the common case.
             const float perRow = std::max(
@@ -4315,8 +4341,8 @@ private:
         // absent entries leave rows at their tallest items.
         for (std::size_t r = 0; r < rowCount; ++r) {
             const ComputedStyle::GridTrack* track = nullptr;
-            if (r < s.gridRows.size()) {
-                track = &s.gridRows[r];
+            if (r < rows.size()) {
+                track = &rows[r];
             } else if (s.hasGridAutoRows) {
                 track = &s.gridAutoRows;
             }
@@ -4325,15 +4351,53 @@ private:
                                                                    resolver_.rootFontSize()));
             }
         }
+        const float rowGapTotal = rowGap * static_cast<float>(rowCount > 0 ? rowCount - 1 : 0);
+        // `fr` rows share the leftover space in a definite-height container, the
+        // same way `fr` columns do. An auto-height grid keeps their content size.
+        float fixedRowTotal = 0.0f;
+        float frRowTotal = 0.0f;
+        for (std::size_t r = 0; r < rowCount; ++r) {
+            const ComputedStyle::GridTrack* track = nullptr;
+            if (r < rows.size()) {
+                track = &rows[r];
+            } else if (s.hasGridAutoRows) {
+                track = &s.gridAutoRows;
+            }
+            if (track && track->isFr) {
+                frRowTotal += std::max(0.0f, track->fr);
+            } else {
+                fixedRowTotal += rowHeights[r];
+            }
+        }
+        if (frRowTotal > 0.0f && box.height > 0.0f) {
+            const float leftover =
+                std::max(0.0f, box.height - fixedRowTotal - rowGapTotal);
+            for (std::size_t r = 0; r < rowCount; ++r) {
+                const ComputedStyle::GridTrack* track = nullptr;
+                if (r < rows.size()) {
+                    track = &rows[r];
+                } else if (s.hasGridAutoRows) {
+                    track = &s.gridAutoRows;
+                }
+                if (track && track->isFr) {
+                    rowHeights[r] =
+                        leftover * (std::max(0.0f, track->fr) / frRowTotal);
+                }
+            }
+        }
         float rowSum = 0.0f;
         for (float trackHeight : rowHeights) {
             rowSum += trackHeight;
         }
-        const float rowGapTotal = rowGap * static_cast<float>(rowCount > 0 ? rowCount - 1 : 0);
         float rowLead = 0.0f;
         float rowExtra = 0.0f;
-        distribute(std::max(0.0f, (box.height > 0.0f ? box.height : 0.0f) - rowSum - rowGapTotal),
-                   rowCount, s.alignContent, rowLead, rowExtra);
+        // A row subgrid already carries its parent's distributed space inside
+        // the inherited sizes and gap, exactly like the column side.
+        if (!subgridRows) {
+            distribute(std::max(0.0f, (box.height > 0.0f ? box.height : 0.0f) - rowSum -
+                                          rowGapTotal),
+                       rowCount, s.alignContent, rowLead, rowExtra);
+        }
 
         std::vector<float> rowY(rowCount, 0.0f);
         float y = rowLead;
@@ -4341,10 +4405,37 @@ private:
             rowY[r] = y;
             y += rowHeights[r] + rowGap + rowExtra;
         }
+        // The local row set a row-subgrid item inherits from its parent. Local
+        // line 0 is the parent line where the item starts; parent line names and
+        // the subgrid's own `[name]` groups merge in local numbering.
+        auto subgridRowsFor = [&](std::size_t row, std::size_t span,
+                                  const ComputedStyle& cs) {
+            SubgridAxis axis;
+            axis.gap = rowGap + rowExtra;
+            for (std::size_t k = 0; k < span; ++k) {
+                axis.sizes.push_back(rowHeights[row + k]);
+            }
+            axis.lines.assign(span + 1, {});
+            for (std::size_t k = 0; k <= span; ++k) {
+                if (row + k < rowLines.size()) {
+                    axis.lines[k] = rowLines[row + k];
+                }
+                if (k < cs.gridRowSubgridLines.size()) {
+                    for (const std::string& name : cs.gridRowSubgridLines[k]) {
+                        if (std::find(axis.lines[k].begin(), axis.lines[k].end(), name) ==
+                            axis.lines[k].end()) {
+                            axis.lines[k].push_back(name);
+                        }
+                    }
+                }
+            }
+            return axis;
+        };
         // Second pass: stretch multi-row items to their full span height now that
         // rowY and rowHeights are both finalised. Single-row items were already
         // sized in the first pass (when the row track was known); only multi-row
-        // items need this deferred re-layout.
+        // items need this deferred re-layout. A row-subgrid item always needs the
+        // second pass, because its parent's used rows only exist now.
         for (std::size_t i = 0; i < children.size(); ++i) {
             if (rSpan[i] <= 1) {
                 continue;
@@ -4352,7 +4443,8 @@ private:
             ComputedStyle cs2 = resolveStyle(*children[i]);
             const ComputedStyle::FlexAlign align2 =
                 cs2.alignSelf != ComputedStyle::AlignStretch ? cs2.alignSelf : s.alignItems;
-            if (align2 != ComputedStyle::AlignStretch) {
+            const bool rowSubgridItem = cs2.gridRowsSubgrid;
+            if (align2 != ComputedStyle::AlignStretch && !rowSubgridItem) {
                 continue;
             }
             const std::size_t row2 = itemRow[i];
@@ -4361,19 +4453,28 @@ private:
             if (spanH <= 0.0f) {
                 continue;
             }
-            const UsedBox b2 = usedBox(cs2, children[i]->layoutWidth());
-            const float chrome2 = verticalEdges(b2.padding, b2.borderWidth);
-            cs2.height = Length(std::max(0.0f, spanH - chrome2));
-            cs2.margin = {};
-            const bool subgridItem = cs2.gridColumnsSubgrid && cSpan[i] > 1;
-            if (subgridItem) {
-                pendingSubgrid_.element = children[i];
-                pendingSubgrid_.columns = subgridColumnsFor(
-                    itemCol[i], static_cast<std::size_t>(cSpan[i]), cs2);
+            if (align2 == ComputedStyle::AlignStretch) {
+                const UsedBox b2 = usedBox(cs2, itemContentWidth[i]);
+                const float chrome2 = verticalEdges(b2.padding, b2.borderWidth);
+                cs2.height = Length(std::max(0.0f, spanH - chrome2));
             }
-            runWith(*children[i], cs2,
-                    children[i]->layoutWidth() - horizontalEdges(b2.padding, b2.borderWidth),
-                    contentX + itemX[i], contentY);
+            cs2.width = Length(itemContentWidth[i]);
+            cs2.boxSizing = BoxSizing::ContentBox;
+            cs2.margin = {};
+            const bool columnSubgridItem = cs2.gridColumnsSubgrid && cSpan[i] > 1;
+            if (columnSubgridItem || rowSubgridItem) {
+                pendingSubgrid_.element = children[i];
+                if (columnSubgridItem) {
+                    pendingSubgrid_.columns = subgridColumnsFor(
+                        itemCol[i], static_cast<std::size_t>(cSpan[i]), cs2);
+                }
+                if (rowSubgridItem) {
+                    pendingSubgrid_.rows = subgridRowsFor(
+                        row2, static_cast<std::size_t>(rSpan[i]), cs2);
+                }
+            }
+            runWith(*children[i], cs2, itemContentWidth[i], contentX + itemX[i],
+                    contentY + rowY[row2]);
             pendingSubgrid_ = PendingSubgrid{};
         }
         for (std::size_t i = 0; i < children.size(); ++i) {
@@ -7167,9 +7268,9 @@ private:
     mutable std::map<const Element*, bool> floatChildCache_;
     mutable std::map<const Element*, bool> laidOutCache_;
 
-    // Set only around the `runWith()` call that lays out a column-subgrid item,
-    // then consumed by that item's grid container. Keying by element keeps a
-    // nested grid from stealing the context.
+    // Set only around the `runWith()` call that lays out a subgrid item, then
+    // consumed by that item's grid container. Keying by element keeps a nested
+    // grid from stealing the context.
     PendingSubgrid pendingSubgrid_;
 };
 

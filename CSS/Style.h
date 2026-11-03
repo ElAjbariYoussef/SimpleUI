@@ -751,6 +751,11 @@ struct ComputedStyle {
     // groups after the keyword, one per local line.
     bool gridColumnsSubgrid = false;
     std::vector<std::vector<std::string>> gridColumnSubgridLines;
+    // `grid-template-rows: subgrid` does the same for the rows the item spans.
+    // `gridRowSubgridLines` holds the optional `[name]` groups after the keyword,
+    // one per local row line.
+    bool gridRowsSubgrid = false;
+    std::vector<std::vector<std::string>> gridRowSubgridLines;
     // Names declared on each grid line by `[name]` groups in the track lists. When
     // non-empty the list has one more entry than the corresponding track list:
     // line 0 is the start edge and the final entry is the end edge. Named areas

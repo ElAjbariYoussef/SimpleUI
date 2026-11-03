@@ -2263,6 +2263,8 @@ bool applyGridTemplateShorthand(ComputedStyle& s, std::string_view value) {
         s.gridRowLines.clear();
         s.gridRowsAutoFill = false;
         s.gridRowsAutoFit = false;
+        s.gridRowsSubgrid = false;
+        s.gridRowSubgridLines.clear();
         s.gridColumns.clear();
         s.gridColumnLines.clear();
         s.gridColumnsAutoFill = false;
@@ -2310,6 +2312,8 @@ bool applyGridTemplateShorthand(ComputedStyle& s, std::string_view value) {
         s.gridRowLines = std::move(rowLines);
         s.gridRowsAutoFill = rowsFill;
         s.gridRowsAutoFit = rowsFit;
+        s.gridRowsSubgrid = false;
+        s.gridRowSubgridLines.clear();
         s.gridColumns = std::move(columns);
         s.gridColumnLines = std::move(columnLines);
         s.gridColumnsAutoFill = columnsFill;
@@ -2424,6 +2428,8 @@ bool applyGridTemplateShorthand(ComputedStyle& s, std::string_view value) {
     s.gridRowLines = std::move(rowLines);
     s.gridRowsAutoFill = false;
     s.gridRowsAutoFit = false;
+    s.gridRowsSubgrid = false;
+    s.gridRowSubgridLines.clear();
     s.gridColumns = std::move(columns);
     s.gridColumnLines = std::move(columnLines);
     s.gridColumnsAutoFill = columnsFill;
@@ -5014,10 +5020,19 @@ void applyDeclaration(ComputedStyle& s, const Declaration& decl, float rootFontS
         s.gridRowsAutoFill = false;
         s.gridRowsAutoFit = false;
         s.gridRowLines.clear();
-        s.gridRows = parseGridTrackList(value, &s.gridRowsAutoFill, &s.gridRowsAutoFit,
-                                        &s.gridRowLines);
-        if (s.gridRows.empty()) {
-            s.gridRowLines.clear();
+        s.gridRowsSubgrid = false;
+        s.gridRowSubgridLines.clear();
+        std::vector<std::vector<std::string>> subgridLines;
+        if (parseGridSubgridValue(value, subgridLines)) {
+            s.gridRows.clear();
+            s.gridRowsSubgrid = true;
+            s.gridRowSubgridLines = std::move(subgridLines);
+        } else {
+            s.gridRows = parseGridTrackList(value, &s.gridRowsAutoFill, &s.gridRowsAutoFit,
+                                            &s.gridRowLines);
+            if (s.gridRows.empty()) {
+                s.gridRowLines.clear();
+            }
         }
     } else if (property == "grid-auto-rows") {
         ComputedStyle::GridTrack t;
@@ -8156,7 +8171,7 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
     if (property == "grid-template") {
         // `grid-template` cannot express `subgrid`, so there is no shorthand
         // serialization for it.
-        if (style.gridColumnsSubgrid) {
+        if (style.gridColumnsSubgrid || style.gridRowsSubgrid) {
             return std::string();
         }
         if (style.gridTemplateAreasRaw.empty() && style.gridRows.empty() &&
@@ -8223,6 +8238,9 @@ std::string StyleResolver::propertyValue(const ComputedStyle& style,
         const bool columns = property == "grid-template-columns";
         if (columns && style.gridColumnsSubgrid) {
             return subgridTracks(style.gridColumnSubgridLines);
+        }
+        if (!columns && style.gridRowsSubgrid) {
+            return subgridTracks(style.gridRowSubgridLines);
         }
         const std::string tracks =
             columns ? gridTracks(style.gridColumns, style.gridColumnsAutoFill,
